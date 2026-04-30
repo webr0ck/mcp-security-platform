@@ -188,6 +188,73 @@ class Settings(BaseSettings):
     COMPLIANCE_SAMPLE_SIZE: int = 1000
     COMPLIANCE_ALERT_WEBHOOK: str = "http://alertmanager:9093/api/v1/alerts"
 
+    # =========================================================================
+    # Credential Broker — KMS (HashiCorp Vault)
+    # =========================================================================
+    VAULT_ADDR: str = "http://vault:8200"
+    VAULT_TOKEN: str = "dev-root-token"
+    BROKER_MASTER_SECRET_PATH: str = "secret/data/credential-broker"
+
+    # =========================================================================
+    # Credential Broker — M365 / Entra
+    # =========================================================================
+    ENTRA_CLIENT_ID: str = ""
+    ENTRA_CLIENT_SECRET: str = ""
+    ENTRA_TENANT_ID: str = ""
+    ENTRA_REDIRECT_URI: str = "https://localhost/auth/callback/m365"
+    ENTRA_SCOPES: str = "Mail.Read Calendars.Read"
+
+    @property
+    def entra_scopes_list(self) -> list[str]:
+        return self.ENTRA_SCOPES.split()
+
+    @property
+    def entra_token_url(self) -> str:
+        return f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/token"
+
+    @property
+    def entra_auth_url(self) -> str:
+        return f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/authorize"
+
+    # =========================================================================
+    # Credential Broker — Bitbucket
+    # =========================================================================
+    BITBUCKET_CLIENT_ID: str = ""
+    BITBUCKET_CLIENT_SECRET: str = ""
+    BITBUCKET_REDIRECT_URI: str = "https://localhost/auth/callback/bitbucket"
+    BITBUCKET_AUTH_URL: str = "https://bitbucket.internal/site/oauth2/authorize"
+    BITBUCKET_TOKEN_URL: str = "https://bitbucket.internal/site/oauth2/access_token"
+    BITBUCKET_SCOPES: str = "repository:read pullrequest:read"
+
+    @property
+    def bitbucket_scopes_list(self) -> list[str]:
+        return self.BITBUCKET_SCOPES.split()
+
+    # =========================================================================
+    # Credential Broker — Grafana
+    # =========================================================================
+    GRAFANA_BASE_URL: str = "http://grafana:3000"
+    GRAFANA_SERVICE_ACCOUNT_ID: int = 1
+    GRAFANA_ADMIN_TOKEN: str = ""
+
+    # =========================================================================
+    # Credential Broker — Netbox
+    # =========================================================================
+    NETBOX_BASE_URL: str = "http://netbox.internal"
+    NETBOX_ADMIN_TOKEN: str = ""
+
+    # =========================================================================
+    # Credential Broker — Session
+    # =========================================================================
+    BROKER_SESSION_TTL_SECONDS: int = 28800
+    BROKER_IDLE_TIMEOUT_SECONDS: int = 3600
+    MCP_REGISTRY_PATH: str = "/app/mcps.yaml"
+
+    # =========================================================================
+    # OAuth state signing
+    # =========================================================================
+    OAUTH_STATE_SECRET: str = "change-me-in-production"
+
     @field_validator("ENVIRONMENT")
     @classmethod
     def validate_environment(cls, v: str) -> str:
