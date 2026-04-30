@@ -192,7 +192,7 @@ class Settings(BaseSettings):
     # Credential Broker — KMS (HashiCorp Vault)
     # =========================================================================
     VAULT_ADDR: str = "http://vault:8200"
-    VAULT_TOKEN: str = "dev-root-token"
+    VAULT_TOKEN: str = "change-me-in-production"
     BROKER_MASTER_SECRET_PATH: str = "secret/data/credential-broker"
 
     # =========================================================================
