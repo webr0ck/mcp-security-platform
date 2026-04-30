@@ -18,4 +18,8 @@ CREATE TRIGGER trg_credential_store_updated_at
     BEFORE UPDATE ON credential_store
     FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
 
+-- DELETE is intentionally granted: credentials may be hard-deleted on full revocation.
+-- This is the only proxy_app-writable table that permits hard delete;
+-- all others rely on soft-delete via updated_at. V003's global REVOKE does not
+-- cover tables created after it runs, so this grant is authoritative.
 GRANT SELECT, INSERT, UPDATE, DELETE ON credential_store TO proxy_app;
