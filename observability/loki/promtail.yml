@@ -1,0 +1,198 @@
+# promtail.yml — Promtail scrape configuration for MCP Security Platform
+#
+# Promtail runs as a sidecar log shipper. It scrapes container stdout logs
+# via the Docker socket and ships structured JSON logs to Loki.
+#
+# Jobs:
+#   mcp-proxy       — FastAPI audit events (JSON, rich label extraction)
+#   nginx-access    — Nginx structured JSON access logs
+#   mcp-compliance  — Compliance checker daily report output
+#
+# Pipeline stages parse JSON, extract timestamps, and promote key fields to
+# Loki labels. Labels are selective — high-cardinality fields (like full
+# client_id or tool arguments) are kept as log line content, not labels.
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: info
+
+# Position file tracks read progress; survives container restarts
+positions:
+  filename: /tmp/promtail-positions.yaml
+
+# Loki push endpoint — Loki is on observability-net, reachable by service name
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    # Batch log lines for efficiency
+    batchwait: 1s
+    batchsize: 1048576  # 1 MB batch max
+
+# ─── Scrape configurations ────────────────────────────────────────────────────
+scrape_configs:
+
+  # ===========================================================================
+  # Job: mcp-proxy
+  # Scrapes MCP Security Proxy (FastAPI) stdout logs.
+  # Log format: structured JSON emitted by mcp-audit-logger library.
+  # Key labels extracted: event_type, outcome, level
+  # High-cardinality fields kept in log body: client_id, tool_name, tool_id
+  # ===========================================================================
+  - job_name: mcp-proxy
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: name
+            values: ["mcp-proxy"]
+
+    relabel_configs:
+      # Only keep logs from the mcp-proxy container
+      - source_labels: [__meta_docker_container_name]
+        regex: /mcp-proxy
+        action: keep
+
+      # Promote container name as a label (useful for multi-instance queries)
+      - source_labels: [__meta_docker_container_name]
+        target_label: container
+        replacement: "$1"
+
+      # Static job label
+      - target_label: job
+        replacement: mcp-proxy
+
+    pipeline_stages:
+      # Parse the outer JSON log line emitted by structlog/mcp-audit-logger
+      - json:
+          expressions:
+            # Extract fields that become labels (low cardinality only)
+            event_type: event_type
+            outcome: outcome    # ALLOW | DENY | ERROR
+            level: level        # info | warning | error
+            # Extract fields for timestamp parsing
+            timestamp: timestamp
+            # High-cardinality fields remain in the log body (not labels)
+            # client_id, tool_name, tool_id, request_id are queryable via LogQL
+
+      # Parse timestamp from the log event itself (not Docker daemon timestamp)
+      # mcp-audit-logger emits ISO 8601 timestamps in the "timestamp" field
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+          fallback_formats:
+            - RFC3339
+            - "2006-01-02T15:04:05.000Z"
+
+      # Promote selected low-cardinality fields to Loki labels
+      # Cardinality rule: labels should have O(10s) not O(1000s) unique values
+      - labels:
+          event_type:   # e.g. TOOL_INVOCATION, TOOL_REGISTERED, ANOMALY_DETECTED
+          outcome:      # ALLOW, DENY, ERROR — always low cardinality
+          level:        # info, warning, error, critical
+
+      # Drop health check poll noise from the log stream
+      # (proxy emits a log line for every /health/ready probe from Nginx)
+      - drop:
+          expression: '.*"path":"/health.*".*'
+
+  # ===========================================================================
+  # Job: nginx-access
+  # Scrapes Nginx gateway structured JSON access logs.
+  # Log format: json_access defined in nginx.conf.
+  # Labels: status (HTTP status code group), ssl_client_present
+  # ===========================================================================
+  - job_name: nginx-access
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: name
+            values: ["mcp-gateway"]
+
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /mcp-gateway
+        action: keep
+
+      - source_labels: [__meta_docker_container_name]
+        target_label: container
+        replacement: "$1"
+
+      - target_label: job
+        replacement: nginx-access
+
+    pipeline_stages:
+      # Parse Nginx json_access format (all fields defined in nginx.conf log_format)
+      - json:
+          expressions:
+            status: status
+            request: request
+            remote_addr: remote_addr
+            ssl_client_s_dn_cn: ssl_client_s_dn_cn
+            timestamp: time
+
+      # Derive a low-cardinality status group label (2xx, 3xx, 4xx, 5xx)
+      # rather than labelling by individual status code (high cardinality)
+      - template:
+          source: status
+          template: |
+            {{ if eq .Value "200" }}2xx
+            {{- else if eq .Value "201" }}2xx
+            {{- else if eq .Value "204" }}2xx
+            {{- else if regexMatch "^2" .Value }}2xx
+            {{- else if regexMatch "^3" .Value }}3xx
+            {{- else if regexMatch "^4" .Value }}4xx
+            {{- else if regexMatch "^5" .Value }}5xx
+            {{- else }}unknown
+            {{- end }}
+          output: status_group
+
+      # Label whether the request was mTLS-authenticated (CN present = yes)
+      - template:
+          source: ssl_client_s_dn_cn
+          template: '{{ if .Value }}mtls{{ else }}no-mtls{{ end }}'
+          output: auth_type
+
+      - labels:
+          status_group:   # 2xx, 3xx, 4xx, 5xx
+          auth_type:      # mtls or no-mtls
+
+      # Drop /health endpoint polls to reduce noise (load balancer probes)
+      - drop:
+          expression: '.*GET /health.*'
+
+  # ===========================================================================
+  # Job: mcp-compliance
+  # Scrapes compliance checker cron output.
+  # Format: JSON lines with check results.
+  # ===========================================================================
+  - job_name: mcp-compliance
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 30s
+        filters:
+          - name: name
+            values: ["mcp-compliance-checker"]
+
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /mcp-compliance-checker
+        action: keep
+
+      - source_labels: [__meta_docker_container_name]
+        target_label: container
+
+      - target_label: job
+        replacement: mcp-compliance
+
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            check_result: check_result   # pass | fail
+            category: category           # pii, credentials, hash_integrity, etc.
+
+      - labels:
+          level:
+          check_result:
+          category:

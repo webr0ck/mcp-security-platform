@@ -1,0 +1,65 @@
+# Helm values for mcp-security-platform
+# These are stub values — configure for your production environment.
+# See docs/ARCHITECTURE.md for service descriptions.
+
+replicaCount: 1
+
+proxy:
+  image:
+    repository: mcp-security-proxy
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+opa:
+  image:
+    repository: openpolicyagent/opa
+    tag: "latest-static"
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+# In production: use managed PostgreSQL (RDS)
+postgresql:
+  enabled: false
+  external:
+    host: ""
+    port: 5432
+    database: mcp_security
+    secretName: mcp-db-credentials
+
+# In production: use managed Redis (ElastiCache)
+redis:
+  enabled: false
+  external:
+    host: ""
+    port: 6379
+    secretName: mcp-redis-credentials
+
+# In production: use AWS S3 + Object Lock
+minio:
+  enabled: false
+  s3:
+    bucket: ""
+    region: us-east-1
+    secretName: mcp-s3-credentials
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    - secretName: mcp-tls
+      hosts:
+        - mcp-security.your-org.example.com

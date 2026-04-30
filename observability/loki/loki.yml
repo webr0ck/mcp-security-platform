@@ -1,0 +1,110 @@
+# loki.yml — Grafana Loki configuration for MCP Security Platform
+#
+# Storage: filesystem (dev/single-node). For production with MinIO/S3, set
+# environment variable LOKI_STORAGE_BACKEND=s3 and configure the s3 block.
+#
+# Retention: 90 days in Loki (matches MINIO_RETENTION_DAYS for compliance).
+# WORM archival to MinIO is the authoritative long-term store (INV-007).
+#
+# Auth: disabled — Grafana handles auth. Loki is on internal-only network.
+# This is safe because observability-net has internal: true in docker-compose.yml.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+  # Never log request bodies — they may contain redacted audit event content
+  log_request_at_level: "warn"
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      # In-memory KV store is correct for single-node deployment.
+      # For HA Loki, replace with consul or etcd.
+      store: inmemory
+
+# ─── Ingester ─────────────────────────────────────────────────────────────────
+# Tune chunk sizes for the expected audit log volume.
+# MCP audit events are ~1-5 KB each; a moderate-traffic platform produces
+# thousands per day, not millions.
+ingester:
+  chunk_idle_period: 30m
+  max_chunk_age: 1h
+  chunk_target_size: 1572864  # 1.5 MB target chunk size
+  chunk_retain_period: 30s
+
+# ─── Schema config ────────────────────────────────────────────────────────────
+# TSDB index (v13 schema) is the recommended schema for Loki 3.x.
+# Single config entry covers all historical data from project start.
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# ─── Storage config ───────────────────────────────────────────────────────────
+# Filesystem storage for dev. In production, override LOKI_STORAGE_BACKEND=s3
+# and mount the MinIO credentials. The alertmanager_url references the
+# alertmanager container on observability-net.
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/index
+    cache_location: /loki/index_cache
+  filesystem:
+    directory: /loki/chunks
+
+# ─── Compactor ────────────────────────────────────────────────────────────────
+# Compactor applies retention deletion. Retention enforcement requires
+# compactor to be enabled.
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+  delete_request_store: filesystem
+
+# ─── Limits config (retention) ────────────────────────────────────────────────
+# 90 days = 2160h. This matches the MINIO_RETENTION_DAYS=90 WORM policy.
+# Loki retention is a soft deletion (chunks purged); MinIO WORM is immutable.
+limits_config:
+  retention_period: 2160h
+  # Per-stream ingestion rate limits — tuned for audit log volume
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 32
+  # Maximum label value length — long client IDs must fit
+  max_label_value_length: 4096
+  # Split queries into shorter intervals for performance
+  split_queries_by_interval: 15m
+
+# ─── Query range ──────────────────────────────────────────────────────────────
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+# ─── Ruler (alert rules) ──────────────────────────────────────────────────────
+# Ruler evaluates LogQL alert rules and fires alerts to Alertmanager.
+# Alert rules are defined in /loki/rules/*.yml (mounted from observability/grafana/).
+ruler:
+  alertmanager_url: http://alertmanager:9093
+  enable_api: true
+  ring:
+    kvstore:
+      store: inmemory
+
+# ─── Analytics ────────────────────────────────────────────────────────────────
+analytics:
+  # Disable Grafana telemetry reporting
+  reporting_enabled: false

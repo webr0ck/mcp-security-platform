@@ -1,0 +1,136 @@
+# CI Job Fragment — Unit Tests
+#
+# Purpose: Run all @pytest.mark.unit tests in complete isolation.
+#          No running services are required. All external dependencies
+#          (OPA, Ollama, PostgreSQL, Redis) are mocked via unittest.mock.
+#
+# Include in the main workflow with:
+#   jobs:
+#     unit-tests:
+#       uses: ./.github/workflows/unit-tests.yml
+#
+# Failure conditions:
+#   - Any test fails (non-zero exit code)
+#   - Coverage drops below configured threshold (see .coveragerc)
+#   - Any test file contains 'pytest.skip' without a ticket reference comment
+#
+# This job is a mandatory PR gate. Merge is blocked if it fails.
+
+unit-tests:
+  name: Unit Tests
+  runs-on: ubuntu-22.04
+
+  # No service containers — unit tests must run with zero external dependencies
+  # If a test requires a service container, it is not a unit test and must be
+  # moved to integration-tests.yml and marked @pytest.mark.integration.
+
+  defaults:
+    run:
+      working-directory: proxy
+
+  env:
+    # Minimal environment for unit tests — non-secret placeholder values only.
+    # These must match the values in conftest.py and unit test fixtures.
+    # Do NOT use real secrets here. Real secrets live in GitHub Actions Secrets
+    # and are only injected for integration jobs.
+    ENVIRONMENT: development
+    DB_PASSWORD: unit-test-placeholder
+    DB_HOST: "localhost"
+    REDIS_PASSWORD: unit-test-placeholder
+    REDIS_HOST: "localhost"
+    PROXY_SECRET_KEY: unit-test-secret-key-32chars-min!!
+    API_KEY_HMAC_KEY: unit-test-api-hmac-key-32chars!!
+    SBOM_SIGNING_KEY: unit-test-sbom-signing-key-32ch!!
+    AUDIT_LOG_HMAC_KEY: unit-test-audit-hmac-key-32chars!
+    WEBHOOK_SIGNING_KEY: unit-test-webhook-key-32chars!!!
+    POLICY_SIGNING_KEY: unit-test-policy-signing-key-32!!
+    MINIO_ROOT_USER: testminio
+    MINIO_ROOT_PASSWORD: testminiopass
+    OLLAMA_MODEL: llama3.2
+    PYTHONDONTWRITEBYTECODE: "1"
+
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: proxy/requirements*.txt
+
+    - name: Install proxy dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+
+    - name: Install mcp-audit-logger (editable)
+      # The redaction tests import from mcp_audit_logger — install from source.
+      run: |
+        pip install -e ../observability/mcp-audit-logger/
+
+    - name: Assert no unexcused test skips
+      # Fail CI if any test file contains pytest.skip() without a ticket reference.
+      # Ticket reference format: # TICKET-NNN or # Issue: <text>
+      run: |
+        python - <<'EOF'
+        import re
+        import sys
+        from pathlib import Path
+
+        skip_pattern = re.compile(r'pytest\.skip\(')
+        ticket_pattern = re.compile(r'#\s*(TICKET-\d+|Issue:|TODO\([A-Z]+-\d+\)|BUG-\d+)', re.IGNORECASE)
+
+        violations = []
+        for path in Path('tests').rglob('*.py'):
+            lines = path.read_text().splitlines()
+            for i, line in enumerate(lines, 1):
+                if skip_pattern.search(line):
+                    # Check the line and the previous two lines for a ticket reference
+                    context = '\n'.join(lines[max(0, i-3):i])
+                    if not ticket_pattern.search(context):
+                        violations.append(f"{path}:{i}: pytest.skip() without ticket reference")
+
+        if violations:
+            print("ERROR: Unexcused test skips found:")
+            for v in violations:
+                print(f"  {v}")
+            sys.exit(1)
+        print(f"OK: No unexcused test skips found.")
+        EOF
+
+    - name: Run unit tests with coverage
+      run: |
+        pytest tests/unit/ \
+          -m unit \
+          --tb=short \
+          --strict-markers \
+          -v \
+          --timeout=5 \
+          --cov=app \
+          --cov=mcp_audit_logger \
+          --cov-report=term-missing \
+          --cov-report=xml:coverage-unit.xml \
+          --cov-fail-under=80 \
+          --junit-xml=test-results-unit.xml
+
+    - name: Upload unit test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: unit-test-results
+        path: |
+          proxy/test-results-unit.xml
+          proxy/coverage-unit.xml
+        retention-days: 30
+
+    - name: Upload coverage report to Codecov
+      if: always()
+      uses: codecov/codecov-action@v4
+      with:
+        files: proxy/coverage-unit.xml
+        flags: unit
+        name: unit-tests
+        fail_ci_if_error: false

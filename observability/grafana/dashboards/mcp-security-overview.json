@@ -1,0 +1,162 @@
+{
+  "title": "MCP Security Platform — Overview",
+  "uid": "mcp-overview-v1",
+  "version": 1,
+  "schemaVersion": 38,
+  "tags": ["mcp", "security"],
+  "timezone": "utc",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Tool Invocations (24h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "count_over_time({container=\"mcp-proxy\"} |= \"TOOL_INVOCATION\" [24h])",
+          "legendFormat": "Invocations"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Denied Invocations (24h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "count_over_time({container=\"mcp-proxy\"} |= \"\\\"outcome\\\":\\\"deny\\\"\" [24h])",
+          "legendFormat": "Denials"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "value",
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 10},
+            {"color": "red", "value": 50}
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Anomaly Alerts (24h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "count_over_time({container=\"mcp-proxy\"} |= \"anomaly_threshold_exceeded\" [24h])",
+          "legendFormat": "Anomalies"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "value",
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 1}
+          ]
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Critical Risk Tools",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "count_over_time({container=\"mcp-proxy\"} |= \"\\\"risk_level\\\":\\\"critical\\\"\" |= \"TOOL_REGISTERED\" [24h])",
+          "legendFormat": "Critical"
+        }
+      ],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "value",
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 1}
+          ]
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Invocation Outcomes Over Time",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(count_over_time({container=\"mcp-proxy\"} |= \"\\\"outcome\\\":\\\"allow\\\"\" [5m])) by (container)",
+          "legendFormat": "Allow"
+        },
+        {
+          "datasource": "Loki",
+          "expr": "sum(count_over_time({container=\"mcp-proxy\"} |= \"\\\"outcome\\\":\\\"deny\\\"\" [5m])) by (container)",
+          "legendFormat": "Deny"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Recent Audit Events",
+      "type": "logs",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "{container=\"mcp-proxy\"} |= \"TOOL_INVOCATION\" | json",
+          "legendFormat": ""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": true,
+        "enableLogDetails": true
+      }
+    },
+    {
+      "id": 7,
+      "title": "Compliance Check Status",
+      "type": "logs",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 12},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "{container=\"mcp-compliance-checker\"} | json",
+          "legendFormat": ""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": false,
+        "prettifyLogMessage": true
+      }
+    }
+  ]
+}

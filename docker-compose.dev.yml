@@ -1,0 +1,119 @@
+# docker-compose.dev.yml — Development overrides for MCP Security Platform
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#   OR via Makefile: make dev-up
+#
+# What this file changes from production compose:
+#   1. Exposes internal ports (db, redis, opa, loki) to host for direct dev access
+#   2. Proxy: hot-reload via volume mount + uvicorn --reload
+#   3. Gateway: mTLS disabled (ssl_verify_client off) for easier curl testing
+#   4. Grafana: anonymous access enabled (no password prompt for dev dashboards)
+#   5. OPA: bundle signing disabled (ENVIRONMENT=development, per INV-012)
+#   6. Compliance checker: runs every minute instead of daily (faster feedback)
+#
+# NEVER use this file in staging or production.
+
+services:
+
+  proxy:
+    build:
+      # Development target includes hot-reload, debugpy, dev dependencies
+      target: development
+    volumes:
+      # Bind-mount the full proxy directory for hot-reload.
+      # This means code changes reflect immediately without image rebuild.
+      # :cached is a macOS performance hint (no-op on Linux).
+      - ./proxy:/app:cached
+      # Also mount policies for development (already in base compose)
+      - ./policies/rego:/app/policies:ro
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      # RELOAD=true is read by the CMD to enable uvicorn hot-reload
+      - RELOAD=true
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/app
+      --log-level debug
+    ports:
+      # Expose proxy directly for local testing without going through gateway
+      - "8000:8000"
+      # debugpy: attach VS Code or PyCharm remote debugger on port 5678
+      - "5678:5678"
+
+  db:
+    # Expose PostgreSQL to host so developers can use psql/pgAdmin/Postico directly
+    ports:
+      - "5432:5432"
+    environment:
+      # Allow a simple dev password via env — .env should have DB_PASSWORD set
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-devpassword}
+
+  redis:
+    # Expose Redis to host for development inspection (redis-cli, RedisInsight)
+    ports:
+      - "6379:6379"
+
+  opa:
+    # Expose OPA for local policy development — test Rego interactively
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-format=json"
+      # Debug-level OPA logging shows every policy evaluation — useful for Rego dev
+      - "--log-level=debug"
+      - "--bundle=/policies"
+      # --watch: OPA automatically reloads when policy files change on disk
+      # This means policy edits take effect immediately in dev without restart.
+      - "--watch"
+      # Bundle signing DISABLED in development (per INV-012: development is exempt)
+      # DO NOT add --set=bundles.policies.signing.* here
+
+  ollama:
+    # Expose Ollama for direct model testing from host
+    ports:
+      - "11434:11434"
+
+  grafana:
+    ports:
+      - "3000:3000"
+    environment:
+      # Debug logging for Grafana plugin and datasource troubleshooting
+      - GF_LOG_LEVEL=debug
+      # Allow a dev password; if not set, falls back to 'devpassword'
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-devpassword}
+      # Enable anonymous access in dev so developers don't need to log in
+      # for dashboard inspection. NEVER enable in staging/production.
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+
+  loki:
+    # Expose Loki for direct LogQL queries from host (e.g., Grafana on host machine)
+    ports:
+      - "3100:3100"
+
+  alertmanager:
+    ports:
+      - "9093:9093"
+
+  minio:
+    # Expose MinIO API and console for dev inspection
+    ports:
+      - "9000:9000"
+      # MinIO web console — useful for browsing WORM bucket contents in dev
+      - "9001:9001"
+
+  compliance-checker:
+    environment:
+      # Run every minute in dev for rapid feedback during compliance checker development.
+      # Production default is "0 2 * * *" (daily at 02:00 UTC).
+      - COMPLIANCE_CRON_SCHEDULE=${COMPLIANCE_CRON_SCHEDULE:-* * * * *}
+      - LOG_LEVEL=DEBUG

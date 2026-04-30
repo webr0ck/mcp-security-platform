@@ -1,0 +1,164 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: MCP Security Alerts
+    folder: MCP Security Platform
+    interval: 1m
+    rules:
+
+      # -----------------------------------------------------------------------
+      # High error rate: more than 20 OPA denials per minute
+      # -----------------------------------------------------------------------
+      - uid: mcp-high-deny-rate
+        title: MCPHighDenyRate
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: |
+                sum(count_over_time(
+                  {container="mcp-proxy"} |= "\"outcome\":\"deny\"" [1m]
+                )) > 20
+        noDataState: NoData
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: "High MCP tool denial rate detected"
+          description: "More than 20 tool invocations denied per minute. Possible attack or misconfiguration."
+          runbook_url: "https://github.com/your-org/mcp-security-platform/wiki/runbooks/high-deny-rate"
+        labels:
+          severity: warning
+          component: proxy
+
+      # -----------------------------------------------------------------------
+      # Anomaly detected: any anomaly threshold exceeded event
+      # -----------------------------------------------------------------------
+      - uid: mcp-anomaly-detected
+        title: MCPAnomalyDetected
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: |
+                count_over_time(
+                  {container="mcp-proxy"} |= "anomaly_threshold_exceeded" [5m]
+                ) > 0
+        noDataState: NoData
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: "MCP anomalous invocation sequence detected"
+          description: "An AI agent's invocation sequence exceeded the anomaly threshold. Potential exfiltration chain."
+          runbook_url: "https://github.com/your-org/mcp-security-platform/wiki/runbooks/anomaly-detected"
+        labels:
+          severity: critical
+          component: anomaly-detector
+
+      # -----------------------------------------------------------------------
+      # Compliance check failure
+      # -----------------------------------------------------------------------
+      - uid: mcp-compliance-failed
+        title: MCPComplianceCheckFailed
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: |
+                count_over_time(
+                  {container="mcp-compliance-checker"} |= "\"status\":\"fail\"" [30m]
+                ) > 0
+        noDataState: NoData
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: "MCP compliance check failed"
+          description: "Daily compliance check found PII/credential violations or hash integrity failures."
+          runbook_url: "https://github.com/your-org/mcp-security-platform/wiki/runbooks/compliance-failure"
+        labels:
+          severity: critical
+          component: compliance-checker
+
+      # -----------------------------------------------------------------------
+      # New tool with critical risk registered
+      # -----------------------------------------------------------------------
+      - uid: mcp-critical-tool-registered
+        title: MCPCriticalRiskToolRegistered
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: |
+                count_over_time(
+                  {container="mcp-proxy"}
+                  |= "TOOL_REGISTERED"
+                  |= "\"risk_level\":\"critical\""
+                  [10m]
+                ) > 0
+        noDataState: NoData
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: "Critical-risk MCP tool registered"
+          description: "A tool with critical risk level was registered and automatically quarantined. Human review required."
+          runbook_url: "https://github.com/your-org/mcp-security-platform/wiki/runbooks/critical-tool-review"
+        labels:
+          severity: critical
+          component: tool-registry
+
+      # -----------------------------------------------------------------------
+      # OPA sidecar unreachable (INV-004)
+      # -----------------------------------------------------------------------
+      - uid: mcp-opa-unavailable
+        title: MCPOPAUnavailable
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: |
+                count_over_time(
+                  {container="mcp-proxy"} |= "OPA_UNAVAILABLE" [2m]
+                ) > 5
+        noDataState: NoData
+        execErrState: Alerting
+        for: 1m
+        annotations:
+          summary: "OPA sidecar unreachable"
+          description: "The OPA policy engine is unreachable. All tool invocations are being denied per INV-004."
+          runbook_url: "https://github.com/your-org/mcp-security-platform/wiki/runbooks/opa-down"
+        labels:
+          severity: critical
+          component: opa
+
+      # -----------------------------------------------------------------------
+      # High latency: p99 latency > 2000ms
+      # -----------------------------------------------------------------------
+      - uid: mcp-high-latency
+        title: MCPHighLatency
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: |
+                quantile_over_time(0.99,
+                  {container="mcp-proxy"}
+                  | json
+                  | unwrap latency_ms
+                  [5m]
+                ) > 2000
+        noDataState: NoData
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: "High MCP proxy latency"
+          description: "p99 tool invocation latency exceeds 2000ms. Possible upstream MCP server or OPA degradation."
+          runbook_url: "https://github.com/your-org/mcp-security-platform/wiki/runbooks/high-latency"
+        labels:
+          severity: warning
+          component: proxy

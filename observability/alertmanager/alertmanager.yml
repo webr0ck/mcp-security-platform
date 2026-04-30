@@ -1,0 +1,80 @@
+# alertmanager.yml — Prometheus Alertmanager configuration
+#
+# Alertmanager receives alerts from:
+#   - Loki ruler (LogQL alert rules)
+#   - Compliance checker (HTTP POST on rule violations)
+#
+# Secrets: webhook URLs and SMTP credentials must be set via environment variables
+# in the compose env_file. This file must never contain real credentials (INV-008).
+#
+# In production, replace the placeholder webhook URL with a real Slack webhook
+# or configure SMTP. The platform fires alerts for:
+#   - Compliance check failures (any of 10 PII/credential categories)
+#   - High tool invocation error rates
+#   - OPA unavailability (INV-004 — fail-closed events)
+#   - Anomaly detection triggers
+
+global:
+  # How long to wait before sending a resolved notification
+  resolve_timeout: 5m
+
+  # SMTP config (optional — configure if using email alerting)
+  # smtp_smarthost, smtp_from, smtp_auth_username are read from environment
+  # variables injected at container startup; they are not stored here.
+
+route:
+  # Default receiver for all alerts
+  receiver: "default"
+
+  # Group alerts by alertname and environment to reduce notification noise
+  group_by: ["alertname", "environment", "job"]
+
+  # Wait before sending the first notification (collects related alerts)
+  group_wait: 30s
+
+  # Wait before sending subsequent notifications for the same group
+  group_interval: 5m
+
+  # Repeat interval for unresolved alerts
+  repeat_interval: 4h
+
+  routes:
+    # Critical alerts (OPA unavailable, compliance failures) get immediate routing
+    - match:
+        severity: critical
+      receiver: "critical"
+      group_wait: 10s
+      repeat_interval: 1h
+
+    # Prompt injection WAF alerts — informational, daily digest
+    - match:
+        alertname: PromptInjectionDetected
+      receiver: "security-team"
+      group_wait: 5m
+      repeat_interval: 24h
+
+receivers:
+  - name: "default"
+    webhook_configs:
+      # ALERTMANAGER_SLACK_WEBHOOK_URL is set in .env (not committed to git)
+      # Replace with a real endpoint in production
+      - url: "http://localhost:9999/alertmanager-placeholder"
+        send_resolved: true
+
+  - name: "critical"
+    webhook_configs:
+      - url: "http://localhost:9999/alertmanager-placeholder"
+        send_resolved: true
+
+  - name: "security-team"
+    webhook_configs:
+      - url: "http://localhost:9999/alertmanager-placeholder"
+        send_resolved: false
+
+inhibit_rules:
+  # If a critical alert is firing for a service, suppress warnings for the same service
+  - source_match:
+      severity: "critical"
+    target_match:
+      severity: "warning"
+    equal: ["alertname", "job"]

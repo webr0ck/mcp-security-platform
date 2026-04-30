@@ -1,0 +1,238 @@
+# CI Job Fragment — Integration Tests
+#
+# Purpose: Run all @pytest.mark.integration tests against real service containers.
+#          Spins up PostgreSQL, Redis, and OPA as GitHub Actions service containers.
+#          The proxy is started in the foreground for the duration of the job.
+#
+# Include in the main workflow with:
+#   jobs:
+#     integration-tests:
+#       uses: ./.github/workflows/integration-tests.yml
+#       needs: unit-tests   # Run only after unit tests pass
+#
+# Failure conditions:
+#   - Any integration test fails (non-zero exit code)
+#   - Proxy fails to start within the health check timeout (60s)
+#   - Any required service container is unhealthy at job start
+#   - The OPA-down phase fails to return 503 (INV-004 regression)
+#
+# This job is a mandatory merge gate (runs on push to main/merge queue).
+# It is advisory on pull requests (runs but does not block merge).
+
+integration-tests:
+  name: Integration Tests
+  runs-on: ubuntu-22.04
+  # Run after unit tests pass — do not waste service startup time on broken code.
+  needs: [unit-tests]
+
+  services:
+    postgres:
+      image: postgres:16-alpine
+      env:
+        POSTGRES_USER: mcp_app
+        POSTGRES_PASSWORD: devpassword
+        POSTGRES_DB: mcp_security
+      ports:
+        - 5432:5432
+      options: >-
+        --health-cmd "pg_isready -U mcp_app -d mcp_security"
+        --health-interval 5s
+        --health-timeout 5s
+        --health-retries 10
+
+    redis:
+      image: redis:7-alpine
+      command: redis-server --requirepass devpassword
+      ports:
+        - 6379:6379
+      options: >-
+        --health-cmd "redis-cli -a devpassword ping"
+        --health-interval 5s
+        --health-timeout 5s
+        --health-retries 10
+
+    opa:
+      image: openpolicyagent/opa:0.68.0
+      command: >-
+        run
+        --server
+        --addr 0.0.0.0:8181
+        --log-level error
+        /policies
+      ports:
+        - 8181:8181
+      volumes:
+        - ${{ github.workspace }}/policies:/policies:ro
+      options: >-
+        --health-cmd "wget -qO- http://localhost:8181/health"
+        --health-interval 5s
+        --health-timeout 5s
+        --health-retries 12
+
+  env:
+    # Integration test environment — secrets injected from GitHub Actions Secrets.
+    # No plaintext secrets in this file.
+    ENVIRONMENT: development
+    DB_HOST: localhost
+    DB_PORT: "5432"
+    DB_NAME: mcp_security
+    DB_USER: mcp_app
+    DB_PASSWORD: devpassword
+    REDIS_HOST: localhost
+    REDIS_PORT: "6379"
+    REDIS_PASSWORD: devpassword
+    OPA_HOST: localhost
+    OPA_PORT: "8181"
+    PROXY_HOST: "0.0.0.0"
+    PROXY_PORT: "8000"
+    PROXY_SECRET_KEY: ${{ secrets.CI_PROXY_SECRET_KEY }}
+    API_KEY_HMAC_KEY: ${{ secrets.CI_API_KEY_HMAC_KEY }}
+    SBOM_SIGNING_KEY: ${{ secrets.CI_SBOM_SIGNING_KEY }}
+    AUDIT_LOG_HMAC_KEY: ${{ secrets.CI_AUDIT_LOG_HMAC_KEY }}
+    WEBHOOK_SIGNING_KEY: ${{ secrets.CI_WEBHOOK_SIGNING_KEY }}
+    POLICY_SIGNING_KEY: ${{ secrets.CI_POLICY_SIGNING_KEY }}
+    MINIO_ROOT_USER: testminio
+    MINIO_ROOT_PASSWORD: testminiopassword
+    OLLAMA_MODEL: llama3.2
+    OLLAMA_HOST: "mock-ollama-does-not-exist"
+    JIRA_ENABLED: "false"
+    ARTIFACTORY_ENABLED: "false"
+    OIDC_ENABLED: "false"
+    PYTHONDONTWRITEBYTECODE: "1"
+
+  defaults:
+    run:
+      working-directory: proxy
+
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: proxy/requirements*.txt
+
+    - name: Install proxy dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install -e ../observability/mcp-audit-logger/
+
+    - name: Run database migrations
+      run: |
+        # Apply all Flyway-style migrations in order.
+        # Requires psql to be available in the runner.
+        which psql || sudo apt-get install -y postgresql-client
+        for migration in $(ls -1 ../infra/db/migrations/V*.sql | sort); do
+          echo "Applying migration: $migration"
+          PGPASSWORD=devpassword psql \
+            -h localhost -U mcp_app -d mcp_security \
+            -f "$migration"
+        done
+
+    - name: Seed integration test fixtures
+      # Insert test clients, tools, OPA grants, and role assignments
+      # required by the integration test suite (see docs/test-plan.md Section 5).
+      run: |
+        PGPASSWORD=devpassword psql \
+          -h localhost -U mcp_app -d mcp_security \
+          -f tests/fixtures/integration_seed.sql
+
+    - name: Start proxy in background
+      run: |
+        nohup python -m uvicorn app.main:app \
+          --host 0.0.0.0 \
+          --port 8000 \
+          --log-level warning \
+          > /tmp/proxy.log 2>&1 &
+        echo $! > /tmp/proxy.pid
+
+    - name: Wait for proxy to be healthy
+      run: |
+        echo "Waiting for proxy to start (max 60s)..."
+        for i in $(seq 1 30); do
+          if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+            echo "Proxy is healthy after ${i}×2s"
+            break
+          fi
+          if [ "$i" -eq 30 ]; then
+            echo "ERROR: Proxy did not become healthy in 60s"
+            cat /tmp/proxy.log
+            exit 1
+          fi
+          sleep 2
+        done
+
+    - name: Run integration tests (Phase 1 — OPA running)
+      # Run all integration tests EXCEPT the OPA-down tests.
+      # OPA-down tests require stopping the OPA container (Phase 2 below).
+      run: |
+        pytest tests/integration/ \
+          -m integration \
+          --ignore=tests/integration/test_audit_completeness_opa_down.py \
+          --tb=short \
+          --strict-markers \
+          -v \
+          --timeout=15 \
+          --junit-xml=test-results-integration-phase1.xml \
+          -k "not opa_down and not OPA_DOWN"
+
+    - name: Stop OPA service container for fail-closed tests
+      # INV-004 test: stop OPA to verify proxy returns 503 (fail-closed).
+      # This step uses docker to stop only the OPA container; postgres and redis
+      # remain running so audit event verification still works.
+      run: |
+        # Find the OPA container by image name
+        OPA_CONTAINER=$(docker ps --filter "ancestor=openpolicyagent/opa:0.68.0" --format "{{.ID}}" | head -1)
+        if [ -n "$OPA_CONTAINER" ]; then
+          echo "Stopping OPA container: $OPA_CONTAINER"
+          docker stop "$OPA_CONTAINER"
+          sleep 2
+          echo "OPA container stopped. Running fail-closed tests..."
+        else
+          echo "WARNING: Could not find OPA container. Skipping fail-closed phase."
+          exit 0
+        fi
+
+    - name: Run integration tests (Phase 2 — OPA down, fail-closed)
+      # Runs with OPA_DOWN_TEST_MODE=1 so that OPA-down-specific tests are active.
+      # These tests verify INV-004: proxy returns 503, not 200, when OPA is down.
+      env:
+        OPA_DOWN_TEST_MODE: "1"
+      run: |
+        pytest tests/integration/test_audit_completeness.py \
+               tests/integration/test_invoke.py \
+          -m integration \
+          -k "opa_down or OPA_down or opa_unavailable" \
+          --tb=short \
+          --strict-markers \
+          -v \
+          --timeout=15 \
+          --junit-xml=test-results-integration-phase2.xml
+
+    - name: Print proxy log on failure
+      if: failure()
+      run: |
+        echo "=== Proxy stdout/stderr ==="
+        cat /tmp/proxy.log || true
+
+    - name: Stop proxy
+      if: always()
+      run: |
+        if [ -f /tmp/proxy.pid ]; then
+          kill $(cat /tmp/proxy.pid) || true
+        fi
+
+    - name: Upload integration test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: integration-test-results
+        path: |
+          proxy/test-results-integration-phase1.xml
+          proxy/test-results-integration-phase2.xml
+        retention-days: 30

@@ -1,0 +1,50 @@
+# security-scan.yml — Standalone security scanning workflow
+# Runs daily and on push to main. No user-controlled input enters shell commands.
+
+name: Security Scan
+
+on:
+  push:
+    branches: ["main"]
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+
+  trufflehog-full:
+    name: Trufflehog (full history)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trufflehog full scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          extra_args: --only-verified
+
+  pip-audit:
+    name: pip-audit (dependency CVE scan)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit and proxy dependencies
+        working-directory: proxy
+        run: |
+          pip install uv pip-audit
+          uv pip install --system -e "."
+
+      - name: Run pip-audit on proxy dependencies
+        working-directory: proxy
+        run: pip-audit

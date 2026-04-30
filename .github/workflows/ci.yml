@@ -1,0 +1,435 @@
+# ci.yml — MCP Security Platform CI Pipeline
+#
+# Jobs:
+#   lint          — ruff (linting + format check) + mypy (type check) on proxy/
+#   security-scan — trufflehog secrets detection on push/PR
+#   rego-lint     — OPA check on policies/rego/ + assert deny-by-default (INV-003)
+#   test          — pytest proxy/tests/ with live postgres, redis, opa services
+#   build         — docker build proxy/ and observability/compliance-checker/
+#   smoke         — full stack up, smoke test, down
+#
+# Security invariants enforced in CI:
+#   INV-002: test_redaction.py must pass (all 10 pattern categories)
+#   INV-003: authz.rego must contain 'default allow = false'
+#   INV-008: trufflehog scan on every push (no secrets in git)
+#   INV-012: OPA rego syntax validated on every PR
+#
+# SECURITY: No github context expressions are interpolated into shell run: blocks.
+# Labels, branch names, and user-controlled inputs are only used in workflow
+# expression contexts (if:, needs:, etc.) — never in run: steps.
+
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+
+# Cancel in-progress runs for the same branch/PR (saves CI minutes)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  OPA_VERSION: "0.63.0"
+
+jobs:
+
+  # ============================================================================
+  # Job: lint
+  # ruff (lint + format) and mypy on proxy/ source
+  # ============================================================================
+  lint:
+    name: Lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: proxy/pyproject.toml
+
+      - name: Install dev dependencies
+        working-directory: proxy
+        run: |
+          pip install uv
+          uv pip install --system -e ".[dev]"
+
+      - name: ruff lint
+        working-directory: proxy
+        run: ruff check app/
+
+      - name: ruff format check
+        working-directory: proxy
+        run: ruff format --check app/
+
+      - name: mypy type check
+        working-directory: proxy
+        run: mypy app/ --ignore-missing-imports --no-error-summary
+
+  # ============================================================================
+  # Job: security-scan
+  # Trufflehog scan for committed secrets (INV-008)
+  # ============================================================================
+  security-scan:
+    name: Secret Scan (trufflehog)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for git scan)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trufflehog git scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+
+  # ============================================================================
+  # Job: rego-lint
+  # OPA syntax check + INV-003 assertion (deny-by-default)
+  # ============================================================================
+  rego-lint:
+    name: Rego Lint (OPA check + deny-by-default)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install OPA
+        env:
+          OPA_VER: ${{ env.OPA_VERSION }}
+        run: |
+          curl -Lo /usr/local/bin/opa \
+            "https://github.com/open-policy-agent/opa/releases/download/v${OPA_VER}/opa_linux_amd64_static"
+          chmod +x /usr/local/bin/opa
+          opa version
+
+      - name: OPA check (syntax validation)
+        run: opa check policies/rego/
+
+      - name: Assert deny-by-default (INV-003)
+        # 'default allow = false' must be present in authz.rego — this is non-negotiable.
+        # Removing this line is an INV-003 violation and must block the PR.
+        run: |
+          if grep -rq "default allow = false" policies/rego/; then
+            echo "PASS: 'default allow = false' found in policies/rego/"
+          else
+            echo "FAIL: 'default allow = false' NOT found in policies/rego/"
+            echo "INV-003 violated: OPA policy engine must default to DENY."
+            exit 1
+          fi
+
+      - name: Assert no wildcard allow-all rules
+        run: |
+          if grep -rn "default allow = true" policies/rego/ 2>/dev/null; then
+            echo "FAIL: 'default allow = true' found — INV-003 violated."
+            exit 1
+          fi
+          echo "PASS: No wildcard allow-all rules found."
+
+  # ============================================================================
+  # Job: test
+  # pytest with live postgres, redis, opa
+  # ============================================================================
+  test:
+    name: Proxy Tests (pytest)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: mcp_security_test
+          POSTGRES_USER: mcp_app
+          # CI-only credential — not used in any real environment
+          POSTGRES_PASSWORD: ci-only-not-a-real-secret
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U mcp_app -d mcp_security_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - "6379:6379"
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 3s
+          --health-retries 3
+
+      opa:
+        image: openpolicyagent/opa:0.63.0-static
+        ports:
+          - "8181:8181"
+        options: >-
+          --health-cmd "curl -sf http://localhost:8181/health"
+          --health-interval 10s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: proxy/pyproject.toml
+
+      - name: Install proxy and audit logger
+        run: |
+          pip install uv
+          uv pip install --system -e "proxy/[dev]"
+          uv pip install --system -e "observability/mcp-audit-logger/"
+
+      - name: Run database migrations
+        env:
+          PGPASSWORD: ci-only-not-a-real-secret
+        run: |
+          for migration in infra/db/migrations/V*.sql; do
+            echo "Running: ${migration}"
+            psql -h localhost -U mcp_app -d mcp_security_test \
+              -f "${migration}" 2>&1 || true
+          done
+
+      - name: Load OPA policies via REST API
+        run: |
+          for rego_file in policies/rego/*.rego; do
+            policy_id=$(basename "${rego_file}" .rego)
+            echo "Loading policy: ${policy_id}"
+            curl -sf -X PUT \
+              "http://localhost:8181/v1/policies/${policy_id}" \
+              -H "Content-Type: text/plain" \
+              --data-binary "@${rego_file}" \
+              || echo "WARN: Could not load ${rego_file}"
+          done
+
+      - name: Run pytest
+        working-directory: proxy
+        env:
+          ENVIRONMENT: test
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_NAME: mcp_security_test
+          DB_USER: mcp_app
+          # CI-only credential stored as env var, not a real secret
+          DB_PASSWORD: ci-only-not-a-real-secret
+          REDIS_HOST: localhost
+          REDIS_PORT: "6379"
+          REDIS_PASSWORD: ""
+          REDIS_DB: "0"
+          OPA_HOST: localhost
+          OPA_PORT: "8181"
+          OPA_URL: http://localhost:8181
+          OPA_TIMEOUT_SECONDS: "5"
+          # All signing keys are CI-only random values — not used in production
+          SBOM_SIGNING_KEY: ci-test-sbom-signing-key-32bytes!!
+          AUDIT_LOG_HMAC_KEY: ci-test-audit-hmac-key-xxxxxxxxx32
+          API_KEY_HMAC_KEY: ci-test-api-key-hmac-key-32bytes!
+          PROXY_SECRET_KEY: ci-test-proxy-secret-key-32bytes!
+          POLICY_SIGNING_KEY: ci-test-policy-signing-key-32byte
+          LOG_LEVEL: DEBUG
+        run: |
+          python -m pytest tests/ \
+            -v \
+            --tb=short \
+            --junit-xml=test-results.xml \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=term-missing
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: proxy/test-results.xml
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: proxy/coverage.xml
+
+  # ============================================================================
+  # Job: build
+  # Build proxy and compliance-checker Docker images
+  # ============================================================================
+  build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build proxy (production target)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./proxy
+          file: ./proxy/Dockerfile
+          target: production
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: mcp-security-proxy:ci
+
+      - name: Build compliance-checker
+        uses: docker/build-push-action@v5
+        with:
+          context: ./observability/compliance-checker
+          file: ./observability/compliance-checker/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: mcp-compliance-checker:ci
+
+  # ============================================================================
+  # Job: smoke
+  # Full stack smoke test: up → wait → test → down
+  # Runs only on pushes to main/develop (not every PR) to save CI minutes.
+  # Force-run on a PR by adding the label 'run-smoke-test'.
+  # ============================================================================
+  smoke:
+    name: Smoke Test (full stack)
+    runs-on: ubuntu-latest
+    if: >
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/develop' ||
+      contains(github.event.pull_request.labels.*.name, 'run-smoke-test')
+    needs: [lint, rego-lint, test, build]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write CI .env (no real secrets — CI-only values)
+        # Values here are placeholder strings for CI. The .env file is in .gitignore
+        # and this step produces it ephemerally in the CI runner workspace.
+        # No real secret is stored in this workflow file (INV-008).
+        run: |
+          cat > .env << 'ENVEOF'
+          ENVIRONMENT=development
+          LOG_LEVEL=INFO
+          DB_HOST=db
+          DB_PORT=5432
+          DB_NAME=mcp_security
+          DB_USER=mcp_app
+          DB_PASSWORD=ci-smoke-db-password-placeholder
+          COMPLIANCE_DB_USER=compliance_checker
+          COMPLIANCE_DB_PASSWORD=ci-smoke-compliance-db-password
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          REDIS_PASSWORD=ci-smoke-redis-password-placeholder
+          REDIS_DB=0
+          REDIS_RATE_LIMIT_DB=1
+          PROXY_HOST=0.0.0.0
+          PROXY_PORT=8000
+          PROXY_WORKERS=2
+          PROXY_SECRET_KEY=ci-smoke-proxy-secret-key-32bytes
+          API_KEY_HMAC_KEY=ci-smoke-api-key-hmac-key-32byteX
+          SBOM_SIGNING_KEY=ci-smoke-sbom-signing-key-32byteXX
+          AUDIT_LOG_HMAC_KEY=ci-smoke-audit-hmac-key-32bytesXX
+          WEBHOOK_SIGNING_KEY=ci-smoke-webhook-signing-key-32byt
+          POLICY_SIGNING_KEY=ci-smoke-policy-signing-key-32byte
+          POLICY_SIGNING_KEY_ID=ci-smoke-policy-key-v1
+          NGINX_CLIENT_MAX_BODY_SIZE=10m
+          STEP_CA_PROVISIONER_NAME=mcp-security-platform
+          STEP_CA_PROVISIONER_PASSWORD=ci-smoke-step-ca-password
+          STEP_CA_MAX_TLS_DURATION=24h
+          OPA_HOST=opa
+          OPA_PORT=8181
+          OPA_URL=http://opa:8181
+          OPA_TIMEOUT_SECONDS=5
+          OLLAMA_HOST=ollama
+          OLLAMA_PORT=11434
+          OLLAMA_BASE_URL=http://ollama:11434
+          OLLAMA_MODEL=llama3.2
+          OLLAMA_TIMEOUT_SECONDS=30
+          MINIO_HOST=minio
+          MINIO_PORT=9000
+          MINIO_ENDPOINT=http://minio:9000
+          MINIO_ROOT_USER=ci-minio-admin
+          MINIO_ROOT_PASSWORD=ci-smoke-minio-password-placeholder
+          MINIO_AUDIT_BUCKET=mcp-audit-archive
+          MINIO_RETENTION_DAYS=90
+          GRAFANA_ADMIN_USER=admin
+          GRAFANA_ADMIN_PASSWORD=ci-smoke-grafana-password
+          LOKI_HOST=loki
+          LOKI_PORT=3100
+          LOKI_URL=http://loki:3100
+          ALERTMANAGER_HOST=alertmanager
+          ALERTMANAGER_PORT=9093
+          COMPLIANCE_CRON_SCHEDULE=0 2 * * *
+          COMPLIANCE_SAMPLE_SIZE=1000
+          COMPLIANCE_ALERT_WEBHOOK=http://alertmanager:9093/api/v1/alerts
+          JIRA_ENABLED=false
+          ARTIFACTORY_ENABLED=false
+          OIDC_ENABLED=false
+          WEBHOOK_ENABLED=false
+          RATE_LIMIT_ADMIN=300
+          RATE_LIMIT_AGENT=120
+          RATE_LIMIT_AUDITOR=60
+          RATE_LIMIT_READONLY=30
+          ENVEOF
+
+      - name: Start stack (dev compose for exposed ports)
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+      - name: Wait for proxy readiness
+        # Polls proxy readiness endpoint with exponential backoff up to 120s.
+        # Fixed sleep avoids wasting CI time on a healthy fast startup.
+        run: |
+          TIMEOUT=120
+          ELAPSED=0
+          echo "Waiting for proxy to be ready (max ${TIMEOUT}s)..."
+          until curl -sf http://localhost:8000/health/ready > /dev/null 2>&1; do
+            if [ "${ELAPSED}" -ge "${TIMEOUT}" ]; then
+              echo "ERROR: Proxy not ready after ${TIMEOUT}s"
+              docker compose logs --tail=50 proxy
+              docker compose ps
+              exit 1
+            fi
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
+            echo "  ${ELAPSED}/${TIMEOUT}s elapsed..."
+          done
+          echo "Proxy ready after ${ELAPSED}s"
+
+      - name: Run smoke tests
+        run: bash scripts/smoke_test.sh dev
+
+      - name: Collect diagnostic logs on failure
+        if: failure()
+        run: |
+          echo "=== docker compose ps ==="
+          docker compose ps
+          echo "=== proxy logs (last 50) ==="
+          docker compose logs --tail=50 proxy
+          echo "=== opa logs ==="
+          docker compose logs --tail=20 opa
+          echo "=== db logs ==="
+          docker compose logs --tail=20 db
+          echo "=== minio-init logs ==="
+          docker compose logs mcp-minio-init
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v

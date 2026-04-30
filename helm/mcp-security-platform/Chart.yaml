@@ -1,0 +1,15 @@
+apiVersion: v2
+name: mcp-security-platform
+description: Full-stack security platform for the MCP ecosystem
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - mcp
+  - security
+  - ai-agents
+  - fastapi
+  - opa
+maintainers:
+  - name: MCP Security Platform Team
+    url: https://github.com/your-org/mcp-security-platform
