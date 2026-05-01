@@ -185,6 +185,7 @@ services:
       - internal-net
       - observability-net
       - step-ca-net
+      - vault-net
     depends_on:
       db:
         condition: service_healthy
@@ -316,8 +317,10 @@ services:
     command: vault server -dev
     cap_add:
       - IPC_LOCK
+    volumes:
+      - vault-data:/vault/data
     networks:
-      - internal-net
+      - vault-net
     <<: [*security-hardening, *restart-always]
     logging: *default-logging
 
