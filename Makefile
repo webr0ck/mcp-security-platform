@@ -189,8 +189,9 @@ security-check:
 			FAILURES=$$((FAILURES + 1)); \
 		fi; \
 	else \
-		echo "WARN: trufflehog not installed — skipping secret scan"; \
+		echo "FAIL: INV-008 trufflehog not installed — gate fails closed (P2.5)"; \
 		echo "      Install: https://github.com/trufflesecurity/trufflehog"; \
+		FAILURES=$$((FAILURES + 1)); \
 	fi; \
 	\
 	echo ""; \
@@ -203,8 +204,9 @@ security-check:
 			FAILURES=$$((FAILURES + 1)); \
 		fi; \
 	else \
-		echo "WARN: opa not installed locally — skipping rego lint"; \
+		echo "FAIL: opa not installed — rego lint gate fails closed (P2.5)"; \
 		echo "      Install: https://www.openpolicyagent.org/docs/latest/#1-download-opa"; \
+		FAILURES=$$((FAILURES + 1)); \
 	fi; \
 	\
 	echo "--- F-001: proxy network isolation ---"; \

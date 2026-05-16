@@ -36,15 +36,35 @@ class CredentialBroker:
         self._db = db
         self._approach_b_adapters = approach_b_adapters
         self._approach_a_adapters = approach_a_adapters
-        self._master_secret: bytes | None = None
+        # CB-008: held in a bytearray so it can be explicitly overwritten;
+        # re-fetched after a TTL so Vault rotation is honoured and the
+        # window a heap dump exposes the master is bounded.
+        self._master_secret: bytearray | None = None
+        self._master_secret_fetched_at: datetime | None = None
+
+    @staticmethod
+    def _zero(buf: bytearray | None) -> None:
+        if buf:
+            for i in range(len(buf)):
+                buf[i] = 0
 
     async def _get_master_secret(self) -> bytes:
-        if self._master_secret is None:
-            from app.core.config import get_settings
-            self._master_secret = await self._kms.get_master_secret(
-                get_settings().BROKER_MASTER_SECRET_PATH
-            )
-        return self._master_secret
+        from app.core.config import get_settings
+        settings = get_settings()
+        ttl = timedelta(seconds=settings.BROKER_MASTER_SECRET_TTL_SECONDS)
+        now = datetime.now(timezone.utc)
+
+        expired = (
+            self._master_secret_fetched_at is None
+            or now - self._master_secret_fetched_at >= ttl
+        )
+        if self._master_secret is None or expired:
+            fresh = await self._kms.get_master_secret(settings.BROKER_MASTER_SECRET_PATH)
+            # Overwrite the previous copy before dropping the reference.
+            self._zero(self._master_secret)
+            self._master_secret = bytearray(fresh)
+            self._master_secret_fetched_at = now
+        return bytes(self._master_secret)
 
     async def resolve(
         self,

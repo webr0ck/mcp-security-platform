@@ -1,0 +1,32 @@
+# Pre-commit hooks (ROADMAP P2.5 / INV-008 gap closure).
+#
+#   pip install pre-commit && pre-commit install
+#
+# Local hooks call the same tools the CI gate uses, so a developer cannot
+# commit a secret or a topology regression that CI would later reject. The
+# gate fails closed: a missing tool is a failure, not a skip.
+repos:
+  - repo: local
+    hooks:
+      - id: trufflehog-secret-scan
+        name: trufflehog secret scan (INV-008)
+        entry: "bash -c 'command -v trufflehog >/dev/null 2>&1 || { echo trufflehog-not-installed; exit 1; }; trufflehog git file://. --since-commit HEAD --only-verified --fail'"
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: f001-network-isolation
+        name: F-001 proxy network isolation gate
+        entry: "python3 scripts/check_network_isolation.py"
+        language: system
+        pass_filenames: false
+        files: '^docker-compose\.ya?ml$'
+        stages: [pre-commit]
+
+      - id: rego-deny-by-default
+        name: INV-003 OPA deny-by-default present
+        entry: "bash -c 'grep -q \"default allow := false\" policies/rego/authz.rego'"
+        language: system
+        pass_filenames: false
+        files: '^policies/rego/'
+        stages: [pre-commit]

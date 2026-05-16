@@ -213,6 +213,10 @@ class Settings(BaseSettings):
     # Empty string => use system trust store (httpx default verify=True).
     VAULT_CA_BUNDLE: str = ""
     BROKER_MASTER_SECRET_PATH: str = "secret/data/credential-broker"
+    # CB-008: how long the broker may cache the Vault master secret in process
+    # memory before it must be re-fetched (honours Vault rotation; bounds the
+    # window a heap dump exposes the master).
+    BROKER_MASTER_SECRET_TTL_SECONDS: int = 300
 
     # =========================================================================
     # Credential Broker — M365 / Entra

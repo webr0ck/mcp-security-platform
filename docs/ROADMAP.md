@@ -56,12 +56,12 @@ Exit criteria: every claim in every doc maps to verified file:line, or is delete
 ## Phase 2 — HARDENING (not started; sequence after P1)
 
 - 2.1 ✅ DONE in P0.8 — KEK via HKDF (RFC 5869) (CB-007).
-- 2.2 ⏳ Master secret: TTL re-fetch from Vault, explicit zeroing, honor rotation (CB-008).
+- 2.2 ✅ DONE — master secret held in a bytearray, re-fetched after `BROKER_MASTER_SECRET_TTL_SECONDS` (default 300s, honours Vault rotation), old copy explicitly zeroed (CB-008). Test: `test_master_secret_ttl.py`.
 - 2.3 ✅ DONE in P0.9 — adapters raise typed `TokenExchangeError`, status only (CB-010). *Still pending:* add IdP-error redaction patterns to `mcp-audit-logger` (INV-002 depth).
 - 2.4 ⏳ Real INV-007 startup Object-Lock verification in compliance-checker; decide GOVERNANCE vs COMPLIANCE mode and align the doc.
-- 2.5 ⏳ Add pre-commit secret-scan hook (INV-008 gap); make trufflehog/opa hard failures in `make security-check` (currently skip-with-warn).
-- 2.6 ⏳ De-skip INV-004 tests so they run in real CI (set the env the tests require in the workflow).
-- 2.7 ⏳ Add broker variables to `.env.example`; `make lab-init` generates lab key material instead of `devpassword` constants (CB-006, CB-015).
+- 2.5 ✅ DONE — `.pre-commit-config.yaml` (trufflehog + F-001 gate + rego deny-by-default); `make security-check` now **fails closed** when trufflehog/opa absent (was skip-with-warn).
+- 2.6 ✅ DONE via P1.4 — integration CI Phase-2 step sets `OPA_DOWN_TEST_MODE=1` and runs the opa_down split; the `--ignore` of the nonexistent file was removed. (Local `make test` still skips it by design — no OPA-down locally.)
+- 2.7 🟡 PARTIAL — broker vars added to `.env.example` (CB-015 closed). *Still pending (deferred, lab-only, touches running lab setup):* `make lab-init` generating lab key material instead of `devpassword` constants (CB-006).
 - 2.8 ⏳ **Wire F-002 into a real staging deploy**: bring the stack up with `-f docker-compose.opa-signed.yml`, prove OPA refuses an unsigned/tampered bundle at runtime (the mechanism exists from P0.4 but has only been validated statically, not enforced in a running env).
 
 ---
