@@ -19,7 +19,9 @@ def test_vault_settings_defaults():
     """Verify the class-level defaults for vault settings without providing them."""
     from app.core.config import Settings
     s = Settings(**_REQUIRED)
-    assert s.VAULT_ADDR == "http://vault:8200"
+    # CB-002: the secure default is https:// — the broker master secret must
+    # never transit a plaintext channel. http:// is rejected outside dev.
+    assert s.VAULT_ADDR == "https://vault:8200"
     assert s.VAULT_TOKEN == "change-me-in-production"
     assert s.BROKER_MASTER_SECRET_PATH == "secret/data/credential-broker"
 

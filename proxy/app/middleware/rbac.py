@@ -30,6 +30,9 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/health/ready",
     "/api/v1/auth/oidc/login",
     "/api/v1/auth/oidc/callback",
+    # Jira webhook is authenticated by JIRA_WEBHOOK_SECRET, not by role.
+    # Must match AuthMiddleware.PUBLIC_PATHS to remain reachable.
+    "/api/v1/integrations/jira/webhook",
 })
 
 # Minimum role required per path prefix.
@@ -82,10 +85,6 @@ class RBACMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:  # type: ignore[override]
         if request.url.path in PUBLIC_PATHS or request.method == "OPTIONS":
-            return await call_next(request)
-
-        # Jira webhook is authenticated by secret, not by role
-        if request.url.path == "/api/v1/integrations/jira/webhook":
             return await call_next(request)
 
         client_roles: list[str] = getattr(request.state, "client_roles", [])

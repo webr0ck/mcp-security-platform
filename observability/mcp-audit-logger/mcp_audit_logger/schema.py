@@ -21,6 +21,11 @@ from uuid import UUID, uuid4
 class AuditOutcome(str, Enum):
     ALLOW = "allow"
     DENY = "deny"
+    # Policy allowed but the upstream invocation could not complete
+    # (handshake failure, network error, malformed response, etc.).
+    # Distinguished from ALLOW so audit reviewers don't conflate "tool
+    # actually executed" with "tool would have been allowed to execute".
+    ERROR = "error"
 
 
 class AuditEventType(str, Enum):

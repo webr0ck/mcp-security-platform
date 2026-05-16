@@ -1,8 +1,31 @@
 # MCP Security Platform
 
-A full-stack, open-source security reference implementation for the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) ecosystem.
+A full-stack, open-source security reference implementation for the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) ecosystem: a hardened ingress gateway, a semantic security proxy, a credential broker, and a compliance-grade observability stack.
 
-92% of MCP servers currently have security vulnerabilities. Only 20% pass basic security criteria. This platform is the missing hardened reference implementation.
+> ⚠️ **Status & honesty notice (2026-05-16).** This README historically over-described the system. The **authoritative, reality-checked** documents are:
+> - [`docs/REVIEW-2026-05-16.md`](docs/REVIEW-2026-05-16.md) — security findings + claimed-vs-actual audit
+> - [`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md) — reality-annotated architecture (supersedes the stale `ARCHITECTURE.md` v1)
+> - [`docs/ROADMAP.md`](docs/ROADMAP.md) — **status dashboard: what's done vs next**
+> - [`docs/DEV-TEST-PROCESS.md`](docs/DEV-TEST-PROCESS.md) — change/test gates
+>
+> Treat any feature claim below as **"see ARCHITECTURE-v2 for verified status"** until Phase 1 (truth reconciliation) completes.
+
+## Status — done vs next
+
+**✅ Done (Phase 0 — security unblock, verified):**
+- Credential-broker identity collapse fixed (CB-001) — identity from the authenticated session, not a spoofable header; server-side nonce + PKCE OAuth.
+- Vault master-key TLS enforced (CB-002); HKDF KEK (CB-007); synchronous credential audit (CB-004); DB grant fix (CB-005); adapter error-leak fixed (CB-010).
+- **F-001 network isolation — implemented and proven on the live lab** (a non-dialed sidecar can no longer reach `proxy:8000`; proxy stays healthy).
+- OPA signed-bundle mechanism delivered (F-002); 79 unit + 9 in-process MCP-client tests pass; `make security-check` gained an F-001 isolation gate.
+
+**⏳ Next (Phase 1 — truth reconciliation, no code risk):**
+- Replace stale `ARCHITECTURE.md` v1; remove/relabel **not-built** features (SPDX SBOM, outbound Jira, Helm/K8s, OIDC, per-tool rate limiting, learned anomaly baseline).
+- Fix broken CI/test cross-references (the integration job currently fails on missing fixtures).
+- Document the credential broker in API/RBAC/SECURITY docs.
+
+**🔜 Then:** Phase 2 hardening (CB-008, INV-007 verify, pre-commit secret hook, F-002 staging enforcement) → Phase 3 features.
+
+Independent third-party MCP-ecosystem vulnerability statistics are intentionally **not cited here** pending a verifiable source (previously an unsourced claim — see ROADMAP P1.3).
 
 ## What This Is
 
@@ -19,14 +42,7 @@ Compliance-grade audit logging (SHA-256 per-event, credential auto-redaction), L
 
 ## Differentiators vs. Competing Tools
 
-| Feature | This Platform | Lilith-zero | MCP Spine | Burrow | Vectimus |
-|---------|:---:|:---:|:---:|:---:|:---:|
-| Full 3-layer stack | Y | N | N | N | N |
-| SBOM generation (CycloneDX) | Y | N | N | N | N |
-| LLM-assisted tool risk scoring | Y | N | N | N | N |
-| OPA/Rego policy engine | Y | N | N | N | Y (Cedar) |
-| WORM compliance logging | Y | N | N | N | N |
-| Anomaly detection | Y | N | N | Y | N |
+_Removed: the prior comparison table referenced competitors that could not be verified and scored this project favourably on every row with no sourcing. A sourced comparison will be reinstated only if backed by verifiable references (ROADMAP P1.3). For what this platform actually implements vs. only documents, see [`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md)._
 
 ## Quick Start
 

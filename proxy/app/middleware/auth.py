@@ -38,6 +38,17 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/api/v1/integrations/jira/webhook",  # authenticated by JIRA_WEBHOOK_SECRET, not RBAC
 })
 
+# CB-001: the OAuth IdP redirects the user's browser here with no client
+# cert / API key, so the path must be public — but identity is NOT taken
+# from a header. It is recovered from the single-use server-side nonce
+# created at /auth/enroll/* (a PROTECTED path). /auth/enroll/* is
+# intentionally NOT public and is authenticated by AuthMiddleware.
+_PUBLIC_PATH_PREFIXES: tuple[str, ...] = ("/auth/callback/",)
+
+
+def _is_public(path: str) -> bool:
+    return path in PUBLIC_PATHS or path.startswith(_PUBLIC_PATH_PREFIXES)
+
 # Redis key TTL for role cache (5 minutes — short enough to pick up revocations quickly)
 _ROLE_CACHE_TTL_SECONDS = 300
 
@@ -57,7 +68,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         Load roles from cache or DB and attach to request.state.client_roles.
         """
         # Skip auth for public endpoints and OPTIONS preflight.
-        if request.url.path in PUBLIC_PATHS or request.method == "OPTIONS":
+        if _is_public(request.url.path) or request.method == "OPTIONS":
             request.state.client_id = None
             request.state.auth_method = "none"
             request.state.client_roles = []
@@ -158,7 +169,7 @@ async def _resolve_api_key(token: str) -> str | None:
     Pipeline (ARCHITECTURE.md §5.4):
       1. Hash the token with API_KEY_HMAC_KEY (HMAC-SHA-256).
       2. Check Redis cache key api_key:{hash} → client_id (TTL 300s).
-      3. On cache miss: query api_keys table for matching key_hash and is_active=true.
+      3. On cache miss: query api_keys table for matching key_hash and revoked_at IS NULL.
       4. On DB hit: populate Redis cache and return client_id.
       5. On DB miss or revoked key: return None (→ 401).
 
@@ -191,7 +202,7 @@ async def _resolve_api_key(token: str) -> str | None:
                     """
                     SELECT client_id FROM api_keys
                     WHERE key_hash = :key_hash
-                      AND is_active = true
+                      AND revoked_at IS NULL
                       AND (expires_at IS NULL OR expires_at > NOW())
                     LIMIT 1
                     """

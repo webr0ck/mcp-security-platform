@@ -1,0 +1,258 @@
+---
+# Lab overlay — add real upstream targets and a local OIDC provider.
+#
+# Usage:
+#   podman compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.dev.yml \
+#     -f podman-compose.lab.yml \
+#     up -d
+#
+# All lab services live on lab-net (bridge, internal: false) so localhost
+# ports are reachable from the host browser.  The seeder also joins
+# internal-net and vault-net to reach mcp-db and mcp-vault.
+
+services:
+
+  # ── Local OIDC / OAuth2 provider ────────────────────────────────────────────
+  lab-dex:
+    image: ghcr.io/dexidp/dex:v2.38.0
+    container_name: lab-dex
+    command: dex serve /etc/dex/config.yaml
+    volumes:
+      - ./lab/dex/config.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "5556:5556"
+    networks:
+      - lab-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5556/dex/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Lab Grafana (port 3001 — avoids conflict with observability on 3000) ────
+  lab-grafana:
+    image: grafana/grafana-oss:11.0.0
+    container_name: lab-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${LAB_GRAFANA_ADMIN_PASSWORD:-labpassword}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - lab-grafana-data:/var/lib/grafana
+    networks:
+      - lab-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── NetBox backing database ──────────────────────────────────────────────────
+  lab-netbox-db:
+    image: postgres:16-alpine
+    container_name: lab-netbox-db
+    environment:
+      POSTGRES_DB: netbox
+      POSTGRES_USER: netbox
+      POSTGRES_PASSWORD: ${LAB_NETBOX_DB_PASSWORD:-labpassword}
+    volumes:
+      - lab-netbox-db-data:/var/lib/postgresql/data
+    networks:
+      - lab-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netbox"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── NetBox Redis cache / task queue ─────────────────────────────────────────
+  lab-netbox-redis:
+    image: redis:7-alpine
+    container_name: lab-netbox-redis
+    command: redis-server --requirepass ${LAB_NETBOX_REDIS_PASSWORD:-labpassword}
+    networks:
+      - lab-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${LAB_NETBOX_REDIS_PASSWORD:-labpassword}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── NetBox IPAM / DCIM ───────────────────────────────────────────────────────
+  lab-netbox:
+    image: netboxcommunity/netbox:v4.2
+    container_name: lab-netbox
+    ports:
+      - "8080:8080"
+    depends_on:
+      lab-netbox-db:
+        condition: service_healthy
+      lab-netbox-redis:
+        condition: service_healthy
+    environment:
+      DB_HOST: lab-netbox-db
+      DB_NAME: netbox
+      DB_USER: netbox
+      DB_PASSWORD: ${LAB_NETBOX_DB_PASSWORD:-labpassword}
+      REDIS_HOST: lab-netbox-redis
+      REDIS_PASSWORD: ${LAB_NETBOX_REDIS_PASSWORD:-labpassword}
+      SECRET_KEY: ${LAB_NETBOX_SECRET_KEY:-change-me-32-chars-minimum-here}
+      SUPERUSER_EMAIL: admin@lab.local
+      SUPERUSER_PASSWORD: ${LAB_NETBOX_ADMIN_PASSWORD:-labpassword}
+      ALLOWED_HOSTS: "lab-netbox localhost 127.0.0.1"
+      SKIP_SUPERUSER: "false"
+    networks:
+      - lab-net
+    healthcheck:
+      # 403 = auth required = NetBox is up; curl -f fails on >=400 so use -s + grep
+      test: ["CMD-SHELL", "curl -s http://localhost:8080/api/ | grep -q 'detail\\|Authentication' && exit 0 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 90s
+    restart: unless-stopped
+
+  # ── Grafana MCP Server ───────────────────────────────────────────────────────
+  mcp-grafana:
+    image: grafana/mcp-grafana:latest
+    container_name: mcp-grafana
+    command:
+      - "-transport"
+      - "streamable-http"
+      - "-address"
+      - "0.0.0.0:8000"
+    ports:
+      - "8100:8000"
+    environment:
+      GRAFANA_URL: "http://lab-grafana:3000"
+      GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_ADMIN_TOKEN}"
+    depends_on:
+      lab-grafana:
+        condition: service_healthy
+    networks:
+      - lab-net
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz 2>/dev/null && exit 0 || curl -sf http://localhost:8000/mcp -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1}' >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── NetBox MCP Server ────────────────────────────────────────────────────────
+  mcp-netbox:
+    build: ./lab/mcp-servers/netbox
+    image: mcp-netbox-server:lab
+    container_name: mcp-netbox
+    ports:
+      - "8101:8000"
+    environment:
+      NETBOX_URL: "http://lab-netbox:8080"
+      NETBOX_TOKEN: "${NETBOX_ADMIN_TOKEN}"
+      TRANSPORT: "http"
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      VERIFY_SSL: "false"
+    depends_on:
+      lab-netbox:
+        condition: service_healthy
+    networks:
+      - lab-net
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8000/mcp -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"id\":1,\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"hc\",\"version\":\"1\"}}}' | grep -q 'serverInfo' && exit 0 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Vault — LAB ONLY: switch to dev mode (in-memory, well-known root token).
+  # The base compose runs Vault with a file storage backend that requires
+  # init+unseal. For lab smoke tests we want a one-command bring-up, so the
+  # overlay flips Vault into dev mode and exposes the API port to the host.
+  # NEVER apply this overlay in production.
+  vault:
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "${VAULT_TOKEN:-lab-root-token}"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      # Clear the production VAULT_LOCAL_CONFIG inherited from the base compose
+      # so the dev-mode command isn't told to look at a JSON config it doesn't use.
+      VAULT_LOCAL_CONFIG: ""
+    command: vault server -dev
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:8200/v1/sys/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  # ── Proxy: also load .env.lab so lab tokens reach the broker ─────────────────
+  proxy:
+    env_file:
+      - .env
+      - .env.lab
+
+  # ── Seed script — runs once, populates Vault, Grafana, NetBox ───────────────
+  lab-seeder:
+    build: ./lab/seeder
+    container_name: lab-seeder
+    restart: "no"
+    depends_on:
+      lab-grafana:
+        condition: service_healthy
+      lab-netbox:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+    networks:
+      - lab-net
+      - internal-net
+      - vault-net
+    env_file:
+      - .env
+      - .env.lab
+    environment:
+      VAULT_ADDR: http://mcp-vault:8200
+      LAB_GRAFANA_URL: http://lab-grafana:3000
+      LAB_NETBOX_URL: http://lab-netbox:8080
+      DB_HOST: mcp-db
+      DB_NAME: mcp_security
+      DB_USER: mcp_app
+
+# ── Named volumes ────────────────────────────────────────────────────────────
+volumes:
+  lab-grafana-data:
+  lab-netbox-db-data:
+
+# ── Networks ─────────────────────────────────────────────────────────────────
+networks:
+  lab-net:
+    driver: bridge
+  # Attach to networks created by the base compose so lab-seeder can reach
+  # mcp-db and mcp-vault.  The project-name prefix matches the compose project
+  # name derived from the directory: mcp-security-platform_.
+  internal-net:
+    external: true
+    name: mcp-security-platform_internal-net
+  vault-net:
+    external: true
+    name: mcp-security-platform_vault-net

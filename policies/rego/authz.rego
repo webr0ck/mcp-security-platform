@@ -36,12 +36,27 @@ allow if {
     not anomaly_threshold_exceeded
 }
 
-# Admins performing testing invocations bypass anomaly scoring
+# Admins performing testing invocations bypass anomaly scoring only.
+# All other gates (inventory grant, risk-level cap, deny rules) still apply,
+# so an admin cannot reach a tool that is outside their OPA inventory.
 allow if {
     input.is_testing == true
     "admin" in input.client_roles
     tool_is_active
+    admin_has_test_permission
+    risk_level_within_threshold
     count(deny) == 0
+}
+
+# Admins are only permitted to test tools explicitly listed in their grant or
+# implied by an allowed tag — never tools outside the inventory.
+admin_has_test_permission if {
+    input.tool_name in data.mcp.grants[input.client_id].allowed_tools
+}
+
+admin_has_test_permission if {
+    some tag in data.mcp.grants[input.client_id].allowed_tags
+    tag in data.mcp.tools[input.tool_name].tags
 }
 
 # =============================================================================
@@ -70,8 +85,8 @@ deny contains "anomaly_threshold_exceeded" if {
 }
 
 deny contains "suspicious_parameter_pattern" if {
-    some _k, val in input.params
-    suspicious_param_value(val)
+    some s in all_string_values(input.params)
+    matches_prompt_injection(s)
 }
 
 # =============================================================================
@@ -118,9 +133,17 @@ tool_allowed_for_client(client_id, tool_name) if {
     tool_name in data.mcp.grants[client_id].allowed_tools
 }
 
-suspicious_param_value(val) if {
-    is_string(val)
-    regex.match(`(?i)(ignore previous|ignore all prior|you are now|act as|jailbreak)`, val)
+matches_prompt_injection(s) if {
+    is_string(s)
+    regex.match(`(?i)(ignore previous|ignore all prior|you are now|act as|jailbreak)`, s)
+}
+
+# walk(x) yields every leaf of x. We keep the string ones.
+all_string_values(x) := result if {
+    result := [v |
+        walk(x, [_, v])
+        is_string(v)
+    ]
 }
 
 # Expose deny reasons for audit logging and API response

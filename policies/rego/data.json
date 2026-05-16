@@ -1,0 +1,19 @@
+{
+  "mcp": {
+    "grants": {
+      "alice@corp": {
+        "allowed_tools": ["grafana-query", "netbox-query", "dex-calendar"],
+        "max_risk_level": "medium"
+      },
+      "bob@corp": {
+        "allowed_tools": ["grafana-query", "netbox-query"],
+        "max_risk_level": "low"
+      }
+    },
+    "tools": {
+      "grafana-query": {"tags": ["grafana", "monitoring"]},
+      "netbox-query":  {"tags": ["netbox", "dcim"]},
+      "dex-calendar":  {"tags": ["calendar", "m365"]}
+    }
+  }
+}

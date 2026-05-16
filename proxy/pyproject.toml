@@ -34,6 +34,9 @@ dependencies = [
     "cryptography>=43.0.0",
     "python-jose[cryptography]>=3.3.0",  # JWT / OIDC
 
+    # Configuration
+    "pyyaml>=6.0",
+
     # Utilities
     "structlog>=24.0.0",
     "tenacity>=9.0.0",       # Retry logic for OPA/Ollama calls
@@ -53,6 +56,10 @@ dev = [
     "factory-boy>=3.3.0",
     "freezegun>=1.5.0",
 ]
+
+[tool.hatch.build.targets.wheel]
+# The app package lives in the app/ subdirectory; tell hatchling where to find it.
+packages = ["app"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

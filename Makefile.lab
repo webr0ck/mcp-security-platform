@@ -1,0 +1,86 @@
+# Lab targets for Podman-based full-stack testing
+# Usage: make -f Makefile.lab <target>
+# Prerequisites: podman, podman compose, python3, curl, jq
+
+LAB_COMPOSE = podman compose \
+  -f docker-compose.yml \
+  -f docker-compose.dev.yml \
+  -f podman-compose.lab.yml
+
+.PHONY: lab-setup lab-up lab-down lab-reset lab-rebuild lab-init lab-test lab-smoke \
+        lab-logs lab-dex-logs lab-ps lab-entra-check lab-vault-init \
+        lab-proxy-shell lab-netbox-shell help
+
+## lab-setup       Zero-to-usable: start stack, migrate DB, provision tokens, seed, smoke test
+lab-setup:
+	bash lab/scripts/lab-setup.sh
+
+## lab-setup-reset  Full reset then zero-to-usable setup (destroys volumes)
+lab-setup-reset:
+	bash lab/scripts/lab-setup.sh --reset
+
+## lab-up          Bring up the full lab stack (build + seed)
+lab-up:
+	$(LAB_COMPOSE) up -d --build
+	sleep 10
+	$(MAKE) -f Makefile.lab lab-init
+
+## lab-down         Tear down the lab stack (preserves volumes)
+lab-down:
+	$(LAB_COMPOSE) down
+
+## lab-reset        Tear down including volumes, then bring back up
+lab-reset:
+	$(LAB_COMPOSE) down -v
+	$(MAKE) -f Makefile.lab lab-up
+
+## lab-rebuild      Rebuild and restart only changed services, then re-seed
+lab-rebuild:
+	$(LAB_COMPOSE) build proxy lab-grafana lab-netbox lab-seeder
+	$(LAB_COMPOSE) up -d --no-deps proxy lab-grafana lab-netbox
+	$(LAB_COMPOSE) run --rm lab-seeder
+
+## lab-init         Initialise Vault then run the seeder container
+lab-init:
+	bash lab/scripts/vault-init.sh
+	$(LAB_COMPOSE) run --rm lab-seeder
+
+## lab-test         Run integration / e2e tests (excludes unit-only tests)
+lab-test:
+	cd proxy && python -m pytest tests/ -m "not unit" --tb=short -v
+
+## lab-smoke        Run the smoke-test script against live endpoints
+lab-smoke:
+	bash lab/scripts/lab-smoke.sh
+
+## lab-logs         Follow logs for core lab services
+lab-logs:
+	$(LAB_COMPOSE) logs -f proxy lab-dex lab-grafana lab-netbox
+
+## lab-dex-logs     Follow logs for Dex IdP only
+lab-dex-logs:
+	$(LAB_COMPOSE) logs -f lab-dex
+
+## lab-ps           Show running container status for the lab stack
+lab-ps:
+	$(LAB_COMPOSE) ps
+
+## lab-entra-check  Verify Entra / Graph API connectivity (requires ENTRA_* vars)
+lab-entra-check:
+	bash lab/scripts/entra-check.sh
+
+## lab-vault-init   Initialise and unseal Vault, write lab secrets
+lab-vault-init:
+	bash lab/scripts/vault-init.sh
+
+## lab-proxy-shell  Open a bash shell inside the proxy container
+lab-proxy-shell:
+	$(LAB_COMPOSE) exec proxy bash
+
+## lab-netbox-shell Open a sh shell inside the NetBox container
+lab-netbox-shell:
+	$(LAB_COMPOSE) exec lab-netbox /bin/sh
+
+## help             Show this help message
+help:
+	@grep -E '^## ' Makefile.lab | sed 's/^## //' | awk 'BEGIN {FS="  +"} {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'

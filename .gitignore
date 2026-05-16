@@ -1,9 +1,15 @@
 *.pyc
 __pycache__/
 .env
+.env.lab
 *.egg-info/
 .venv/
 dist/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+# F-002: signed OPA bundle is a build artifact (signed with POLICY_SIGNING_KEY).
+# Never commit it — rebuild via `make sign-policy-bundle`.
+policies/bundle.tar.gz
+# local pre-change safety copy (F-001 network surgery)
+docker-compose.yml.pre-f001-bak

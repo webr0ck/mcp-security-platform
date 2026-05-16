@@ -1,17 +1,32 @@
 from __future__ import annotations
 
-import hmac
-import hashlib
 import os
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 _NONCE_SIZE = 12  # 96-bit nonce for AES-GCM
+_KEK_SIZE = 32  # 256-bit KEK for AES-256-GCM
+# Domain-separation prefix; bump the version suffix if the KDF construction
+# ever changes so old and new KEKs can never collide.
+_HKDF_INFO_PREFIX = b"mcp-credential-broker-kek-v1:"
 
 
 def _derive_kek(user_sub: str, master_secret: bytes) -> bytes:
-    """Derive per-user Key Encryption Key via HMAC-SHA256."""
-    return hmac.new(master_secret, user_sub.encode(), hashlib.sha256).digest()
+    """
+    CB-007: derive the per-user Key Encryption Key with HKDF-SHA256
+    (RFC 5869) instead of a single-round HMAC. The user identity is bound
+    into the HKDF `info` for domain separation, so a leaked master secret
+    cannot be turned into a per-user KEK with one trivial HMAC call.
+    """
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=_KEK_SIZE,
+        salt=None,
+        info=_HKDF_INFO_PREFIX + user_sub.encode(),
+    )
+    return hkdf.derive(master_secret)
 
 
 def encrypt(plaintext: str, user_sub: str, master_secret: bytes) -> bytes:

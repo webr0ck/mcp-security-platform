@@ -1,6 +1,6 @@
 .PHONY: help up down dev-up dev-down build logs shell proxy-shell db-shell \
         test test-unit test-integration lint \
-        db-migrate setup pull-model step-ca-init policy-reload \
+        db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle \
         assign-role compliance-run sbom-verify \
         security-check health smoke-test \
         clean
@@ -207,6 +207,14 @@ security-check:
 		echo "      Install: https://www.openpolicyagent.org/docs/latest/#1-download-opa"; \
 	fi; \
 	\
+	echo "--- F-001: proxy network isolation ---"; \
+	if python3 scripts/check_network_isolation.py; then \
+		echo "PASS: F-001 proxy network isolation"; \
+	else \
+		echo "FAIL: F-001 proxy network isolation"; \
+		FAILURES=$$((FAILURES+1)); \
+	fi; \
+	\
 	echo ""; \
 	if [ "$$FAILURES" -gt 0 ]; then \
 		echo "════════════════════════════════════════════════════════"; \
@@ -295,6 +303,9 @@ step-ca-init:
 	@echo ""
 	@echo "Copy the CA fingerprint above to .env as STEP_CA_FINGERPRINT"
 	@echo "Then restart the gateway: docker compose restart gateway"
+
+sign-policy-bundle:
+	@scripts/sign_policy_bundle.sh
 
 policy-reload:
 	@echo "OPA watches /policies automatically in development (--watch flag)."

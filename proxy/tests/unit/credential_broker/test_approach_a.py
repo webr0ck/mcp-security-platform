@@ -39,3 +39,19 @@ def test_nonce_is_random_each_time():
     blob1 = encrypt("token", USER_SUB_A, MASTER_SECRET)
     blob2 = encrypt("token", USER_SUB_A, MASTER_SECRET)
     assert blob1 != blob2
+
+
+@pytest.mark.unit
+def test_kek_is_hkdf_not_single_round_hmac():
+    """CB-007: KEK derivation must be HKDF-SHA256, not bare HMAC(master, sub)."""
+    import hashlib
+    import hmac
+
+    from app.credential_broker.approaches.approach_a import _derive_kek
+
+    kek = _derive_kek(USER_SUB_A, MASTER_SECRET)
+    assert len(kek) == 32  # 256-bit KEK
+    assert kek == _derive_kek(USER_SUB_A, MASTER_SECRET)  # deterministic
+    assert kek != _derive_kek(USER_SUB_B, MASTER_SECRET)  # domain-separated
+    legacy = hmac.new(MASTER_SECRET, USER_SUB_A.encode(), hashlib.sha256).digest()
+    assert kek != legacy  # explicitly NOT the old weak construction

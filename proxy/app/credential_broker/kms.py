@@ -13,9 +13,13 @@ class KMSError(Exception):
 
 
 class VaultKMSClient:
-    def __init__(self, addr: str, token: str) -> None:
+    def __init__(self, addr: str, token: str, ca_bundle: str | None = None) -> None:
         self._addr = addr
         self._headers = {"X-Vault-Token": token}
+        # CB-009: explicitly verify the Vault TLS certificate. A non-empty
+        # ca_bundle pins verification to that bundle; otherwise use the system
+        # trust store (httpx default). Verification is never disabled.
+        self._verify: str | bool = ca_bundle if ca_bundle else True
 
     async def get_master_secret(self, path: str) -> bytes:
         """
@@ -26,7 +30,7 @@ class VaultKMSClient:
         """
         url = f"{self._addr}/v1/{path}"
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, verify=self._verify) as client:
                 resp = await client.get(url, headers=self._headers)
                 resp.raise_for_status()
         except httpx.HTTPError as exc:

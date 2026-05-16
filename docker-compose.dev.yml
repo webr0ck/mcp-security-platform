@@ -17,8 +17,18 @@
 services:
 
   proxy:
+    # Override OPA dependency condition for dev/lab: OPA static binary has no
+    # shell/curl for in-container health checks. Use service_started so compose
+    # doesn't block on a health check that can never pass in this image.
+    depends_on:
+      opa:
+        condition: service_started
     build:
       # Development target includes hot-reload, debugpy, dev dependencies
+      # Context is project root so the Dockerfile can reach local packages
+      # (e.g. observability/mcp-audit-logger) that are not on PyPI.
+      context: .
+      dockerfile: proxy/Dockerfile
       target: development
     volumes:
       # Bind-mount the full proxy directory for hot-reload.
@@ -69,7 +79,8 @@ services:
       - "--log-format=json"
       # Debug-level OPA logging shows every policy evaluation — useful for Rego dev
       - "--log-level=debug"
-      - "--bundle=/policies"
+      - "--bundle"
+      - "/policies"
       # --watch: OPA automatically reloads when policy files change on disk
       # This means policy edits take effect immediately in dev without restart.
       - "--watch"

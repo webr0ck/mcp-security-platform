@@ -72,3 +72,31 @@ class RedisPool:
 
 # Module-level singleton; initialized in app lifespan
 redis_pool = RedisPool()
+
+
+import time as _time
+
+_ANOMALY_WINDOW_SECONDS = 300  # 5-minute sliding window
+
+
+async def push_anomaly_invocation(client_id: str, tool_name: str) -> list[str]:
+    """
+    Push a tool invocation event into a per-client sliding window in Redis.
+    Returns the list of tool names invoked in the last ANOMALY_WINDOW_SECONDS.
+    Used by the anomaly detector to compute invocation frequency scores.
+    """
+    redis = redis_pool.client
+    key = f"anomaly:window:{client_id}"
+    now = _time.time()
+    cutoff = now - _ANOMALY_WINDOW_SECONDS
+
+    pipe = redis.pipeline()
+    pipe.zadd(key, {f"{tool_name}:{now}": now})
+    pipe.zremrangebyscore(key, "-inf", cutoff)
+    pipe.zrange(key, 0, -1)
+    pipe.expire(key, _ANOMALY_WINDOW_SECONDS * 2)
+    results = await pipe.execute()
+
+    # results[2] is the current window members (tool_name:timestamp strings)
+    members: list[str] = results[2] if results[2] else []
+    return [m.split(":")[0] for m in members]

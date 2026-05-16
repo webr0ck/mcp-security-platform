@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 class AuditOutcome(str, Enum):
     ALLOW = "allow"
     DENY = "deny"
+    ERROR = "error"
 
 
 class AuditEventCreate(BaseModel):

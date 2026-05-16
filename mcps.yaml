@@ -1,0 +1,63 @@
+servers:
+  grafana:
+    url: "http://grafana:3000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: B
+      type: api_key
+      inject_header: Authorization
+      inject_prefix: "Bearer "
+      adapter: grafana
+
+  netbox:
+    url: "http://netbox.internal/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: B
+      type: api_key
+      inject_header: Authorization
+      inject_prefix: "Token "
+      adapter: netbox
+
+  m365:
+    url: "http://m365-mcp.internal/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: A
+      type: oauth2
+      flow: authorization_code
+      adapter: m365
+
+  bitbucket:
+    url: "http://bitbucket.internal/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: A
+      type: oauth2
+      flow: authorization_code
+      adapter: bitbucket
+
+  lab-grafana:
+    url: "http://lab-grafana:3000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: B
+      type: api_key
+      inject_header: Authorization
+      inject_prefix: "Bearer "
+      adapter: grafana
+
+  lab-dex:
+    url: "http://lab-dex:5556/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: A
+      type: oauth2
+      flow: authorization_code
+      adapter: dex

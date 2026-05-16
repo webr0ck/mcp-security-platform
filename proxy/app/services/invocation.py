@@ -18,6 +18,7 @@ See docs/ARCHITECTURE.md data flow 5.1 for the step-by-step sequence.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -25,7 +26,16 @@ from uuid import uuid4
 
 import httpx
 
+from app.credential_broker.broker import CredentialBroker
+
 logger = logging.getLogger(__name__)
+
+# Module-level singleton — initialized by app lifespan, injected for tests.
+broker_instance: CredentialBroker | None = None
+
+# Hard cap on bytes read from an upstream MCP server. Guards against a
+# malicious upstream streaming unbounded data on the SSE channel.
+_MAX_UPSTREAM_BODY_BYTES = 4 * 1024 * 1024  # 4 MiB
 
 
 async def invoke_tool(
@@ -132,31 +142,97 @@ async def invoke_tool(
     # -------------------------------------------------------------------------
     # Step 4: Forward to upstream MCP server
     # -------------------------------------------------------------------------
+    extra_headers: dict[str, str] = {}
+    credential = None
+    if broker_instance is not None and tool_record.get("service_name") and tool_record.get("credential_approach"):
+        credential = await broker_instance.resolve(
+            user_sub=client_id,
+            service=tool_record["service_name"],
+            session_id=request_id,
+            approach=tool_record["credential_approach"],
+        )
+        prefix = tool_record.get("inject_prefix", "")
+        extra_headers[tool_record["inject_header"]] = f"{prefix}{credential.token}"
+
     start_ts = datetime.now(timezone.utc)
     upstream_response: dict[str, Any] = {}
     upstream_error: Exception | None = None
+    init_failed = False
+
+    # MCP streamable-http requires Accept header to signal JSON or SSE response preference.
+    # The initialize handshake does NOT need the upstream credential — only the tools/call
+    # forward does. Keeping handshake headers minimal limits credential exposure to the
+    # request that actually needs it.
+    handshake_headers = {
+        "Accept": "application/json, text/event-stream",
+    }
+    forward_base_headers = {
+        **handshake_headers,
+        **extra_headers,
+    }
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(upstream_url, json=json_rpc_request)
-            upstream_response = resp.json()
+            # MCP streamable-http servers require an initialize handshake before
+            # any tools/call — establish a session and reuse it for the real call.
+            try:
+                session_id = await _mcp_initialize(client, upstream_url, handshake_headers)
+            except Exception as exc:
+                init_failed = True
+                upstream_error = exc
+                logger.error("MCP initialize handshake failed: %s", exc)
+                session_id = None
+
+            if not init_failed:
+                forward_headers = dict(forward_base_headers)
+                if session_id:
+                    forward_headers["Mcp-Session-Id"] = session_id
+
+                resp = await client.post(upstream_url, json=json_rpc_request, headers=forward_headers)
+
+                # Defense against unbounded streaming from a malicious upstream.
+                body = resp.content[:_MAX_UPSTREAM_BODY_BYTES]
+                content_type = resp.headers.get("content-type", "")
+                if "text/event-stream" in content_type:
+                    for line in body.decode("utf-8", errors="replace").splitlines():
+                        if line.startswith("data:"):
+                            upstream_response = json.loads(line[5:].strip())
+                            break
+                else:
+                    upstream_response = json.loads(body)
     except Exception as exc:
         upstream_error = exc
         logger.error("Upstream MCP server error: %s", exc)
+    finally:
+        if credential is not None:
+            credential.zero()
 
     end_ts = datetime.now(timezone.utc)
     latency_ms = int((end_ts - start_ts).total_seconds() * 1000)
 
     # -------------------------------------------------------------------------
-    # Step 5: Emit ALLOW audit event synchronously (INV-001)
+    # Step 5: Emit audit event synchronously (INV-001).
+    # If the upstream call (or init handshake) failed, the policy decision
+    # was "allow" but the tool did not actually execute. Record outcome="error"
+    # with a reason so audit reviewers can distinguish this from a genuine
+    # successful invocation.
     # -------------------------------------------------------------------------
+    if upstream_error is not None:
+        audit_outcome = "error"
+        audit_reasons = [
+            "upstream_init_failed" if init_failed else "upstream_invocation_failed",
+        ]
+    else:
+        audit_outcome = "allow"
+        audit_reasons = []
+
     audit_id = await _emit_audit_event(
         tool_id=str(tool_id),
         tool_name=tool_name,
         tool_version=tool_record.get("version"),
         client_id=client_id,
-        outcome="allow",
-        deny_reasons=[],
+        outcome=audit_outcome,
+        deny_reasons=audit_reasons,
         request_id=request_id,
         latency_ms=latency_ms,
         anomaly_score=anomaly_score,
@@ -185,6 +261,31 @@ async def invoke_tool(
     return upstream_response
 
 
+async def _mcp_initialize(
+    client: httpx.AsyncClient,
+    upstream_url: str,
+    headers: dict[str, str],
+) -> str | None:
+    """
+    Perform the MCP initialize handshake and return the Mcp-Session-Id.
+    Returns None if the server doesn't require sessions (no header in response).
+    """
+    init_payload = {
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "id": 0,
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "mcp-security-proxy", "version": "1.0.0"},
+        },
+    }
+    # Errors propagate to the caller, which records the failure in the audit
+    # event with outcome="error" rather than masking it as an "allow".
+    resp = await client.post(upstream_url, json=init_payload, headers=headers)
+    return resp.headers.get("mcp-session-id") or resp.headers.get("Mcp-Session-Id")
+
+
 async def _emit_audit_event(
     tool_id: str,
     tool_name: str,
@@ -207,14 +308,19 @@ async def _emit_audit_event(
     try:
         from mcp_audit_logger import AuditEvent, AuditEventType, AuditOutcome, MCPAuditLogger
 
-        audit_logger = MCPAuditLogger()
+        outcome_map = {
+            "allow": AuditOutcome.ALLOW,
+            "deny": AuditOutcome.DENY,
+            "error": getattr(AuditOutcome, "ERROR", AuditOutcome.DENY),
+        }
+        audit_logger = _get_audit_logger()
         event = AuditEvent(
             event_type=AuditEventType.TOOL_INVOCATION,
             client_id=client_id,
             tool_name=tool_name,
             tool_id=tool_id,
             tool_version=tool_version,
-            outcome=AuditOutcome.ALLOW if outcome == "allow" else AuditOutcome.DENY,
+            outcome=outcome_map.get(outcome, AuditOutcome.DENY),
             request_id=request_id,
             latency_ms=latency_ms,
             deny_reasons=deny_reasons,
@@ -224,11 +330,36 @@ async def _emit_audit_event(
         )
         audit_logger.emit(event)
         return str(event.event_id)
+    except AuditEmissionError:
+        raise
     except Exception as exc:
         # Per INV-001: if audit emission fails, we must surface this.
         # The caller treats a raised exception as a 500 error.
         logger.error("CRITICAL: Audit event emission failed: %s", exc)
-        raise RuntimeError(f"Audit event emission failed: {exc}") from exc
+        raise AuditEmissionError(f"Audit event emission failed: {exc}") from exc
+
+
+# Module-level singleton so we don't re-instantiate on every invocation
+# (synchronous audit path is on the hot RTT path — INV-001).
+_audit_logger_singleton = None
+
+
+def _get_audit_logger():
+    global _audit_logger_singleton
+    if _audit_logger_singleton is None:
+        from mcp_audit_logger import MCPAuditLogger
+
+        _audit_logger_singleton = MCPAuditLogger()
+    return _audit_logger_singleton
+
+
+class AuditEmissionError(RuntimeError):
+    """Raised when audit event emission fails (INV-001).
+
+    Treated by AuditMiddleware as a 500 with code AUDIT_EMISSION_FAILED.
+    Distinct exception type so the middleware does not have to string-match
+    on the message (which is fragile — see L1 in the AppSec review).
+    """
 
 
 class ToolQuarantinedError(Exception):

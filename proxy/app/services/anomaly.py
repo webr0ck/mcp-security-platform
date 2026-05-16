@@ -207,18 +207,17 @@ async def update_baseline_async(client_id: str, tool_name: str) -> None:
                 text(
                     """
                     INSERT INTO anomaly_baselines
-                      (client_id, baseline_version, tools_in_baseline, sequence_patterns,
-                       transition_matrix, sample_count, last_updated, created_at, updated_at)
+                      (client_id, baseline_version, tools_in_baseline,
+                       tool_sequence_patterns, last_updated, created_at, updated_at)
                     VALUES
                       (:client_id, 1,
-                       ARRAY[:tool_name]::TEXT[], '[]', '{}', 1, NOW(), NOW(), NOW())
+                       ARRAY[:tool_name]::TEXT[], '[]', NOW(), NOW(), NOW())
                     ON CONFLICT (client_id) DO UPDATE SET
                       tools_in_baseline = CASE
                         WHEN :tool_name = ANY(anomaly_baselines.tools_in_baseline)
                         THEN anomaly_baselines.tools_in_baseline
                         ELSE array_append(anomaly_baselines.tools_in_baseline, :tool_name)
                       END,
-                      sample_count = anomaly_baselines.sample_count + 1,
                       baseline_version = anomaly_baselines.baseline_version + 1,
                       last_updated = NOW(),
                       updated_at = NOW()
@@ -232,3 +231,6 @@ async def update_baseline_async(client_id: str, tool_name: str) -> None:
             "Baseline update failed",
             extra={"client_id": client_id, "tool_name": tool_name, "error": str(exc)},
         )
+
+# Alias for backward compatibility with invocation.py
+evaluate_anomaly = detect

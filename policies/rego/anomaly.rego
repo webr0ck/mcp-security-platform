@@ -18,8 +18,7 @@ import rego.v1
 # Default: no structural anomaly detected by this policy
 default structural_anomaly := false
 
-# Default deny reasons (empty set)
-default structural_deny_reasons := set()
+# structural_deny_reasons is an incremental set — no default needed (empty set by default in Rego v1)
 
 # =============================================================================
 # KNOWN EXFILTRATION CHAIN: web_search followed by bulk file_read
@@ -69,26 +68,28 @@ structural_anomaly if {
     credential_then_exec
 }
 
+# Helper: tool_name indicates credential access
+_is_cred_tool(name) if contains(name, "secret")
+_is_cred_tool(name) if contains(name, "credential")
+_is_cred_tool(name) if contains(name, "vault")
+_is_cred_tool(name) if contains(name, "env")
+
+# Helper: tool_name indicates code/shell execution
+_is_exec_tool(name) if contains(name, "exec")
+_is_exec_tool(name) if contains(name, "shell")
+_is_exec_tool(name) if contains(name, "run")
+_is_exec_tool(name) if contains(name, "command")
+
 credential_then_exec if {
     cred_calls := [c |
         c := input.recent_calls[_]
-        any([
-            contains(c.tool_name, "secret"),
-            contains(c.tool_name, "credential"),
-            contains(c.tool_name, "vault"),
-            contains(c.tool_name, "env"),
-        ])
+        _is_cred_tool(c.tool_name)
     ]
     count(cred_calls) >= 1
 
     exec_calls := [c |
         c := input.recent_calls[_]
-        any([
-            contains(c.tool_name, "exec"),
-            contains(c.tool_name, "shell"),
-            contains(c.tool_name, "run"),
-            contains(c.tool_name, "command"),
-        ])
+        _is_exec_tool(c.tool_name)
     ]
     count(exec_calls) >= 1
 }

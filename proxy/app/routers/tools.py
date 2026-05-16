@@ -45,7 +45,7 @@ async def register_tool(
     2. Check for duplicate name+version (409 CONFLICT)
     3. Run Tool Manifest Auditor (static + LLM scoring)
     4. Generate and sign CycloneDX SBOM (INV-006)
-    5. Persist tool_registry + sbom_records + tool_audits rows
+    5. Persist tool_registry + sbom_records + tool_audit_results rows
     6. Emit TOOL_REGISTERED audit event
     7. If risk_level=critical: quarantine + optional Jira issue
     """
@@ -175,38 +175,43 @@ async def register_tool(
             text(
                 """
                 INSERT INTO sbom_records
-                  (sbom_id, tool_id, format, spec_version, bom_document,
-                   schema_hash, signature, serial_number, created_at)
+                  (sbom_id, tool_id, bom_ref, cyclonedx_json,
+                   schema_hash, signature, auditor_version, created_at)
                 VALUES
-                  (:sbom_id, :tool_id, 'cyclonedx', '1.5', :bom_document::jsonb,
-                   :schema_hash, :signature, :serial_number, NOW())
+                  (:sbom_id, :tool_id, :bom_ref, :cyclonedx_json::jsonb,
+                   :schema_hash, :signature, :auditor_version, NOW())
                 """
             ),
             {
                 "sbom_id": sbom_id,
                 "tool_id": tool_id,
-                "bom_document": json.dumps(bom_document),
+                "bom_ref": bom_serial,
+                "cyclonedx_json": json.dumps(bom_document),
                 "schema_hash": schema_hash,
                 "signature": sbom_signature,
-                "serial_number": bom_serial,
+                "auditor_version": (
+                    audit_result.auditor_version
+                    if hasattr(audit_result, "auditor_version")
+                    else "1.0.0"
+                ),
             },
         )
 
-        # Persist tool_audits (immutable)
+        # Persist tool_audit_results (immutable)
         await db.execute(
             text(
                 """
-                INSERT INTO tool_audits
-                  (audit_id, tool_id, auditor_version, risk_score, risk_level,
-                   findings, llm_analysis, static_analysis, llm_model, llm_prompt_hash, created_at)
+                INSERT INTO tool_audit_results
+                  (audit_result_id, tool_id, auditor_version, risk_score, risk_level,
+                   findings, llm_analysis, static_analysis, created_at)
                 VALUES
-                  (:audit_id, :tool_id, :auditor_version, :risk_score, :risk_level,
+                  (:audit_result_id, :tool_id, :auditor_version, :risk_score, :risk_level,
                    :findings::jsonb, :llm_analysis::jsonb, :static_analysis::jsonb,
-                   :llm_model, :llm_prompt_hash, NOW())
+                   NOW())
                 """
             ),
             {
-                "audit_id": str(uuid4()),
+                "audit_result_id": str(uuid4()),
                 "tool_id": tool_id,
                 "auditor_version": audit_result.auditor_version if hasattr(audit_result, "auditor_version") else "1.0.0",
                 "risk_score": risk_score,
@@ -214,8 +219,6 @@ async def register_tool(
                 "findings": json.dumps([]),
                 "llm_analysis": json.dumps(audit_result.llm_analysis or {}),
                 "static_analysis": json.dumps(audit_result.static_analysis or {}),
-                "llm_model": audit_result.llm_model if hasattr(audit_result, "llm_model") else "",
-                "llm_prompt_hash": audit_result.llm_prompt_hash if hasattr(audit_result, "llm_prompt_hash") else "",
             },
         )
 
@@ -301,7 +304,7 @@ async def list_tools(
     logger = logging.getLogger(__name__)
 
     roles: list[str] = getattr(request.state, "client_roles", [])
-    if not any(r in {"admin", "auditor", "readonly"} for r in roles):
+    if not any(r in {"admin", "agent", "auditor", "readonly"} for r in roles):
         raise HTTPException(403, {"code": "FORBIDDEN", "message": "Insufficient role."})
 
     is_readonly = "readonly" in roles and "admin" not in roles and "auditor" not in roles
@@ -640,9 +643,9 @@ async def get_tool_audit(
         result = await db.execute(
             text(
                 """
-                SELECT audit_id, tool_id, auditor_version, risk_score, risk_level,
-                       findings, llm_analysis, static_analysis, created_at
-                FROM tool_audits
+                SELECT audit_result_id, tool_id, auditor_version, risk_score, risk_level,
+                       findings, llm_analysis, static_analysis, created_at, audited_at
+                FROM tool_audit_results
                 WHERE tool_id = :tool_id
                 ORDER BY created_at DESC
                 LIMIT 1
@@ -660,8 +663,8 @@ async def get_tool_audit(
 
     return JSONResponse(content={
         "tool_id": str(row.tool_id),
-        "audit_id": str(row.audit_id),
-        "audited_at": row.created_at.isoformat(),
+        "audit_id": str(row.audit_result_id),
+        "audited_at": (row.audited_at or row.created_at).isoformat(),
         "auditor_version": row.auditor_version,
         "risk_score": row.risk_score,
         "risk_level": row.risk_level,
@@ -780,7 +783,7 @@ async def get_tool_sbom(
         result = await db.execute(
             text(
                 """
-                SELECT s.sbom_id, s.bom_document, s.signature, s.format
+                SELECT s.sbom_id, s.cyclonedx_json, s.signature
                 FROM sbom_records s
                 WHERE s.tool_id = :tool_id
                 ORDER BY s.created_at DESC
@@ -797,7 +800,7 @@ async def get_tool_sbom(
     if row is None:
         raise HTTPException(404, {"code": "NOT_FOUND", "message": f"No SBOM found for tool '{tool_id}'."})
 
-    bom_doc = row.bom_document if isinstance(row.bom_document, dict) else json.loads(row.bom_document)
+    bom_doc = row.cyclonedx_json if isinstance(row.cyclonedx_json, dict) else json.loads(row.cyclonedx_json)
 
     # Readonly: strip signature field (RBAC.md 3.2)
     if is_readonly:

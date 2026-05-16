@@ -22,15 +22,8 @@ import rego.v1
 # =============================================================================
 # RISK FLAGS
 # Each flag adds to the overall risk score in the proxy service.
+# _risk_flag is an incremental set — all partial rules contribute to it.
 # =============================================================================
-
-# Collect all risk flags as a set
-risk_flags := flags if {
-    flags := {flag | flag := _risk_flag[_]}
-}
-
-# Default: no flags
-default risk_flags := set()
 
 _risk_flag contains "filesystem_unrestricted" if {
     some param_name, param_def in input.schema.properties
@@ -62,13 +55,14 @@ _risk_flag contains "excessive_permissions_tag" if {
     "root" in input.tags
 }
 
+# Helper: param_name is a network-type parameter
+_is_network_param(param_name) if contains(param_name, "url")
+_is_network_param(param_name) if contains(param_name, "host")
+_is_network_param(param_name) if contains(param_name, "endpoint")
+
 _risk_flag contains "network_unrestricted" if {
     some param_name in object.keys(input.schema.properties)
-    any([
-        contains(param_name, "url"),
-        contains(param_name, "host"),
-        contains(param_name, "endpoint"),
-    ])
+    _is_network_param(param_name)
     not input.schema.properties[param_name].pattern
 }
 
@@ -76,37 +70,44 @@ _risk_flag contains "no_source_repo" if {
     not input.source_repo
 }
 
+# Helper: param_name is a shell-execution-type parameter
+_is_shell_param(param_name) if contains(param_name, "command")
+_is_shell_param(param_name) if contains(param_name, "cmd")
+_is_shell_param(param_name) if contains(param_name, "exec")
+_is_shell_param(param_name) if contains(param_name, "shell")
+_is_shell_param(param_name) if contains(param_name, "script")
+
 _risk_flag contains "shell_execution" if {
     some param_name in object.keys(input.schema.properties)
-    any([
-        contains(param_name, "command"),
-        contains(param_name, "cmd"),
-        contains(param_name, "exec"),
-        contains(param_name, "shell"),
-        contains(param_name, "script"),
-    ])
+    _is_shell_param(param_name)
 }
+
+# Helper: param_name is a credential-type parameter
+_is_cred_param(param_name) if contains(param_name, "password")
+_is_cred_param(param_name) if contains(param_name, "secret")
+_is_cred_param(param_name) if contains(param_name, "token")
+_is_cred_param(param_name) if contains(param_name, "key")
+_is_cred_param(param_name) if contains(param_name, "credential")
 
 _risk_flag contains "credential_parameter" if {
     some param_name in object.keys(input.schema.properties)
-    any([
-        contains(param_name, "password"),
-        contains(param_name, "secret"),
-        contains(param_name, "token"),
-        contains(param_name, "key"),
-        contains(param_name, "credential"),
-    ])
+    _is_cred_param(param_name)
 }
+
+# Helper: tag indicates code execution
+_is_exec_tag(tag) if tag == "exec"
+_is_exec_tag(tag) if tag == "shell"
+_is_exec_tag(tag) if tag == "code"
+_is_exec_tag(tag) if tag == "eval"
 
 _risk_flag contains "code_execution" if {
     some tag in input.tags
-    any([
-        tag == "exec",
-        tag == "shell",
-        tag == "code",
-        tag == "eval",
-    ])
+    _is_exec_tag(tag)
 }
+
+# Expose the complete set of flags as the top-level result
+# _risk_flag is already a complete set; risk_flags is an alias for external query.
+risk_flags := _risk_flag
 
 # =============================================================================
 # RISK SCORE COMPUTATION
@@ -133,24 +134,7 @@ static_risk_score := score if {
 
 default static_risk_score := 0
 
-static_risk_level := level if {
-    static_risk_score >= 90
-    level := "critical"
-}
-
-static_risk_level := level if {
-    static_risk_score >= 70
-    static_risk_score < 90
-    level := "high"
-}
-
-static_risk_level := level if {
-    static_risk_score >= 40
-    static_risk_score < 70
-    level := "medium"
-}
-
-static_risk_level := level if {
-    static_risk_score < 40
-    level := "low"
-}
+static_risk_level := "critical" if static_risk_score >= 90
+static_risk_level := "high" if { static_risk_score >= 70; static_risk_score < 90 }
+static_risk_level := "medium" if { static_risk_score >= 40; static_risk_score < 70 }
+static_risk_level := "low" if static_risk_score < 40

@@ -45,27 +45,27 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
         request_id = request.state.request_id
 
+        from app.services.invocation import AuditEmissionError
+
         try:
             response: Response = await call_next(request)  # type: ignore[misc]
-        except RuntimeError as exc:
-            err_str = str(exc).lower()
-            if "audit event emission failed" in err_str or "audit emission" in err_str:
-                # INV-001: Audit failure must surface as 500, not be swallowed
-                logger.error(
-                    "INV-001 boundary: audit emission failure returning 500",
-                    extra={"request_id": request_id, "error": str(exc)},
-                )
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": {
-                            "code": "INTERNAL_ERROR",
-                            "message": "Audit event emission failed. Invocation aborted per INV-001.",
-                            "request_id": request_id,
-                        }
-                    },
-                )
-            raise
+        except AuditEmissionError as exc:
+            # INV-001: Audit failure must surface as 500, not be swallowed.
+            # Typed exception — no fragile string match on the message.
+            logger.error(
+                "INV-001 boundary: audit emission failure returning 500",
+                extra={"request_id": request_id, "error": str(exc)},
+            )
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "code": "AUDIT_EMISSION_FAILED",
+                        "message": "Audit event emission failed. Invocation aborted per INV-001.",
+                        "request_id": request_id,
+                    }
+                },
+            )
 
         response.headers["X-Request-ID"] = request_id
         return response

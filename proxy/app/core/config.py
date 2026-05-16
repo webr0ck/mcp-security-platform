@@ -11,8 +11,24 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AnyHttpUrl, Field, field_validator
+from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Strings that we know are dev-only placeholders. If any of these reach a
+# production runtime in a security-sensitive setting, we fail startup rather
+# than silently authenticate / sign / decrypt with a well-known value.
+_KNOWN_PLACEHOLDER_VALUES: frozenset[str] = frozenset({
+    "change-me-in-production",
+    "change-me",
+    "lab-state-secret-change-me",
+    "lab-root-token",
+    "mcp-proxy-secret",
+    "devpassword",
+    "labpassword",
+    "miniopassword",
+    "",
+})
 
 
 class Settings(BaseSettings):
@@ -191,8 +207,11 @@ class Settings(BaseSettings):
     # =========================================================================
     # Credential Broker — KMS (HashiCorp Vault)
     # =========================================================================
-    VAULT_ADDR: str = "http://vault:8200"
+    VAULT_ADDR: str = "https://vault:8200"
     VAULT_TOKEN: str = "change-me-in-production"
+    # Optional path to a CA bundle for verifying the Vault TLS certificate.
+    # Empty string => use system trust store (httpx default verify=True).
+    VAULT_CA_BUNDLE: str = ""
     BROKER_MASTER_SECRET_PATH: str = "secret/data/credential-broker"
 
     # =========================================================================
@@ -244,6 +263,19 @@ class Settings(BaseSettings):
     NETBOX_ADMIN_TOKEN: str = ""
 
     # =========================================================================
+    # Credential Broker — Dex (local lab OIDC IdP)
+    # =========================================================================
+    DEX_ISSUER_URL: str = "http://localhost:5556/dex"
+    DEX_CLIENT_ID: str = "mcp-proxy"
+    DEX_CLIENT_SECRET: str = "mcp-proxy-secret"
+    DEX_REDIRECT_URI: str = "http://localhost:8000/auth/callback/dex"
+    DEX_SCOPES: str = "openid profile email offline_access"
+
+    @property
+    def dex_scopes_list(self) -> list[str]:
+        return self.DEX_SCOPES.split()
+
+    # =========================================================================
     # Credential Broker — Session
     # =========================================================================
     BROKER_SESSION_TTL_SECONDS: int = 28800
@@ -260,13 +292,71 @@ class Settings(BaseSettings):
     def validate_environment(cls, v: str) -> str:
         return v
 
+    @model_validator(mode="after")
+    def _reject_placeholders_in_production(self) -> "Settings":
+        """
+        Fail startup if any security-sensitive secret still has a dev
+        placeholder value in a production deployment. Catching this at
+        config-load time is cheap and refuses to boot a server that would
+        otherwise authenticate to Vault, sign SBOMs, or validate OAuth
+        state with a well-known string.
+
+        Also enforces the signed-only-runtime-policy non-negotiable
+        (INV-012): in production the OPA bundle signing key must be set
+        and OPA must be configured (separately) with the matching
+        verification key.
+        """
+        if not self.is_production:
+            return self
+
+        sensitive_fields = (
+            "PROXY_SECRET_KEY",
+            "API_KEY_HMAC_KEY",
+            "SBOM_SIGNING_KEY",
+            "AUDIT_LOG_HMAC_KEY",
+            "WEBHOOK_SIGNING_KEY",
+            "POLICY_SIGNING_KEY",
+            "VAULT_TOKEN",
+            "OAUTH_STATE_SECRET",
+            "DEX_CLIENT_SECRET",
+            "DB_PASSWORD",
+            "REDIS_PASSWORD",
+            "MINIO_ROOT_PASSWORD",
+        )
+        bad = [
+            name for name in sensitive_fields
+            if str(getattr(self, name, "")).strip() in _KNOWN_PLACEHOLDER_VALUES
+        ]
+        if bad:
+            raise ValueError(
+                "Production startup blocked: the following secrets are unset "
+                "or set to a known placeholder value: "
+                + ", ".join(bad)
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_vault_tls(self) -> "Settings":
+        """
+        CB-002: the Vault master secret protects every credential at rest.
+        It must never transit a plaintext channel outside local development.
+        Reject an http:// VAULT_ADDR in staging/production at config-load time.
+        """
+        if self.ENVIRONMENT != "development" and self.VAULT_ADDR.lower().startswith("http://"):
+            raise ValueError(
+                "VAULT_ADDR must use https:// outside development "
+                f"(ENVIRONMENT={self.ENVIRONMENT}, VAULT_ADDR={self.VAULT_ADDR}). "
+                "The credential-broker master secret cannot transit a plaintext channel."
+            )
+        return self
+
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT == "production"
 
     @property
     def opa_policy_path(self) -> str:
-        return "mcp/authz/allow"
+        return "mcp/authz"
 
     @property
     def opa_authz_url(self) -> str:
@@ -279,5 +369,7 @@ def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
 
 
-# Module-level alias for convenience (import settings from app.core.config)
-settings: Settings = get_settings()
+def __getattr__(name: str) -> object:
+    if name == "settings":
+        return get_settings()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

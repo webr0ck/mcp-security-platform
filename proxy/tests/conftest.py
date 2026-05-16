@@ -10,12 +10,11 @@ from __future__ import annotations
 import pytest
 from httpx import AsyncClient, ASGITransport
 
-from app.main import app
-
 
 @pytest.fixture
 async def async_client():
     """Async test client for async route tests."""
+    from app.main import app  # lazy: avoids Settings validation in unit tests
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://testserver",

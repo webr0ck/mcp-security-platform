@@ -13,8 +13,11 @@ name: mcp-security-platform
 #
 # Network topology (ARCHITECTURE.md §10.1):
 #   gateway-net:       gateway <-> proxy (and grafana for dashboard proxy)
-#   internal-net:      proxy <-> opa, ollama, db, redis (internal: true)
-#   observability-net: proxy, loki, promtail, grafana, alertmanager, minio (internal: true)
+#   internal-net:      opa, ollama, db, redis, compliance-checker (internal: true)
+#                      — proxy is NOT here (F-001); backends peer + podman lab
+#   proxy-{opa,ollama,redis,db}-net: dedicated pairwise proxy<->backend (F-001)
+#   observability-net: loki, promtail, grafana, alertmanager, minio, compliance-checker (internal: true)
+#                      — proxy NOT here (F-001); audit ships stdout->Promtail
 #   step-ca-net:       gateway, step-ca, proxy (internal: true)
 
 x-logging: &default-logging
@@ -58,6 +61,24 @@ networks:
     driver: bridge
     internal: true
 
+  # F-001: dedicated pairwise proxy<->backend networks. The proxy is NOT on
+  # the flat internal-net mesh, so a compromised sidecar (opa/ollama/redis/db)
+  # can no longer reach proxy:8000 to forge an identity. Each backend keeps
+  # internal-net (podman lab + peer comms) and additionally joins exactly the
+  # one pairwise net the proxy dials it on.
+  proxy-opa-net:
+    driver: bridge
+    internal: true
+  proxy-ollama-net:
+    driver: bridge
+    internal: true
+  proxy-redis-net:
+    driver: bridge
+    internal: true
+  proxy-db-net:
+    driver: bridge
+    internal: true
+
 volumes:
   postgres-data:
     driver: local
@@ -76,6 +97,8 @@ volumes:
   step-ca-data:
     driver: local
   vault-data:
+    driver: local
+  vault-tls:
     driver: local
 
 services:
@@ -181,11 +204,20 @@ services:
     # Non-root user (UID 1001 defined in proxy/Dockerfile)
     user: "1001:1001"
     networks:
+      # F-001: inbound ONLY via gateway-net (gateway + grafana + proxy).
+      # NOT on internal-net — sidecars cannot reach proxy:8000 anymore.
       - gateway-net
-      - internal-net
-      - observability-net
-      - step-ca-net
-      - vault-net
+      # F-001: proxy is NOT on observability-net. Audit events ship via
+      # stdout -> Promtail (docker_sd_configs / docker.sock), not a network
+      # push, and proxy makes no call to loki/minio/alertmanager. Removing
+      # it stops compliance-checker (also on observability-net) from being
+      # able to reach proxy:8000.
+      - step-ca-net         # cert issuance
+      - vault-net           # KMS master secret (pairwise)
+      - proxy-opa-net       # policy eval egress (pairwise)
+      - proxy-ollama-net    # LLM risk scoring egress (pairwise)
+      - proxy-redis-net     # rate/session/cache egress (pairwise)
+      - proxy-db-net        # persistence egress (pairwise)
     depends_on:
       db:
         condition: service_healthy
@@ -217,30 +249,37 @@ services:
       - "--addr=0.0.0.0:8181"
       - "--log-format=json"
       - "--log-level=info"
-      - "--bundle=/policies"
+      - "--bundle"
+      - "/policies"
       # Decision logging: emits structured JSON for every policy evaluation
       # Promtail scrapes these from stdout and ships to Loki
       - "--set=decision_logs.console=true"
-      # In production (ENVIRONMENT=production), the proxy passes POLICY_SIGNING_KEY
-      # to validate the bundle signature per INV-012.
-      # Bundle signing is controlled by the proxy's OPA client config, not here,
-      # because the static OPA image reads signing config from the bundle itself.
+      # INV-012 / F-002 (signed-only runtime policy):
+      # This dev profile uses a read-only directory mount (no signature
+      # verification), which INV-012 permits ONLY in ENVIRONMENT=development.
+      # Staging/production MUST add the docker-compose.opa-signed.yml overlay,
+      # which replaces this command with `--verification-key` + a signed
+      # bundle.tar.gz so OPA refuses unsigned/tampered policy at load and on
+      # every refresh:
+      #   make sign-policy-bundle
+      #   docker compose -f docker-compose.yml -f docker-compose.opa-signed.yml up -d
     volumes:
       # Policies bind-mounted read-only — git is the source of truth
       - ./policies/rego:/policies:ro
     networks:
-      - internal-net
+      - internal-net      # peer/lab compatibility
+      - proxy-opa-net      # F-001: pairwise channel the proxy dials
     expose:
       - "8181"
     # OPA static binary runs as nobody (UID 65534) by default
     user: "65534:65534"
     logging: *default-logging
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8181/health || exit 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
+      # OPA 0.63 static binary has no shell, curl, or wget.
+      # Health is verified externally via http://localhost:8181/health from the host.
+      # The proxy's OPA client retries on connection failure, so no blocking health
+      # check is needed here. "NONE" disables the docker-level healthcheck.
+      test: ["NONE"]
 
   ollama:
     # Ollama: local LLM inference for tool risk scoring (air-gapped, no external API)
@@ -254,7 +293,8 @@ services:
     tmpfs:
       - /tmp:size=256m,mode=1777
     networks:
-      - internal-net
+      - internal-net      # peer/lab compatibility
+      - proxy-ollama-net   # F-001: pairwise channel the proxy dials
     expose:
       - "11434"
     environment:
@@ -291,8 +331,10 @@ services:
       - /tmp:size=64m,mode=1777
       - /var/run/postgresql:size=4m,mode=0755
     networks:
-      - internal-net
-    # Not exposed to host — only reachable from proxy and compliance-checker on internal-net
+      - internal-net      # compliance-checker reaches db here; podman lab
+      - proxy-db-net       # F-001: pairwise channel the proxy dials
+    # Not exposed to host — reachable from proxy (proxy-db-net) and
+    # compliance-checker (internal-net) only
     expose:
       - "5432"
     environment:
@@ -308,17 +350,35 @@ services:
       retries: 5
       start_period: 15s
 
+  # Vault — production-style: file storage backend, manual init+unseal.
+  # Dev mode (in-memory, well-known root token) is enabled ONLY in the
+  # podman-compose.lab.yml overlay. Running this base compose without an
+  # overlay yields a sealed Vault that requires `vault operator init` and
+  # `vault operator unseal` before use — never a well-known root token.
   vault:
     image: hashicorp/vault:1.17
     container_name: mcp-vault
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: "${VAULT_TOKEN:-change-me-in-production}"
-      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
-    command: vault server -dev
+      VAULT_LOCAL_CONFIG: |
+        {
+          "storage": {"file": {"path": "/vault/data"}},
+          "listener": [{
+            "tcp": {
+              "address": "0.0.0.0:8200",
+              "tls_disable": false,
+              "tls_cert_file": "/vault/tls/server.crt",
+              "tls_key_file":  "/vault/tls/server.key"
+            }
+          }],
+          "ui": false,
+          "disable_mlock": false
+        }
+    command: vault server -config=/vault/config/local.json
     cap_add:
       - IPC_LOCK
     volumes:
       - vault-data:/vault/data
+      - vault-tls:/vault/tls:ro
     networks:
       - vault-net
     <<: [*security-hardening, *restart-always]
@@ -341,7 +401,8 @@ services:
     tmpfs:
       - /tmp:size=16m,mode=1777
     networks:
-      - internal-net
+      - internal-net      # peer/lab compatibility
+      - proxy-redis-net    # F-001: pairwise channel the proxy dials
     expose:
       - "6379"
     # Redis Alpine runs as root inside container by default; non-root requires

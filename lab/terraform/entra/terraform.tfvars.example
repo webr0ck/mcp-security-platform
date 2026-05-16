@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars and fill in your values
+tenant_id        = "your-tenant-id-here"
+# subscription_id = "optional-if-using-az-cli-auth"
+app_display_name = "mcp-security-lab"

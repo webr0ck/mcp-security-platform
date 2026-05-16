@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from app.middleware.audit import AuditMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
-from app.routers import anomaly, audit, auth, compliance, health, integrations, policy, tools
+from app.routers import anomaly, audit, auth, compliance, health, integrations, oauth, policy, tools
 from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.redis_client import redis_pool
@@ -113,6 +113,7 @@ app.include_router(anomaly.router, prefix="/api/v1", tags=["Anomaly"])
 app.include_router(audit.router, prefix="/api/v1", tags=["Audit"])
 app.include_router(auth.router, prefix="/api/v1", tags=["Authentication"])
 app.include_router(integrations.router, prefix="/api/v1", tags=["Integrations"])
+app.include_router(oauth.router)
 
 
 # ============================================================================

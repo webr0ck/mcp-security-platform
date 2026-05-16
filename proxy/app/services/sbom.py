@@ -117,10 +117,14 @@ def generate_cyclonedx_sbom(
     bom_json = json.dumps(bom_document, sort_keys=True)
     sbom_signature = sign_sbom(bom_json)
 
-    # Embed signature in response (not in the signed document itself)
+    # Embed signature in response (not in the signed document itself).
+    # The `value` field carries only the hex digest; the `algorithm` field
+    # encodes the scheme. Strip the "hmac-sha256:" prefix before embedding.
+    _PREFIX = "hmac-sha256:"
+    sig_hex = sbom_signature[len(_PREFIX):] if sbom_signature.startswith(_PREFIX) else sbom_signature
     bom_document["signature"] = {
         "algorithm": "HMAC-SHA256",
-        "value": sbom_signature,
+        "value": sig_hex,
     }
 
     return bom_document, schema_hash, sbom_signature
