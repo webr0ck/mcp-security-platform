@@ -151,8 +151,17 @@ All conditions must pass; any deny terminates the request with 403.
 
 | Operation | `admin` | `agent` | `auditor` | `readonly` |
 |-----------|---------|---------|-----------|------------|
-| `GET /auth/oidc/login` | Y | Y | Y | Y (public) |
-| `GET /auth/oidc/callback` | Y | Y | Y | Y (public) |
+| `GET /auth/oidc/login` *(NOT BUILT — returns 501)* | — | — | — | — |
+| `GET /auth/oidc/callback` *(NOT BUILT — returns 501)* | — | — | — | — |
+
+### 3.9b Credential Broker — OAuth Enrollment
+
+| Operation | `admin` | `agent` | `auditor` | `readonly` |
+|-----------|---------|---------|-----------|------------|
+| `GET /auth/enroll/{service}` | Y | Y | N | N |
+| `GET /auth/callback/{service}` | public — identity from single-use server-side nonce, not role |
+
+**Enrollment is an authenticated action.** `/auth/enroll/*` requires a resolved identity (mTLS / API key); the credential is stored under that **authenticated `client_id`**, never a header (CB-001). `auditor`/`readonly` cannot enroll (they never invoke tools, so need no brokered upstream credentials). The IdP redirect to `/auth/callback/*` is unauthenticated by necessity but bound to the enrolling identity via a single-use nonce (CB-003). See SECURITY_NONNEGATABLES **INV-013**.
 
 ### 3.10 Integrations
 

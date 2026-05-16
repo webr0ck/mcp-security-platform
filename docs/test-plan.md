@@ -16,7 +16,7 @@ Status: LIVING DOCUMENT — update when new features land or invariants change.
 | Unit | `proxy/tests/unit/` | <1 s/test | None (all mocked) | Yes — blocks merge |
 | Integration | `proxy/tests/integration/` | 1–5 s/test | postgres, redis, opa | Yes — runs in service containers |
 | E2E | (future: `ui/tests/e2e/`) | 5–30 s/test | Full stack | No — advisory only in v1 |
-| Security lint | `ci/test-jobs/security.yml` | <30 s | None | Yes — blocks merge |
+| Security lint | `.github/workflows/ci.yml` (`security-scan`+`rego-lint`) / `make security-check` | <30 s | None | Yes — blocks merge |
 
 ### 1.2 Markers
 
@@ -67,16 +67,16 @@ Every invariant from `docs/SECURITY_NONNEGATABLES.md` must have at least one tes
 | INV-001 | Every invocation has exactly one audit record | `tests/integration/test_audit_completeness.py` | `test_allow_path_produces_one_audit_event`, `test_deny_path_produces_one_audit_event`, `test_opa_down_produces_error_audit_event`, `test_unauthenticated_produces_no_audit_event` |
 | INV-002 | Logs never contain raw payloads (10 categories) | `tests/unit/test_redaction.py` | All 10 `test_*_redacted` tests + `test_all_10_categories_covered` |
 | INV-003 | OPA deny-by-default | `tests/integration/test_opa_deny_by_default.py` | `test_opa_deny_by_default_empty_input`, `test_opa_deny_unknown_client` |
-| INV-003 | OPA rego lint: `default allow = false` present | `ci/test-jobs/security.yml` | `assert-opa-deny-by-default` lint step |
+| INV-003 | OPA rego lint: `default allow = false` present | `.github/workflows/ci.yml` (`rego-lint` job) + `make security-check` | grep assertion on `authz.rego` |
 | INV-004 | OPA unreachable = 503, fail closed | `tests/integration/test_invoke.py` | `test_opa_unavailable_returns_503` |
 | INV-005 | Quarantined tools blocked before OPA | `tests/integration/test_invoke.py` | `test_quarantined_tool_returns_403_before_opa` |
 | INV-006 | SBOM signature required on registration | `tests/unit/test_sbom.py` | `test_hmac_signature_roundtrip`, `test_signature_rejects_tampered_sbom`, `test_missing_signing_key_raises` |
 | INV-007 | Audit log archive is WORM (MinIO Object Lock) | Infrastructure (`infra/scripts/setup-minio.sh`) | Verified at deploy time; compliance checker startup assertion |
-| INV-008 | No secrets in code/config files | `ci/test-jobs/security.yml` | `trufflehog-scan` step |
+| INV-008 | No secrets in code/config files | `.github/workflows/ci.yml` (`security-scan` job) | `trufflehog` git scan (also `make security-check`, currently skip-if-absent — see ROADMAP P2.5) |
 | INV-009 | mTLS enforced for agent endpoints | `tests/integration/test_invoke.py` | `test_unauthenticated_returns_401` |
 | INV-010 | step-ca certs max 24h TTL | Nginx/step-ca config verification | Out of unit test scope; verified at deploy time |
 | INV-011 | No direct DB writes outside designated services | PostgreSQL role grants (`V003__db_roles.sql`) | Out of unit test scope; verified at deploy time |
-| INV-012 | OPA policy bundle signing in prod/staging | `ci/test-jobs/security.yml` | `policy-bundle-signing-check` step |
+| INV-012 | OPA policy bundle signing in prod/staging | `scripts/sign_policy_bundle.sh` + `docker-compose.opa-signed.yml` | Mechanism delivered; runtime enforcement in a staging deploy is **pending — ROADMAP P2.8** (not yet a CI gate) |
 
 ---
 

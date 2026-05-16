@@ -2,7 +2,17 @@
 
 Version: 1.0.0
 Date: 2026-04-21
-Status: Canonical
+Status: **SUPERSEDED — DO NOT RELY ON THIS DOCUMENT.**
+
+> ⛔ **This v1 architecture is stale and partly aspirational.** It omits the
+> credential broker, HashiCorp Vault, `credential_store`, and the OAuth router
+> (the largest subsystems), and describes features that are not built (SPDX
+> SBOM, outbound Jira, Helm/K8s, OIDC). It is retained only for history.
+>
+> **Canonical architecture: [`ARCHITECTURE-v2.md`](ARCHITECTURE-v2.md)** —
+> reality-annotated, every component marked implemented / partial / stub /
+> defect. See also [`REVIEW-2026-05-16.md`](REVIEW-2026-05-16.md) and
+> [`ROADMAP.md`](ROADMAP.md).
 
 ---
 

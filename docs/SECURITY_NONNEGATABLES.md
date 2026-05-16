@@ -14,6 +14,23 @@ A CI gate (`make security-check`) enforces the machine-verifiable invariants. Hu
 
 ---
 
+## Enforcement reality (2026-05-16)
+
+The per-INV "Enforcement:" lines below describe the *intended* control. Audited actual state (see `REVIEW-2026-05-16.md` §2):
+
+| INV | Actually enforced by automation? |
+|---|---|
+| INV-002, INV-003, INV-005, INV-006 | ✅ Yes — real, gated. |
+| INV-001 | ✅ Test exists & is thorough, but at `proxy/tests/integration/test_audit_completeness.py` (not the path quoted below) and is **not** in `make security-check`. Credential-lifecycle audit added (CB-004). |
+| INV-004 | 🟡 Code correct & fail-closed; CI now runs the OPA-down phase (P1.4 fix) — previously skipped. |
+| INV-009, INV-010 | 🟡 Config-only; verified at deploy, no automated test. |
+| INV-008 | 🟡 CI trufflehog real; **no pre-commit hook in repo**, `make security-check` skips trufflehog if absent (ROADMAP P2.5). |
+| INV-011 | 🟡 `V003`+`V009` grants real; written scope still omits `credential_store`/`role_assignments` (P1.6). |
+| INV-007 | ⚠️ Object Lock is configured, but the "compliance checker verifies on startup" claim below is **aspirational — no such startup check exists**. GOVERNANCE mode is **not** MFA-enforced WORM (a privileged key can still delete). Decide GOVERNANCE→COMPLIANCE or downgrade the guarantee (ROADMAP P2.4). |
+| INV-012 | 🟡 Signing mechanism now delivered (`scripts/sign_policy_bundle.sh` + `docker-compose.opa-signed.yml`); **not yet enforced in a running staging deploy** (ROADMAP P2.8). |
+
+---
+
 ## INV-001: Every Tool Invocation Has an Audit Record
 
 **Statement:** Every call to `POST /tools/{tool_id}/invoke`, whether the outcome is ALLOW or DENY, must produce an audit event record before any response is returned to the caller.
@@ -22,7 +39,7 @@ A CI gate (`make security-check`) enforces the machine-verifiable invariants. Hu
 
 **Why:** Without a complete invocation log, compliance reporting and anomaly detection are invalid. Partial logs are worse than no logs because they create false confidence.
 
-**Enforcement:** Integration test in `proxy/tests/test_audit_completeness.py` asserts that every invocation in the test suite produces exactly one audit event.
+**Enforcement:** Integration test `proxy/tests/integration/test_audit_completeness.py` (note: `integration/` subdir) asserts every invocation produces exactly one audit event; `proxy/tests/unit/test_mcp_client.py` covers the route-level contract. Credential enrollment also emits a synchronous audit event (CB-004). *Gap: not yet wired into `make security-check`.*
 
 ---
 
@@ -104,7 +121,7 @@ This line must never be removed or changed to `default allow = true`.
 
 **Why:** WORM storage is the only reliable guarantee against insider log deletion. A platform that claims compliance logging but allows log deletion is worthless.
 
-**Enforcement:** `infra/scripts/setup-minio.sh` configures Object Lock at bucket creation time. The compliance checker verifies Object Lock is active on startup and alerts if it is not.
+**Enforcement:** `infra/scripts/setup-minio.sh` configures Object Lock at bucket creation time. ⚠️ **Correction (2026-05-16):** there is currently **no** compliance-checker startup verification of Object Lock — that is aspirational (ROADMAP P2.4). Also, GOVERNANCE mode does **not** require MFA to delete (a privileged key can bypass it); only COMPLIANCE mode is true WORM. Either move to COMPLIANCE mode or downgrade this guarantee in the docs.
 
 ---
 
@@ -157,6 +174,18 @@ This line must never be removed or changed to `default allow = true`.
 **In development (`ENVIRONMENT=development`):** Bundle signing may be disabled for iteration velocity.
 
 **Why:** Unsigned policy bundles in production mean an attacker who can modify the bundle filesystem volume can change allow/deny rules without detection.
+
+**Enforcement (2026-05-16):** Mechanism delivered — `make sign-policy-bundle` (`scripts/sign_policy_bundle.sh`, HS256, `scope=write`) + the `docker-compose.opa-signed.yml` overlay (OPA started with `--verification-key`, refuses unsigned/tampered bundles at load and on refresh). Dev keeps the read-only directory mount (permitted above). **Pending:** prove it in a running staging deploy and add a CI gate (ROADMAP P2.8).
+
+---
+
+## INV-013: Credential Broker — At-Rest Encryption and Lifecycle Audit
+
+**Statement:** Every third-party credential stored by the credential broker MUST be (a) envelope-encrypted at rest with AES-256-GCM under a per-user KEK derived via HKDF-SHA256 from a Vault-held master secret transported only over TLS; (b) keyed to the **authenticated** caller identity (`request.state.client_id`), never a client-supplied header; and (c) every enroll / refresh / revoke / delete on `credential_store` MUST emit a synchronous audit event before the response (same hard-fail discipline as INV-001).
+
+**Why:** The broker holds the keys to M365/Bitbucket/Grafana/Netbox/Dex. Identity collapse or a plaintext master key (the original CB-001/CB-002 CRITICALs) compromises every brokered credential at once.
+
+**Enforcement:** `proxy/tests/unit/test_oauth_router.py` (identity-from-store, spoof-ignored, nonce/PKCE replay), `test_vault_tls_enforcement.py` (no `http://` Vault outside dev), `test_approach_a.py` (HKDF KEK). *Pending:* extend the synchronous-audit requirement to refresh/revoke/delete and add an audit-before-delete DB trigger (ROADMAP P2 / §4.2.5).
 
 ---
 

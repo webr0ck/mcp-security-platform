@@ -171,9 +171,10 @@ integration-tests:
       # Run all integration tests EXCEPT the OPA-down tests.
       # OPA-down tests require stopping the OPA container (Phase 2 below).
       run: |
+        # The OPA-down split is by -k filter, not a separate file (there is
+        # no test_audit_completeness_opa_down.py — REVIEW P1.4).
         pytest tests/integration/ \
           -m integration \
-          --ignore=tests/integration/test_audit_completeness_opa_down.py \
           --tb=short \
           --strict-markers \
           -v \
@@ -186,8 +187,9 @@ integration-tests:
       # This step uses docker to stop only the OPA container; postgres and redis
       # remain running so audit event verification still works.
       run: |
-        # Find the OPA container by image name
-        OPA_CONTAINER=$(docker ps --filter "ancestor=openpolicyagent/opa:0.68.0" --format "{{.ID}}" | head -1)
+        # Find the OPA container by name (image tag drifts: compose pins
+        # openpolicyagent/opa:0.63.0-static — REVIEW P1.4).
+        OPA_CONTAINER=$(docker ps --filter "name=mcp-opa" --format "{{.ID}}" | head -1)
         if [ -n "$OPA_CONTAINER" ]; then
           echo "Stopping OPA container: $OPA_CONTAINER"
           docker stop "$OPA_CONTAINER"

@@ -856,34 +856,32 @@ Query the audit event index. Returns metadata; full event content is in Loki.
 
 ---
 
-### 2.9 Authentication (OIDC)
+### 2.9 Authentication (OIDC) — ⛔ NOT BUILT (Planned)
 
-#### `GET /auth/oidc/login`
+> **Status: stub.** `GET /auth/oidc/login` and `GET /auth/oidc/callback` currently return **HTTP 501 "not yet implemented"** (`proxy/app/routers/auth.py`). The `oidc_role_mappings` table exists but no code consumes it. Treat this section as forward design, not a contract. Tracked: ROADMAP Phase 3.
 
-Initiate OIDC authorization code flow. Redirects to the configured OIDC provider.
-
-**Authentication:** None required (public).
-
-**Response 302** — Redirect to OIDC provider.
+`GET /auth/oidc/login` *(planned — 501 today)* — initiate OIDC auth-code flow.
+`GET /auth/oidc/callback` *(planned — 501 today)* — exchange code, resolve roles. Planned body: `{ "access_token": "eyJ...", "token_type": "bearer", "expires_in": 3600, "roles": ["auditor"] }`.
 
 ---
 
-#### `GET /auth/oidc/callback`
+### 2.9b Credential Broker — OAuth Enrollment ✅ (implemented)
 
-OIDC authorization code callback. Exchanges code for tokens, resolves roles, returns session.
+Lets an authenticated caller link a third-party account (M365 / Bitbucket / Dex) so the proxy can inject a brokered credential into upstream tool calls. Refresh tokens are envelope-encrypted at rest (SECURITY_NONNEGATABLES **INV-013**).
 
-**Authentication:** None required (OIDC provider handles it).
+#### `GET /auth/enroll/{service}`
 
-**Response 200**
+`service` ∈ `m365` | `bitbucket` | `dex`.
 
-```json
-{
-  "access_token": "eyJ...",
-  "token_type": "bearer",
-  "expires_in": 3600,
-  "roles": ["auditor"]
-}
-```
+**Authentication: required** (mTLS CN / API key, resolved by `AuthMiddleware`). The enrolled identity is the *authenticated* `client_id`, **never** a request header (CB-001).
+
+**Behaviour:** mints a single-use server-side nonce in Redis (TTL 300 s) + PKCE S256 challenge, then **302** to the IdP authorize URL with `state=<nonce>`. **Errors:** `401` unauthenticated, `404` unknown/non-OAuth service.
+
+#### `GET /auth/callback/{service}?code=&state=`
+
+**Authentication:** public path (browser redirect from the IdP). Identity is **not** read from any header — it is recovered from the single-use nonce minted at enroll and consumed atomically (replay → `400`).
+
+**Behaviour:** exchanges `code` (+ PKCE verifier) for a refresh token, envelope-encrypts it under `HKDF(master, authenticated client_id)`, upserts `credential_store`, emits a synchronous `CREDENTIAL_ENROLLED` audit event, returns **200** HTML. **Errors:** `400` invalid/expired/replayed state or state↔service mismatch, `404` unknown service.
 
 ---
 
