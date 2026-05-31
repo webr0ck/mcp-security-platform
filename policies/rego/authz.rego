@@ -108,6 +108,18 @@ client_has_invoke_permission if {
     tag in data.mcp.tools[input.tool_name].tags
 }
 
+# Admins with explicit tool grants may invoke directly (not just in testing mode).
+client_has_invoke_permission if {
+    "admin" in input.client_roles
+    tool_allowed_for_client(input.client_id, input.tool_name)
+}
+
+# Analysts with explicit grants may invoke tools within their risk threshold.
+client_has_invoke_permission if {
+    "analyst" in input.client_roles
+    tool_allowed_for_client(input.client_id, input.tool_name)
+}
+
 risk_level_value := {
     "low":      1,
     "medium":   2,
@@ -120,10 +132,9 @@ risk_level_within_threshold if {
     risk_level_value[input.tool_risk_level] <= risk_level_value[client_max]
 }
 
-risk_level_within_threshold if {
-    not data.mcp.grants[input.client_id].max_risk_level
-    input.tool_risk_level == "low"
-}
+# REMOVED: fail-open fallback that allowed low-risk tools when max_risk_level was absent.
+# Missing max_risk_level now falls through to deny (INV-003, FIND-005 fix).
+# Every grant object must declare max_risk_level explicitly.
 
 anomaly_threshold_exceeded if {
     input.anomaly_score > 0.85

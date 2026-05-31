@@ -110,7 +110,7 @@ async def register_tool(
 
     risk_score = audit_result.risk_score
     risk_level = audit_result.risk_level
-    risk_reasons = json.dumps(audit_result.risk_reasons)
+    risk_reasons = json.dumps(audit_result.static_analysis.get("risk_flags", []))
 
     # Critical-risk tools start quarantined (API.md §2.2)
     initial_status = "quarantined" if risk_level == "critical" else "active"
@@ -779,6 +779,14 @@ async def get_tool_sbom(
 
     is_readonly = "readonly" in roles and not any(r in {"admin", "auditor"} for r in roles)
 
+    # SPDX is not implemented (roadmap). Be honest: return 501 rather than silently
+    # serving CycloneDX content under an SPDX request.
+    if format == "spdx":
+        raise HTTPException(
+            501,
+            {"code": "NOT_IMPLEMENTED", "message": "SPDX SBOM is not implemented; CycloneDX only."},
+        )
+
     try:
         result = await db.execute(
             text(
@@ -872,7 +880,9 @@ async def invoke_tool(
     result = await db.execute(
         text(
             """
-            SELECT tool_id, name, version, status, risk_level, upstream_url
+            SELECT tool_id, name, version, status, risk_level, upstream_url,
+                   injection_mode, service_name, inject_header, inject_prefix,
+                   kc_client_id, kc_token_audience
             FROM tool_registry
             WHERE tool_id = :tool_id AND deleted_at IS NULL
             LIMIT 1
@@ -894,6 +904,13 @@ async def invoke_tool(
         "status": tool_row.status,
         "risk_level": tool_row.risk_level,
         "upstream_url": tool_row.upstream_url,
+        # Credential injection metadata — required by dispatcher (FIND-002 fix)
+        "injection_mode": tool_row.injection_mode or "none",
+        "service_name": tool_row.service_name,
+        "inject_header": tool_row.inject_header or "Authorization",
+        "inject_prefix": tool_row.inject_prefix or "Bearer",
+        "kc_client_id": tool_row.kc_client_id,
+        "kc_token_audience": tool_row.kc_token_audience,
     }
 
     try:
@@ -908,6 +925,24 @@ async def invoke_tool(
         return JSONResponse(content=response)
 
     except ToolQuarantinedError as exc:
+        # INV-001: emit audit event for quarantined tool blocks
+        try:
+            from app.services.invocation import _emit_audit_event
+            await _emit_audit_event(
+                tool_id=tool_record["tool_id"],
+                tool_name=tool_record["name"],
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=["TOOL_QUARANTINED"],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=0.0,
+                opa_decision_id="",
+                is_testing=is_testing,
+            )
+        except Exception:
+            pass  # Audit failure here should not suppress the 403 response
         return JSONResponse(
             status_code=403,
             content={
@@ -965,16 +1000,36 @@ async def invoke_tool(
             },
         )
     except RuntimeError as exc:
-        # INV-001: audit emission failure
-        if "audit" in str(exc).lower():
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "error": {
-                        "code": "INTERNAL_ERROR",
-                        "message": "Audit emission failed. Invocation aborted per INV-001.",
-                        "request_id": request_id,
-                    }
-                },
-            )
-        raise
+        # INV-001: audit emission failure is a hard abort.
+        # Any other RuntimeError (e.g. credential not found) also returns 500 rather
+        # than propagating as an unhandled exception through the ASGI stack.
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": (
+                        "Audit emission failed. Invocation aborted per INV-001."
+                        if "audit" in str(exc).lower()
+                        else str(exc)
+                    ),
+                    "request_id": request_id,
+                }
+            },
+        )
+    except Exception as exc:
+        # Catch-all for unexpected exceptions from the invocation layer
+        # (e.g. httpx.TimeoutException from upstream, credential errors).
+        # Return 503 so the caller knows the upstream is unavailable, not the proxy.
+        import httpx as _httpx
+        status = 503 if isinstance(exc, (_httpx.TimeoutException, _httpx.ConnectError)) else 500
+        return JSONResponse(
+            status_code=status,
+            content={
+                "error": {
+                    "code": "UPSTREAM_ERROR",
+                    "message": str(exc),
+                    "request_id": request_id,
+                }
+            },
+        )
