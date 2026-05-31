@@ -337,6 +337,33 @@ services:
     restart: unless-stopped
 
   # ── gateway: Podman/macOS compatibility override ─────────────────────────────
+  # ── RAG Assistant — developer onboarding + doc search MCP server ────────────
+  lab-rag-assistant:
+    build: ./lab/mcp-servers/rag-assistant
+    image: lab-rag-assistant:lab
+    container_name: lab-rag-assistant
+    ports:
+      - "8104:8000"
+    environment:
+      DOCS_DIR: "/app/docs"
+      KB_DIR: "/app/kb"
+      TRANSPORT: "http"
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    volumes:
+      # Mount platform docs and KB read-only so the index stays current
+      - ./docs:/app/docs:ro
+    networks:
+      - lab-net
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   # Production config requires step-ca server cert at /etc/nginx/certs/ which is
   # not provisioned automatically. Lab uses:
   #   - lab/nginx/nginx.conf as a writable placeholder (CRS template overwrites it)
