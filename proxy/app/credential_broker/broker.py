@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.credential_broker.kms import VaultKMSClient
 from app.credential_broker.models import CredentialResult
@@ -27,13 +27,13 @@ class CredentialBroker:
         self,
         session: SessionStore,
         kms: VaultKMSClient,
-        db: AsyncSession,
+        db_factory: async_sessionmaker,
         approach_b_adapters: dict,
         approach_a_adapters: dict,
     ) -> None:
         self._session = session
         self._kms = kms
-        self._db = db
+        self._db_factory = db_factory
         self._approach_b_adapters = approach_b_adapters
         self._approach_a_adapters = approach_a_adapters
         # CB-008: held in a bytearray so it can be explicitly overwritten;
@@ -114,26 +114,27 @@ class CredentialBroker:
         from sqlalchemy import text
         master = await self._get_master_secret()
 
-        row = await self._db.execute(
-            text("SELECT encrypted_blob FROM credential_store WHERE user_sub=:sub AND service=:svc"),
-            {"sub": user_sub, "svc": service},
-        )
-        record = row.fetchone()
-        if record is None:
-            raise CredentialNotEnrolledError(user_sub=user_sub, service=service)
+        async with self._db_factory() as db:
+            row = await db.execute(
+                text("SELECT encrypted_blob FROM credential_store WHERE user_sub=:sub AND service=:svc"),
+                {"sub": user_sub, "svc": service},
+            )
+            record = row.fetchone()
+            if record is None:
+                raise CredentialNotEnrolledError(user_sub=user_sub, service=service)
 
-        refresh_token = decrypt(bytes(record.encrypted_blob), user_sub, master)
-        adapter = self._approach_a_adapters[service]
-        access_token, new_refresh, expires_in = await adapter.refresh(refresh_token)
+            refresh_token = decrypt(bytes(record.encrypted_blob), user_sub, master)
+            adapter = self._approach_a_adapters[service]
+            access_token, new_refresh, expires_in = await adapter.refresh(refresh_token)
 
-        new_encrypted = encrypt(new_refresh, user_sub, master)
-        await self._db.execute(
-            text(
-                "UPDATE credential_store SET encrypted_blob=:blob WHERE user_sub=:sub AND service=:svc"
-            ),
-            {"blob": new_encrypted, "sub": user_sub, "svc": service},
-        )
-        await self._db.commit()
+            new_encrypted = encrypt(new_refresh, user_sub, master)
+            await db.execute(
+                text(
+                    "UPDATE credential_store SET encrypted_blob=:blob WHERE user_sub=:sub AND service=:svc"
+                ),
+                {"blob": new_encrypted, "sub": user_sub, "svc": service},
+            )
+            await db.commit()
 
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
         return CredentialResult(
@@ -149,3 +150,21 @@ class CredentialNotEnrolledError(Exception):
         self.user_sub = user_sub
         self.service = service
         super().__init__(f"User {user_sub} not enrolled for {service}. OAuth enrollment required.")
+
+
+async def _load_master_secret() -> bytes:
+    """Module-level helper used by admin_credentials and approach_a for standalone encryption.
+    Fetches the broker master secret directly from Vault using app settings.
+    """
+    from app.core.config import get_settings
+    settings = get_settings()
+    import httpx
+    vault_addr = settings.VAULT_ADDR.rstrip("/")
+    vault_token = settings.VAULT_TOKEN
+    path = settings.BROKER_MASTER_SECRET_PATH  # e.g. "secret/data/mcp/broker-master"
+    url = f"{vault_addr}/v1/{path}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(url, headers={"X-Vault-Token": vault_token})
+        resp.raise_for_status()
+    secret_hex: str = resp.json()["data"]["data"]["value"]
+    return bytes.fromhex(secret_hex)
