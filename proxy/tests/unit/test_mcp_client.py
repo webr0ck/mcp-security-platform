@@ -39,6 +39,10 @@ def _tool_row(status: str = "active"):
     return SimpleNamespace(
         tool_id=TOOL_ID, name="active-low-risk-tool", version="1.0.0",
         status=status, risk_level="low", upstream_url="http://upstream:9",
+        # Credential injection metadata (FIND-002 fix — must match SELECT columns)
+        injection_mode="none", service_name=None,
+        inject_header="Authorization", inject_prefix="Bearer",
+        kc_client_id=None, kc_token_audience=None,
     )
 
 
@@ -93,7 +97,8 @@ async def test_unauthenticated_returns_401():
     async with _Ctx() as c:
         r = await c.post(f"/api/v1/tools/{TOOL_ID}/invoke", json=RPC)
     assert r.status_code == 401
-    assert r.json()["error"]["code"] == "UNAUTHENTICATED"
+    # RFC 6750 §3.1: auth middleware returns {"error": "unauthenticated", ...}
+    assert r.json()["error"] == "unauthenticated"
 
 
 @pytest.mark.unit

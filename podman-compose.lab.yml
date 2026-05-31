@@ -14,17 +14,73 @@
 
 services:
 
-  # ── Local OIDC / OAuth2 provider ────────────────────────────────────────────
+  # ── Keycloak IDP (replaces/augments Dex for full OAuth2 + PKCE + token exchange)
+  lab-keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: lab-keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_DB: dev-file
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-adminpassword}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY: edge
+      # Variable substitution in realm import (Keycloak 24 supports KC_* env vars in realm JSON)
+      KC_PROXY_CLIENT_SECRET: ${KC_PROXY_CLIENT_SECRET:-mcp-proxy-secret}
+      KC_GRAFANA_CLIENT_SECRET: ${KC_GRAFANA_CLIENT_SECRET:-grafana-secret}
+      DEX_ALICE_PASSWORD: ${DEX_ALICE_PASSWORD:-labpassword}
+      DEX_BOB_PASSWORD: ${DEX_BOB_PASSWORD:-labpassword}
+      LAB_HOST: ${LAB_HOST:-localhost}
+    volumes:
+      - ./lab/keycloak/realm-mcp.json:/opt/keycloak/data/import/realm-mcp.json:ro
+      - lab-keycloak-data:/opt/keycloak/data
+    ports:
+      - "8082:8080"    # Keycloak admin console + OIDC endpoints
+    networks:
+      - lab-net
+      - gateway-net    # proxy must reach Keycloak for JWKS and token validation
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  # ── Keycloak seeder — updates client secrets from env vars post-import ─────
+  lab-keycloak-seeder:
+    image: curlimages/curl:8.6.0
+    container_name: lab-keycloak-seeder
+    restart: "no"
+    depends_on:
+      lab-keycloak:
+        condition: service_healthy
+    volumes:
+      - ./lab/keycloak/seed.sh:/seed.sh:ro
+    command: ["sh", "/seed.sh"]
+    environment:
+      KC_URL: http://lab-keycloak:8080
+      KC_REALM: mcp
+      KC_ADMIN: admin
+      KC_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-adminpassword}
+      KC_PROXY_CLIENT_SECRET: ${KC_PROXY_CLIENT_SECRET:-mcp-proxy-secret}
+      KC_GRAFANA_CLIENT_SECRET: ${KC_GRAFANA_CLIENT_SECRET:-grafana-secret}
+    networks:
+      - lab-net
+
+  # ── Local OIDC / OAuth2 provider (Dex — kept for backward compatibility) ────
   lab-dex:
     image: ghcr.io/dexidp/dex:v2.38.0
     container_name: lab-dex
-    command: dex serve /etc/dex/config.yaml
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
     volumes:
-      - ./lab/dex/config.yaml:/etc/dex/config.yaml:ro
+      - ./lab/dex/config.lab.yaml:/etc/dex/config.yaml:ro
     ports:
       - "5556:5556"
     networks:
       - lab-net
+      - gateway-net    # proxy must reach Dex for JWKS and token validation
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:5556/dex/healthz"]
       interval: 10s
@@ -34,6 +90,8 @@ services:
     restart: unless-stopped
 
   # ── Lab Grafana (port 3001 — avoids conflict with observability on 3000) ────
+  # Also joins observability-net so it can reach mcp-loki:3100.
+  # Keycloak SSO is wired via generic_oauth; fallback to local admin remains.
   lab-grafana:
     image: grafana/grafana-oss:11.0.0
     container_name: lab-grafana
@@ -44,10 +102,23 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${LAB_GRAFANA_ADMIN_PASSWORD:-labpassword}
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
+      # Keycloak SSO via generic_oauth
+      GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+      GF_AUTH_GENERIC_OAUTH_NAME: "Keycloak"
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID: "grafana"
+      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: ${KC_GRAFANA_CLIENT_SECRET:-grafana-secret}
+      GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email roles"
+      GF_AUTH_GENERIC_OAUTH_AUTH_URL: "http://${LAB_HOST:-localhost}:8082/realms/mcp/protocol/openid-connect/auth"
+      GF_AUTH_GENERIC_OAUTH_TOKEN_URL: "http://lab-keycloak:8080/realms/mcp/protocol/openid-connect/token"
+      GF_AUTH_GENERIC_OAUTH_API_URL: "http://lab-keycloak:8080/realms/mcp/protocol/openid-connect/userinfo"
+      GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "contains(roles[*], 'grafana-admin') && 'Admin' || contains(roles[*], 'grafana-editor') && 'Editor' || 'Viewer'"
+      GF_AUTH_GENERIC_OAUTH_ALLOW_ASSIGN_GRAFANA_ADMIN: "true"
     volumes:
       - lab-grafana-data:/var/lib/grafana
+      - ./lab/grafana/provisioning:/etc/grafana/provisioning:ro
     networks:
       - lab-net
+      - observability-net
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
       interval: 10s
@@ -96,7 +167,7 @@ services:
     image: netboxcommunity/netbox:v4.2
     container_name: lab-netbox
     ports:
-      - "8080:8080"
+      - "8090:8080"
     depends_on:
       lab-netbox-db:
         condition: service_healthy
@@ -112,7 +183,7 @@ services:
       SECRET_KEY: ${LAB_NETBOX_SECRET_KEY:-change-me-32-chars-minimum-here}
       SUPERUSER_EMAIL: admin@lab.local
       SUPERUSER_PASSWORD: ${LAB_NETBOX_ADMIN_PASSWORD:-labpassword}
-      ALLOWED_HOSTS: "lab-netbox localhost 127.0.0.1"
+      ALLOWED_HOSTS: "lab-netbox localhost 127.0.0.1 ${LAB_HOST:-localhost}"
       SKIP_SUPERUSER: "false"
     networks:
       - lab-net
@@ -126,9 +197,9 @@ services:
     restart: unless-stopped
 
   # ── Grafana MCP Server ───────────────────────────────────────────────────────
-  mcp-grafana:
+  lab-mcp-grafana:
     image: grafana/mcp-grafana:latest
-    container_name: mcp-grafana
+    container_name: lab-mcp-grafana
     command:
       - "-transport"
       - "streamable-http"
@@ -146,7 +217,7 @@ services:
       - lab-net
       - internal-net
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz 2>/dev/null && exit 0 || curl -sf http://localhost:8000/mcp -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1}' >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=4)\" 2>/dev/null || python3 -c \"import urllib.request,json; urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'ping','id':1}).encode(),headers={'Content-Type':'application/json'},method='POST'),timeout=4)\" 2>/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -174,12 +245,140 @@ services:
       - lab-net
       - internal-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8000/mcp -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"id\":1,\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"hc\",\"version\":\"1\"}}}' | grep -q 'serverInfo' && exit 0 || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
       interval: 15s
       timeout: 10s
       retries: 5
       start_period: 20s
     restart: unless-stopped
+
+  # ── Gitea — self-hosted Git server (Bitbucket equivalent) ───────────────────
+  lab-gitea:
+    build: ./lab/gitea
+    image: lab-gitea:lab
+    container_name: lab-gitea
+    ports:
+      - "3002:3000"
+      - "2222:22"
+    environment:
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__database__PATH: /data/gitea/gitea.db
+      GITEA__server__DOMAIN: ${LAB_HOST:-localhost}
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__ROOT_URL: "http://${LAB_HOST:-localhost}:3002/"
+      GITEA__server__SSH_PORT: "2222"
+      GITEA__log__LEVEL: warn
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA_ADMIN_USER: ${GITEA_ADMIN_USER:-gitadmin}
+      GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-labpassword}
+      GITEA_ADMIN_EMAIL: ${GITEA_ADMIN_EMAIL:-admin@lab.local}
+    volumes:
+      - lab-gitea-data:/data
+    networks:
+      - lab-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -T 30 -qO- http://localhost:3000/api/healthz 2>/dev/null | grep -q 'pass' && exit 0 || exit 1"]
+      interval: 15s
+      timeout: 35s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
+
+  # ── Gitea MCP Server ─────────────────────────────────────────────────────────
+  lab-mcp-gitea:
+    build: ./lab/mcp-servers/gitea
+    image: lab-mcp-gitea:lab
+    container_name: lab-mcp-gitea
+    ports:
+      - "8102:8000"
+    environment:
+      GITEA_URL: "http://lab-gitea:3000"
+      GITEA_TOKEN: "${GITEA_ADMIN_TOKEN}"
+      TRANSPORT: "http"
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    depends_on:
+      lab-gitea:
+        condition: service_healthy
+    networks:
+      - lab-net
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── M365 MCP Server — Microsoft Graph via app-only token ────────────────────
+  lab-mcp-m365:
+    build: ./lab/mcp-servers/m365
+    image: lab-mcp-m365:lab
+    container_name: lab-mcp-m365
+    ports:
+      - "8103:8000"
+    environment:
+      ENTRA_CLIENT_ID: "${ENTRA_CLIENT_ID}"
+      ENTRA_CLIENT_SECRET: "${ENTRA_CLIENT_SECRET}"
+      ENTRA_TENANT_ID: "${ENTRA_TENANT_ID}"
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    networks:
+      - lab-net
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── gateway: Podman/macOS compatibility override ─────────────────────────────
+  # Production config requires step-ca server cert at /etc/nginx/certs/ which is
+  # not provisioned automatically. Lab uses:
+  #   - lab/nginx/nginx.conf as a writable placeholder (CRS template overwrites it)
+  #   - lab/nginx/conf.d with mTLS-free config using CRS self-signed cert
+  # docker-compose merges volumes by target, so these replace the base mounts.
+  gateway:
+    # rootless Podman: run as root so nginx master can bind ports 80/443 inside
+    # the container's network namespace (maps to 8088/8443 on the host).
+    user: root
+    # 91-update-resolver.sh uses `sed -i` (creates temp + renames) which fails on
+    # bind mounts in rootless Podman. Run the CRS init steps explicitly (no shell
+    # loop vars — $var in compose command strings is expanded at create time, not
+    # at container runtime, producing empty strings). Skip step 91; remove the
+    # literal "resolver RESOLVERS" placeholder with grep instead.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "[ -x /docker-entrypoint.d/01-check-low-port.sh ] && /docker-entrypoint.d/01-check-low-port.sh || true;
+        [ -x /docker-entrypoint.d/10-generate-certificate.sh ] && /docker-entrypoint.d/10-generate-certificate.sh || true;
+        [ -x /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh ] && /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh || true;
+        [ -f /docker-entrypoint.d/15-local-resolvers.envsh ] && . /docker-entrypoint.d/15-local-resolvers.envsh || true;
+        [ -x /docker-entrypoint.d/20-envsubst-on-templates.sh ] && /docker-entrypoint.d/20-envsubst-on-templates.sh || true;
+        [ -x /docker-entrypoint.d/30-tune-worker-processes.sh ] && /docker-entrypoint.d/30-tune-worker-processes.sh || true;
+        [ -x /docker-entrypoint.d/90-copy-modsecurity-config.sh ] && /docker-entrypoint.d/90-copy-modsecurity-config.sh || true;
+        grep -v 'resolver RESOLVERS' /etc/nginx/nginx.conf > /tmp/nginx-patched.conf 2>/dev/null && cat /tmp/nginx-patched.conf > /etc/nginx/nginx.conf || true;
+        echo '# replaced by mcp-proxy-lab.conf' > /etc/nginx/conf.d/default.conf;
+        exec nginx -g 'daemon off;'"
+    volumes:
+      - ./lab/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./lab/nginx/conf.d:/etc/nginx/conf.d
+      - ./lab/nginx/lab-certs:/etc/nginx/lab-certs:ro
+
+  # ── MinIO: remap host ports to avoid clash with other projects on :9000/:9001 ──
+  minio:
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+
+  # ── step-ca: Podman/macOS compatibility override ─────────────────────────────
+  # Podman/macOS compatibility override — direct volume mount instead of Docker Secrets.
+  step-ca:
+    volumes:
+      - ./lab/step-ca-password:/run/secrets/step_ca_password:ro
 
   # ── Vault — LAB ONLY: switch to dev mode (in-memory, well-known root token).
   # The base compose runs Vault with a file storage backend that requires
@@ -195,7 +394,8 @@ services:
       VAULT_LOCAL_CONFIG: ""
     command: vault server -dev
     ports:
-      - "8200:8200"
+      # Remapped to 8201 — port 8200 is used by isl-vault from intentional-secrets-lab
+      - "8201:8200"
     healthcheck:
       test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:8200/v1/sys/health || exit 1"]
       interval: 10s
@@ -203,13 +403,116 @@ services:
       retries: 6
       start_period: 15s
 
-  # ── Proxy: also load .env.lab so lab tokens reach the broker ─────────────────
+  # ── Promtail: Podman/macOS compatibility override ────────────────────────────
+  # Production promtail.yml uses docker_sd_configs which require
+  # /var/run/docker.sock and /var/lib/docker/containers. Neither exists in
+  # rootless Podman on macOS. Override volumes (by target-path merge) with
+  # a lab config that uses static scrape only.
+  promtail:
+    volumes:
+      - ./observability/loki/promtail-lab.yml:/etc/promtail/promtail.yml:ro
+      - /tmp:/var/run/docker.sock:ro
+      - /tmp:/var/lib/docker/containers:ro
+
+  # ── Proxy: dev-style build + hot-reload (was in docker-compose.dev.yml) ──────
+  # Drop docker-compose.dev.yml from the lab stack to avoid MinIO port conflicts.
+  # We reproduce only the parts the lab needs here.
+  # ── Mock IdP — click-to-login OAuth 2.1 / OIDC for lab testing ─────────────
+  lab-mock-idp:
+    build: ./lab/mock-idp
+    image: lab-mock-idp:lab
+    container_name: lab-mock-idp
+    ports:
+      - "8888:8888"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8888"
+      MOCK_IDP_ISSUER: "http://${LAB_HOST:-localhost}:8888"
+    networks:
+      - lab-net
+      - gateway-net   # lets the proxy reach lab-mock-idp by name for JWKS / token verification
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8888/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
   proxy:
+    depends_on:
+      opa:
+        condition: service_started
+      lab-dex:
+        condition: service_healthy
+      lab-keycloak:
+        condition: service_healthy
+    build:
+      context: .
+      dockerfile: proxy/Dockerfile
+      target: development
+    volumes:
+      - ./proxy:/app:cached
+      - ./policies/rego:/app/policies:ro
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/app
+      --log-level debug
+    ports:
+      - "8000:8000"
+      - "5678:5678"
     env_file:
       - .env
       - .env.lab
+    networks:
+      - gateway-net
+      - step-ca-net
+      - vault-net
+      - proxy-opa-net
+      - proxy-ollama-net
+      - proxy-redis-net
+      - proxy-db-net
+      - internal-net    # lab: proxy must reach upstream MCP servers on internal-net
 
-  # ── Seed script — runs once, populates Vault, Grafana, NetBox ───────────────
+  # ── DB: expose postgres to host for dev inspection ─────────────────────────
+  db:
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-devpassword}
+
+  # ── OPA: expose for interactive Rego development ───────────────────────────
+  opa:
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-format=json"
+      - "--log-level=debug"
+      - "--bundle"
+      - "/policies"
+      - "--watch"
+
+  # ── Loki: expose for direct LogQL queries from host ───────────────────────
+  loki:
+    ports:
+      - "3100:3100"
+
+  # ── Grafana (main observability): expose directly ─────────────────────────
+  grafana:
+    ports:
+      - "3000:3000"
+
+  # ── Seed script — runs once, populates Vault, Grafana, NetBox, Gitea ─────────
   lab-seeder:
     build: ./lab/seeder
     container_name: lab-seeder
@@ -218,6 +521,8 @@ services:
       lab-grafana:
         condition: service_healthy
       lab-netbox:
+        condition: service_healthy
+      lab-gitea:
         condition: service_healthy
       db:
         condition: service_healthy
@@ -234,6 +539,9 @@ services:
       VAULT_ADDR: http://mcp-vault:8200
       LAB_GRAFANA_URL: http://lab-grafana:3000
       LAB_NETBOX_URL: http://lab-netbox:8080
+      LAB_GITEA_URL: http://lab-gitea:3000
+      LAB_GITEA_ADMIN_USER: ${GITEA_ADMIN_USER:-gitadmin}
+      LAB_GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-labpassword}
       DB_HOST: mcp-db
       DB_NAME: mcp_security
       DB_USER: mcp_app
@@ -242,6 +550,8 @@ services:
 volumes:
   lab-grafana-data:
   lab-netbox-db-data:
+  lab-gitea-data:
+  lab-keycloak-data:
 
 # ── Networks ─────────────────────────────────────────────────────────────────
 networks:
@@ -256,3 +566,7 @@ networks:
   vault-net:
     external: true
     name: mcp-security-platform_vault-net
+  # lab-grafana joins this to reach mcp-loki:3100 for Loki datasource
+  observability-net:
+    external: true
+    name: mcp-security-platform_observability-net
