@@ -27,6 +27,18 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+from datetime import date
+from uuid import UUID
+
+
+class _Encoder(json.JSONEncoder):
+    """Serialize UUID and datetime objects returned by asyncpg."""
+    def default(self, o: Any) -> Any:
+        if isinstance(o, (UUID,)):
+            return str(o)
+        if isinstance(o, (datetime, date)):
+            return o.isoformat()
+        return super().default(o)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -48,7 +60,7 @@ MINIO_ROOT_PASSWORD = os.environ["MINIO_ROOT_PASSWORD"]
 MINIO_AUDIT_BUCKET = os.getenv("MINIO_AUDIT_BUCKET", "mcp-audit-archive")
 COMPLIANCE_SAMPLE_SIZE = int(os.getenv("COMPLIANCE_SAMPLE_SIZE", "1000"))
 COMPLIANCE_ALERT_WEBHOOK = os.getenv(
-    "COMPLIANCE_ALERT_WEBHOOK", "http://alertmanager:9093/api/v1/alerts"
+    "COMPLIANCE_ALERT_WEBHOOK", "http://alertmanager:9093/api/v2/alerts"
 )
 
 # ---------------------------------------------------------------------------
@@ -76,7 +88,7 @@ def check_event_for_violations(event: dict[str, Any]) -> dict[str, list[str]]:
     Returns {category: [field_names_with_violations]}.
     """
     violations: dict[str, list[str]] = {}
-    event_str = json.dumps(event)
+    event_str = json.dumps(event, cls=_Encoder)
 
     for category, pattern in COMPLIANCE_PATTERNS:
         if pattern.search(event_str):
@@ -161,7 +173,7 @@ async def _run_async() -> int:
     run_at = datetime.now(timezone.utc)
     period_end = run_at
     period_start = run_at - timedelta(hours=24)
-    report_id = f"rpt_{uuid4().hex[:16]}"
+    report_id = str(uuid4())
 
     logger.info(
         "Starting compliance check",
@@ -203,7 +215,12 @@ async def _run_async() -> int:
         await conn.close()
         return 1
 
-    events = [dict(row) for row in rows]
+    # Stringify UUID/datetime values so json.dumps never fails on asyncpg types.
+    events = [
+        {k: str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+         for k, v in dict(row).items()}
+        for row in rows
+    ]
     logger.info("Sampled %d audit events for compliance check", len(events))
 
     # Check each category
@@ -252,14 +269,15 @@ async def _run_async() -> int:
         },
     }
 
-    # Write compliance report to PostgreSQL (compliance_checker_app role)
+    # Write compliance report to PostgreSQL
     try:
         await conn.execute(
             """
             INSERT INTO compliance_reports (
                 report_id, run_at, period_start, period_end, status,
-                sample_size, categories_checked, categories_failed, results
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                sample_size, categories_checked, categories_failed,
+                category_results, hash_integrity
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
             """,
             report_id,
             run_at,
@@ -269,7 +287,8 @@ async def _run_async() -> int:
             COMPLIANCE_SAMPLE_SIZE,
             len(COMPLIANCE_PATTERNS),
             categories_failed,
-            json.dumps(report),
+            json.dumps(category_results, cls=_Encoder),
+            json.dumps(report.get("hash_integrity", {}), cls=_Encoder),
         )
         logger.info("Compliance report written to PostgreSQL: %s (status=%s)", report_id, overall_status)
     except Exception as exc:
@@ -292,7 +311,7 @@ async def _run_async() -> int:
         s3.put_object(
             Bucket=MINIO_AUDIT_BUCKET,
             Key=key,
-            Body=json.dumps(report).encode(),
+            Body=json.dumps(report, cls=_Encoder).encode(),
             ContentType="application/json",
             ObjectLockMode="GOVERNANCE",
             ObjectLockRetainUntilDate=(run_at + timedelta(days=90)).isoformat(),
@@ -315,7 +334,7 @@ async def _run_async() -> int:
         "COMPLIANCE CHECK PASSED: %d events sampled, all categories passed",
         len(events),
     )
-    print(json.dumps({"status": "pass", "report_id": report_id, "events_sampled": len(events)}))  # noqa: T201
+    print(json.dumps({"status": "pass", "report_id": report_id, "events_sampled": len(events)}, cls=_Encoder))  # noqa: T201
     return 0
 
 

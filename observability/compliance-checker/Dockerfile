@@ -5,11 +5,8 @@ RUN groupadd --gid 1001 appgroup && \
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    cron \
-    && rm -rf /var/lib/apt/lists/*
-
+# No system cron — it requires root to write /var/spool/cron/.
+# The entrypoint.py runs checker.py on schedule using Python sleep.
 RUN pip install --no-cache-dir \
     asyncpg==0.30.0 \
     sqlalchemy==2.0.36 \
@@ -23,5 +20,6 @@ COPY --chown=appuser:appgroup . /app/
 
 USER appuser
 
-# Entrypoint: run checker.py on cron schedule defined by COMPLIANCE_CRON_SCHEDULE env var
-ENTRYPOINT ["/bin/sh", "-c", "echo \"${COMPLIANCE_CRON_SCHEDULE} python /app/checker.py\" | crontab - && cron -f"]
+# entrypoint.py reads COMPLIANCE_CHECK_INTERVAL_SECONDS (default 86400 = 24h)
+# and runs checker.py on that cadence. No cron, no root, no /var/spool writes.
+CMD ["python", "/app/entrypoint.py"]
