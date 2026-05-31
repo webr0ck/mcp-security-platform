@@ -1,0 +1,220 @@
+# promtail-lab.yml — Lab Promtail config using the Podman API socket.
+#
+# In rootless Podman on macOS the Docker socket isn't at the standard path.
+# The lab compose mounts ${PODMAN_SOCK} → /var/run/docker.sock so that
+# docker_sd_configs can discover all running containers via the Podman API.
+#
+# Every container's stdout/stderr is collected. Labels extracted:
+#   container  — container name (e.g. mcp-proxy, lab-keycloak)
+#   job        — mcp-proxy | keycloak | gitea | netbox | grafana | vault | lab
+#   level      — extracted from JSON logs where possible
+#   event_type — extracted from proxy audit events
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /tmp/promtail-positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    batchwait: 2s
+    batchsize: 1048576
+
+scrape_configs:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # MCP Security Proxy — structured JSON audit + app logs
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: mcp-proxy
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: name
+            values: ["mcp-proxy"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+        replacement: "$1"
+      - target_label: job
+        replacement: mcp-proxy
+    pipeline_stages:
+      - json:
+          expressions:
+            event_type: event_type
+            outcome:    outcome
+            level:      level
+            timestamp:  timestamp
+      - labels:
+          event_type:
+          outcome:
+          level:
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+          fallback_formats: [RFC3339, UnixMs]
+          action_on_failure: skip
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Nginx Gateway — access logs
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: mcp-gateway
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: name
+            values: ["mcp-gateway"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+        replacement: "$1"
+      - target_label: job
+        replacement: gateway
+    pipeline_stages:
+      - json:
+          expressions:
+            level:  level
+            status: status
+      - labels:
+          level:
+          status:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Keycloak — authentication events
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: keycloak
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: name
+            values: ["lab-keycloak"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+        replacement: "$1"
+      - target_label: job
+        replacement: keycloak
+    pipeline_stages:
+      - regex:
+          expression: '(?P<level>(ERROR|WARN|INFO|DEBUG))'
+      - labels:
+          level:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OPA — policy evaluation logs
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: opa
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: name
+            values: ["mcp-opa"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+        replacement: "$1"
+      - target_label: job
+        replacement: opa
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Vault — secret access logs
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: vault
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: name
+            values: ["mcp-vault"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+        replacement: "$1"
+      - target_label: job
+        replacement: vault
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Gitea — lab SCM
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: gitea
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: name
+            values: ["lab-gitea"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+        replacement: "$1"
+      - target_label: job
+        replacement: gitea
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # NetBox — network inventory
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: netbox
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: name
+            values: ["lab-netbox"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+        replacement: "$1"
+      - target_label: job
+        replacement: netbox
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Compliance checker
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: compliance
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: name
+            values: ["mcp-compliance-checker"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+        replacement: "$1"
+      - target_label: job
+        replacement: compliance
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Catch-all: Dex, mock-idp, MCP servers, etc. Excludes Loki/Promtail.
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: lab-other
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(mcp-loki|mcp-promtail)
+        action: drop
+      - source_labels: [__meta_docker_container_name]
+        regex: /(mcp-proxy|mcp-gateway|lab-keycloak|mcp-opa|mcp-vault|lab-gitea|lab-netbox|mcp-compliance-checker)
+        action: drop
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+        replacement: "$1"
+      - target_label: job
+        replacement: lab

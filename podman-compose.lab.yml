@@ -409,9 +409,18 @@ services:
   # rootless Podman on macOS. Override volumes (by target-path merge) with
   # a lab config that uses static scrape only.
   promtail:
+    user: "0:1000"
+    # Disable SELinux label enforcement so the container can connect to the
+    # Podman socket. Required in Fedora CoreOS (SELinux-enforcing) Podman VMs.
+    security_opt:
+      - label=disable
     volumes:
       - ./observability/loki/promtail-lab.yml:/etc/promtail/promtail.yml:ro
-      - /tmp:/var/run/docker.sock:ro
+      # Mount the ACTUAL socket (not the /run/docker.sock symlink — symlink
+      # target doesn't resolve inside the container's namespace).
+      # Path is resolved by Podman daemon inside the VM.
+      - /run/user/501/podman/podman.sock:/var/run/docker.sock
+      # Override the production /var/lib/docker/containers mount.
       - /tmp:/var/lib/docker/containers:ro
 
   # ── Proxy: dev-style build + hot-reload (was in docker-compose.dev.yml) ──────

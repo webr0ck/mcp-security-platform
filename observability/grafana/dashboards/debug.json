@@ -1,0 +1,174 @@
+{
+  "title": "MCP — Debug / Logs",
+  "uid": "mcp-debug",
+  "version": 1,
+  "schemaVersion": 39,
+  "tags": ["mcp", "debug", "logs"],
+  "timezone": "utc",
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "10s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "pluginId": "loki",
+        "label": "Datasource",
+        "hide": 0,
+        "query": "loki",
+        "current": { "text": "Loki", "value": "Loki" },
+        "options": [],
+        "refresh": 1
+      },
+      {
+        "name": "service",
+        "type": "custom",
+        "label": "Service",
+        "hide": 0,
+        "query": "mcp-proxy,mcp-gateway,lab-keycloak,mcp-opa,mcp-vault,lab-gitea,lab-netbox,mcp-compliance-checker,lab-dex,lab-mock-idp,mcp-minio,mcp-grafana,mcp-alertmanager",
+        "current": { "text": "All", "value": ".+" },
+        "options": [
+          { "text": "All", "value": ".+", "selected": true },
+          { "text": "mcp-proxy", "value": "mcp-proxy", "selected": false },
+          { "text": "mcp-gateway", "value": "mcp-gateway", "selected": false },
+          { "text": "lab-keycloak", "value": "lab-keycloak", "selected": false },
+          { "text": "mcp-opa", "value": "mcp-opa", "selected": false },
+          { "text": "mcp-vault", "value": "mcp-vault", "selected": false },
+          { "text": "lab-gitea", "value": "lab-gitea", "selected": false },
+          { "text": "lab-netbox", "value": "lab-netbox", "selected": false },
+          { "text": "mcp-compliance-checker", "value": "mcp-compliance-checker", "selected": false },
+          { "text": "lab-dex", "value": "lab-dex", "selected": false },
+          { "text": "lab-mock-idp", "value": "lab-mock-idp", "selected": false },
+          { "text": "mcp-minio", "value": "mcp-minio", "selected": false },
+          { "text": "mcp-grafana", "value": "mcp-grafana", "selected": false },
+          { "text": "mcp-alertmanager", "value": "mcp-alertmanager", "selected": false }
+        ],
+        "includeAll": true,
+        "allValue": ".+",
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "All Logs",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{container=~\"$service\"}",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "showLabels": true,
+        "showTime": true,
+        "prettifyLogMessage": false
+      }
+    },
+    {
+      "id": 2,
+      "title": "Proxy Errors",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{job=\"mcp-proxy\"} | json | level=\"error\"",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "showLabels": false,
+        "showTime": true,
+        "prettifyLogMessage": false
+      }
+    },
+    {
+      "id": 3,
+      "title": "Auth / Identity (Keycloak + Proxy)",
+      "type": "logs",
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{job=~\"keycloak|mcp-proxy\"} |~ \"LOGIN|LOGOUT|token|auth|401|403\"",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "showLabels": false,
+        "showTime": true,
+        "prettifyLogMessage": false
+      }
+    },
+    {
+      "id": 4,
+      "title": "OPA Policy Decisions",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{job=\"opa\"}",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "showLabels": false,
+        "showTime": true,
+        "prettifyLogMessage": false
+      }
+    },
+    {
+      "id": 5,
+      "title": "All Errors across Stack",
+      "type": "logs",
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{container=~\".+\"} |~ \"(?i)error|exception|panic|fatal\"",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "showLabels": true,
+        "showTime": true,
+        "prettifyLogMessage": false
+      }
+    }
+  ]
+}

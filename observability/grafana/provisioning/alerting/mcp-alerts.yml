@@ -15,6 +15,9 @@ groups:
         condition: A
         data:
           - refId: A
+            relativeTimeRange:
+              from: 120
+              to: 0
             datasourceUid: loki
             model:
               expr: |
@@ -40,6 +43,9 @@ groups:
         condition: A
         data:
           - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
             datasourceUid: loki
             model:
               expr: |
@@ -65,6 +71,9 @@ groups:
         condition: A
         data:
           - refId: A
+            relativeTimeRange:
+              from: 1800
+              to: 0
             datasourceUid: loki
             model:
               expr: |
@@ -90,6 +99,9 @@ groups:
         condition: A
         data:
           - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
             datasourceUid: loki
             model:
               expr: |
@@ -118,6 +130,9 @@ groups:
         condition: A
         data:
           - refId: A
+            relativeTimeRange:
+              from: 120
+              to: 0
             datasourceUid: loki
             model:
               expr: |
@@ -143,6 +158,9 @@ groups:
         condition: A
         data:
           - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
             datasourceUid: loki
             model:
               expr: |
