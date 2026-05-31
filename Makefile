@@ -1,5 +1,5 @@
 .PHONY: help up down dev-up dev-down build logs shell proxy-shell db-shell \
-        test test-unit test-integration lint \
+        test test-unit test-integration test-security test-perf test-all test-red-team lint \
         db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle \
         assign-role compliance-run sbom-verify \
         security-check health smoke-test \
@@ -53,9 +53,13 @@ help:
 	@echo "  make db-shell          psql session in the db container"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test              Run full proxy test suite"
-	@echo "  make test-unit         Run unit tests only"
-	@echo "  make test-integration  Run integration tests only"
+	@echo "  make test              Run full proxy test suite (all layers)"
+	@echo "  make test-unit         Run unit tests only (no services required)"
+	@echo "  make test-integration  Run integration tests only (needs docker compose up)"
+	@echo "  make test-security     Run [TAMPER] + AI attack + sandbox tests"
+	@echo "  make test-perf         Run performance benchmarks (latency/throughput/memory)"
+	@echo "  make test-all          Run unit + integration + security (CI gate)"
+	@echo "  make test-red-team     Run sandbox isolation shell scripts (needs docker up)"
 	@echo "  make lint              ruff + mypy on proxy/"
 	@echo "  make smoke-test        End-to-end stack verification"
 	@echo "  make health            Check all service health endpoints"
@@ -143,6 +147,30 @@ test-unit:
 test-integration:
 	$(COMPOSE) exec $(PROXY_CONTAINER) \
 		python -m pytest tests/integration/ -v --tb=short -m integration
+
+# Run only security tests ([TAMPER] + AI attack surface + sandbox escape)
+test-security:
+	$(COMPOSE) exec $(PROXY_CONTAINER) \
+		python -m pytest tests/security/ -v --tb=short -m security
+
+# Run performance benchmarks (latency, throughput, memory)
+# Does not fail CI on target misses — reports regressions only.
+test-perf:
+	$(COMPOSE) exec $(PROXY_CONTAINER) \
+		python -m pytest tests/performance/ -v --tb=short -m performance -s
+
+# Run all test layers: unit + integration + security (not perf — perf is opt-in)
+test-all:
+	$(COMPOSE) exec $(PROXY_CONTAINER) \
+		python -m pytest tests/unit/ tests/integration/ tests/security/ \
+		-v --tb=short
+
+# Run red-team shell isolation tests (requires: docker compose up with sandbox)
+test-red-team:
+	@echo "Running red-team sandbox isolation tests..."
+	@echo "Requires: docker compose up (sandbox container must be running)"
+	@bash sandbox/tests/red_team/run_all.sh || true
+	@echo "Red-team tests complete. Review output above for PASS/FAIL."
 
 lint:
 	$(COMPOSE) exec $(PROXY_CONTAINER) ruff check app/
@@ -367,3 +395,15 @@ clean:
 	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
 	@echo "Cleaned. All volumes destroyed."
+
+ship-check: ## Pre-publish gate (docs-honesty + secret scan + compose smoke)
+	@bash scripts/ship-check.sh
+
+# ─── Security guard ───────────────────────────────────────────────────────────
+# RT-001 prevention: never serve the repo root via Python's HTTP server.
+# If you need to share a file during development, serve a specific subdirectory:
+#   python3 -m http.server --directory /tmp/safe-export-dir 8080
+serve-root-UNSAFE:
+	$(error SECURITY: never run 'python3 -m http.server' from the repo root. \
+	  It exposes .env files, .git history, TLS keys, and source code. \
+	  Use 'make serve-root-UNSAFE' only acknowledges this target exists as a warning.)

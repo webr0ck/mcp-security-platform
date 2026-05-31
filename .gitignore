@@ -13,3 +13,8 @@ dist/
 policies/bundle.tar.gz
 # local pre-change safety copy (F-001 network surgery)
 docker-compose.yml.pre-f001-bak
+server.crt
+server.key
+lab/nginx/lab-certs/*.pem
+# RT-004 fix: local key override written after red-team rotation — never commit
+proxy/.env

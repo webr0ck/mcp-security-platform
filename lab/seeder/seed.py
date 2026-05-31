@@ -65,6 +65,21 @@ LAB_NETBOX_URL = os.environ.get("LAB_NETBOX_URL", "http://lab-netbox:8080")
 # If absent, the NetBox step is skipped with a warning.
 LAB_NETBOX_ADMIN_TOKEN: Optional[str] = os.environ.get("LAB_NETBOX_ADMIN_TOKEN")
 
+LAB_GITEA_URL = os.environ.get("LAB_GITEA_URL", "http://lab-gitea:3000")
+LAB_GITEA_ADMIN_USER = os.environ.get("LAB_GITEA_ADMIN_USER", "admin")
+LAB_GITEA_ADMIN_PASSWORD = os.environ.get("LAB_GITEA_ADMIN_PASSWORD", "labpassword")
+
+KC_ADMIN_URL = os.environ.get("KC_ADMIN_URL", "http://lab-keycloak:8080")
+KC_ADMIN_PASSWORD = os.environ.get("KC_ADMIN_PASSWORD", "adminpassword")
+# Expected usernames in the mcp realm; any others are treated as attacker artifacts.
+KC_EXPECTED_USERS = {"alice", "bob", "carol"}
+# Passwords that should be set for each expected user on every seeder run.
+KC_USER_PASSWORDS: dict[str, str] = {
+    "alice": os.environ.get("DEX_ALICE_PASSWORD", "labpassword"),
+    "bob": os.environ.get("DEX_BOB_PASSWORD", "labpassword"),
+    "carol": os.environ.get("DEX_ALICE_PASSWORD", "labpassword"),
+}
+
 SQL_DIR = Path(__file__).parent / "sql"
 
 # ---------------------------------------------------------------------------
@@ -330,6 +345,154 @@ async def create_netbox_token() -> Optional[str]:
         return token_key
 
 
+async def create_gitea_token() -> Optional[str]:
+    """Create or retrieve a Gitea API token for the admin user."""
+    token_name = "mcp-lab"
+    auth = (LAB_GITEA_ADMIN_USER, LAB_GITEA_ADMIN_PASSWORD)
+
+    async with httpx.AsyncClient(base_url=LAB_GITEA_URL, timeout=15) as client:
+        try:
+            # Check if the token already exists
+            existing = await client.get(
+                f"/api/v1/users/{LAB_GITEA_ADMIN_USER}/tokens",
+                auth=auth,
+            )
+            if existing.status_code == 200:
+                for t in existing.json():
+                    if t.get("name") == token_name:
+                        log.info("Gitea mcp-lab token already exists — re-creating to get the key")
+                        # Delete the old token so we can recreate it (Gitea only exposes key on creation)
+                        await client.delete(
+                            f"/api/v1/users/{LAB_GITEA_ADMIN_USER}/tokens/{t['id']}",
+                            auth=auth,
+                        )
+                        break
+
+            # Create a new token (Gitea 1.19+ requires at least one scope)
+            resp = await client.post(
+                f"/api/v1/users/{LAB_GITEA_ADMIN_USER}/tokens",
+                json={"name": token_name, "scopes": ["write:repository", "write:issue", "read:user"]},
+                auth=auth,
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.TransportError as exc:
+            log.error("Cannot reach Gitea at %s: %s", LAB_GITEA_URL, exc)
+            return None
+
+    if resp.status_code not in (200, 201):
+        log.error("Gitea token creation failed: %s %s", resp.status_code, resp.text)
+        return None
+
+    token_sha1 = resp.json().get("sha1")
+    if not token_sha1:
+        log.error("Gitea response did not contain sha1: %s", resp.json())
+        return None
+
+    log.info("Gitea API token created (name=%s)", token_name)
+    print(f"GITEA_ADMIN_TOKEN={token_sha1}")
+    return token_sha1
+
+
+# ---------------------------------------------------------------------------
+# Keycloak hardening — runs on every seeder invocation (idempotent)
+# ---------------------------------------------------------------------------
+
+async def harden_keycloak() -> dict[str, str]:
+    """
+    Enforce expected KC mcp-realm state:
+      - Reset all expected user passwords to known-good values
+      - Delete any unknown users (attacker artifacts)
+      - Disable ROPC (directAccessGrantsEnabled) on mcp-proxy client
+    Returns a results dict.
+    """
+    results: dict[str, str] = {}
+
+    # Obtain master-realm admin token via admin-cli ROPC (admin-cli uses ROPC internally).
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            resp = await client.post(
+                f"{KC_ADMIN_URL}/realms/master/protocol/openid-connect/token",
+                data={
+                    "client_id": "admin-cli",
+                    "grant_type": "password",
+                    "username": "admin",
+                    "password": KC_ADMIN_PASSWORD,
+                },
+            )
+            if resp.status_code != 200:
+                log.warning("KC admin token failed (%s) — skipping KC hardening", resp.status_code)
+                return {"keycloak": f"SKIPPED (token {resp.status_code})"}
+            admin_token = resp.json()["access_token"]
+        except Exception as exc:
+            log.warning("KC not reachable — skipping KC hardening: %s", exc)
+            return {"keycloak": f"SKIPPED ({exc})"}
+
+        headers = {"Authorization": f"Bearer {admin_token}", "Content-Type": "application/json"}
+
+        # --- Enumerate users ---
+        users_resp = await client.get(f"{KC_ADMIN_URL}/admin/realms/mcp/users", headers=headers)
+        if users_resp.status_code != 200:
+            return {"keycloak": f"FAILED (list users {users_resp.status_code})"}
+        users = users_resp.json()
+
+        # --- Delete unexpected users (attacker artifacts) ---
+        deleted: list[str] = []
+        for user in users:
+            if user["username"] not in KC_EXPECTED_USERS:
+                del_resp = await client.delete(
+                    f"{KC_ADMIN_URL}/admin/realms/mcp/users/{user['id']}", headers=headers
+                )
+                if del_resp.status_code in (204, 404):
+                    deleted.append(user["username"])
+                    log.warning("KC hardening: deleted unexpected user '%s'", user["username"])
+                else:
+                    log.error("KC hardening: failed to delete '%s': %s", user["username"], del_resp.status_code)
+        if deleted:
+            results["kc_deleted_users"] = ", ".join(deleted)
+
+        # --- Reset passwords for all expected users ---
+        reset_ok: list[str] = []
+        for user in users:
+            uname = user["username"]
+            if uname not in KC_EXPECTED_USERS:
+                continue
+            expected_pw = KC_USER_PASSWORDS.get(uname, "labpassword")
+            pw_resp = await client.put(
+                f"{KC_ADMIN_URL}/admin/realms/mcp/users/{user['id']}/reset-password",
+                headers=headers,
+                json={"type": "password", "value": expected_pw, "temporary": False},
+            )
+            if pw_resp.status_code == 204:
+                reset_ok.append(uname)
+            else:
+                log.error("KC hardening: password reset for '%s' failed: %s", uname, pw_resp.status_code)
+        if reset_ok:
+            log.info("KC hardening: reset passwords for %s", reset_ok)
+
+        # --- Enforce directAccessGrantsEnabled=false on mcp-proxy client ---
+        clients_resp = await client.get(
+            f"{KC_ADMIN_URL}/admin/realms/mcp/clients?clientId=mcp-proxy", headers=headers
+        )
+        if clients_resp.status_code == 200 and clients_resp.json():
+            client_data = clients_resp.json()[0]
+            if client_data.get("directAccessGrantsEnabled"):
+                patch_resp = await client.put(
+                    f"{KC_ADMIN_URL}/admin/realms/mcp/clients/{client_data['id']}",
+                    headers=headers,
+                    json={**client_data, "directAccessGrantsEnabled": False},
+                )
+                if patch_resp.status_code == 204:
+                    log.warning("KC hardening: disabled ROPC on mcp-proxy client (was enabled)")
+                    results["kc_ropc"] = "DISABLED (was enabled — attacker artifact)"
+                else:
+                    log.error("KC hardening: failed to disable ROPC: %s", patch_resp.status_code)
+            else:
+                results["kc_ropc"] = "OK (already disabled)"
+
+    results["keycloak"] = "OK"
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -390,7 +553,17 @@ async def main() -> None:
         else "FAILED"
     )
 
-    # 8. Summary
+    # 8. Create Gitea API token
+    log.info("Creating Gitea API token...")
+    gitea_token = await create_gitea_token()
+    results["gitea"] = "OK" if gitea_token else "FAILED"
+
+    # 9. Keycloak hardening (idempotent — resets passwords, removes attacker users, disables ROPC)
+    log.info("Hardening Keycloak realm state...")
+    kc_results = await harden_keycloak()
+    results.update(kc_results)
+
+    # 10. Summary
     print("\n" + "=" * 60)
     print("LAB SEEDER SUMMARY")
     print("=" * 60)
@@ -412,6 +585,10 @@ async def main() -> None:
         )
     else:
         print("  NETBOX_ADMIN_TOKEN=<not created — check logs>")
+    if gitea_token:
+        print("  GITEA_ADMIN_TOKEN=<printed above>")
+    else:
+        print("  GITEA_ADMIN_TOKEN=<not created — check logs>")
     print("=" * 60)
 
 

@@ -1,0 +1,149 @@
+{
+  "realm": "mcp",
+  "enabled": true,
+  "displayName": "MCP Security Platform",
+  "loginWithEmailAllowed": true,
+  "sslRequired": "none",
+  "adminPermissionsEnabled": false,
+  "accessTokenLifespan": 900,
+  "refreshTokenMaxReuse": 0,
+  "ssoSessionMaxLifespan": 86400,
+  "clients": [
+    {
+      "clientId": "mcp-proxy",
+      "name": "MCP Security Proxy",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${KC_PROXY_CLIENT_SECRET}",
+      "redirectUris": [
+        "http://localhost:8000/api/v1/auth/oidc/callback",
+        "http://${LAB_HOST}:8000/api/v1/auth/oidc/callback",
+        "http://${LAB_HOST}:8088/api/v1/auth/oidc/callback"
+      ],
+      "webOrigins": ["http://localhost:8000", "http://${LAB_HOST}:8000"],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": false,
+      "frontchannelLogout": true,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "use.refresh.tokens": "true",
+        "token.response.include.issued.token.type": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "roles-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "client-roles-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "config": {
+            "claim.name": "resource_access.${clientId}.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "usermodel.clientRoleMapping.clientId": "mcp-proxy"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "claude-code",
+      "name": "Claude Code MCP Client",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "redirectUris": [
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "webOrigins": ["+"],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    },
+    {
+      "clientId": "grafana",
+      "name": "Grafana",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${KC_GRAFANA_CLIENT_SECRET}",
+      "redirectUris": [
+        "http://localhost:3000/login/generic_oauth",
+        "http://${LAB_HOST}:3000/login/generic_oauth"
+      ],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    }
+  ],
+  "roles": {
+    "realm": [
+      {"name": "admin", "description": "Full platform admin"},
+      {"name": "agent", "description": "Can invoke registered tools"},
+      {"name": "auditor", "description": "Read-only audit and reporting"},
+      {"name": "readonly", "description": "Read-only tool catalogue"},
+      {"name": "grafana-admin", "description": "Grafana admin role"},
+      {"name": "grafana-editor", "description": "Grafana editor role"},
+      {"name": "grafana-viewer", "description": "Grafana viewer role"}
+    ]
+  },
+  "users": [
+    {
+      "username": "alice",
+      "email": "alice@lab.local",
+      "enabled": true,
+      "firstName": "Alice",
+      "lastName": "Admin",
+      "credentials": [{"type": "password", "value": "${DEX_ALICE_PASSWORD}", "temporary": false}],
+      "realmRoles": ["admin", "grafana-admin"]
+    },
+    {
+      "username": "bob",
+      "email": "bob@lab.local",
+      "enabled": true,
+      "firstName": "Bob",
+      "lastName": "Agent",
+      "credentials": [{"type": "password", "value": "${DEX_BOB_PASSWORD}", "temporary": false}],
+      "realmRoles": ["agent", "grafana-editor"]
+    },
+    {
+      "username": "carol",
+      "email": "carol@lab.local",
+      "enabled": true,
+      "firstName": "Carol",
+      "lastName": "Auditor",
+      "credentials": [{"type": "password", "value": "labpassword", "temporary": false}],
+      "realmRoles": ["auditor", "grafana-viewer"]
+    }
+  ],
+  "identityProviders": [],
+  "browserSecurityHeaders": {
+    "contentTypeOptions": "nosniff",
+    "xRobotsTag": "none",
+    "xFrameOptions": "SAMEORIGIN",
+    "contentSecurityPolicy": "frame-src 'self'; frame-ancestors 'self'; object-src 'none';"
+  }
+}

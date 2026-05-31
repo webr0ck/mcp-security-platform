@@ -490,17 +490,20 @@ services:
       - proxy-db-net
       - internal-net    # lab: proxy must reach upstream MCP servers on internal-net
 
-  # ── DB: expose postgres to host for dev inspection ─────────────────────────
+  # ── DB: loopback-only — reachable from host for dev inspection but NOT from LAN.
+  # RT-006 fix: DB_PASSWORD is known from .env; binding to 0.0.0.0 would expose
+  # the database to the local network. 127.0.0.1 restricts to localhost only.
   db:
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       - POSTGRES_PASSWORD=${DB_PASSWORD:-devpassword}
 
-  # ── OPA: expose for interactive Rego development ───────────────────────────
+  # ── OPA: NOT exposed to host — reachable only from proxy on proxy-opa-net.
+  # RT-005 fix: OPA has no authentication; exposing :8181 lets any host process
+  # read the full grants/policy database. Use `podman exec mcp-opa ...` for dev
+  # queries, or restore the port temporarily with `ports: ["127.0.0.1:8181:8181"]`.
   opa:
-    ports:
-      - "8181:8181"
     command:
       - "run"
       - "--server"
