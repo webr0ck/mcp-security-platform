@@ -69,9 +69,13 @@ services:
       - "6379:6379"
 
   opa:
-    # Expose OPA for local policy development — test Rego interactively
+    # RT-005 fix: OPA has no authentication. Binding to 0.0.0.0:8181 lets any
+    # network peer read the full grants/policy database without credentials.
+    # Restrict to loopback for local Rego development: `curl localhost:8181/...`
+    # To open temporarily: override with `ports: ["0.0.0.0:8181:8181"]` in a
+    # local docker-compose.override.yml (never commit that file).
     ports:
-      - "8181:8181"
+      - "127.0.0.1:8181:8181"
     command:
       - "run"
       - "--server"

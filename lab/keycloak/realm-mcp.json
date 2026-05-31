@@ -4,7 +4,6 @@
   "displayName": "MCP Security Platform",
   "loginWithEmailAllowed": true,
   "sslRequired": "none",
-  "adminPermissionsEnabled": false,
   "accessTokenLifespan": 900,
   "refreshTokenMaxReuse": 0,
   "ssoSessionMaxLifespan": 86400,
