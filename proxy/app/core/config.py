@@ -129,15 +129,36 @@ class Settings(BaseSettings):
     STEP_CA_MAX_TLS_DURATION: str = "24h"
 
     # =========================================================================
-    # OIDC (Optional)
+    # OIDC / Keycloak (Optional)
     # =========================================================================
     OIDC_ENABLED: bool = False
     OIDC_ISSUER_URL: str = ""
+    # Internal URL for proxy→IdP communication (JWKS, token endpoint).
+    # Defaults to OIDC_ISSUER_URL if not set.
+    OIDC_INTERNAL_URL: str = ""
+    OIDC_INTERNAL_ISSUER_URL: str = ""  # Keycloak container-name URL (overrides OIDC_INTERNAL_URL)
     OIDC_CLIENT_ID: str = ""
     OIDC_CLIENT_SECRET: str = ""
     OIDC_AUDIENCE: str = ""
     OIDC_ROLE_CLAIM_PATH: str = "roles"
     OIDC_REDIRECT_URI: str = ""
+    PROXY_BASE_URL: str = "http://localhost:8000"
+
+    # Session JWT (issued after Keycloak browser login; short-lived)
+    SESSION_JWT_EXPIRE_SECONDS: int = 900      # 15 min default
+    SESSION_COOKIE_SECURE: bool = False         # True in prod (HTTPS)
+    SESSION_COOKIE_DOMAIN: str = "localhost"
+    SESSION_COOKIE_NAME: str = "mcp_session"
+
+    # RT-NEW-005 fix: shared secret Nginx must include in X-Gateway-Secret header.
+    # X-Client-Cert-CN is only accepted when X-Gateway-Secret matches this value.
+    # Empty string = mTLS CN auth disabled (safe default when unconfigured).
+    # Set the same value in Nginx `proxy_set_header X-Gateway-Secret <value>` and here.
+    GATEWAY_SHARED_SECRET: str = ""
+
+    # Keycloak token exchange (service_account / oauth_user_token injection modes)
+    KC_TOKEN_EXCHANGE_ENABLED: bool = False
+    KC_TOKEN_EXCHANGE_AUDIENCE: str = ""        # default audience for KC token exchange
 
     # =========================================================================
     # MinIO / S3

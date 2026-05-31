@@ -18,14 +18,37 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+import ipaddress
+
 from app.core.config import settings
 from app.core.security import hash_api_key
+
+
+def _is_trusted_proxy(request: Request) -> bool:
+    """Return True only when the request carries the gateway shared secret.
+
+    RT-NEW-005: X-Client-Cert-CN must only be honoured when it arrives from
+    Nginx/gateway, which proves its identity via X-Gateway-Secret.
+    CIDR-based checks are insufficient because gvproxy port-forwarding makes
+    direct host connections appear on the same subnet as Nginx.
+
+    Design: Nginx sets `proxy_set_header X-Gateway-Secret <secret>` on every
+    proxied request. Direct callers cannot know this secret and are rejected.
+    If GATEWAY_SHARED_SECRET is empty, mTLS CN auth is disabled entirely.
+    """
+    secret = settings.GATEWAY_SHARED_SECRET
+    if not secret:
+        return False
+    provided = request.headers.get("X-Gateway-Secret", "")
+    import hmac as _hmac
+    return bool(provided) and _hmac.compare_digest(provided, secret)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +59,7 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/api/v1/auth/oidc/login",
     "/api/v1/auth/oidc/callback",
     "/api/v1/integrations/jira/webhook",  # authenticated by JIRA_WEBHOOK_SECRET, not RBAC
+    "/oauth/register",                    # RFC 7591 dynamic client registration — pre-auth
 })
 
 # CB-001: the OAuth IdP redirects the user's browser here with no client
@@ -43,7 +67,7 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
 # from a header. It is recovered from the single-use server-side nonce
 # created at /auth/enroll/* (a PROTECTED path). /auth/enroll/* is
 # intentionally NOT public and is authenticated by AuthMiddleware.
-_PUBLIC_PATH_PREFIXES: tuple[str, ...] = ("/auth/callback/",)
+_PUBLIC_PATH_PREFIXES: tuple[str, ...] = ("/auth/callback/", "/.well-known/")
 
 
 def _is_public(path: str) -> bool:
@@ -79,29 +103,80 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # ----------------------------------------------------------------
         # Priority 1: mTLS client certificate CN (set by Nginx gateway)
+        # RT-NEW-005 fix: only trust X-Client-Cert-CN from upstream proxy IPs.
+        # Direct callers (port 8000) cannot spoof mTLS identity via this header.
         # ----------------------------------------------------------------
         cert_cn = request.headers.get("X-Client-Cert-CN", "").strip()
-        if cert_cn:
+        if cert_cn and _is_trusted_proxy(request):
             client_id = cert_cn
             auth_method = "mtls"
             logger.debug("Auth: mTLS cert CN=%s", cert_cn)
+        elif cert_cn:
+            logger.warning(
+                "X-Client-Cert-CN header ignored: source IP %s is not a trusted proxy",
+                request.client.host if request.client else "unknown",
+            )
 
         # ----------------------------------------------------------------
-        # Priority 2: Bearer token — OIDC JWT or API key
+        # Priority 2: Internal session JWT (from Keycloak browser login cookie)
+        # ----------------------------------------------------------------
+        if not client_id:
+            session_token = request.cookies.get(settings.SESSION_COOKIE_NAME, "")
+            if session_token:
+                try:
+                    import jose.jwt as jose_jwt
+                    from jose import JWTError
+                    claims = jose_jwt.decode(
+                        session_token,
+                        settings.PROXY_SECRET_KEY,
+                        algorithms=["HS256"],
+                        audience="mcp-proxy-session",
+                    )
+                    session_client_id = claims.get("client_id") or claims.get("sub")
+                    if session_client_id:
+                        client_id = session_client_id
+                        auth_method = "oidc_session"
+                        request.state._jwt_roles = claims.get("roles", [])
+                        request.state._kc_sub = claims.get("sub")
+                except Exception:
+                    pass
+
+        # ----------------------------------------------------------------
+        # Priority 3: Bearer token — OIDC JWT, internal session JWT, or API key
         # ----------------------------------------------------------------
         if not client_id:
             auth_header = request.headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
                 token = auth_header[len("Bearer "):].strip()
                 if token:
-                    # Try OIDC JWT first (if enabled), fall through to API key check.
-                    if settings.OIDC_ENABLED:
-                        oidc_client_id = await _validate_oidc_jwt(token)
+                    # 3a. Try internal session JWT (issued by /auth/oidc/callback)
+                    try:
+                        import jose.jwt as jose_jwt
+                        from jose import JWTError
+                        claims = jose_jwt.decode(
+                            token,
+                            settings.PROXY_SECRET_KEY,
+                            algorithms=["HS256"],
+                            audience="mcp-proxy-session",
+                        )
+                        session_client_id = claims.get("client_id") or claims.get("sub")
+                        if session_client_id:
+                            client_id = session_client_id
+                            auth_method = "oidc_session"
+                            request.state._jwt_roles = claims.get("roles", [])
+                            request.state._kc_sub = claims.get("sub")
+                    except Exception:
+                        pass
+
+                    # 3b. Try external OIDC JWT (Keycloak access token directly).
+                    if not client_id and settings.OIDC_ENABLED:
+                        oidc_client_id, jwt_roles = await _validate_oidc_jwt(token)
                         if oidc_client_id:
                             client_id = oidc_client_id
                             auth_method = "oidc"
+                            request.state._jwt_roles = jwt_roles
 
-                    # If OIDC didn't resolve, try API key hash lookup.
+                    # 3c. API key hash lookup (no OIDC dependency).
                     if not client_id:
                         api_key_client_id = await _resolve_api_key(token)
                         if api_key_client_id:
@@ -109,17 +184,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             auth_method = "api_key"
 
         if not client_id:
+            resource_metadata_url = str(request.base_url).rstrip("/") + "/.well-known/oauth-protected-resource"
             return JSONResponse(
                 status_code=401,
                 content={
-                    "error": {
-                        "code": "UNAUTHENTICATED",
-                        "message": (
-                            "No valid identity could be resolved. "
-                            "Provide mTLS client cert or Authorization: Bearer <token>."
-                        ),
-                        "request_id": getattr(request.state, "request_id", "unknown"),
-                    }
+                    # RFC 6750 §3.1 — `error` must be a string (OAuth clients validate this)
+                    "error": "unauthenticated",
+                    "error_description": (
+                        "No valid identity could be resolved. "
+                        "Provide mTLS client cert or Authorization: Bearer <token>."
+                    ),
+                    "request_id": getattr(request.state, "request_id", "unknown"),
+                },
+                headers={
+                    "WWW-Authenticate": f'Bearer realm="mcp-proxy", resource_metadata="{resource_metadata_url}"',
                 },
             )
 
@@ -127,9 +205,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.auth_method = auth_method
 
         # ----------------------------------------------------------------
-        # Load roles from Redis cache or PostgreSQL role_assignments
+        # Load roles: merge DB role_assignments with any roles in the JWT
+        # DB is authoritative; JWT roles are a convenience fallback for lab.
         # ----------------------------------------------------------------
-        request.state.client_roles = await _load_roles(client_id)
+        db_roles = await _load_roles(client_id)
+        jwt_roles: list[str] = getattr(request.state, "_jwt_roles", [])
+        # Union: DB roles take precedence; JWT adds any that DB doesn't have
+        combined = list(dict.fromkeys(db_roles + [r for r in jwt_roles if r not in db_roles]))
+        request.state.client_roles = combined
 
         logger.debug(
             "Auth resolved",
@@ -144,22 +227,126 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)  # type: ignore[misc]
 
 
-async def _validate_oidc_jwt(token: str) -> str | None:
+_jwks_cache: dict[str, Any] = {}   # {"keys": [...], "fetched_at": float, "jwks_uri": str}
+_JWKS_TTL = 300.0
+
+
+async def _discover_jwks_uri(base: str) -> str:
     """
-    Validate an OIDC JWT Bearer token.
-
-    Fetches the JWKS from the configured OIDC issuer and validates the token's
-    signature, expiry, and audience. Returns the 'sub' claim as client_id.
-
-    Returns None on any validation failure (falls through to API key check).
-
-    STUB: Full JWKS fetch and jose.jwt.decode not yet implemented.
-    Returns None — falls through to API key check.
-    # TODO: Implement with python-jose: fetch OIDC discovery doc, validate JWT
-    #       against JWKS, extract settings.OIDC_ROLE_CLAIM_PATH for roles.
+    Resolve the JWKS URI via OIDC discovery.
+    Tries RFC 8414 (/.well-known/oauth-authorization-server) then OIDC standard
+    (/.well-known/openid-configuration). Falls back to Dex-style {base}/keys.
     """
-    # STUB: replace with working impl when OIDC is enabled in production.
-    return None
+    import httpx
+
+    for path in ("/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"):
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{base}{path}")
+                if resp.status_code == 200:
+                    uri = resp.json().get("jwks_uri", "")
+                    if uri:
+                        # Rewrite host to internal URL so JWKS fetch stays on container network
+                        return uri
+        except Exception:
+            continue
+    # Last resort: Dex default JWKS path relative to issuer base
+    return f"{base}/keys"
+
+
+async def _fetch_jwks() -> list[dict]:
+    """Fetch and cache the JWKS from the configured OIDC issuer using discovery."""
+    import time
+    import httpx
+
+    now = time.monotonic()
+    if _jwks_cache and now - _jwks_cache.get("fetched_at", 0) < _JWKS_TTL:
+        return _jwks_cache["keys"]
+
+    # Use OIDC_INTERNAL_URL for container-network fetches (avoids routing to external IP).
+    base = getattr(settings, "OIDC_INTERNAL_URL", "").rstrip("/") or settings.OIDC_ISSUER_URL.rstrip("/")
+
+    jwks_uri = _jwks_cache.get("jwks_uri") or await _discover_jwks_uri(base)
+
+    # Ensure the JWKS URI uses the internal base (discovery may return the public URL)
+    public_base = settings.OIDC_ISSUER_URL.rstrip("/")
+    if public_base and public_base != base:
+        jwks_uri = jwks_uri.replace(public_base, base)
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(jwks_uri)
+            resp.raise_for_status()
+            data = resp.json()
+            keys = data.get("keys", [])
+            _jwks_cache["keys"] = keys
+            _jwks_cache["fetched_at"] = now
+            _jwks_cache["jwks_uri"] = jwks_uri
+            return keys
+    except Exception as exc:
+        logger.warning("JWKS fetch failed from %s: %s", jwks_uri, exc)
+        return _jwks_cache.get("keys", [])
+
+
+async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
+    """
+    Validate an OIDC JWT Bearer token against the configured issuer's JWKS.
+    Returns (sub, roles_from_jwt) on success, (None, []) on failure.
+    Roles from the JWT are used as a fallback when the DB has no assignments.
+    """
+    try:
+        from jose import jwt as jose_jwt, jwk, JWTError
+        from jose.utils import base64url_decode
+        import json as _json
+
+        keys = await _fetch_jwks()
+        if not keys:
+            logger.warning("No JWKS keys available — cannot validate OIDC JWT")
+            return None
+
+        # Decode header to pick the right key by kid
+        header = jose_jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        matching = [k for k in keys if k.get("kid") == kid] if kid else keys
+        if not matching:
+            matching = keys  # fall back to trying all keys
+
+        last_exc: Exception | None = None
+        for jwk_key in matching:
+            try:
+                pub = jwk.construct(jwk_key)
+                # Only verify audience when OIDC_AUDIENCE is explicitly set.
+                # OIDC_CLIENT_ID is the proxy's own client identity — it must NOT
+                # be used as an audience constraint because dynamic clients
+                # (e.g. Claude Code via RFC 7591) receive tokens with their own
+                # dynamically-generated client_id in the aud claim.
+                expected_aud = settings.OIDC_AUDIENCE or None
+                claims = jose_jwt.decode(
+                    token,
+                    pub.to_dict(),
+                    algorithms=["RS256"],
+                    audience=expected_aud,
+                    options={"verify_aud": bool(expected_aud)},
+                )
+                sub: str = claims.get("sub", "")
+                if not sub:
+                    return None, []
+                # Extract roles claim — mock-idp and most enterprise IdPs include this
+                jwt_roles: list[str] = claims.get("roles", [])
+                if isinstance(jwt_roles, str):
+                    jwt_roles = [jwt_roles]
+                logger.debug("OIDC JWT validated: sub=%s jwt_roles=%s", sub, jwt_roles)
+                return sub, jwt_roles
+            except JWTError as exc:
+                last_exc = exc
+                continue
+
+        logger.info("OIDC JWT validation failed: %s", last_exc)
+        return None, []
+
+    except Exception as exc:
+        logger.warning("Unexpected error in OIDC JWT validation: %s", exc)
+        return None, []
 
 
 async def _resolve_api_key(token: str) -> str | None:

@@ -64,9 +64,12 @@ services:
       - POSTGRES_PASSWORD=${DB_PASSWORD:-devpassword}
 
   redis:
-    # Expose Redis to host for development inspection (redis-cli, RedisInsight)
-    ports:
-      - "6379:6379"
+    # RT-NEW-002 fix: Redis auth cache (api_key:{hash}→client_id, roles:{client_id}) is
+    # writable with only REDIS_PASSWORD. LAN exposure lets an attacker inject fake
+    # identity mappings and bypass DB auth entirely. Restrict to loopback.
+    # Use redis-cli via `podman exec mcp-redis redis-cli -a $REDIS_PASSWORD` for dev access.
+    # RT-NEW-002 fix: no host port binding — Redis is only reachable from proxy-redis-net.
+    # For dev inspection: podman exec mcp-redis redis-cli -a $REDIS_PASSWORD
 
   opa:
     # RT-005 fix: OPA has no authentication. Binding to 0.0.0.0:8181 lets any
