@@ -39,28 +39,43 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
 # More specific paths are checked first (longer prefix wins).
 # Role hierarchy for access comparison (higher index = more privilege):
 ROLE_LEVELS: dict[str, int] = {
+    # v3 roles
+    "user": 0,
+    "manager": 1,
+    "server_owner": 2,
+    "auditor": 3,
+    "platform_admin": 4,
+    # legacy aliases — kept for backward compat during migration
     "readonly": 0,
-    "agent": 1,
-    "auditor": 2,
-    "admin": 3,
+    "agent": 0,
+    "admin": 4,
 }
 
 # Endpoint → minimum required role (most permissive)
 PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     # (method_or_ANY, path_prefix, allowed_roles)
-    ("POST", "/api/v1/tools/{tool_id}/invoke", {"admin", "agent"}),
-    ("POST", "/api/v1/tools", {"admin"}),
-    ("PATCH", "/api/v1/tools", {"admin"}),
-    ("DELETE", "/api/v1/tools", {"admin"}),
-    ("GET", "/api/v1/tools", {"admin", "agent", "auditor", "readonly"}),
-    ("GET", "/api/v1/policy/rules", {"admin", "auditor"}),
-    ("POST", "/api/v1/policy/evaluate", {"admin"}),
-    ("GET", "/api/v1/compliance", {"admin", "auditor"}),
-    ("POST", "/api/v1/compliance", {"admin"}),
-    ("GET", "/api/v1/anomaly", {"admin", "auditor"}),
-    ("PATCH", "/api/v1/anomaly", {"admin"}),
-    ("GET", "/api/v1/audit", {"admin", "auditor", "agent"}),
+    ("POST", "/api/v1/tools/{tool_id}/invoke", {"admin", "platform_admin", "agent", "user"}),
+    ("POST", "/api/v1/tools", {"admin", "platform_admin"}),
+    ("PATCH", "/api/v1/tools", {"admin", "platform_admin"}),
+    ("DELETE", "/api/v1/tools", {"admin", "platform_admin"}),
+    ("GET", "/api/v1/tools", {"admin", "platform_admin", "agent", "user", "auditor", "readonly", "manager", "server_owner"}),
+    ("GET", "/api/v1/policy/rules", {"admin", "platform_admin", "auditor"}),
+    ("POST", "/api/v1/policy/evaluate", {"admin", "platform_admin"}),
+    ("GET", "/api/v1/compliance", {"admin", "platform_admin", "auditor"}),
+    ("POST", "/api/v1/compliance", {"admin", "platform_admin"}),
+    ("GET", "/api/v1/anomaly", {"admin", "platform_admin", "auditor"}),
+    ("PATCH", "/api/v1/anomaly", {"admin", "platform_admin"}),
+    ("GET", "/api/v1/audit", {"admin", "platform_admin", "auditor", "agent", "user"}),
     ("POST", "/api/v1/integrations/jira/webhook", {"__webhook__"}),
+    # Admin credential UI — platform_admin only
+    ("GET",    "/admin/credentials", {"admin", "platform_admin"}),
+    ("PUT",    "/admin/credentials", {"admin", "platform_admin"}),
+    ("DELETE", "/admin/credentials", {"admin", "platform_admin"}),
+    # Server registry — platform_admin manages, all authenticated can list approved
+    ("ANY", "/api/v1/admin/servers", {"admin", "platform_admin"}),
+    ("GET", "/api/v1/servers", {"admin", "platform_admin", "server_owner", "manager", "user", "agent", "auditor", "readonly"}),
+    # /mcp — all authenticated roles (AuthMiddleware enforces identity; RBAC enforces role)
+    ("ANY", "/mcp", {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor", "readonly"}),
 ]
 
 
@@ -69,9 +84,17 @@ def _resolve_allowed_roles(method: str, path: str) -> set[str] | None:
     for rule_method, prefix, roles in PATH_ROLE_MAP:
         if rule_method not in ("ANY", method):
             continue
-        # Normalize path for matching (strip UUIDs)
-        if path.startswith(prefix.split("{")[0].rstrip("/")):
-            return roles
+        if "{" in prefix:
+            # Parameterized rule: check prefix AND static suffix after the param.
+            # e.g. /api/v1/tools/{tool_id}/invoke → prefix=/api/v1/tools/, suffix=/invoke
+            norm = prefix.split("{")[0].rstrip("/")
+            after_param = prefix.split("}", 1)[-1] if "}" in prefix else ""
+            if path.startswith(norm + "/") and path.endswith(after_param):
+                return roles
+        else:
+            norm = prefix.rstrip("/")
+            if path == norm or path.startswith(norm + "/"):
+                return roles
     return None
 
 

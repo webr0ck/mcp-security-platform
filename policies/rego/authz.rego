@@ -41,7 +41,8 @@ allow if {
 # so an admin cannot reach a tool that is outside their OPA inventory.
 allow if {
     input.is_testing == true
-    "admin" in input.client_roles
+    some role in input.client_roles
+    role in {"admin", "platform_admin"}
     tool_is_active
     admin_has_test_permission
     risk_level_within_threshold
@@ -98,19 +99,22 @@ tool_is_active if {
 }
 
 client_has_invoke_permission if {
-    "agent" in input.client_roles
+    some role in input.client_roles
+    role in {"agent", "user"}
     tool_allowed_for_client(input.client_id, input.tool_name)
 }
 
 client_has_invoke_permission if {
-    "agent" in input.client_roles
+    some role in input.client_roles
+    role in {"agent", "user"}
     some tag in data.mcp.grants[input.client_id].allowed_tags
     tag in data.mcp.tools[input.tool_name].tags
 }
 
-# Admins with explicit tool grants may invoke directly (not just in testing mode).
+# Admins (admin/platform_admin) with explicit tool grants may invoke directly.
 client_has_invoke_permission if {
-    "admin" in input.client_roles
+    some role in input.client_roles
+    role in {"admin", "platform_admin"}
     tool_allowed_for_client(input.client_id, input.tool_name)
 }
 
