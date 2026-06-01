@@ -73,8 +73,8 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = ("/auth/callback/", "/.well-known/")
 def _is_public(path: str) -> bool:
     return path in PUBLIC_PATHS or path.startswith(_PUBLIC_PATH_PREFIXES)
 
-# Redis key TTL for role cache (5 minutes — short enough to pick up revocations quickly)
-_ROLE_CACHE_TTL_SECONDS = 300
+# Redis key TTL for role cache (60s — matches v3 spec ≤60s revocation SLA)
+_ROLE_CACHE_TTL_SECONDS = 60
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
