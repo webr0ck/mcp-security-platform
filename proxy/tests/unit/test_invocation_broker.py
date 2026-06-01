@@ -93,3 +93,87 @@ async def test_invoke_tool_injects_credential_header():
     assert captured_headers["Authorization"] == "Bearer injected-token"
     mock_broker.resolve.assert_awaited_once()
     mock_credential.zero.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_invoke_tool_fails_closed_when_broker_none_and_injection_required():
+    """
+    broker_instance is None + tool has service_name + credential_approach
+    → CredentialInjectionError must be raised (not silently skip injection).
+    """
+    stubs = _make_sys_stubs()
+
+    with patch.dict(sys.modules, stubs):
+        from app.services import invocation as _inv_mod
+        invoke_tool = _inv_mod.invoke_tool
+
+    tool_record = {
+        "tool_id": "t2",
+        "name": "grafana-query",
+        "status": "active",
+        "upstream_url": "http://grafana:3000/mcp",
+        "service_name": "grafana",
+        "credential_approach": "B",
+        "inject_header": "Authorization",
+        "inject_prefix": "Bearer ",
+    }
+
+    from app.credential_broker.dispatcher import CredentialInjectionError
+
+    with patch.dict(sys.modules, stubs), \
+         patch.object(_inv_mod, "broker_instance", None):
+        with pytest.raises(CredentialInjectionError, match="Credential broker not initialized"):
+            await invoke_tool(
+                tool_record=tool_record,
+                json_rpc_request={"jsonrpc": "2.0", "method": "tools/call", "id": 2, "params": {}},
+                client_id="alice@corp",
+                client_roles=["operator"],
+                is_testing=False,
+                request_id="req-2",
+            )
+
+
+@pytest.mark.unit
+async def test_invoke_tool_passes_when_broker_none_and_no_injection_required():
+    """
+    broker_instance is None + tool has NO service_name (injection not required)
+    → must NOT raise; call proceeds normally.
+    """
+    stubs = _make_sys_stubs()
+
+    with patch.dict(sys.modules, stubs):
+        from app.services import invocation as _inv_mod
+        invoke_tool = _inv_mod.invoke_tool
+
+    tool_record_no_injection = {
+        "tool_id": "t3",
+        "name": "no-cred-tool",
+        "status": "active",
+        "upstream_url": "http://some-server:8080/mcp",
+        # No service_name, no credential_approach → no injection needed
+    }
+
+    mock_response = MagicMock()
+    mock_response.content = b'{"jsonrpc": "2.0", "result": {}, "id": 3}'
+    mock_response.headers = {"content-type": "application/json"}
+
+    with patch.dict(sys.modules, stubs), \
+         patch.object(_inv_mod, "broker_instance", None), \
+         patch("app.services.invocation.httpx.AsyncClient") as mock_cls:
+        mock_http = AsyncMock()
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_http
+
+        result = await invoke_tool(
+            tool_record=tool_record_no_injection,
+            json_rpc_request={"jsonrpc": "2.0", "method": "tools/call", "id": 3, "params": {}},
+            client_id="alice@corp",
+            client_roles=["operator"],
+            is_testing=False,
+            request_id="req-3",
+        )
+
+    # Result must be a JSON-RPC response (not a crash)
+    assert result.get("jsonrpc") == "2.0"
