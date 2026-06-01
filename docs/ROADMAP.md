@@ -72,6 +72,67 @@ OIDC (replace 501 stubs, wire `oidc_role_mappings`) · learned/statistical anoma
 
 ---
 
+## Phase 4 — SELF-SERVICE MCP (after P3)
+
+**Goal:** expose platform management capabilities *as an MCP server* so agents and automated pipelines can discover, enable, and configure MCP servers programmatically — the platform eating its own dogfood.
+
+### Design principles
+- **JSON only, no bloat.** Every response is a tight JSON object. No HTML, no XML, no extra wrapper envelopes. Schema-minimal: only fields a consumer will actually use.
+- **One MCP server, one responsibility.** The self-service MCP is a single FastMCP server (`self-service-mcp`) running alongside the proxy. It talks to the proxy DB and RBAC layer directly (same container network). It does NOT re-implement auth — the proxy's auth middleware sits in front of it like any other upstream.
+
+### Tools (minimum viable set)
+
+| Tool | Description | Auth required |
+|---|---|---|
+| `list_available_mcps` | List all MCP servers visible to the caller's account. Returns `[{name, description, status, enabled_for_account}]`. Filters by RBAC — agents only see MCPs they are entitled to. | agent / auditor |
+| `enable_mcp` | Enable an MCP server for the caller's account (or a named profile). Idempotent. Emits `MCP_ENABLED` audit event. | agent (self) / admin (others) |
+| `disable_mcp` | Disable an MCP server for the caller's account (or profile). Emits `MCP_DISABLED` audit event. | agent (self) / admin (others) |
+| `list_functions` | List all tools exposed by a specific MCP server visible to the caller. Returns `[{function_name, description, enabled}]`. | agent |
+| `enable_function` | Enable a specific function on an MCP server for a profile. Profile defaults to the caller's identity. Emits audit event. | agent (self-profile) / admin |
+| `disable_function` | Disable a specific function on an MCP server for a profile. Emits audit event. | agent (self-profile) / admin |
+| `get_profile` | Get the complete permission profile for an account: which MCPs enabled, which functions active per MCP. | agent (self) / admin / auditor |
+
+### Profile model
+
+A **profile** is a named permission set (maps 1:1 to a KC role or user sub). Profiles answer: "which MCP servers can this identity call, and which functions on each?"
+
+```json
+{
+  "profile_id": "alice@lab.local",
+  "mcps": [
+    {
+      "name": "search-kb",
+      "enabled": true,
+      "functions": ["search", "get_document", "list_categories"]
+    },
+    {
+      "name": "notes-store",
+      "enabled": true,
+      "functions": ["create_note", "list_notes"]
+    },
+    {
+      "name": "grafana-query",
+      "enabled": false,
+      "functions": []
+    }
+  ]
+}
+```
+
+### Implementation sketch
+
+- **Backend storage:** new `mcp_profiles` table: `(profile_id, mcp_name, enabled, allowed_functions jsonb, updated_at)`. Seeded with defaults from tool_registry.
+- **MCP server:** `lab/mcp-servers/self-service/server.py` using FastMCP. Talks to DB directly (read own profile) and via proxy admin API (admin operations).
+- **OPA integration:** proxy checks `mcp_profiles` at tool-call time: if `enabled=false` for the caller's profile → deny even if the tool is globally active.
+- **Audit trail:** every enable/disable emits to `audit_events` — immutable, same pipeline as all other events.
+
+### Non-goals for P4
+- No UI. The self-service MCP IS the interface; a human-facing UI is a Phase 5+ concern.
+- No cross-tenant profile sharing. Each profile is scoped to a single identity.
+- No bulk import. Changes are per-MCP, per-function, per-profile.
+
+---
+
 ## Challenges & Risks
 
 1. **The doc/reality gap is structural, not a one-off.** The "canonical" doc drifted because nothing enforces doc↔code consistency. Mitigation: Phase 1.5 + the DEV-TEST-PROCESS doc-consistency gate; treat an unverifiable claim as a build defect.
