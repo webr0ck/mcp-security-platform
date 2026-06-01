@@ -21,6 +21,7 @@ from app.routers import anomaly, audit, auth, compliance, health, integrations, 
 from app.routers import oidc_browser, admin_credentials, portal, server_registry, catalog
 from app.core.config import settings
 from app.core.database import check_database_health
+from app.core.hardening import apply_process_hardening
 from app.core.redis_client import redis_pool
 from app.credential_broker.factory import build_broker
 
@@ -48,6 +49,10 @@ async def lifespan(app: FastAPI):
       2. Drain Redis connection pool
     """
     logger.info("MCP Security Proxy starting up", extra={"version": settings.PLATFORM_VERSION})
+
+    # Step 0: Process hardening (mlock + no-core-dump + log-level enforcement)
+    apply_process_hardening(settings.ENVIRONMENT)
+    logger.info("Process hardening applied")
 
     # Step 1: Initialize Redis pool (broker needs a live client immediately after)
     await redis_pool.initialize()

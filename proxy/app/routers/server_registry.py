@@ -26,6 +26,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
+from app.services.ssrf import SSRFError, validate_server_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -172,6 +173,21 @@ async def delete_server(server_id: str, request: Request):
 async def approve_server(server_id: str, request: Request):
     _require_platform_admin(request)
     approver = getattr(request.state, "client_id", "unknown")
+
+    # D1 SSRF allowlist: validate the upstream URL before approval
+    async with AsyncSessionLocal() as db:
+        url_row = await db.execute(
+            text("SELECT upstream_url FROM server_registry WHERE server_id = :id AND deleted_at IS NULL"),
+            {"id": server_id},
+        )
+        url_record = url_row.fetchone()
+    if url_record is None:
+        raise HTTPException(status_code=404, detail="Server not found")
+    try:
+        validate_server_url(url_record[0])
+    except SSRFError as exc:
+        raise HTTPException(status_code=422, detail=f"SSRF validation failed: {exc}") from exc
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             text(
