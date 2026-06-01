@@ -98,15 +98,31 @@ class SessionSUKCustodian(KeyCustodian):
             raise CustodySessionExpiredError("Session secret has been zeroed — session expired")
         return self._session_secret
 
+    @staticmethod
+    def _encode_info_component(s: str) -> bytes:
+        """Length-prefix encode a string component for HKDF info construction.
+
+        Using a bare delimiter (e.g. '|') allows separator-collision attacks:
+        principal_id='a|b', server_id='c'  → b'a|b|c'
+        principal_id='a',   server_id='b|c' → b'a|b|c'
+        A 4-byte big-endian length prefix makes each component unambiguous.
+        """
+        b = s.encode("utf-8")
+        return len(b).to_bytes(4, "big") + b
+
     def _derive_suk(self, hkdf_salt: bytes, principal_id: str, server_id: str) -> bytes:
         from cryptography.hazmat.primitives.kdf.hkdf import HKDF
         from cryptography.hazmat.primitives import hashes
         session_secret = self._require_live_session()
+        info = (
+            self._encode_info_component(principal_id)
+            + self._encode_info_component(server_id)
+        )
         return HKDF(
             algorithm=hashes.SHA256(),
             length=32,
             salt=hkdf_salt,
-            info=f"{principal_id}|{server_id}".encode(),
+            info=info,
         ).derive(bytes(session_secret))
 
     async def wrap(self, principal_id: str, server_id: str, plaintext: bytes) -> CustodyRef:

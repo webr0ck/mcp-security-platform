@@ -362,6 +362,30 @@ class Settings(BaseSettings):
                 "or set to a known placeholder value: "
                 + ", ".join(bad)
             )
+
+        # Enforce minimum 32-byte length for all HMAC / signing keys.
+        # A key shorter than 32 bytes provides near-zero security for HMAC-SHA256.
+        _hmac_key_fields = (
+            "PROXY_SECRET_KEY",
+            "API_KEY_HMAC_KEY",
+            "AUDIT_LOG_HMAC_KEY",
+            "SBOM_SIGNING_KEY",
+            "WEBHOOK_SIGNING_KEY",
+        )
+        short_keys = [
+            name
+            for name in _hmac_key_fields
+            if len(str(getattr(self, name, "")).encode("utf-8")) < 32
+        ]
+        if short_keys:
+            raise ValueError(
+                "Production startup blocked: the following HMAC/signing keys are "
+                "shorter than 32 bytes: "
+                + ", ".join(short_keys)
+                + ". Generate a suitable key with: "
+                "python3 -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+
         return self
 
     @model_validator(mode="after")
