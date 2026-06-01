@@ -11,7 +11,7 @@ from app.credential_broker.broker import CredentialBroker
 
 def _broker(kms):
     return CredentialBroker(
-        session=MagicMock(), kms=kms, db=MagicMock(),
+        session=MagicMock(), kms=kms, db_factory=MagicMock(),
         approach_b_adapters={}, approach_a_adapters={},
     )
 
