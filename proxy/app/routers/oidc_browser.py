@@ -97,7 +97,7 @@ def _pkce_pair() -> tuple[str, str]:
 
 def _issue_session_jwt(subject: str, client_id: str, roles: list[str], jti: str) -> str:
     """Issue an internal HS256 session JWT (never contains raw KC tokens)."""
-    import jose.jwt as jose_jwt  # python-jose
+    import jwt as jose_jwt  # PyJWT
 
     now = int(time.time())
     payload = {
@@ -116,8 +116,8 @@ def _issue_session_jwt(subject: str, client_id: str, roles: list[str], jti: str)
 
 def _decode_session_jwt(token: str) -> dict[str, Any] | None:
     """Decode and verify internal session JWT. Returns None on failure."""
-    import jose.jwt as jose_jwt
-    from jose import JWTError
+    import jwt as jose_jwt
+    from jwt.exceptions import InvalidTokenError as JWTError
 
     try:
         return jose_jwt.decode(
@@ -274,21 +274,45 @@ async def oidc_callback(
     expires_in = token_data.get("expires_in", settings.SESSION_JWT_EXPIRE_SECONDS)
 
     # Decode ID token claims — verify signature using JWKS (Bug 3 fix).
-    # Falls back to get_unverified_claims() only when JWKS is unavailable (fail-open).
+    # Falls back to unverified decode only when JWKS is unavailable (fail-open).
     try:
-        from jose import jwt as jose_jwt, JWTError
+        import jwt as jose_jwt
+        from jwt.algorithms import RSAAlgorithm
+        from jwt.exceptions import InvalidTokenError as JWTError
+        import json as _json
         from app.middleware.auth import _fetch_jwks
 
         try:
             jwks = await _fetch_jwks()
             if jwks:
-                id_token_claims = jose_jwt.decode(
-                    id_token or access_token,
-                    {"keys": jwks},
-                    algorithms=["RS256"],
-                    audience=settings.OIDC_AUDIENCE or None,
-                    options={"verify_aud": bool(settings.OIDC_AUDIENCE)},
-                )
+                # Pick the key matching the token's kid header
+                raw_token = id_token or access_token
+                header = jose_jwt.get_unverified_header(raw_token)
+                kid = header.get("kid")
+                matching_keys = [k for k in jwks if k.get("kid") == kid] if kid else jwks
+                if not matching_keys:
+                    matching_keys = jwks
+                verify_exc_last: Exception | None = None
+                id_token_claims: dict = {}
+                for jwk_key in matching_keys:
+                    try:
+                        pub = RSAAlgorithm.from_jwk(_json.dumps(jwk_key))
+                        decode_opts: dict = {}
+                        if not settings.OIDC_AUDIENCE:
+                            decode_opts["verify_aud"] = False
+                        id_token_claims = jose_jwt.decode(
+                            raw_token,
+                            pub,
+                            algorithms=["RS256"],
+                            audience=settings.OIDC_AUDIENCE or None,
+                            options=decode_opts,
+                        )
+                        break
+                    except JWTError as ve:
+                        verify_exc_last = ve
+                        continue
+                if not id_token_claims:
+                    raise ValueError(verify_exc_last or "No matching JWKS key")
             else:
                 raise ValueError("JWKS unavailable — no keys returned")
         except Exception as verify_exc:
@@ -297,7 +321,13 @@ async def oidc_callback(
                 "unverified claims (fail-open — JWKS may be temporarily unreachable)",
                 verify_exc,
             )
-            id_token_claims = jose_jwt.get_unverified_claims(id_token or access_token)
+            # PyJWT equivalent of get_unverified_claims
+            raw_token = id_token or access_token
+            id_token_claims = jose_jwt.decode(
+                raw_token,
+                options={"verify_signature": False},
+                algorithms=["RS256", "HS256"],
+            )
     except Exception:
         id_token_claims = {}
 

@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.middleware.audit import AuditMiddleware
 from app.middleware.auth import AuthMiddleware
@@ -124,6 +125,16 @@ app = FastAPI(
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(AuditMiddleware)
+
+# PYSEC-2026-161 defence-in-depth: TrustedHostMiddleware prevents Host header
+# injection attacks. Registered last so it runs first (Starlette reverse order).
+# In production, set ALLOWED_HOSTS env var (comma-separated) to restrict to
+# known hostnames. Defaults to wildcard "*" which blocks only blatantly malformed
+# Host headers; narrowing to specific hostnames is strongly recommended.
+if settings.ENVIRONMENT == "production":
+    allowed_hosts_raw = getattr(settings, "ALLOWED_HOSTS", "*") or "*"
+    allowed_hosts = [h.strip() for h in allowed_hosts_raw.split(",") if h.strip()]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 if settings.ENVIRONMENT == "development":
     app.add_middleware(

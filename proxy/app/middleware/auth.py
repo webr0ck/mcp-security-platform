@@ -149,8 +149,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             session_token = request.cookies.get(settings.SESSION_COOKIE_NAME, "")
             if session_token:
                 try:
-                    import jose.jwt as jose_jwt
-                    from jose import JWTError
+                    import jwt as jose_jwt
+                    from jwt.exceptions import InvalidTokenError as JWTError
                     claims = jose_jwt.decode(
                         session_token,
                         settings.PROXY_SECRET_KEY,
@@ -179,8 +179,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 if token:
                     # 3a. Try internal session JWT (issued by /auth/oidc/callback)
                     try:
-                        import jose.jwt as jose_jwt
-                        from jose import JWTError
+                        import jwt as jose_jwt
+                        from jwt.exceptions import InvalidTokenError as JWTError
                         claims = jose_jwt.decode(
                             token,
                             settings.PROXY_SECRET_KEY,
@@ -359,14 +359,14 @@ async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
     Roles from the JWT are used as a fallback when the DB has no assignments.
     """
     try:
-        from jose import jwt as jose_jwt, jwk, JWTError
-        from jose.utils import base64url_decode
-        import json as _json
+        import jwt as jose_jwt
+        from jwt.algorithms import RSAAlgorithm
+        from jwt.exceptions import InvalidTokenError as JWTError
 
         keys = await _fetch_jwks()
         if not keys:
             logger.warning("No JWKS keys available — cannot validate OIDC JWT")
-            return None
+            return None, []
 
         # Decode header to pick the right key by kid
         header = jose_jwt.get_unverified_header(token)
@@ -375,30 +375,36 @@ async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
         if not matching:
             matching = keys  # fall back to trying all keys
 
+        # Enforce audience when OIDC_AUDIENCE is set.
+        # If unset in non-production, log a WARNING (production is
+        # blocked at startup by the config validator).
+        # OIDC_CLIENT_ID is the proxy's own client identity — it must NOT
+        # be used as an audience constraint because dynamic clients
+        # (e.g. Claude Code via RFC 7591) receive tokens with their own
+        # dynamically-generated client_id in the aud claim.
+        expected_aud = settings.OIDC_AUDIENCE.strip() or None
+        if not expected_aud:
+            logger.warning(
+                "OIDC_AUDIENCE is not set — audience validation is DISABLED. "
+                "Any valid JWT from the same Keycloak realm will authenticate. "
+                "Set OIDC_AUDIENCE to the expected audience to close this gap."
+            )
+
         last_exc: Exception | None = None
+        import json as _json
         for jwk_key in matching:
             try:
-                pub = jwk.construct(jwk_key)
-                # Enforce audience when OIDC_AUDIENCE is set.
-                # If unset in non-production, log a WARNING (production is
-                # blocked at startup by the config validator).
-                # OIDC_CLIENT_ID is the proxy's own client identity — it must NOT
-                # be used as an audience constraint because dynamic clients
-                # (e.g. Claude Code via RFC 7591) receive tokens with their own
-                # dynamically-generated client_id in the aud claim.
-                expected_aud = settings.OIDC_AUDIENCE.strip() or None
+                # PyJWT: construct public key from JWK dict
+                pub = RSAAlgorithm.from_jwk(_json.dumps(jwk_key))
+                decode_options: dict = {}
                 if not expected_aud:
-                    logger.warning(
-                        "OIDC_AUDIENCE is not set — audience validation is DISABLED. "
-                        "Any valid JWT from the same Keycloak realm will authenticate. "
-                        "Set OIDC_AUDIENCE to the expected audience to close this gap."
-                    )
+                    decode_options["verify_aud"] = False
                 claims = jose_jwt.decode(
                     token,
-                    pub.to_dict(),
+                    pub,
                     algorithms=["RS256"],
                     audience=expected_aud,
-                    options={"verify_aud": bool(expected_aud)},
+                    options=decode_options,
                 )
                 sub: str = claims.get("sub", "")
                 if not sub:

@@ -32,9 +32,14 @@ x-restart-policy: &restart-always
 # Shared security hardening applied to all non-gateway containers.
 # Gateway (Nginx) cannot be fully read-only because it writes PID files and temp files;
 # those services get tmpfs mounts instead of read_only: true.
+# read_only: true pairs with tmpfs mounts on /tmp (already present per service) so
+# containers have no writable layer outside declared tmpfs/volume mounts.
 x-security-hardening: &security-hardening
+  read_only: true
   security_opt:
     - no-new-privileges:true
+  cap_drop:
+    - ALL
 
 networks:
   # External-facing bridge — only gateway and grafana (for dashboard proxy) are here

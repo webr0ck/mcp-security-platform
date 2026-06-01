@@ -30,9 +30,13 @@ dependencies = [
     # SBOM generation
     "cyclonedx-python-lib>=7.0.0",
 
+    # Web framework — starlette pinned to fix PYSEC-2026-161 Host header auth bypass
+    "starlette>=1.0.1",
+
     # Security
     "cryptography>=43.0.0",
-    "python-jose[cryptography]>=3.3.0",  # JWT / OIDC
+    "PyJWT[crypto]>=2.8.0",              # JWT / OIDC — replaces python-jose (unmaintained, CVE: algorithm confusion, DoS, non-constant-time HMAC)
+    "idna>=3.15",                         # CVE-2026-45409 ReDoS (transitive via httpx/anyio — pinned explicitly)
 
     # Configuration
     "pyyaml>=6.0",
