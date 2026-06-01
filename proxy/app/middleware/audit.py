@@ -12,6 +12,9 @@ which surfaces the audit failure visibly to the caller rather than silently succ
 
 The actual per-invocation audit event is emitted by services/invocation.py.
 This middleware handles the global error boundary for audit emission failures.
+
+Also provides IPRateLimitMiddleware: a global per-IP request limiter (default 100 req/min)
+that runs before auth, covering unauthenticated flooding of any endpoint.
 """
 from __future__ import annotations
 
@@ -96,3 +99,64 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
         response.headers["X-Request-ID"] = request_id
         return response
+
+
+# ---------------------------------------------------------------------------
+# Global per-IP rate limiter
+# ---------------------------------------------------------------------------
+
+# Endpoints that are exempt from IP-level rate limiting (health probes, metrics).
+_IP_RL_EXEMPT_PATHS = frozenset({"/health", "/health/ready", "/health/live", "/metrics"})
+
+# Default: 100 requests per minute per IP, across all endpoints.
+_IP_RL_LIMIT = 100
+_IP_RL_WINDOW = 60
+
+
+class IPRateLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Global per-source-IP rate limiter. Runs before auth and RBAC so it covers
+    unauthenticated flooding of any endpoint, including discovery endpoints,
+    /oauth/register, and the MCP endpoint.
+
+    Keyed by the real client IP (request.client.host). In production behind a
+    reverse proxy, ensure the proxy sets X-Forwarded-For and that Starlette's
+    ProxyHeadersMiddleware is added so request.client.host reflects the real IP.
+
+    Health/metrics paths are exempted to avoid interfering with load balancer probes.
+    Fails open if Redis is unavailable.
+    """
+
+    def __init__(self, app: ASGIApp, limit: int = _IP_RL_LIMIT, window: int = _IP_RL_WINDOW) -> None:
+        super().__init__(app)
+        self.limit = limit
+        self.window = window
+
+    async def dispatch(self, request: Request, call_next: object) -> Response:
+        if request.url.path in _IP_RL_EXEMPT_PATHS:
+            return await call_next(request)  # type: ignore[misc]
+
+        client_ip = request.client.host if request.client else "unknown"
+        try:
+            from app.core.redis_client import redis_pool
+            rl_client = redis_pool.rate_limit_client
+            key = f"rl:ip:{client_ip}"
+            pipe = rl_client.pipeline()
+            pipe.incr(key)
+            pipe.expire(key, self.window)
+            results = await pipe.execute()
+            count = results[0]
+        except Exception:
+            count = 0  # fail-open
+
+        if count > self.limit:
+            logger.warning(
+                "IP rate limit exceeded",
+                extra={"client_ip": client_ip, "count": count, "limit": self.limit},
+            )
+            return JSONResponse(
+                status_code=429,
+                content={"error": {"code": "RATE_LIMITED", "message": "Too many requests from this IP"}},
+            )
+
+        return await call_next(request)  # type: ignore[misc]

@@ -62,6 +62,23 @@ async def _check_rate_limit(client_id: str, limit: int = 300, window_seconds: in
     except Exception:
         return True  # fail-open
 
+
+async def _check_rate_limit_by_key(key: str, limit: int, window_seconds: int = 60) -> bool:
+    """Generic rate limiter keyed by an arbitrary string. Returns True if allowed."""
+    from app.core.redis_client import redis_pool
+    try:
+        rl_client = redis_pool.rate_limit_client
+    except RuntimeError:
+        return True  # fail-open if Redis unavailable
+    try:
+        pipe = rl_client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window_seconds)
+        results = await pipe.execute()
+        return results[0] <= limit
+    except Exception:
+        return True  # fail-open
+
 SERVER_INFO = {
     "name": "mcp-security-platform",
     "version": "1.0.0",
@@ -460,15 +477,17 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
             status_code=400,
         )
 
-    # Per-client rate limiting (applied before processing regardless of message shape)
+    # Per-client rate limiting (applied before processing regardless of message shape).
+    # client_id is always set post-auth (AuthMiddleware); the IP fallback handles the
+    # theoretical case where client_id is None so no request can slip through unlimited.
     client_id = getattr(request.state, "client_id", None)
-    if client_id:
-        allowed = await _check_rate_limit(client_id)
-        if not allowed:
-            return JSONResponse(
-                {"error": {"code": "RATE_LIMITED", "message": "Too many requests"}},
-                status_code=429,
-            )
+    rl_key_id = client_id or (request.client.host if request.client else "unknown")
+    allowed = await _check_rate_limit(rl_key_id)
+    if not allowed:
+        return JSONResponse(
+            {"error": {"code": "RATE_LIMITED", "message": "Too many requests"}},
+            status_code=429,
+        )
 
     # Single message
     if isinstance(body, dict):

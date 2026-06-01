@@ -274,6 +274,13 @@ services:
     networks:
       - internal-net      # peer/lab compatibility
       - proxy-opa-net      # F-001: pairwise channel the proxy dials
+    # SECURITY: OPA must NEVER be exposed to the host network in production.
+    # In production: remove port mapping entirely; proxy reaches OPA via proxy-opa-net only.
+    # Lab only: expose (not ports:) restricts OPA to container-internal networking only —
+    # 127.0.0.1:8181 is NOT accessible from the Mac host with this configuration.
+    # If you need host-side debugging in the lab, temporarily add:
+    #   ports: ["127.0.0.1:8181:8181"]
+    # and remove it immediately after. Never use "0.0.0.0:8181:8181" in any environment.
     expose:
       - "8181"
     # OPA static binary runs as nobody (UID 65534) by default

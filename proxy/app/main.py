@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.middleware.audit import AuditMiddleware
+from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
 from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
@@ -116,15 +116,19 @@ app = FastAPI(
 # So the LAST added runs FIRST on requests.
 #
 # Execution order on request:
-#   1. AuditMiddleware  (request_id injection, INV-001 boundary) — registered first
-#   2. AuthMiddleware   (identity resolution)
-#   3. RBACMiddleware   (role enforcement)
+#   1. IPRateLimitMiddleware (global per-IP flood guard, pre-auth) — registered first
+#   2. AuditMiddleware       (request_id injection, INV-001 boundary)
+#   3. AuthMiddleware        (identity resolution)
+#   4. RBACMiddleware        (role enforcement)
 #
 # Registration order (reverse of above):
 # ============================================================================
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(AuditMiddleware)
+# IPRateLimitMiddleware runs first (outermost) — registered last so it fires
+# before auth on every request, catching unauthenticated floods.
+app.add_middleware(IPRateLimitMiddleware)
 
 # PYSEC-2026-161 defence-in-depth: TrustedHostMiddleware prevents Host header
 # injection attacks. Registered last so it runs first (Starlette reverse order).
