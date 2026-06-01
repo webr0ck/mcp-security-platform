@@ -487,6 +487,20 @@ async def update_tool(
     new_status = body.get("status")
     new_metadata = body.get("metadata")
 
+    # "internal" is NOT a DB-settable status — it is reserved for first-party platform
+    # tools and exists only as an OPA policy bypass signal.  Allowing any operator to
+    # PATCH a tool's status to "internal" via the API would bypass all OPA gates
+    # (quarantine check, risk threshold, and grant checks) for every authenticated role.
+    _PATCHABLE_STATUSES = {"active", "quarantined", "deprecated"}
+    if new_status and new_status not in _PATCHABLE_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": f"status must be one of {sorted(_PATCHABLE_STATUSES)}",
+            },
+        )
+
     # Fetch current tool
     try:
         result = await db.execute(

@@ -76,6 +76,13 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     ("GET", "/api/v1/servers", {"admin", "platform_admin", "server_owner", "manager", "user", "agent", "auditor", "readonly"}),
     # /mcp — all authenticated roles (AuthMiddleware enforces identity; RBAC enforces role)
     ("ANY", "/mcp", {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor", "readonly"}),
+    # Portal — admin-only fragments/actions listed first (longer-prefix wins)
+    ("POST",  "/portal/actions/save-grants", {"admin", "platform_admin"}),  # OPA grant management
+    ("GET",   "/portal/fragments/admin",     {"admin", "platform_admin"}),  # admin tab and sub-tabs
+    ("GET",   "/portal",                     {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor"}),  # general portal access
+    ("ANY",   "/portal",                     {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor"}),  # catch-all for portal
+    # Catalog endpoints
+    ("GET",   "/api/v1/catalog",             {"admin", "platform_admin", "user", "agent", "manager", "server_owner", "auditor"}),
 ]
 
 
