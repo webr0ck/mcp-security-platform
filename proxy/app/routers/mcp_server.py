@@ -194,12 +194,13 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                text("SELECT * FROM tool_registry WHERE name = :name AND status != 'deleted' LIMIT 1"),
+                text("SELECT * FROM tool_registry WHERE name = :name AND status NOT IN ('deprecated', 'quarantined') AND deleted_at IS NULL LIMIT 1"),
                 {"name": tool_name},
             )
             row = result.mappings().fetchone()
     except Exception as exc:
-        return {"type": "text", "text": f"DB error looking up tool: {exc}"}
+        logger.error("DB error looking up tool %s: %s", tool_name, exc)
+        return {"type": "text", "text": "Tool lookup failed (internal error). Check server logs."}
 
     if row is None:
         return {"type": "text", "text": f"Tool '{tool_name}' not found in registry"}
@@ -260,7 +261,7 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
         return {"type": "text", "text": json.dumps(result, indent=2)}
     except Exception as exc:
         logger.exception("invoke_tool pipeline error for %s", tool_name)
-        return {"type": "text", "text": f"Invocation error: {exc}"}
+        return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}
 
 
 _TOOL_HANDLERS = {

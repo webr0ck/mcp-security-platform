@@ -153,6 +153,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     )
                     session_client_id = claims.get("client_id") or claims.get("sub")
                     if session_client_id:
+                        jti = claims.get("jti")
+                        if jti and await _is_session_jti_revoked(jti):
+                            return JSONResponse({"detail": "Session revoked"}, status_code=401)
                         client_id = session_client_id
                         auth_method = "oidc_session"
                         request.state._jwt_roles = claims.get("roles", [])
@@ -180,6 +183,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         )
                         session_client_id = claims.get("client_id") or claims.get("sub")
                         if session_client_id:
+                            jti = claims.get("jti")
+                            if jti and await _is_session_jti_revoked(jti):
+                                return JSONResponse({"detail": "Session revoked"}, status_code=401)
                             client_id = session_client_id
                             auth_method = "oidc_session"
                             request.state._jwt_roles = claims.get("roles", [])
@@ -254,6 +260,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
         )
 
         return await call_next(request)  # type: ignore[misc]
+
+
+async def _is_session_jti_revoked(jti: str) -> bool:
+    """
+    Return True if the given session JWT JTI has been revoked (revoked_at IS NOT NULL).
+    Fail-open: if the DB is unavailable, log a warning and return False to avoid
+    breaking auth on transient DB issues.
+    """
+    try:
+        from app.core.database import AsyncSessionLocal
+        from sqlalchemy import text as sa_text
+        async with AsyncSessionLocal() as db:
+            row = await db.execute(
+                sa_text(
+                    "SELECT revoked_at FROM oidc_sessions WHERE session_jwt_jti = :jti LIMIT 1"
+                ),
+                {"jti": jti},
+            )
+            record = row.fetchone()
+            return bool(record and record[0] is not None)
+    except Exception as exc:
+        logger.warning("JTI revocation check failed (fail-open): %s", exc)
+        return False
 
 
 _jwks_cache: dict[str, Any] = {}   # {"keys": [...], "fetched_at": float, "jwks_uri": str}
