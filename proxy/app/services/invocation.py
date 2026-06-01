@@ -140,6 +140,23 @@ async def invoke_tool(
         raise OPADenyError(opa_result["reasons"])
 
     # -------------------------------------------------------------------------
+    # Step 3b: SSRF guard — re-validate upstream URL at call time (C3)
+    # Registration-time check alone is insufficient: upstream_url may have been
+    # changed via PATCH after approval. Call-time validation is an independent
+    # defense-in-depth layer.
+    # -------------------------------------------------------------------------
+    from app.core.config import settings
+    from app.services.ssrf import SSRFError, validate_server_url as _validate_server_url
+
+    try:
+        _validate_server_url(
+            upstream_url,
+            allow_http_localhost=(settings.ENVIRONMENT == "development"),
+        )
+    except SSRFError as exc:
+        raise ValueError(f"SSRF blocked upstream URL at invoke time: {exc}") from exc
+
+    # -------------------------------------------------------------------------
     # Step 4: Forward to upstream MCP server
     # -------------------------------------------------------------------------
     from app.credential_broker.dispatcher import CredentialInjectionError

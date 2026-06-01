@@ -3,7 +3,7 @@ SSRF allowlist for MCP server upstream URLs.
 
 Applied at two points:
   1. server_registry approval: POST /api/v1/admin/servers/{id}/approve calls validate_server_url()
-  2. tool invocation: invocation.py calls validate_server_url() before forwarding
+  2. tool invocation: invocation.py calls validate_server_url() before forwarding (C3 fix)
 
 Blocks:
 - Private/loopback IPv4: 10.x, 172.16-31.x, 192.168.x, 127.x

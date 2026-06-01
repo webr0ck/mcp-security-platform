@@ -137,6 +137,13 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
     updates = {k: v for k, v in updates.items() if k in _PATCH_ALLOWED}
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+    # SSRF guard: validate upstream_url changes the same way approve_server does (C4 fix).
+    if "upstream_url" in updates:
+        try:
+            validate_server_url(updates["upstream_url"])
+        except SSRFError as exc:
+            raise HTTPException(status_code=422, detail=f"upstream_url blocked by SSRF policy: {exc}") from exc
+
     set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
     async with AsyncSessionLocal() as db:
         result = await db.execute(
