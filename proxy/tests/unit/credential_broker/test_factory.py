@@ -39,6 +39,7 @@ def test_build_broker_returns_broker_for_valid_token():
     assert isinstance(result, CredentialBroker)
     # Adapter dict must be empty — GRAFANA_ADMIN_TOKEN was empty
     assert result._approach_b_adapters == {}
+    assert result._db_factory is mock_factory
 
 
 @pytest.mark.unit

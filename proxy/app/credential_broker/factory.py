@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 # can replace the name in this module's namespace during tests.
 # create_async_engine is lazy (no real connection until first use), so this is
 # safe to import at module level without an active database.
-from app.core.database import AsyncSessionLocal  # noqa: E402  (after TYPE_CHECKING guard)
+from app.core.database import AsyncSessionLocal
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -65,12 +65,10 @@ def build_broker(settings: "Settings", redis_client):
             admin_token=settings.GRAFANA_ADMIN_TOKEN,
         )
 
-    # Reference the module-level name so patch() replacements take effect in tests.
-    import app.credential_broker.factory as _self
     broker = CredentialBroker(
         session=session_store,
         kms=kms,
-        db_factory=_self.AsyncSessionLocal,
+        db_factory=AsyncSessionLocal,
         approach_b_adapters=approach_b_adapters,
         approach_a_adapters=approach_a_adapters,
     )

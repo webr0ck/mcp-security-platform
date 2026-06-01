@@ -44,19 +44,16 @@ class VaultKMSClient:
 
 
 async def load_master_secret_standalone() -> bytes:
-    """Standalone helper for callers that do not have a VaultKMSClient instance.
-
-    Fetches the broker master secret directly from Vault using app settings.
-    Uses raw httpx (same as VaultKMSClient) with the hex-encoded 'value' field.
+    """
+    Standalone helper for callers that don't hold a VaultKMSClient instance
+    (admin_credentials, approach_a). Delegates to VaultKMSClient so field name,
+    encoding, and TLS CA bundle handling are consistent with the broker path.
     """
     from app.core.config import get_settings
     settings = get_settings()
-    vault_addr = settings.VAULT_ADDR.rstrip("/")
-    vault_token = settings.VAULT_TOKEN
-    path = settings.BROKER_MASTER_SECRET_PATH  # e.g. "secret/data/mcp/broker-master"
-    url = f"{vault_addr}/v1/{path}"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(url, headers={"X-Vault-Token": vault_token})
-        resp.raise_for_status()
-    secret_hex: str = resp.json()["data"]["data"]["value"]
-    return bytes.fromhex(secret_hex)
+    client = VaultKMSClient(
+        addr=settings.VAULT_ADDR,
+        token=settings.VAULT_TOKEN,
+        ca_bundle=settings.VAULT_CA_BUNDLE or None,
+    )
+    return await client.get_master_secret(settings.BROKER_MASTER_SECRET_PATH)
