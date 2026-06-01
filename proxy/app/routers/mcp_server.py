@@ -205,6 +205,27 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
         return {"type": "text", "text": f"Tool '{tool_name}' not found in registry"}
 
     tool_record = dict(row)
+
+    # ROADMAP — discovery==invoke entitlement enforcement [C6]:
+    # tool_registry currently has no server_id FK column linking tools to
+    # server_registry rows. Once migration V020__tool_server_fk.sql adds
+    #   ALTER TABLE tool_registry ADD COLUMN server_id UUID REFERENCES server_registry(server_id);
+    # this handler should call check_entitlement() before inv_svc.invoke_tool():
+    #
+    #   from app.services.entitlement import check_entitlement
+    #   server_id = tool_record.get("server_id")
+    #   if server_id:
+    #       principal_type = getattr(request.state, "principal_type", "human")
+    #       principal_id   = getattr(request.state, "principal_id", client_id)
+    #       ent = await check_entitlement(principal_type, principal_id, str(server_id))
+    #       if not ent.entitled:
+    #           return {"type": "text",
+    #                   "text": f"Access denied: not entitled to server {server_id} ({ent.reason})"}
+    #
+    # Until that migration ships, a principal with the admin/platform_admin RBAC
+    # role can invoke any tool by name regardless of server-level grants, which
+    # violates the discovery==invoke invariant established in P6.
+
     client_id = getattr(request.state, "client_id", "unknown")
     client_roles = getattr(request.state, "client_roles", [])
     request_id = getattr(request.state, "request_id", str(uuid4()))
