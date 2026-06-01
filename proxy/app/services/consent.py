@@ -97,11 +97,20 @@ def verify_consent_token(
     expected_server_id: str,
     expected_new_mode: str,
     expected_owner_sub: str,
+    expected_old_mode: str | None = None,
+    expected_old_cred_ref: str | None = None,
+    expected_new_cred_ref: str | None = None,
 ) -> ConsentPayload:
     """
     Verify and decode a consent token.
     Raises ConsentTokenError subclass on any failure.
     Does NOT mark the token as consumed — call consume_consent_token() after.
+
+    The optional expected_old_mode, expected_old_cred_ref, and
+    expected_new_cred_ref parameters bind the token to a specific transition.
+    Without these checks a token issued for one mode/credential transition
+    could be replayed for a different transition on the same server.
+    Callers that do not pass these parameters retain existing behaviour.
     """
     try:
         payload_json, sig = token.rsplit(".", 1)
@@ -122,6 +131,12 @@ def verify_consent_token(
         raise ConsentTokenMismatchError("Token new_mode mismatch")
     if payload.get("owner_sub") != expected_owner_sub:
         raise ConsentTokenMismatchError("Token owner_sub mismatch")
+    if expected_old_mode is not None and payload.get("old_mode") != expected_old_mode:
+        raise ConsentTokenMismatchError("Token old_mode mismatch")
+    if expected_old_cred_ref is not None and payload.get("old_cred_ref") != expected_old_cred_ref:
+        raise ConsentTokenMismatchError("Token old_cred_ref mismatch")
+    if expected_new_cred_ref is not None and payload.get("new_cred_ref") != expected_new_cred_ref:
+        raise ConsentTokenMismatchError("Token new_cred_ref mismatch")
 
     # Build ConsentPayload from known fields only
     field_names = {f.name for f in dataclass_fields(ConsentPayload)}
