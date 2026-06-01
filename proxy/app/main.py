@@ -17,10 +17,12 @@ from fastapi.responses import JSONResponse
 from app.middleware.audit import AuditMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
-from app.routers import anomaly, audit, auth, compliance, health, integrations, oauth, policy, tools
+from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
+from app.routers import oidc_browser, admin_credentials, portal
 from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.redis_client import redis_pool
+from app.credential_broker.factory import build_broker
 
 logger = logging.getLogger(__name__)
 
@@ -36,28 +38,46 @@ async def lifespan(app: FastAPI):
     """
     Application startup and shutdown lifecycle.
 
-    Startup checks:
+    Startup:
       1. Initialize Redis connection pool
-      2. Verify database connectivity
-      3. Verify OPA sidecar reachability
+      2. Initialize credential broker (requires live Redis client)
+      3. Verify database connectivity
 
     Shutdown:
-      1. Drain Redis connection pool
+      1. Zero credential broker master secret (CB-008)
+      2. Drain Redis connection pool
     """
     logger.info("MCP Security Proxy starting up", extra={"version": settings.PLATFORM_VERSION})
 
-    # Initialize Redis pool
+    # Step 1: Initialize Redis pool (broker needs a live client immediately after)
     await redis_pool.initialize()
     logger.info("Redis pool initialized")
 
-    # Verify database on startup (warn but don't crash — health endpoint will report status)
+    # Step 2: Initialize credential broker
+    from app.services import invocation as inv_svc
+    broker = build_broker(settings, redis_pool.client)
+    inv_svc.broker_instance = broker
+    if broker is None:
+        logger.warning(
+            "Credential broker disabled (VAULT_TOKEN empty) — "
+            "tools with service_name + credential_approach set will fail-closed at call time"
+        )
+    else:
+        logger.info("Credential broker initialized")
+
+    # Step 3: Verify database on startup (warn but don't crash)
     db_ok = await check_database_health()
     if not db_ok:
         logger.warning("Database not reachable at startup — health endpoint will report degraded")
 
     yield
 
-    # Shutdown
+    # Shutdown — zero broker master secret before releasing Redis
+    if broker is not None:
+        broker._zero(broker._master_secret)
+        broker._master_secret = None
+        logger.info("Credential broker master secret zeroed")
+
     logger.info("MCP Security Proxy shutting down")
     await redis_pool.close()
     logger.info("Redis pool closed")
@@ -113,7 +133,12 @@ app.include_router(anomaly.router, prefix="/api/v1", tags=["Anomaly"])
 app.include_router(audit.router, prefix="/api/v1", tags=["Audit"])
 app.include_router(auth.router, prefix="/api/v1", tags=["Authentication"])
 app.include_router(integrations.router, prefix="/api/v1", tags=["Integrations"])
+app.include_router(mcp_server.router)
 app.include_router(oauth.router)
+app.include_router(oauth_metadata.router)
+app.include_router(oidc_browser.router)        # Keycloak browser login flow
+app.include_router(admin_credentials.router)   # Credential management UI
+app.include_router(portal.router)              # Multi-role portal UI
 
 
 # ============================================================================
