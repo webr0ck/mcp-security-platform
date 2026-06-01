@@ -127,11 +127,15 @@ class Settings(BaseSettings):
     STEP_CA_PORT: int = 9000
     STEP_CA_FINGERPRINT: str = ""
     STEP_CA_MAX_TLS_DURATION: str = "24h"
+    # v3 typed principal namespace: CA identity label used in agent:{ca_id}:{cn}
+    MTLS_CA_ID: str = "step-ca"
 
     # =========================================================================
     # OIDC / Keycloak (Optional)
     # =========================================================================
     OIDC_ENABLED: bool = False
+    # v3 typed principal namespace: issuer label used in human:{issuer_id}:{sub}
+    OIDC_ISSUER_ID: str = "keycloak"
     OIDC_ISSUER_URL: str = ""
     # Internal URL for proxy→IdP communication (JWKS, token endpoint).
     # Defaults to OIDC_ISSUER_URL if not set.

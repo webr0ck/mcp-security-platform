@@ -73,6 +73,23 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = ("/auth/callback/", "/.well-known/")
 def _is_public(path: str) -> bool:
     return path in PUBLIC_PATHS or path.startswith(_PUBLIC_PATH_PREFIXES)
 
+
+def _build_principal_id(auth_method: str, client_id: str) -> tuple[str, str]:
+    """
+    Return (principal_id, principal_type) in the v3 typed namespace.
+
+    human OIDC/session: ("human:{issuer_id}:{sub}", "human")
+    agent mTLS cert:    ("agent:{ca_id}:{cn}", "agent")
+    API key:            ("human:apikey:{client_id}", "human")
+    """
+    if auth_method == "mtls":
+        return f"agent:{settings.MTLS_CA_ID}:{client_id}", "agent"
+    if auth_method == "api_key":
+        return f"human:apikey:{client_id}", "human"
+    # oidc_session, oidc, or any other human auth method
+    return f"human:{settings.OIDC_ISSUER_ID}:{client_id}", "human"
+
+
 # Redis key TTL for role cache (60s — matches v3 spec ≤60s revocation SLA)
 _ROLE_CACHE_TTL_SECONDS = 60
 
@@ -96,6 +113,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.client_id = None
             request.state.auth_method = "none"
             request.state.client_roles = []
+            request.state.principal_id = None
+            request.state.principal_type = None
             return await call_next(request)  # type: ignore[misc]
 
         client_id: str | None = None
@@ -203,6 +222,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         request.state.client_id = client_id
         request.state.auth_method = auth_method
+        principal_id, principal_type = _build_principal_id(auth_method, client_id)
+        request.state.principal_id = principal_id
+        request.state.principal_type = principal_type
 
         # ----------------------------------------------------------------
         # Load roles: merge DB role_assignments with any roles in the JWT
