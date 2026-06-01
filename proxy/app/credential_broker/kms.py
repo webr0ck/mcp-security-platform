@@ -41,3 +41,22 @@ class VaultKMSClient:
             return base64.b64decode(encoded)
         except (KeyError, ValueError) as exc:
             raise KMSError(f"Unexpected Vault response structure: {exc}") from exc
+
+
+async def load_master_secret_standalone() -> bytes:
+    """Standalone helper for callers that do not have a VaultKMSClient instance.
+
+    Fetches the broker master secret directly from Vault using app settings.
+    Uses raw httpx (same as VaultKMSClient) with the hex-encoded 'value' field.
+    """
+    from app.core.config import get_settings
+    settings = get_settings()
+    vault_addr = settings.VAULT_ADDR.rstrip("/")
+    vault_token = settings.VAULT_TOKEN
+    path = settings.BROKER_MASTER_SECRET_PATH  # e.g. "secret/data/mcp/broker-master"
+    url = f"{vault_addr}/v1/{path}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(url, headers={"X-Vault-Token": vault_token})
+        resp.raise_for_status()
+    secret_hex: str = resp.json()["data"]["data"]["value"]
+    return bytes.fromhex(secret_hex)

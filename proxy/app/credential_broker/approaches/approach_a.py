@@ -99,10 +99,10 @@ async def decrypt_credential(
     """
     from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
-    from app.credential_broker.broker import _load_master_secret  # type: ignore[attr-defined]
+    from app.credential_broker.kms import load_master_secret_standalone
 
     try:
-        master = await _load_master_secret()
+        master = await load_master_secret_standalone()
     except Exception:
         return None
 

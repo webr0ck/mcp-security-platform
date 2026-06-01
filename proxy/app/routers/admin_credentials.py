@@ -161,10 +161,10 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
 
     # Encrypt with Approach A
     try:
-        from app.credential_broker.broker import _load_master_secret  # type: ignore[attr-defined]
+        from app.credential_broker.kms import load_master_secret_standalone
         from app.credential_broker.approaches.approach_a import encrypt
 
-        master = await _load_master_secret()
+        master = await load_master_secret_standalone()
         blob = encrypt(
             body.secret,
             user_sub,
@@ -188,7 +188,7 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
                         (user_sub, service, encrypted_blob, owner_type, tool_id, credential_type, description)
                     VALUES
                         (:sub, :svc, :blob, :owner_type, :tool_id, :ctype, :desc)
-                    ON CONFLICT ON CONSTRAINT uq_credential_service_mode
+                    ON CONFLICT (tool_id, service) WHERE owner_type = 'service' AND tool_id IS NOT NULL
                         DO UPDATE SET
                             encrypted_blob = EXCLUDED.encrypted_blob,
                             credential_type = EXCLUDED.credential_type,

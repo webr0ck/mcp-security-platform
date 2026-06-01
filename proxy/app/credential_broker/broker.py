@@ -150,21 +150,3 @@ class CredentialNotEnrolledError(Exception):
         self.user_sub = user_sub
         self.service = service
         super().__init__(f"User {user_sub} not enrolled for {service}. OAuth enrollment required.")
-
-
-async def _load_master_secret() -> bytes:
-    """Module-level helper used by admin_credentials and approach_a for standalone encryption.
-    Fetches the broker master secret directly from Vault using app settings.
-    """
-    from app.core.config import get_settings
-    settings = get_settings()
-    import httpx
-    vault_addr = settings.VAULT_ADDR.rstrip("/")
-    vault_token = settings.VAULT_TOKEN
-    path = settings.BROKER_MASTER_SECRET_PATH  # e.g. "secret/data/mcp/broker-master"
-    url = f"{vault_addr}/v1/{path}"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(url, headers={"X-Vault-Token": vault_token})
-        resp.raise_for_status()
-    secret_hex: str = resp.json()["data"]["data"]["value"]
-    return bytes.fromhex(secret_hex)
