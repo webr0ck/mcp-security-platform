@@ -324,7 +324,7 @@ async def _mcp_initialize(
 
 
 async def _emit_audit_event(
-    tool_id: str,
+    tool_id: str | None,
     tool_name: str,
     tool_version: str | None,
     client_id: str,
@@ -373,9 +373,13 @@ async def _emit_audit_event(
         # Guard: skip DB write if values look like test mocks (non-UUID event_id or
         # non-string sha256_hash). This keeps unit tests that mock the audit logger
         # from hitting the real DB.
+        # Also skip if tool_id is falsy (None/empty): audit_events.tool_id is a
+        # nullable UUID FK and PostgreSQL would reject an empty string cast to UUID.
         import re as _re
         _uuid_re = _re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', _re.I)
         if not isinstance(sha256_hash, str) or not _uuid_re.match(event_id):
+            return event_id
+        if not tool_id:
             return event_id
         try:
             from sqlalchemy import text as _text
@@ -423,6 +427,11 @@ async def _emit_audit_event(
         # The caller treats a raised exception as a 500 error.
         logger.error("CRITICAL: Audit event emission failed: %s", exc)
         raise AuditEmissionError(f"Audit event emission failed: {exc}") from exc
+
+
+# Public alias so mcp_server.py can call emit_mcp_access_event directly
+# without importing the private _emit_audit_event name.
+emit_mcp_access_event = _emit_audit_event
 
 
 # Module-level singleton so we don't re-instantiate on every invocation

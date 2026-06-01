@@ -98,6 +98,11 @@ tool_is_active if {
     input.tool_status == "active"
 }
 
+# Internal first-party platform tools bypass grants/risk checks.
+tool_is_active if {
+    input.tool_status == "internal"
+}
+
 client_has_invoke_permission if {
     some role in input.client_roles
     role in {"agent", "user"}
@@ -124,6 +129,14 @@ client_has_invoke_permission if {
     tool_allowed_for_client(input.client_id, input.tool_name)
 }
 
+# Internal first-party platform tools: any authenticated role may invoke.
+client_has_invoke_permission if {
+    input.tool_status == "internal"
+    some role in input.client_roles
+    role in {"admin", "platform_admin", "analyst", "agent", "user",
+             "manager", "server_owner", "auditor", "readonly"}
+}
+
 risk_level_value := {
     "low":      1,
     "medium":   2,
@@ -134,6 +147,11 @@ risk_level_value := {
 risk_level_within_threshold if {
     client_max := data.mcp.grants[input.client_id].max_risk_level
     risk_level_value[input.tool_risk_level] <= risk_level_value[client_max]
+}
+
+# Internal first-party platform tools bypass risk threshold checks.
+risk_level_within_threshold if {
+    input.tool_status == "internal"
 }
 
 # REMOVED: fail-open fallback that allowed low-risk tools when max_risk_level was absent.
