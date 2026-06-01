@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS server_registry (
     name                    VARCHAR(128) NOT NULL UNIQUE,
     upstream_url            TEXT        NOT NULL,
     status                  VARCHAR(32) NOT NULL DEFAULT 'pending'
-                                CHECK (status IN ('pending', 'approved', 'suspended', 'deleted')),
+                                CHECK (status IN ('pending', 'approved', 'suspended')),
     owner_sub               TEXT        NOT NULL,
     injection_mode          injection_mode_enum NOT NULL DEFAULT 'none',
     service_name            VARCHAR(128),
@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS server_registry (
     url_allowlist_checked   BOOLEAN     NOT NULL DEFAULT FALSE,
     approved_at             TIMESTAMPTZ,
     approved_by             TEXT,
+    CONSTRAINT server_registry_approval_consistency
+        CHECK (
+            (approved_at IS NULL AND approved_by IS NULL) OR
+            (approved_at IS NOT NULL AND approved_by IS NOT NULL)
+        ),
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at              TIMESTAMPTZ
