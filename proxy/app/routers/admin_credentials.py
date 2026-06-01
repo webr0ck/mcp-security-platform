@@ -241,6 +241,12 @@ async def revoke_credential(
     """Hard-delete a credential from credential_store."""
     _require_admin(request)
 
+    if owner_type == "user" and not user_sub:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VALIDATION_ERROR", "message": "user_sub is required when owner_type is 'user'"},
+        )
+
     _user_sub = "__service__" if owner_type == "service" else (user_sub or "")
 
     try:
@@ -251,7 +257,7 @@ async def revoke_credential(
                 text("""
                     DELETE FROM credential_store
                     WHERE tool_id = :tid AND owner_type = :otype
-                    AND (:sub = '' OR user_sub = :sub)
+                    AND user_sub = :sub
                 """),
                 {"tid": tool_id, "otype": owner_type, "sub": _user_sub},
             )
