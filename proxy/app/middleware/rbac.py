@@ -24,7 +24,9 @@ from starlette.types import ASGIApp
 
 logger = logging.getLogger(__name__)
 
-# Endpoints exempt from RBAC (already exempt from auth in AuthMiddleware)
+# Endpoints exempt from RBAC (already exempt from auth in AuthMiddleware).
+# PUBLIC_PATHS must match AuthMiddleware.PUBLIC_PATHS exactly.
+# Diff last verified: 2026-06-01
 PUBLIC_PATHS: frozenset[str] = frozenset({
     "/health",
     "/health/ready",
@@ -33,6 +35,8 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     # Jira webhook is authenticated by JIRA_WEBHOOK_SECRET, not by role.
     # Must match AuthMiddleware.PUBLIC_PATHS to remain reachable.
     "/api/v1/integrations/jira/webhook",
+    # RFC 7591 dynamic client registration — pre-auth, no role required.
+    "/oauth/register",
 })
 
 # Minimum role required per path prefix.
@@ -65,7 +69,7 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     ("POST", "/api/v1/compliance", {"admin", "platform_admin"}),
     ("GET", "/api/v1/anomaly", {"admin", "platform_admin", "auditor"}),
     ("PATCH", "/api/v1/anomaly", {"admin", "platform_admin"}),
-    ("GET", "/api/v1/audit", {"admin", "platform_admin", "auditor", "agent", "user"}),
+    ("GET", "/api/v1/audit", {"admin", "platform_admin", "auditor"}),
     ("POST", "/api/v1/integrations/jira/webhook", {"__webhook__"}),
     # Admin credential UI — platform_admin only
     ("GET",    "/admin/credentials", {"admin", "platform_admin"}),

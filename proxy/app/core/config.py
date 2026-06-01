@@ -386,6 +386,24 @@ class Settings(BaseSettings):
                 "python3 -c \"import secrets; print(secrets.token_hex(32))\""
             )
 
+        # Enforce OIDC_AUDIENCE is set when OIDC is enabled in production.
+        # Without an audience constraint any valid JWT from the same Keycloak
+        # realm authenticates, even tokens issued for unrelated clients.
+        if self.OIDC_ENABLED and not self.OIDC_AUDIENCE.strip():
+            raise ValueError(
+                "Production startup blocked: OIDC_ENABLED=true but OIDC_AUDIENCE is "
+                "empty. Set OIDC_AUDIENCE to the expected token audience (e.g. the "
+                "proxy client_id) so that tokens issued for other clients are rejected."
+            )
+
+        # Enforce SESSION_COOKIE_SECURE in production to prevent session cookie
+        # transmission over plain HTTP (downgrade / mixed-content attack surface).
+        if not self.SESSION_COOKIE_SECURE:
+            raise ValueError(
+                "Production startup blocked: SESSION_COOKIE_SECURE must be True in "
+                "production. Set SESSION_COOKIE_SECURE=true in your environment."
+            )
+
         return self
 
     @model_validator(mode="after")

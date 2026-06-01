@@ -373,12 +373,20 @@ async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
         for jwk_key in matching:
             try:
                 pub = jwk.construct(jwk_key)
-                # Only verify audience when OIDC_AUDIENCE is explicitly set.
+                # Enforce audience when OIDC_AUDIENCE is set.
+                # If unset in non-production, log a WARNING (production is
+                # blocked at startup by the config validator).
                 # OIDC_CLIENT_ID is the proxy's own client identity — it must NOT
                 # be used as an audience constraint because dynamic clients
                 # (e.g. Claude Code via RFC 7591) receive tokens with their own
                 # dynamically-generated client_id in the aud claim.
-                expected_aud = settings.OIDC_AUDIENCE or None
+                expected_aud = settings.OIDC_AUDIENCE.strip() or None
+                if not expected_aud:
+                    logger.warning(
+                        "OIDC_AUDIENCE is not set — audience validation is DISABLED. "
+                        "Any valid JWT from the same Keycloak realm will authenticate. "
+                        "Set OIDC_AUDIENCE to the expected audience to close this gap."
+                    )
                 claims = jose_jwt.decode(
                     token,
                     pub.to_dict(),
