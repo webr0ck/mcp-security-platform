@@ -67,5 +67,32 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 },
             )
 
+        # Audit authentication and authorization failures (401/403).
+        # These are returned as JSONResponse by AuthMiddleware, RBACMiddleware, or
+        # handlers before the invocation layer runs, so they are never captured by
+        # the per-invocation emit in services/invocation.py.  Emitting here closes
+        # the gap: every rejected request now produces an audit record.
+        if response.status_code in (401, 403):
+            try:
+                from uuid import uuid4
+
+                from app.services.invocation import _emit_audit_event
+
+                await _emit_audit_event(
+                    tool_id=None,
+                    tool_name=f"[{response.status_code}] {request.method} {request.url.path}",
+                    tool_version=None,
+                    client_id=getattr(request.state, "client_id", "unauthenticated"),
+                    outcome="deny",
+                    deny_reasons=[f"HTTP_{response.status_code}"],
+                    request_id=getattr(request.state, "request_id", str(uuid4())),
+                    latency_ms=0,
+                    anomaly_score=0.0,
+                    opa_decision_id=f"dec_{uuid4().hex[:16]}",
+                    is_testing=False,
+                )
+            except Exception:
+                pass  # Never block the response for audit failures
+
         response.headers["X-Request-ID"] = request_id
         return response

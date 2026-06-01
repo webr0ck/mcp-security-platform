@@ -145,8 +145,8 @@ async def register_tool(
                    registered_by, created_at, updated_at)
                 VALUES
                   (:tool_id, :name, :version, :description, :schema, :status,
-                   :risk_score, :risk_level, :risk_reasons::jsonb, :upstream_url,
-                   :source_repo, :source_commit, :tags, :metadata::jsonb,
+                   :risk_score, :risk_level, CAST(:risk_reasons AS jsonb), :upstream_url,
+                   :source_repo, :source_commit, :tags, CAST(:metadata AS jsonb),
                    :registered_by, :created_at, :created_at)
                 """
             ),
@@ -176,9 +176,9 @@ async def register_tool(
                 """
                 INSERT INTO sbom_records
                   (sbom_id, tool_id, bom_ref, cyclonedx_json,
-                   schema_hash, signature, auditor_version, created_at)
+                   schema_hash, signature, auditor_version, generated_at)
                 VALUES
-                  (:sbom_id, :tool_id, :bom_ref, :cyclonedx_json::jsonb,
+                  (:sbom_id, :tool_id, :bom_ref, CAST(:cyclonedx_json AS jsonb),
                    :schema_hash, :signature, :auditor_version, NOW())
                 """
             ),
@@ -206,7 +206,7 @@ async def register_tool(
                    findings, llm_analysis, static_analysis, created_at)
                 VALUES
                   (:audit_result_id, :tool_id, :auditor_version, :risk_score, :risk_level,
-                   :findings::jsonb, :llm_analysis::jsonb, :static_analysis::jsonb,
+                   CAST(:findings AS jsonb), CAST(:llm_analysis AS jsonb), CAST(:static_analysis AS jsonb),
                    NOW())
                 """
             ),
@@ -411,7 +411,7 @@ async def get_tool(
                 FROM tool_registry t
                 LEFT JOIN sbom_records s ON s.tool_id = t.tool_id
                 WHERE t.tool_id = :tool_id AND t.deleted_at IS NULL
-                ORDER BY s.created_at DESC
+                ORDER BY s.generated_at DESC
                 LIMIT 1
                 """
             ),
@@ -490,7 +490,7 @@ async def update_tool(
     # Fetch current tool
     try:
         result = await db.execute(
-            text("SELECT status, sbom_id FROM tool_registry t LEFT JOIN sbom_records s ON s.tool_id = t.tool_id WHERE t.tool_id = :id AND t.deleted_at IS NULL ORDER BY s.created_at DESC LIMIT 1"),
+            text("SELECT status, sbom_id FROM tool_registry t LEFT JOIN sbom_records s ON s.tool_id = t.tool_id WHERE t.tool_id = :id AND t.deleted_at IS NULL ORDER BY s.generated_at DESC LIMIT 1"),
             {"id": str(tool_id)},
         )
         row = result.fetchone()
@@ -517,7 +517,7 @@ async def update_tool(
 
     if new_metadata is not None:
         # Merge (not replace) metadata
-        updates.append("metadata = metadata || :new_metadata::jsonb")
+        updates.append("metadata = metadata || CAST(:new_metadata AS jsonb)")
         update_params["new_metadata"] = json.dumps(new_metadata)
 
     try:
@@ -794,7 +794,7 @@ async def get_tool_sbom(
                 SELECT s.sbom_id, s.cyclonedx_json, s.signature
                 FROM sbom_records s
                 WHERE s.tool_id = :tool_id
-                ORDER BY s.created_at DESC
+                ORDER BY s.generated_at DESC
                 LIMIT 1
                 """
             ),
@@ -912,6 +912,37 @@ async def invoke_tool(
         "kc_client_id": tool_row.kc_client_id,
         "kc_token_audience": tool_row.kc_token_audience,
     }
+
+    # ENTITLEMENT CHECK (discovery == invoke invariant)
+    #
+    # Full per-server entitlement check is deferred pending the server_id FK column
+    # being added to tool_registry (see ROADMAP comment in mcp_server.py [C6]):
+    #   ALTER TABLE tool_registry ADD COLUMN server_id UUID REFERENCES server_registry(server_id);
+    # Once that migration lands, replace this block with check_entitlement() per mcp_server.py stub.
+    #
+    # Interim guard: reject invocations against non-active tools and verify the
+    # caller holds at least the 'agent' role (already checked above, but re-stated
+    # here so the security intent is explicit and cannot be removed without notice).
+    if tool_record["status"] != "active":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "NOT_ENTITLED",
+                "message": (
+                    f"Tool '{tool_record['name']}' has status '{tool_record['status']}' "
+                    f"and cannot be invoked."
+                ),
+            },
+        )
+
+    principal_has_agent_role = any(r in {"agent", "admin"} for r in client_roles)
+    if not principal_has_agent_role:
+        # Belt-and-suspenders: the role check above already blocks this path,
+        # but kept here so the entitlement block is self-contained.
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "NOT_ENTITLED", "message": "Principal lacks agent role for tool invocation."},
+        )
 
     try:
         response = await _invoke(
