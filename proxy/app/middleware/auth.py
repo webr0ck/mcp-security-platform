@@ -160,8 +160,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     session_client_id = claims.get("client_id") or claims.get("sub")
                     if session_client_id:
                         jti = claims.get("jti")
-                        if jti and await _is_session_jti_revoked(jti):
-                            return JSONResponse({"detail": "Session revoked"}, status_code=401)
+                        # Require jti — a legitimately issued session JWT always has one.
+                        # Missing jti means a crafted/forged token; treat as revoked/unknown.
+                        if not jti or await _is_session_jti_revoked(jti):
+                            return JSONResponse({"detail": "Session revoked or not issued by this proxy"}, status_code=401)
                         client_id = session_client_id
                         auth_method = "oidc_session"
                         request.state._jwt_roles = claims.get("roles", [])
@@ -190,8 +192,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         session_client_id = claims.get("client_id") or claims.get("sub")
                         if session_client_id:
                             jti = claims.get("jti")
-                            if jti and await _is_session_jti_revoked(jti):
-                                return JSONResponse({"detail": "Session revoked"}, status_code=401)
+                            # Require jti — legitimately issued session JWTs always carry one.
+                            if not jti or await _is_session_jti_revoked(jti):
+                                return JSONResponse({"detail": "Session revoked or not issued by this proxy"}, status_code=401)
                             client_id = session_client_id
                             auth_method = "oidc_session"
                             request.state._jwt_roles = claims.get("roles", [])
@@ -270,9 +273,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 async def _is_session_jti_revoked(jti: str) -> bool:
     """
-    Return True if the given session JWT JTI has been revoked (revoked_at IS NOT NULL).
-    Fail-open: if the DB is unavailable, log a warning and return False to avoid
-    breaking auth on transient DB issues.
+    Return True if the given session JWT JTI is unknown (never legitimately issued)
+    OR has been revoked (revoked_at IS NOT NULL).
+
+    Security invariant: a JTI that has no row in oidc_sessions was never issued by
+    this proxy — it is either forged or crafted with a leaked PROXY_SECRET_KEY.
+    Such tokens are DENIED (True returned) rather than allowed through.
+
+    Fail-open only on DB errors: if the DB is temporarily unavailable we log a
+    warning and return False to avoid hard-blocking all authenticated requests.
     """
     try:
         from app.core.database import AsyncSessionLocal
@@ -285,7 +294,11 @@ async def _is_session_jti_revoked(jti: str) -> bool:
                 {"jti": jti},
             )
             record = row.fetchone()
-            return bool(record and record[0] is not None)
+            if record is None:
+                # JTI was never registered — token was never legitimately issued.
+                logger.warning("Session JTI %s not found in oidc_sessions — possible forged token; denying", jti)
+                return True  # DENY: unknown = forged
+            return record[0] is not None  # True if revoked_at is set
     except Exception as exc:
         logger.warning("JTI revocation check failed (fail-open): %s", exc)
         return False

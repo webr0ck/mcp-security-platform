@@ -53,70 +53,89 @@ async def check_entitlement(
     3. server_role_grant table: role-based grant (fallback)
 
     Returns EntitlementResult with entitled=True and highest role if any grant found.
+    Returns server_not_approved if the entitlement tables do not yet exist
+    (e.g. Plan 4 migrations are pending) to prevent a 500 surfacing to callers.
     """
-    async with AsyncSessionLocal() as db:
-        # Step 1: Verify server exists and is approved.
-        row = await db.execute(
-            text(
-                "SELECT server_id, status FROM server_registry "
-                "WHERE server_id = :server_id AND deleted_at IS NULL"
-            ),
-            {"server_id": server_id},
-        )
-        server_row = row.mappings().first()
+    try:
+        async with AsyncSessionLocal() as db:
+            # Step 1: Verify server exists and is approved.
+            row = await db.execute(
+                text(
+                    "SELECT server_id, status FROM server_registry "
+                    "WHERE server_id = :server_id AND deleted_at IS NULL"
+                ),
+                {"server_id": server_id},
+            )
+            server_row = row.mappings().first()
 
-        if server_row is None or server_row["status"] != "approved":
+            if server_row is None or server_row["status"] != "approved":
+                return EntitlementResult(
+                    entitled=False,
+                    role=None,
+                    server_id=None,
+                    reason="server_not_approved",
+                )
+
+            # Step 2: Check entitlement table (explicit per-principal grant).
+            ent_row = await db.execute(
+                text(
+                    "SELECT role FROM entitlement "
+                    "WHERE principal_type = :pt "
+                    "  AND principal_id = :pid "
+                    "  AND server_id = :sid "
+                    "  AND revoked_at IS NULL"
+                ),
+                {"pt": principal_type, "pid": principal_id, "sid": server_id},
+            )
+            ent = ent_row.mappings().first()
+            if ent is not None:
+                return EntitlementResult(
+                    entitled=True,
+                    role=ent["role"],
+                    server_id=server_id,
+                    reason="entitlement_table",
+                )
+
+            # Step 3: Fallback to server_role_grant.
+            srg_row = await db.execute(
+                text(
+                    "SELECT role FROM server_role_grant "
+                    "WHERE principal_type = :pt "
+                    "  AND principal_id = :pid "
+                    "  AND server_id = :sid"
+                ),
+                {"pt": principal_type, "pid": principal_id, "sid": server_id},
+            )
+            srg = srg_row.mappings().first()
+            if srg is not None:
+                return EntitlementResult(
+                    entitled=True,
+                    role=srg["role"],
+                    server_id=server_id,
+                    reason="role_grant",
+                )
+
             return EntitlementResult(
                 entitled=False,
                 role=None,
-                server_id=None,
-                reason="server_not_approved",
-            )
-
-        # Step 2: Check entitlement table (explicit per-principal grant).
-        ent_row = await db.execute(
-            text(
-                "SELECT role FROM entitlement "
-                "WHERE principal_type = :pt "
-                "  AND principal_id = :pid "
-                "  AND server_id = :sid "
-                "  AND revoked_at IS NULL"
-            ),
-            {"pt": principal_type, "pid": principal_id, "sid": server_id},
-        )
-        ent = ent_row.mappings().first()
-        if ent is not None:
-            return EntitlementResult(
-                entitled=True,
-                role=ent["role"],
                 server_id=server_id,
-                reason="entitlement_table",
+                reason="not_found",
             )
-
-        # Step 3: Fallback to server_role_grant.
-        srg_row = await db.execute(
-            text(
-                "SELECT role FROM server_role_grant "
-                "WHERE principal_type = :pt "
-                "  AND principal_id = :pid "
-                "  AND server_id = :sid"
-            ),
-            {"pt": principal_type, "pid": principal_id, "sid": server_id},
+    except Exception as exc:
+        # Catches missing tables (UndefinedTableError) or any other DB error.
+        # Return server_not_approved so callers see an empty catalog / 404,
+        # not an unhandled 500. Log at WARNING so the missing migration is visible.
+        logger.warning(
+            "check_entitlement DB error for server_id=%s principal=%s: %s",
+            server_id,
+            principal_id,
+            exc,
         )
-        srg = srg_row.mappings().first()
-        if srg is not None:
-            return EntitlementResult(
-                entitled=True,
-                role=srg["role"],
-                server_id=server_id,
-                reason="role_grant",
-            )
-
         return EntitlementResult(
             entitled=False,
             role=None,
-            server_id=server_id,
-            reason="not_found",
+            server_id=None,
+            reason="server_not_approved",
         )
 
 
@@ -129,41 +148,53 @@ async def list_entitled_servers(
     with their role. Used for server catalog filtering.
 
     Enforces discovery == invoke: only servers the principal can invoke appear here.
+    Returns an empty list if the entitlement tables do not yet exist (migration
+    pending) rather than propagating a 500 to the caller.
     """
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            text(
-                """
-                SELECT
-                    sr.server_id::TEXT  AS server_id,
-                    sr.name             AS name,
-                    sr.upstream_url     AS upstream_url,
-                    sr.custody_mode     AS custody_mode,
-                    combined.role       AS role
-                FROM server_registry sr
-                JOIN (
-                    -- Explicit per-principal grants (not revoked)
-                    SELECT server_id, role
-                    FROM entitlement
-                    WHERE principal_type = :pt
-                      AND principal_id   = :pid
-                      AND revoked_at IS NULL
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT
+                        sr.server_id::TEXT  AS server_id,
+                        sr.name             AS name,
+                        sr.upstream_url     AS upstream_url,
+                        sr.custody_mode     AS custody_mode,
+                        combined.role       AS role
+                    FROM server_registry sr
+                    JOIN (
+                        -- Explicit per-principal grants (not revoked)
+                        SELECT server_id, role
+                        FROM entitlement
+                        WHERE principal_type = :pt
+                          AND principal_id   = :pid
+                          AND revoked_at IS NULL
 
-                    UNION ALL
+                        UNION ALL
 
-                    -- Role-based grants
-                    SELECT server_id, role
-                    FROM server_role_grant
-                    WHERE principal_type = :pt
-                      AND principal_id   = :pid
-                ) AS combined ON sr.server_id = combined.server_id
-                WHERE sr.status = 'approved'
-                  AND sr.deleted_at IS NULL
-                """
-            ),
-            {"pt": principal_type, "pid": principal_id},
+                        -- Role-based grants
+                        SELECT server_id, role
+                        FROM server_role_grant
+                        WHERE principal_type = :pt
+                          AND principal_id   = :pid
+                    ) AS combined ON sr.server_id = combined.server_id
+                    WHERE sr.status = 'approved'
+                      AND sr.deleted_at IS NULL
+                    """
+                ),
+                {"pt": principal_type, "pid": principal_id},
+            )
+            rows = result.mappings().all()
+    except Exception as exc:
+        # Missing tables (Plan 4 migration pending) or transient DB error.
+        # Return empty list so the catalog endpoint returns 200 [] instead of 500.
+        logger.warning(
+            "list_entitled_servers DB error for principal=%s: %s",
+            principal_id,
+            exc,
         )
-        rows = result.mappings().all()
+        return []
 
     # Deduplicate by server_id, keeping the highest role per ROLE_LEVELS ordering.
     best: dict[str, dict] = {}
