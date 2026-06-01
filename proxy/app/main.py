@@ -18,7 +18,7 @@ from app.middleware.audit import AuditMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
 from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
-from app.routers import oidc_browser, admin_credentials, portal
+from app.routers import oidc_browser, admin_credentials, portal, server_registry
 from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.redis_client import redis_pool
@@ -139,6 +139,7 @@ app.include_router(oauth_metadata.router)
 app.include_router(oidc_browser.router)        # Keycloak browser login flow
 app.include_router(admin_credentials.router)   # Credential management UI
 app.include_router(portal.router)              # Multi-role portal UI
+app.include_router(server_registry.router)     # Server registry CRUD + approval
 
 
 # ============================================================================
