@@ -24,6 +24,7 @@ enforces Bearer token auth so every request has request.state.client_id.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -34,6 +35,32 @@ from fastapi.responses import JSONResponse, StreamingResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["MCP"])
+
+# ---------------------------------------------------------------------------
+# Resource guards
+# ---------------------------------------------------------------------------
+
+_MAX_BATCH_SIZE = 20  # MCP spec doesn't define a limit; 20 is generous for real clients
+
+_INVOKE_SEMAPHORE = asyncio.Semaphore(10)  # max 10 concurrent invoke_tool calls platform-wide
+
+
+async def _check_rate_limit(client_id: str, limit: int = 300, window_seconds: int = 60) -> bool:
+    """Returns True if request allowed, False if rate limited."""
+    from app.core.redis_client import redis_pool
+    try:
+        rl_client = redis_pool.rate_limit_client
+    except RuntimeError:
+        return True  # fail-open if Redis unavailable
+    try:
+        key = f"rl:mcp:{client_id}"
+        pipe = rl_client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window_seconds)
+        results = await pipe.execute()
+        return results[0] <= limit
+    except Exception:
+        return True  # fail-open
 
 SERVER_INFO = {
     "name": "mcp-security-platform",
@@ -250,14 +277,15 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
     }
 
     try:
-        result = await inv_svc.invoke_tool(
-            tool_record=tool_record,
-            json_rpc_request=json_rpc_request,
-            client_id=client_id,
-            client_roles=client_roles,
-            is_testing=False,
-            request_id=request_id,
-        )
+        async with _INVOKE_SEMAPHORE:
+            result = await inv_svc.invoke_tool(
+                tool_record=tool_record,
+                json_rpc_request=json_rpc_request,
+                client_id=client_id,
+                client_roles=client_roles,
+                is_testing=False,
+                request_id=request_id,
+            )
         return {"type": "text", "text": json.dumps(result, indent=2)}
     except Exception as exc:
         logger.exception("invoke_tool pipeline error for %s", tool_name)
@@ -424,6 +452,16 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
             status_code=400,
         )
 
+    # Per-client rate limiting (applied before processing regardless of message shape)
+    client_id = getattr(request.state, "client_id", None)
+    if client_id:
+        allowed = await _check_rate_limit(client_id)
+        if not allowed:
+            return JSONResponse(
+                {"error": {"code": "RATE_LIMITED", "message": "Too many requests"}},
+                status_code=429,
+            )
+
     # Single message
     if isinstance(body, dict):
         result = await _dispatch(body, request)
@@ -433,7 +471,11 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
 
     # Batch
     if isinstance(body, list):
-        import asyncio
+        if len(body) > _MAX_BATCH_SIZE:
+            return JSONResponse(
+                _err(None, -32600, f"Batch too large: max {_MAX_BATCH_SIZE} messages per request"),
+                status_code=400,
+            )
         responses = await asyncio.gather(*[_dispatch(msg, request) for msg in body if isinstance(msg, dict)])
         responses = [r for r in responses if r is not None]
         if not responses:
