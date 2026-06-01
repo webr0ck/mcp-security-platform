@@ -134,6 +134,39 @@ async def test_invoke_tool_fails_closed_when_broker_none_and_injection_required(
 
 
 @pytest.mark.unit
+async def test_invoke_tool_fails_closed_for_service_account_mode():
+    """injection_mode='service_account' must raise CredentialInjectionError (G4 fix).
+
+    A broker is present (non-None), but the mode is 'service_account' which is not
+    yet implemented. The else branch must fire and raise rather than silently forward
+    the request without credentials.
+    """
+    stubs = _make_sys_stubs()
+
+    with patch.dict(sys.modules, stubs):
+        from app.services import invocation as _inv_mod
+        invoke_tool = _inv_mod.invoke_tool
+
+    tool = {
+        "tool_id": "t1", "name": "svc-tool", "status": "active",
+        "risk_level": "low", "upstream_url": "http://fake/",
+        "injection_mode": "service_account", "service_name": "mysvc",
+        "inject_header": None, "inject_prefix": None, "version": "1",
+    }
+
+    from app.credential_broker.dispatcher import CredentialInjectionError
+
+    with patch.dict(sys.modules, stubs), \
+         patch.object(_inv_mod, "broker_instance", MagicMock()):  # broker is present — mode is the issue
+        with pytest.raises(CredentialInjectionError, match="not yet implemented"):
+            await invoke_tool(
+                tool_record=tool,
+                json_rpc_request={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"arguments": {}}},
+                client_id="u1", client_roles=["agent"], is_testing=False, request_id="r1",
+            )
+
+
+@pytest.mark.unit
 async def test_invoke_tool_passes_when_broker_none_and_no_injection_required():
     """
     broker_instance is None + tool has NO service_name (injection not required)

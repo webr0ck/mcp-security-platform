@@ -158,8 +158,6 @@ async def invoke_tool(
                 f"for tool {tool_record.get('tool_id')}. "
                 "Ensure VAULT_TOKEN is configured and broker initialized at startup."
             )
-        # Direct broker.resolve for service and user modes.
-        # service_account/oauth_user_token modes will use the dispatcher path (Plan 2).
         if service_name and injection_mode in ("service", "user"):
             approach = "B" if injection_mode == "service" else "A"
             credential = await broker_instance.resolve(
@@ -171,6 +169,12 @@ async def invoke_tool(
             inject_header = tool_record.get("inject_header") or "Authorization"
             prefix = tool_record.get("inject_prefix") or ""
             extra_headers[inject_header] = f"{prefix}{credential.token}".strip()
+        else:
+            raise CredentialInjectionError(
+                f"Injection mode '{injection_mode}' is not yet implemented; cannot inject "
+                f"credential for tool {tool_record.get('tool_id')}. "
+                "Configure injection_mode='none' or use a supported mode (service, user)."
+            )
 
     start_ts = datetime.now(timezone.utc)
     upstream_response: dict[str, Any] = {}
