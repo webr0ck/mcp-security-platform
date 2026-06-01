@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from fastapi import Request, Response
@@ -29,6 +30,11 @@ import ipaddress
 
 from app.core.config import settings
 from app.core.security import hash_api_key
+
+
+def _sanitize_cn(cn: str) -> str:
+    """Strip control characters from mTLS CN to prevent log injection."""
+    return re.sub(r"[\x00-\x1f\x7f]", "", cn).strip()[:128]
 
 
 def _is_trusted_proxy(request: Request) -> bool:
@@ -125,7 +131,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # RT-NEW-005 fix: only trust X-Client-Cert-CN from upstream proxy IPs.
         # Direct callers (port 8000) cannot spoof mTLS identity via this header.
         # ----------------------------------------------------------------
-        cert_cn = request.headers.get("X-Client-Cert-CN", "").strip()
+        cert_cn = _sanitize_cn(request.headers.get("X-Client-Cert-CN", ""))
         if cert_cn and _is_trusted_proxy(request):
             client_id = cert_cn
             auth_method = "mtls"

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -93,7 +94,9 @@ async def list_servers(request: Request):
 @router.post("/api/v1/admin/servers", status_code=201)
 async def create_server(body: ServerCreate, request: Request):
     _require_platform_admin(request)
-    owner = body.owner_sub or getattr(request.state, "client_id", "unknown")
+    # Always attribute ownership to the authenticated requester, not the submitted value
+    effective_owner_sub = getattr(request.state, "client_id", "unknown")
+    owner = effective_owner_sub
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             text(
@@ -144,6 +147,9 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
         except SSRFError as exc:
             raise HTTPException(status_code=422, detail=f"upstream_url blocked by SSRF policy: {exc}") from exc
 
+    # Column names are interpolated — frozenset above is the ONLY guard.
+    # Never add user-supplied strings to the allowlist.
+    assert all(re.match(r'^[a-z_]+$', k) for k in updates), f"Unsafe column names: {updates.keys()}"
     set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
     async with AsyncSessionLocal() as db:
         result = await db.execute(
