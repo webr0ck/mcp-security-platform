@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _ADMIN_ROLES = frozenset({"admin", "platform_admin"})
+_PATCH_ALLOWED = frozenset({"name", "upstream_url", "service_name"})
 
 
 def _require_platform_admin(request: Request) -> None:
@@ -131,8 +132,10 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
     updates = body.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    # injection_mode changes after approval require owner consent (Plan 7)
-    # Only name, upstream_url, service_name are freely updatable here
+    # Filter to allowed fields — injection_mode changes after approval require owner consent (Plan 7)
+    updates = {k: v for k, v in updates.items() if k in _PATCH_ALLOWED}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
     set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -144,7 +147,8 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
             {**updates, "server_id": server_id},
         )
         await db.commit()
-    if result.rowcount == 0:
+        rows_updated = result.rowcount
+    if rows_updated == 0:
         raise HTTPException(status_code=404, detail="Server not found")
     return JSONResponse({"server_id": server_id, "updated": list(updates)})
 
@@ -180,7 +184,8 @@ async def approve_server(server_id: str, request: Request):
             {"id": server_id, "approver": approver},
         )
         await db.commit()
-    if result.rowcount == 0:
+        rows_updated = result.rowcount
+    if rows_updated == 0:
         raise HTTPException(status_code=404, detail="Server not found or not in pending state")
     return JSONResponse({"server_id": server_id, "status": "approved"})
 
