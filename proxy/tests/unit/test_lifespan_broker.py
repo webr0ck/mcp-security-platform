@@ -8,6 +8,15 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+@pytest.fixture(autouse=True)
+def _restore_broker_instance():
+    """Restore broker_instance after each test to avoid state leak between tests."""
+    import app.services.invocation as inv_svc
+    original = inv_svc.broker_instance
+    yield
+    inv_svc.broker_instance = original
+
+
 @pytest.mark.unit
 async def test_lifespan_sets_broker_instance_when_factory_returns_broker():
     """After lifespan startup, invocation.broker_instance must equal what build_broker returned."""
@@ -70,3 +79,4 @@ async def test_lifespan_zeros_master_secret_on_shutdown():
             pass  # yields and shuts down
 
     mock_broker._zero.assert_called_once_with(master)
+    assert all(b == 0 for b in master), "master secret was not zeroed in-place"
