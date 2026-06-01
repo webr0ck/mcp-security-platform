@@ -54,6 +54,14 @@ async def lifespan(app: FastAPI):
     apply_process_hardening(settings.ENVIRONMENT)
     logger.info("Process hardening applied")
 
+    if settings.OIDC_ENABLED and not settings.OIDC_AUDIENCE:
+        logger.warning(
+            "SECURITY WARNING: OIDC_ENABLED=true but OIDC_AUDIENCE is not set. "
+            "Audience validation is DISABLED — any RS256 token from the configured issuer "
+            "will authenticate regardless of intended audience. "
+            "Set OIDC_AUDIENCE to the proxy's client_id to enforce audience binding."
+        )
+
     # Step 1: Initialize Redis pool (broker needs a live client immediately after)
     await redis_pool.initialize()
     logger.info("Redis pool initialized")

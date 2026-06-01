@@ -227,12 +227,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.principal_type = principal_type
 
         # ----------------------------------------------------------------
-        # Load roles: merge DB role_assignments with any roles in the JWT
-        # DB is authoritative; JWT roles are a convenience fallback for lab.
+        # Load roles: merge DB role_assignments with any roles in the JWT.
+        # DB is always authoritative. Internal session JWTs (proxy-issued,
+        # auth_method=oidc_session) are trusted in all environments and may
+        # supplement DB roles. External OIDC JWTs (auth_method=oidc, roles
+        # from the IdP) are mechanically blocked from augmenting DB roles in
+        # non-development environments to prevent JWT role escalation attacks.
         # ----------------------------------------------------------------
         db_roles = await _load_roles(client_id)
         jwt_roles: list[str] = getattr(request.state, "_jwt_roles", [])
-        # Union: DB roles take precedence; JWT adds any that DB doesn't have
+        # External OIDC JWT roles (from IdP) must not augment DB roles in production.
+        # Internal session JWTs (proxy-issued, auth_method=oidc_session) are trusted in all envs.
+        if auth_method == "oidc" and settings.ENVIRONMENT != "development":
+            jwt_roles = []
         combined = list(dict.fromkeys(db_roles + [r for r in jwt_roles if r not in db_roles]))
         request.state.client_roles = combined
 
