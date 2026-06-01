@@ -451,7 +451,7 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
             return _ok(req_id, {"content": [content]})
         except Exception as exc:
             logger.exception("Tool handler error: %s", name)
-            return _err(req_id, -32603, f"Tool execution error: {exc}")
+            return _err(req_id, -32603, "Tool execution error (internal). Check server logs.")
 
     # Unknown method
     return _err(req_id, -32601, f"Method not found: {method}")

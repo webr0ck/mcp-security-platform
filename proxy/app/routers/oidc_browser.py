@@ -401,6 +401,13 @@ async def oidc_callback(
             await session.commit()
     except Exception as exc:
         logger.error("Failed to update OIDC session record: %s", exc)
+        # SECURITY: If the DB write fails, the JTI is not registered in oidc_sessions.
+        # Subsequent auth checks will deny this JWT (unknown JTI = forged token policy).
+        # Return a 503 rather than issuing a JWT the user can never use.
+        raise HTTPException(
+            status_code=503,
+            detail="Session registration failed — please try logging in again.",
+        ) from exc
 
     # Also register the session JWT client_id in role_assignments if not present
     try:
