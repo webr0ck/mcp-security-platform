@@ -139,7 +139,7 @@ _TOOLS: list[dict[str, Any]] = [
             },
             "required": ["tool_name"],
         },
-        "_roles": {"admin", "platform_admin"},
+        "_roles": {"admin", "platform_admin", "agent"},
     },
 ]
 

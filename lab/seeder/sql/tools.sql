@@ -150,3 +150,22 @@ ON CONFLICT (name, version) DO UPDATE SET
     inject_header       = EXCLUDED.inject_header,
     inject_prefix       = EXCLUDED.inject_prefix,
     updated_at          = NOW();
+
+-- ── Self-Service MCP — per-identity permission management ────────────────────
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'self-service-mcp', '1.0.0',
+    'Per-identity MCP permission management: list, enable/disable MCPs and functions per profile.',
+    '{"type":"object","properties":{"caller_sub":{"type":"string"},"mcp_name":{"type":"string"},"function_name":{"type":"string"},"target_profile":{"type":"string"},"caller_role":{"type":"string"}},"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-self-service:8000/mcp',
+    'active', 'low', 10, '["Manages per-user access grants","Writes to mcp_profiles table"]'::jsonb,
+    'lab-seeder', null, 'A', 'X-User-Sub', ''
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url        = EXCLUDED.upstream_url,
+    updated_at          = NOW();

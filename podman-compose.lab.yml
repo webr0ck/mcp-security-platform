@@ -376,6 +376,7 @@ services:
       HOST: "0.0.0.0"
       PORT: "8000"
       SERVER_NAME: "echo-mcp"
+      FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
     networks:
       - lab-net
       - internal-net
@@ -399,10 +400,36 @@ services:
       HOST: "0.0.0.0"
       PORT: "8000"
       REDIS_URL: "redis://mcp-redis:6379/3"
+      FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
     networks:
       - lab-net
       - internal-net
       - proxy-redis-net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Self-Service MCP — per-identity MCP permission management ───────────────
+  lab-mcp-self-service:
+    build:
+      context: ./lab/mcp-servers/self-service
+    image: lab-mcp-self-service:lab
+    container_name: lab-mcp-self-service
+    ports:
+      - "8108:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      DATABASE_URL: "postgresql://mcp_app:${DB_PASSWORD:-devpassword}@mcp-db:5432/mcp_security"
+      FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
+    networks:
+      - lab-net
+      - internal-net
+      - proxy-db-net
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
       interval: 10s
@@ -422,6 +449,7 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
+      FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
     networks:
       - lab-net
       - internal-net

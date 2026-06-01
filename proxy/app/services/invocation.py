@@ -106,6 +106,32 @@ async def invoke_tool(
             )
 
     # -------------------------------------------------------------------------
+    # Step 2.5: Profile lookup — check mcp_profiles for per-identity permission
+    # -------------------------------------------------------------------------
+    # If a profile row exists for (client_id, tool_name), inject it into OPA input.
+    # OPA then applies mcp_disabled_for_profile / function_not_allowed_for_profile rules.
+    # Absence of a row = platform default = no restriction.
+    profile_data: dict = {}
+    function_name = params.get("tool_name", "")  # inner tool being invoked via invoke_tool
+    try:
+        from app.core.database import AsyncSessionLocal
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as _db:
+            row = await _db.execute(
+                text("SELECT enabled, allowed_functions FROM mcp_profiles WHERE profile_id=:pid AND mcp_name=:mname LIMIT 1"),
+                {"pid": client_id, "mname": tool_name},
+            )
+            prow = row.mappings().first()
+            if prow:
+                profile_data = {
+                    "enabled": prow["enabled"],
+                    "allowed_functions": prow["allowed_functions"],
+                }
+    except Exception as _exc:
+        # Fail-open: if DB is unreachable, skip profile check (do not block legitimate traffic)
+        logger.warning("mcp_profiles lookup failed for %s/%s: %s", client_id, tool_name, _exc)
+
+    # -------------------------------------------------------------------------
     # Step 3: OPA policy evaluation (INV-003, INV-004)
     # -------------------------------------------------------------------------
     opa_input = {
@@ -118,6 +144,8 @@ async def invoke_tool(
         "params": params,
         "anomaly_score": anomaly_score,
         "is_testing": is_testing,
+        "profile": profile_data,
+        "tool_function_name": function_name,
     }
 
     opa_result = await evaluate_policy(opa_input)

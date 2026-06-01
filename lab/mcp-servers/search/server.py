@@ -133,5 +133,8 @@ async def search_by_category(category: str, limit: int = 10) -> dict:
 
 
 if __name__ == "__main__":
+    # Disable DNS rebinding protection for lab (internal network only, no browser access)
+    from mcp.server.transport_security import TransportSecuritySettings
+    mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     app = mcp.streamable_http_app()
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

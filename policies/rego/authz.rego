@@ -179,5 +179,24 @@ all_string_values(x) := result if {
     ]
 }
 
+# =============================================================================
+# PROFILE-BASED ACCESS CONTROL (mcp_profiles table via input.profile)
+# =============================================================================
+# The proxy may inject input.profile.enabled and input.profile.allowed_functions
+# when an mcp_profiles row exists for (client_id, tool_name).
+# If no profile data is present, default = allow (backward-compatible).
+
+deny contains "mcp_disabled_for_profile" if {
+    input.profile.enabled == false
+}
+
+deny contains "function_not_allowed_for_profile" if {
+    is_array(input.profile.allowed_functions)
+    count(input.profile.allowed_functions) > 0
+    not input.tool_function_name in input.profile.allowed_functions
+    input.tool_function_name != ""
+    input.tool_function_name != null
+}
+
 # Expose deny reasons for audit logging and API response
 reasons := deny
