@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -42,7 +43,7 @@ router = APIRouter(tags=["MCP"])
 
 _MAX_BATCH_SIZE = 20  # MCP spec doesn't define a limit; 20 is generous for real clients
 
-_INVOKE_SEMAPHORE = asyncio.Semaphore(10)  # max 10 concurrent invoke_tool calls platform-wide
+_INVOKE_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("MCP_INVOKE_CONCURRENCY", "10")))  # max concurrent invoke_tool calls
 
 
 async def _check_rate_limit(client_id: str, limit: int = 300, window_seconds: int = 60) -> bool:

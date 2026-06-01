@@ -85,3 +85,68 @@ INSERT INTO tool_registry (
 ON CONFLICT (name, version) DO UPDATE SET
     upstream_url = EXCLUDED.upstream_url,
     updated_at   = NOW();
+
+-- ── Echo MCP — stress-test / auth-verification (no credentials needed) ───────
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'echo-ping', '1.0.0',
+    'Liveness and auth-verification tools for the echo MCP server.',
+    '{"type":"object","properties":{"message":{"type":"string"},"count":{"type":"integer"},"tag":{"type":"string"}},"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-echo:8000/mcp',
+    'active', 'low', 5, '[]'::jsonb,
+    'lab-seeder', null, null, null, null
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url = EXCLUDED.upstream_url,
+    updated_at   = NOW();
+
+-- ── Notes MCP — per-user isolated storage (approach A — per-user credential) ─
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'notes-store', '1.0.0',
+    'Create and retrieve user-isolated notes. Credential approach A: per-user JWT injected as X-User-Sub.',
+    '{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"user_sub":{"type":"string"},"note_id":{"type":"string"}},"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-notes:8000/mcp',
+    'active', 'low', 15, '["Stores user-supplied text in Redis","Per-user isolation relies on proxy injecting correct user_sub"]'::jsonb,
+    'lab-seeder', 'notes', 'A', 'X-User-Sub', ''
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url        = EXCLUDED.upstream_url,
+    service_name        = EXCLUDED.service_name,
+    credential_approach = EXCLUDED.credential_approach,
+    inject_header       = EXCLUDED.inject_header,
+    inject_prefix       = EXCLUDED.inject_prefix,
+    updated_at          = NOW();
+
+-- ── Search MCP — shared service account (approach B — shared SA token) ────────
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'search-kb', '1.0.0',
+    'Full-text search over MCP security knowledge base. Shared service account: all users share one backend token.',
+    '{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"},"category":{"type":"string"}},"required":["query"],"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-search:8000/mcp',
+    'active', 'low', 10, '["Returns internal documentation snippets"]'::jsonb,
+    'lab-seeder', 'search', 'B', 'Authorization', 'Bearer '
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url        = EXCLUDED.upstream_url,
+    service_name        = EXCLUDED.service_name,
+    credential_approach = EXCLUDED.credential_approach,
+    inject_header       = EXCLUDED.inject_header,
+    inject_prefix       = EXCLUDED.inject_prefix,
+    updated_at          = NOW();

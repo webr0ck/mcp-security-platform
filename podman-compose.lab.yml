@@ -364,6 +364,75 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # ── Echo MCP — stress-test and auth-verification target ─────────────────────
+  lab-mcp-echo:
+    build:
+      context: ./lab/mcp-servers/echo
+    image: lab-mcp-echo:lab
+    container_name: lab-mcp-echo
+    ports:
+      - "8105:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      SERVER_NAME: "echo-mcp"
+    networks:
+      - lab-net
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Notes MCP — per-user isolated notes (approach A credential injection) ───
+  lab-mcp-notes:
+    build:
+      context: ./lab/mcp-servers/notes
+    image: lab-mcp-notes:lab
+    container_name: lab-mcp-notes
+    ports:
+      - "8106:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      REDIS_URL: "redis://mcp-redis:6379/3"
+    networks:
+      - lab-net
+      - internal-net
+      - proxy-redis-net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Search MCP — shared SA scenario (approach B credential injection) ────────
+  lab-mcp-search:
+    build:
+      context: ./lab/mcp-servers/search
+    image: lab-mcp-search:lab
+    container_name: lab-mcp-search
+    ports:
+      - "8107:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    networks:
+      - lab-net
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
   # Production config requires step-ca server cert at /etc/nginx/certs/ which is
   # not provisioned automatically. Lab uses:
   #   - lab/nginx/nginx.conf as a writable placeholder (CRS template overwrites it)

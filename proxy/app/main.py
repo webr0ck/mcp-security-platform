@@ -8,6 +8,7 @@ See docs/ARCHITECTURE.md for service boundary definitions.
 See docs/API.md for complete endpoint specifications.
 """
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -128,7 +129,8 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(AuditMiddleware)
 # IPRateLimitMiddleware runs first (outermost) — registered last so it fires
 # before auth on every request, catching unauthenticated floods.
-app.add_middleware(IPRateLimitMiddleware)
+_ip_rl_limit = int(os.environ.get("IP_RATE_LIMIT_PER_MIN", "100"))
+app.add_middleware(IPRateLimitMiddleware, limit=_ip_rl_limit)
 
 # PYSEC-2026-161 defence-in-depth: TrustedHostMiddleware prevents Host header
 # injection attacks. Registered last so it runs first (Starlette reverse order).
