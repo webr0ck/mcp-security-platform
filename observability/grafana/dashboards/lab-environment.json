@@ -1,0 +1,282 @@
+{
+  "title": "MCP — Lab Environment",
+  "uid": "mcp-lab-v1",
+  "version": 1,
+  "schemaVersion": 39,
+  "tags": ["mcp", "lab", "keycloak", "stress-test"],
+  "timezone": "utc",
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "description": "Lab environment monitoring: Keycloak auth flows, lab MCP servers (echo, notes, search, self-service), stress test signals.",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "pluginId": "loki",
+        "label": "Datasource",
+        "hide": 0,
+        "query": "loki",
+        "current": { "text": "Loki", "value": "Loki" },
+        "options": [],
+        "refresh": 1
+      },
+      {
+        "name": "mcp_server",
+        "type": "custom",
+        "label": "MCP Server",
+        "hide": 0,
+        "options": [
+          {"selected": true, "text": "All", "value": "$__all"},
+          {"selected": false, "text": "echo", "value": "lab-mcp-echo"},
+          {"selected": false, "text": "notes", "value": "lab-mcp-notes"},
+          {"selected": false, "text": "search", "value": "lab-mcp-search"},
+          {"selected": false, "text": "self-service", "value": "lab-mcp-self-service"}
+        ],
+        "includeAll": true,
+        "multi": false,
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "KC Token Grants (1h)",
+      "description": "Successful Keycloak token issuances — ROPC + client_credentials + per-user",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "count_over_time({job=\"lab-keycloak\"} |= \"token_grant\" |= \"SUCCESS\" [1h])",
+          "legendFormat": "Grants",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}}}
+    },
+    {
+      "id": 2,
+      "title": "KC Auth Failures (1h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "count_over_time({job=\"lab-keycloak\"} |= \"LOGIN_ERROR\" [1h])",
+          "legendFormat": "Auth Failures",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 5}]}
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Echo MCP — Invocations (1h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "count_over_time({job=\"lab-mcp-echo\"} [1h])",
+          "legendFormat": "Echo calls",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "blue"}}}
+    },
+    {
+      "id": 4,
+      "title": "Notes MCP — Active Users (1h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "count(count_over_time({job=\"lab-mcp-notes\"} | json | user_sub != \"\" [1h]) by (user_sub))",
+          "legendFormat": "Unique users",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "purple"}}}
+    },
+    {
+      "id": 5,
+      "title": "Self-Service — Profile Changes (1h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "count_over_time({job=\"lab-mcp-self-service\"} |= \"MCP_ENABLED\" [1h]) + count_over_time({job=\"lab-mcp-self-service\"} |= \"MCP_DISABLED\" [1h]) + count_over_time({job=\"lab-mcp-self-service\"} |= \"FUNCTION_ENABLED\" [1h]) + count_over_time({job=\"lab-mcp-self-service\"} |= \"FUNCTION_DISABLED\" [1h])",
+          "legendFormat": "Profile changes",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "orange"}}}
+    },
+    {
+      "id": 6,
+      "title": "Profile Denials — OPA (1h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "count_over_time({job=\"mcp-proxy\"} |= \"mcp_disabled_for_profile\" [1h]) + count_over_time({job=\"mcp-proxy\"} |= \"function_not_allowed_for_profile\" [1h])",
+          "legendFormat": "Profile denials",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Lab MCP Invocations Over Time",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 4},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=\"lab-mcp-echo\"} [$__interval]))",
+          "legendFormat": "echo",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(count_over_time({job=\"lab-mcp-notes\"} [$__interval]))",
+          "legendFormat": "notes",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(count_over_time({job=\"lab-mcp-search\"} [$__interval]))",
+          "legendFormat": "search",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(count_over_time({job=\"lab-mcp-self-service\"} [$__interval]))",
+          "legendFormat": "self-service",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"custom": {"lineWidth": 2, "fillOpacity": 8}},
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "Auth Mode Distribution",
+      "type": "piechart",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 4},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "sum by (auth_type) (count_over_time({job=\"mcp-proxy\"} | json | auth_type != \"\" [1h]))",
+          "legendFormat": "{{auth_type}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "displayLabels": ["name", "percent"],
+        "legend": {"displayMode": "table", "placement": "right"}
+      }
+    },
+    {
+      "id": 9,
+      "title": "Stress Test — Request Rate",
+      "description": "Visible when k6 stress test is running. Shows combined MCP request rate.",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 12},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=\"mcp-proxy\"} |= \"TOOL_INVOCATION\" [$__interval]))",
+          "legendFormat": "Total MCP requests",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(count_over_time({job=\"mcp-proxy\"} | json | outcome=\"deny\" [$__interval]))",
+          "legendFormat": "Denied",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "custom": {"lineWidth": 2, "fillOpacity": 10}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "Denied"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "title": "Proxy Latency Percentiles (from logs)",
+      "description": "p50/p95/p99 latency extracted from audit log latency_ms field",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 12},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "quantile_over_time(0.50, {job=\"mcp-proxy\"} | json | unwrap latency_ms [$__interval])",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "quantile_over_time(0.95, {job=\"mcp-proxy\"} | json | unwrap latency_ms [$__interval])",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "quantile_over_time(0.99, {job=\"mcp-proxy\"} | json | unwrap latency_ms [$__interval])",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ms", "custom": {"lineWidth": 2}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "p95"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]},
+          {"matcher": {"id": "byName", "options": "p99"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "title": "Self-Service Profile Events Log",
+      "type": "logs",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 18},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "{job=\"lab-mcp-self-service\"} | json",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": true,
+        "enableLogDetails": true
+      }
+    }
+  ]
+}

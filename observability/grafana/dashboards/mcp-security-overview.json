@@ -1,135 +1,238 @@
 {
   "title": "MCP Security Platform — Overview",
   "uid": "mcp-overview-v1",
-  "version": 1,
-  "schemaVersion": 38,
+  "version": 2,
+  "schemaVersion": 39,
   "tags": ["mcp", "security"],
   "timezone": "utc",
-  "time": {
-    "from": "now-24h",
-    "to": "now"
-  },
+  "time": { "from": "now-24h", "to": "now" },
   "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "pluginId": "loki",
+        "label": "Datasource",
+        "hide": 0,
+        "query": "loki",
+        "current": { "text": "Loki", "value": "Loki" },
+        "options": [],
+        "refresh": 1
+      }
+    ]
+  },
   "panels": [
     {
       "id": 1,
       "title": "Tool Invocations (24h)",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
       "targets": [
         {
-          "datasource": "Loki",
-          "expr": "count_over_time({container=\"mcp-proxy\"} |= \"TOOL_INVOCATION\" [24h])",
-          "legendFormat": "Invocations"
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "count_over_time({job=\"mcp-proxy\"} |= \"TOOL_INVOCATION\" [24h])",
+          "legendFormat": "Invocations",
+          "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"]},
-        "colorMode": "value",
-        "graphMode": "area"
+        "reduceOptions": {"calcs": ["sum"]},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "fixed", "fixedColor": "blue"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
+        },
+        "overrides": []
       }
     },
     {
       "id": 2,
       "title": "Denied Invocations (24h)",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
       "targets": [
         {
-          "datasource": "Loki",
-          "expr": "count_over_time({container=\"mcp-proxy\"} |= \"\\\"outcome\\\":\\\"deny\\\"\" [24h])",
-          "legendFormat": "Denials"
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "count_over_time({job=\"mcp-proxy\"} | json | outcome=\"deny\" [24h])",
+          "legendFormat": "Denials",
+          "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"]},
-        "colorMode": "value",
-        "thresholds": {
-          "mode": "absolute",
-          "steps": [
-            {"color": "green", "value": null},
-            {"color": "yellow", "value": 10},
-            {"color": "red", "value": 50}
-          ]
-        }
+        "reduceOptions": {"calcs": ["sum"]},
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 10},
+              {"color": "red", "value": 50}
+            ]
+          }
+        },
+        "overrides": []
       }
     },
     {
       "id": 3,
       "title": "Anomaly Alerts (24h)",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
       "targets": [
         {
-          "datasource": "Loki",
-          "expr": "count_over_time({container=\"mcp-proxy\"} |= \"anomaly_threshold_exceeded\" [24h])",
-          "legendFormat": "Anomalies"
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "count_over_time({job=\"mcp-proxy\"} |= \"anomaly_threshold_exceeded\" [24h])",
+          "legendFormat": "Anomalies",
+          "refId": "A"
         }
       ],
-      "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"]},
-        "colorMode": "value",
-        "thresholds": {
-          "mode": "absolute",
-          "steps": [
-            {"color": "green", "value": null},
-            {"color": "red", "value": 1}
-          ]
-        }
+      "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]
+          }
+        },
+        "overrides": []
       }
     },
     {
       "id": 4,
-      "title": "Critical Risk Tools",
+      "title": "Profile Denials (24h)",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
       "targets": [
         {
-          "datasource": "Loki",
-          "expr": "count_over_time({container=\"mcp-proxy\"} |= \"\\\"risk_level\\\":\\\"critical\\\"\" |= \"TOOL_REGISTERED\" [24h])",
-          "legendFormat": "Critical"
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "count_over_time({job=\"mcp-proxy\"} |= \"mcp_disabled_for_profile\" [24h]) + count_over_time({job=\"mcp-proxy\"} |= \"function_not_allowed_for_profile\" [24h])",
+          "legendFormat": "Profile Denials",
+          "refId": "A"
         }
       ],
-      "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"]},
-        "colorMode": "value",
-        "thresholds": {
-          "mode": "absolute",
-          "steps": [
-            {"color": "green", "value": null},
-            {"color": "red", "value": 1}
-          ]
-        }
+      "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 20}]
+          }
+        },
+        "overrides": []
       }
     },
     {
       "id": 5,
-      "title": "Invocation Outcomes Over Time",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "title": "Self-Service Profile Changes (24h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
       "targets": [
         {
-          "datasource": "Loki",
-          "expr": "sum(count_over_time({container=\"mcp-proxy\"} |= \"\\\"outcome\\\":\\\"allow\\\"\" [5m])) by (container)",
-          "legendFormat": "Allow"
-        },
-        {
-          "datasource": "Loki",
-          "expr": "sum(count_over_time({container=\"mcp-proxy\"} |= \"\\\"outcome\\\":\\\"deny\\\"\" [5m])) by (container)",
-          "legendFormat": "Deny"
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "count_over_time({job=\"lab-mcp-self-service\"} |= \"MCP_ENABLED\" [24h]) + count_over_time({job=\"lab-mcp-self-service\"} |= \"MCP_DISABLED\" [24h])",
+          "legendFormat": "Profile Changes",
+          "refId": "A"
         }
-      ]
+      ],
+      "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "value"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "fixed", "fixedColor": "purple"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "purple", "value": null}]}
+        },
+        "overrides": []
+      }
     },
     {
       "id": 6,
+      "title": "Critical Risk Tools Active",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "count_over_time({job=\"mcp-proxy\"} | json | risk_level=\"critical\" |= \"TOOL_REGISTERED\" [24h])",
+          "legendFormat": "Critical",
+          "refId": "A"
+        }
+      ],
+      "options": {"reduceOptions": {"calcs": ["sum"]}, "colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Invocation Outcomes Over Time",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "sum(count_over_time({job=\"mcp-proxy\"} | json | outcome=\"allow\" [$__interval]))",
+          "legendFormat": "Allow",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "sum(count_over_time({job=\"mcp-proxy\"} | json | outcome=\"deny\" [$__interval]))",
+          "legendFormat": "Deny",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "sum(count_over_time({job=\"mcp-proxy\"} |= \"mcp_disabled_for_profile\" [$__interval]))",
+          "legendFormat": "Profile Deny",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"custom": {"lineWidth": 2, "fillOpacity": 10}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "Allow"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+          {"matcher": {"id": "byName", "options": "Deny"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
+          {"matcher": {"id": "byName", "options": "Profile Deny"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]}
+        ]
+      }
+    },
+    {
+      "id": 8,
       "title": "Recent Audit Events",
       "type": "logs",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
       "targets": [
         {
-          "datasource": "Loki",
-          "expr": "{container=\"mcp-proxy\"} |= \"TOOL_INVOCATION\" | json",
-          "legendFormat": ""
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{job=\"mcp-proxy\"} |= \"TOOL_INVOCATION\" | json",
+          "legendFormat": "",
+          "refId": "A"
         }
       ],
       "options": {
@@ -141,15 +244,71 @@
       }
     },
     {
-      "id": 7,
-      "title": "Compliance Check Status",
-      "type": "logs",
-      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 12},
+      "id": 9,
+      "title": "MCP Server Breakdown (invocations by tool)",
+      "type": "piechart",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 12},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
       "targets": [
         {
-          "datasource": "Loki",
-          "expr": "{container=\"mcp-compliance-checker\"} | json",
-          "legendFormat": ""
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "sum by (tool_name) (count_over_time({job=\"mcp-proxy\"} | json | outcome=\"allow\" [24h]))",
+          "legendFormat": "{{tool_name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {"pieType": "donut", "displayLabels": ["name", "percent"]}
+    },
+    {
+      "id": 10,
+      "title": "Auth Mode Breakdown",
+      "type": "piechart",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 12},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "sum by (auth_mode) (count_over_time({job=\"mcp-proxy\"} | json | outcome=\"allow\" [24h]))",
+          "legendFormat": "{{auth_mode}}",
+          "refId": "A"
+        }
+      ],
+      "options": {"pieType": "donut", "displayLabels": ["name", "percent"]}
+    },
+    {
+      "id": 11,
+      "title": "Profile Changes Log",
+      "type": "logs",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 12},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{job=\"lab-mcp-self-service\"} | json",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": true,
+        "enableLogDetails": true
+      }
+    },
+    {
+      "id": 12,
+      "title": "Compliance Check Status",
+      "type": "logs",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 20},
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{job=\"mcp-compliance-checker\"} | json",
+          "legendFormat": "",
+          "refId": "A"
         }
       ],
       "options": {

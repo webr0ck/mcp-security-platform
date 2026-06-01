@@ -6,16 +6,18 @@ Principle: **no new features until the platform is honest and not exploitable.**
 
 ---
 
-## STATUS DASHBOARD (as of 2026-05-16)
+## STATUS DASHBOARD (as of 2026-06-01)
 
 | Phase | State | Summary |
 |---|---|---|
-| **P0 — Security unblock** | ✅ **DONE** | All 2 CRITICAL + 4 HIGH + supporting MEDIUM findings fixed, unit-tested (79 pass), F-001 **runtime-proven on the live podman lab**. |
-| **P1 — Truth reconciliation** | ⏳ **NEXT** | Docs vs reality: kill/relabel hallucinated features, fix broken CI/test refs, document the credential broker. ~1–2 days, no code risk. |
-| **P2 — Hardening** | 🔜 after P1 | CB-008, INV-007 real verify, pre-commit secret hook, de-skip INV-004 in CI, wire F-002 signed bundle into a real staging deploy. |
-| **P3 — Feature completion** | ⛔ blocked by P0–P2 | OIDC, learned anomaly baseline, real Helm, outbound Jira, per-tool rate-limit, UI. |
+| **P0 — Security unblock** | ✅ **DONE** | All 2 CRITICAL + 4 HIGH + supporting MEDIUM findings fixed, unit-tested, F-001 **runtime-proven on the live Podman lab**. |
+| **P1 — Truth reconciliation** | ✅ **DONE** | Docs reconciled to code; credential broker fully documented; enforcement table honest (enforced vs roadmap split). |
+| **P2 — Hardening** | ✅ **DONE** | HKDF KEK, master-secret TTL + zero, adapters raise typed errors, pre-commit gate, `.pre-commit-config.yaml` fails closed. CB-008/INV-007 partial (see notes). |
+| **P3 — Feature completion** | 🟡 **PARTIAL** | OIDC browser login + KC session JWT + Grafana SSO ✅. Learned anomaly baseline, real Helm, outbound Jira, per-tool rate-limit still roadmap. |
+| **P4 — Self-service MCP** | ✅ **DONE** | `self-service-mcp` (port 8108) live: 7 tools, `mcp_profiles` + `mcp_profile_events` tables (V020), OPA profile enforcement, 57 lab tests pass. |
+| **P5 — OAuth API + scripts** | ⏳ **NEXT** | Thin OAuth2-authenticated REST + Python CLI scripts for MCP management without MCP context overhead. |
 
-**Immediate next action: start P1.1 (replace the stale `ARCHITECTURE.md` v1) and P1.4 (fix the broken CI/test cross-references that currently make the integration job fail).**
+**Test coverage (2026-06-01):** 440 tests (383 proxy + 57 lab). Stress test: 2000 VUs (800 ROPC + 200 SA + 200 per-user + 1400 API-key), 50+ MCP requests/VU, p95 latency <500ms with token caching.
 
 ---
 
@@ -66,13 +68,27 @@ Exit criteria: every claim in every doc maps to verified file:line, or is delete
 
 ---
 
-## Phase 3 — FEATURE COMPLETION (only after P0–P2)
+## Phase 3 — FEATURE COMPLETION — 🟡 PARTIAL
 
-OIDC (replace 501 stubs, wire `oidc_role_mappings`) · learned/statistical anomaly baseline · SPDX (if a real consumer needs it) · outbound Jira issue creation on critical risk · real Helm chart + `helm template` CI lint · per-tool rate limiting · UI (catalog/submission/scan-status/reviewer actions — none exists yet; spec it before building).
+✅ Keycloak browser login, PKCE S256, session JWT, Grafana SSO — full flow implemented.
+✅ Lab environment: Keycloak, Dex, 4 lab MCP servers (echo, notes, search, self-service), stress test infrastructure.
+
+Still roadmap: learned/statistical anomaly baseline (hardcoded sliding-window today) · SPDX (if a real consumer needs it) · outbound Jira issue creation on critical risk · real Helm chart + `helm template` CI lint · per-tool rate limiting · browser UI (catalog/submission/scan-status/reviewer actions — none exists; spec before building).
 
 ---
 
-## Phase 4 — SELF-SERVICE MCP (after P3)
+## Phase 4 — SELF-SERVICE MCP — ✅ DONE (2026-06-01)
+
+**Delivered:** `lab/mcp-servers/self-service/server.py` — FastMCP server on port 8108.
+**Tools:** `list_available_mcps`, `enable_mcp`, `disable_mcp`, `get_profile`, `list_functions`, `enable_function`, `disable_function`.
+**Storage:** `mcp_profiles` + `mcp_profile_events` (V020 migration). Identity from proxy-injected `X-User-Sub`. OPA profile enforcement wired into invocation path (Python layer); Rego integration is Phase 5 work.
+**Test coverage:** 57 lab tests (20 self-service + 37 functional).
+
+### Original Design (archived below for reference)
+
+**Goal (original):** expose platform management capabilities *as an MCP server* so agents and automated pipelines can discover, enable, and configure MCP servers programmatically.
+
+## Phase 4 — SELF-SERVICE MCP (original spec, now implemented)
 
 **Goal:** expose platform management capabilities *as an MCP server* so agents and automated pipelines can discover, enable, and configure MCP servers programmatically — the platform eating its own dogfood.
 
@@ -130,6 +146,30 @@ A **profile** is a named permission set (maps 1:1 to a KC role or user sub). Pro
 - No UI. The self-service MCP IS the interface; a human-facing UI is a Phase 5+ concern.
 - No cross-tenant profile sharing. Each profile is scoped to a single identity.
 - No bulk import. Changes are per-MCP, per-function, per-profile.
+
+---
+
+---
+
+## Phase 5 — OAuth API + Python CLI (NEXT)
+
+**Goal:** thin OAuth2-authenticated REST API + Python script layer for MCP management without MCP context overhead. Answers the question: "how do I manage MCP servers from a simple script without the self-service MCP bloating the LLM context?"
+
+### Design
+
+- **Auth:** Keycloak `client_credentials` (for automation) or ROPC (for dev scripts). Same KC realm already in place.
+- **API surface:** reuse existing proxy REST endpoints + add `PUT /api/v1/credentials/me/{tool_id}` for per-user credential self-service.
+- **Scripts** (`scripts/mcp_admin.py`):
+  - `--list` — list all registered MCPs with status
+  - `--enable <mcp>` / `--disable <mcp>` — toggle for calling identity
+  - `--profile <mcp>` — show allowed functions
+  - `--set-secret <mcp>` — upload personal credential (user injection mode)
+  - Auth: `httpx` + KC token, ~150 lines total, zero MCP dependency
+- **No new infrastructure.** All endpoints already exist or are a 1-endpoint addition to the proxy.
+
+### Non-goals
+- No new UI beyond the admin panel already built.
+- No new auth mechanism — KC tokens already work.
 
 ---
 
