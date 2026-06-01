@@ -421,9 +421,13 @@ async def _emit_audit_event(
                         "client_id": client_id,
                         "tool_name": tool_name,
                         "tool_id": tool_id,
-                        # DB constraint only allows 'allow'/'deny'; upstream errors
-                        # are OPA-allowed so map 'error' → 'allow' for the index row.
-                        "outcome": "allow" if outcome == "error" else outcome,
+                        # DB CHECK constraint only allows 'allow'/'deny'.
+                        # An upstream failure means the tool did NOT successfully
+                        # execute despite OPA allowing it — mapping to 'allow'
+                        # would misrepresent the event in compliance queries.
+                        # 'deny' is the conservative choice: the operation did not
+                        # complete; opa_reasons records the specific failure cause.
+                        "outcome": "deny" if outcome == "error" else outcome,
                         "latency_ms": latency_ms,
                         "sha256_hash": sha256_hash,
                         "anomaly_score": anomaly_score,
