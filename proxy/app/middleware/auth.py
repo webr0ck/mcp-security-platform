@@ -318,6 +318,17 @@ async def _discover_jwks_uri(base: str) -> str:
     return f"{base}/keys"
 
 
+def _get_jwks_base_url() -> str:
+    """Return the internal JWKS discovery URL — prefers OIDC_INTERNAL_ISSUER_URL over OIDC_INTERNAL_URL."""
+    internal_issuer = getattr(settings, "OIDC_INTERNAL_ISSUER_URL", "").strip()
+    if internal_issuer:
+        return internal_issuer.rstrip("/")
+    internal_url = getattr(settings, "OIDC_INTERNAL_URL", "").strip()
+    if internal_url:
+        return internal_url.rstrip("/")
+    return settings.OIDC_ISSUER_URL.rstrip("/")
+
+
 async def _fetch_jwks() -> list[dict]:
     """Fetch and cache the JWKS from the configured OIDC issuer using discovery."""
     import time
@@ -327,8 +338,11 @@ async def _fetch_jwks() -> list[dict]:
     if _jwks_cache and now - _jwks_cache.get("fetched_at", 0) < _JWKS_TTL:
         return _jwks_cache["keys"]
 
-    # Use OIDC_INTERNAL_URL for container-network fetches (avoids routing to external IP).
-    base = getattr(settings, "OIDC_INTERNAL_URL", "").rstrip("/") or settings.OIDC_ISSUER_URL.rstrip("/")
+    # Use OIDC_INTERNAL_ISSUER_URL (Keycloak container URL) for JWKS fetches,
+    # falling back to OIDC_INTERNAL_URL and finally OIDC_ISSUER_URL.
+    # Bug fix: previously hardcoded OIDC_INTERNAL_URL which pointed at Dex,
+    # causing all Keycloak tokens to be rejected during JWKS validation.
+    base = _get_jwks_base_url()
 
     jwks_uri = _jwks_cache.get("jwks_uri") or await _discover_jwks_uri(base)
 

@@ -71,6 +71,15 @@ LAB_GITEA_ADMIN_PASSWORD = os.environ.get("LAB_GITEA_ADMIN_PASSWORD", "labpasswo
 
 KC_ADMIN_URL = os.environ.get("KC_ADMIN_URL", "http://lab-keycloak:8080")
 KC_ADMIN_PASSWORD = os.environ.get("KC_ADMIN_PASSWORD", "adminpassword")
+
+# OIDC issuer URL used to replace __OIDC_ISSUER_PLACEHOLDER__ in oidc_role_mappings.
+# Uses OIDC_INTERNAL_ISSUER_URL (container-network URL) so role lookups work
+# inside the proxy container; falls back to OIDC_ISSUER_URL if not set.
+OIDC_ISSUER_URL = (
+    os.environ.get("OIDC_INTERNAL_ISSUER_URL", "").strip()
+    or os.environ.get("OIDC_ISSUER_URL", "").strip()
+    or "http://lab-keycloak:8080/realms/mcp"
+)
 # Expected usernames in the mcp realm; any others are treated as attacker artifacts.
 KC_EXPECTED_USERS = {"alice", "bob", "carol"}
 # Passwords that should be set for each expected user on every seeder run.
@@ -184,6 +193,72 @@ async def run_sql_file(conn: asyncpg.Connection, sql_file: Path) -> None:
     except Exception as exc:
         log.error("Error executing %s: %s", sql_file.name, exc)
         raise
+
+
+async def fix_oidc_issuer_placeholder(conn: asyncpg.Connection) -> int:
+    """
+    Replace __OIDC_ISSUER_PLACEHOLDER__ in oidc_role_mappings with the real
+    OIDC issuer URL.  Returns the number of rows updated.
+
+    The migration (V002) inserts placeholder rows because the issuer URL is
+    environment-specific and cannot be hardcoded in a portable migration file.
+    The seeder runs after migrations and substitutes the real value on every
+    run (idempotent — a second run finds 0 rows to update).
+    """
+    result = await conn.execute(
+        """
+        UPDATE oidc_role_mappings
+        SET oidc_issuer = $1
+        WHERE oidc_issuer = '__OIDC_ISSUER_PLACEHOLDER__'
+        """,
+        OIDC_ISSUER_URL,
+    )
+    # asyncpg returns "UPDATE N" as a status string
+    updated = int(result.split()[-1]) if result else 0
+    if updated:
+        log.info(
+            "oidc_role_mappings: replaced %d placeholder rows with issuer=%s",
+            updated, OIDC_ISSUER_URL,
+        )
+    else:
+        log.info(
+            "oidc_role_mappings: no placeholder rows found (already substituted or empty)"
+        )
+    return updated
+
+
+async def revoke_placeholder_api_keys(conn: asyncpg.Connection) -> int:
+    """
+    Revoke API key rows whose key_hash is a known placeholder pattern.
+    These keys were inserted by V002 migration and lab/seeder/sql/roles.sql
+    and can never authenticate (no real HMAC was computed). Revoking them
+    removes the hygiene risk of unrevokable zero-hash entries.
+    Returns the number of rows revoked.
+    """
+    placeholder_hashes = [
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "a1ce0000000000000000000000000000000000000000000000000000000000a1",
+        "b0b00000000000000000000000000000000000000000000000000000000000b0",
+    ]
+    result = await conn.execute(
+        """
+        UPDATE api_keys
+        SET revoked_at = NOW()
+        WHERE key_hash = ANY($1::text[])
+          AND revoked_at IS NULL
+        """,
+        placeholder_hashes,
+    )
+    revoked = int(result.split()[-1]) if result else 0
+    if revoked:
+        log.warning(
+            "api_keys: revoked %d placeholder-hash row(s) — generate real keys via "
+            "infra/scripts/create-bootstrap-key.sh",
+            revoked,
+        )
+    else:
+        log.info("api_keys: no unrevoked placeholder-hash rows found")
+    return revoked
 
 
 async def create_grafana_token() -> Optional[str]:
@@ -536,6 +611,24 @@ async def main() -> None:
     except Exception as exc:
         log.error("roles.sql seeding failed: %s", exc)
         results["roles_sql"] = f"FAILED: {exc}"
+
+    # 5a. Fix oidc_role_mappings placeholder issuer
+    log.info("Fixing OIDC issuer placeholder in oidc_role_mappings...")
+    try:
+        n = await fix_oidc_issuer_placeholder(conn)
+        results["oidc_issuer_fix"] = f"OK ({n} rows updated)"
+    except Exception as exc:
+        log.error("oidc_role_mappings placeholder fix failed: %s", exc)
+        results["oidc_issuer_fix"] = f"FAILED: {exc}"
+
+    # 5b. Revoke placeholder API key hashes
+    log.info("Revoking placeholder-hash API keys...")
+    try:
+        n = await revoke_placeholder_api_keys(conn)
+        results["placeholder_key_revoke"] = f"OK ({n} rows revoked)"
+    except Exception as exc:
+        log.error("Placeholder API key revocation failed: %s", exc)
+        results["placeholder_key_revoke"] = f"FAILED: {exc}"
 
     await conn.close()
 

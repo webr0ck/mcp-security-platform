@@ -23,6 +23,10 @@
 --
 -- ON CONFLICT DO NOTHING makes this idempotent if re-applied.
 
+-- NOTE: The __OIDC_ISSUER_PLACEHOLDER__ string must be replaced at deploy time.
+-- The lab seeder (lab/seeder/seed.py) runs a post-migration UPDATE to substitute
+-- the real OIDC_ISSUER_URL value. For production, use the deploy script or
+-- infra/scripts/fix-oidc-issuer.sh.
 INSERT INTO oidc_role_mappings (oidc_issuer, claim_key, claim_value, roles)
 VALUES
     -- Admin: full read/write platform access

@@ -67,6 +67,16 @@
             "access.token.claim": "true",
             "usermodel.clientRoleMapping.clientId": "mcp-proxy"
           }
+        },
+        {
+          "name": "audience-mcp-proxy",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "mcp-proxy",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
         }
       ]
     },
