@@ -66,7 +66,7 @@ async def test_invoke_tool_injects_credential_header():
         "status": "active",
         "upstream_url": "http://grafana:3000/mcp",
         "service_name": "grafana",
-        "credential_approach": "B",
+        "injection_mode": "service",
         "inject_header": "Authorization",
         "inject_prefix": "Bearer ",
     }
@@ -113,7 +113,7 @@ async def test_invoke_tool_fails_closed_when_broker_none_and_injection_required(
         "status": "active",
         "upstream_url": "http://grafana:3000/mcp",
         "service_name": "grafana",
-        "credential_approach": "B",
+        "injection_mode": "service",
         "inject_header": "Authorization",
         "inject_prefix": "Bearer ",
     }
@@ -150,7 +150,7 @@ async def test_invoke_tool_passes_when_broker_none_and_no_injection_required():
         "name": "no-cred-tool",
         "status": "active",
         "upstream_url": "http://some-server:8080/mcp",
-        # No service_name, no credential_approach → no injection needed
+        "injection_mode": "none",   # explicit: no injection
     }
 
     mock_response = MagicMock()

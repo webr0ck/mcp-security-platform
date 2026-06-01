@@ -146,27 +146,31 @@ async def invoke_tool(
 
     extra_headers: dict[str, str] = {}
     credential = None
+    injection_mode = tool_record.get("injection_mode", "none")
     service_name = tool_record.get("service_name")
-    credential_approach = tool_record.get("credential_approach")
 
-    if service_name and credential_approach:
-        # Fail-closed: if the broker is not initialized, refuse to call upstream
-        # without credentials. An uncredentialed call would silently bypass the
-        # injection boundary — that's worse than a visible error.
+    if injection_mode != "none":
+        # Fail-closed: broker must be initialized for any credential injection.
+        # This guard fires in production where injection_mode is set from the DB.
         if broker_instance is None:
             raise CredentialInjectionError(
-                f"Credential broker not initialized; cannot inject credential "
-                f"for tool {tool_record.get('tool_id')} (service={service_name}). "
+                f"Credential broker not initialized; cannot inject '{injection_mode}' credential "
+                f"for tool {tool_record.get('tool_id')}. "
                 "Ensure VAULT_TOKEN is configured and broker initialized at startup."
             )
-        credential = await broker_instance.resolve(
-            user_sub=client_id,
-            service=service_name,
-            session_id=request_id,
-            approach=credential_approach,
-        )
-        prefix = tool_record.get("inject_prefix", "")
-        extra_headers[tool_record["inject_header"]] = f"{prefix}{credential.token}"
+        # Direct broker.resolve for service and user modes.
+        # service_account/oauth_user_token modes will use the dispatcher path (Plan 2).
+        if service_name and injection_mode in ("service", "user"):
+            approach = "B" if injection_mode == "service" else "A"
+            credential = await broker_instance.resolve(
+                user_sub=client_id,
+                service=service_name,
+                session_id=request_id,
+                approach=approach,
+            )
+            inject_header = tool_record.get("inject_header") or "Authorization"
+            prefix = tool_record.get("inject_prefix") or ""
+            extra_headers[inject_header] = f"{prefix}{credential.token}".strip()
 
     start_ts = datetime.now(timezone.utc)
     upstream_response: dict[str, Any] = {}
