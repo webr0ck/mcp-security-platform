@@ -18,6 +18,7 @@ See docs/ARCHITECTURE.md data flow 5.1 for the step-by-step sequence.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -214,16 +215,22 @@ async def invoke_tool(
     }
 
     try:
+        # Attempt to reuse a cached MCP-Session-Id before opening an HTTP client.
+        # On cache hit we skip the 2-request initialize handshake entirely (Bug 1 fix).
+        session_id = await _get_or_create_session(upstream_url, client_id, handshake_headers)
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # MCP streamable-http servers require an initialize handshake before
-            # any tools/call — establish a session and reuse it for the real call.
-            try:
-                session_id = await _mcp_initialize(client, upstream_url, handshake_headers)
-            except Exception as exc:
-                init_failed = True
-                upstream_error = exc
-                logger.error("MCP initialize handshake failed: %s", exc)
-                session_id = None
+            # If no cached session was available, run the full initialize handshake.
+            if session_id is None:
+                try:
+                    session_id = await _mcp_initialize(client, upstream_url, handshake_headers)
+                    if session_id:
+                        await _store_session(upstream_url, client_id, session_id)
+                except Exception as exc:
+                    init_failed = True
+                    upstream_error = exc
+                    logger.error("MCP initialize handshake failed: %s", exc)
+                    session_id = None
 
             if not init_failed:
                 forward_headers = dict(forward_base_headers)
@@ -301,6 +308,46 @@ async def invoke_tool(
     upstream_response["meta"]["latency_ms"] = latency_ms
 
     return upstream_response
+
+
+
+async def _get_or_create_session(upstream_url: str, client_id: str, headers: dict) -> str | None:
+    """Return cached MCP-Session-Id or None (caller runs full handshake on None).
+
+    Cache key is a SHA-256 hash of (upstream_url, client_id) to prevent cross-client
+    session reuse. TTL is 25s — safely below the 30s upstream session timeout.
+    Fails open: returns None if Redis is unavailable so caller falls back to fresh handshake.
+    """
+    from app.core.redis_client import redis_pool
+    if redis_pool.client is None:
+        return None
+    cache_key = (
+        "mcp_session:"
+        + hashlib.sha256(f"{upstream_url}:{client_id}".encode()).hexdigest()[:16]
+    )
+    try:
+        cached = await redis_pool.client.get(cache_key)
+        if cached:
+            logger.debug("MCP session cache hit for client=%s", client_id)
+            return cached.decode()
+    except Exception as exc:
+        logger.debug("Redis session cache read failed (fail-open): %s", exc)
+    return None
+
+
+async def _store_session(upstream_url: str, client_id: str, session_id: str) -> None:
+    """Persist a newly-created MCP-Session-Id in Redis with 25s TTL (best-effort)."""
+    from app.core.redis_client import redis_pool
+    if redis_pool.client is None:
+        return
+    cache_key = (
+        "mcp_session:"
+        + hashlib.sha256(f"{upstream_url}:{client_id}".encode()).hexdigest()[:16]
+    )
+    try:
+        await redis_pool.client.setex(cache_key, 25, session_id)
+    except Exception as exc:
+        logger.debug("Redis session cache write failed (non-fatal): %s", exc)
 
 
 async def _mcp_initialize(

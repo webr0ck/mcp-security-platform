@@ -324,6 +324,14 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
     client_id = getattr(request.state, "client_id", "anonymous")
     roles: list[str] = getattr(request.state, "client_roles", [])
 
+    # Bug 2 fix: prefer per-message batch sub-ID over the shared request.state.request_id.
+    # This ensures every audit event in a batch carries a unique correlation ID.
+    from uuid import uuid4 as _uuid4
+    _effective_request_id: str = (
+        body.get("_request_id")
+        or getattr(request.state, "request_id", str(_uuid4()))
+    )
+
     logger.info("MCP %s from %s roles=%s", method, client_id, roles)
 
     # ── Notifications (no id → no response) ─────────────────────────────
@@ -384,7 +392,7 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
                     client_id=client_id,
                     outcome="deny",
                     deny_reasons=opa_result.get("reasons", []),
-                    request_id=getattr(request.state, "request_id", str(uuid4())),
+                    request_id=_effective_request_id,
                     latency_ms=0,
                     anomaly_score=0.0,
                     opa_decision_id=f"dec_{uuid4().hex[:16]}",
@@ -417,7 +425,7 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
                     client_id=client_id,
                     outcome="allow",
                     deny_reasons=[],
-                    request_id=getattr(request.state, "request_id", str(uuid4())),
+                    request_id=_effective_request_id,
                     latency_ms=latency_ms,
                     anomaly_score=0.0,
                     opa_decision_id=f"dec_{uuid4().hex[:16]}",
@@ -476,7 +484,18 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
                 _err(None, -32600, f"Batch too large: max {_MAX_BATCH_SIZE} messages per request"),
                 status_code=400,
             )
-        responses = await asyncio.gather(*[_dispatch(msg, request) for msg in body if isinstance(msg, dict)])
+        # Bug 2 fix: inject per-message correlation IDs so every audit event in a
+        # batch carries a unique request_id (format: <batch_id>#<index>).
+        from uuid import uuid4 as _uuid4
+        batch_request_id = getattr(request.state, "request_id", str(_uuid4()))
+        tagged = []
+        for i, msg in enumerate(body):
+            if isinstance(msg, dict):
+                msg = dict(msg)  # shallow copy — do not mutate caller's object
+                msg["_batch_index"] = i
+                msg["_request_id"] = f"{batch_request_id}#{i}"
+                tagged.append(msg)
+        responses = await asyncio.gather(*[_dispatch(msg, request) for msg in tagged])
         responses = [r for r in responses if r is not None]
         if not responses:
             return JSONResponse({}, status_code=202)
