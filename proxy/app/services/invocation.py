@@ -196,31 +196,12 @@ async def invoke_tool(
     service_name = tool_record.get("service_name")
 
     if injection_mode != "none":
-        # Fail-closed: broker must be initialized for any credential injection.
-        # This guard fires in production where injection_mode is set from the DB.
-        if broker_instance is None:
-            raise CredentialInjectionError(
-                f"Credential broker not initialized; cannot inject '{injection_mode}' credential "
-                f"for tool {tool_record.get('tool_id')}. "
-                "Ensure VAULT_TOKEN is configured and broker initialized at startup."
-            )
-        if service_name and injection_mode in ("service", "user"):
-            approach = "B" if injection_mode == "service" else "A"
-            credential = await broker_instance.resolve(
-                user_sub=client_id,
-                service=service_name,
-                session_id=request_id,
-                approach=approach,
-            )
-            inject_header = tool_record.get("inject_header") or "Authorization"
-            prefix = tool_record.get("inject_prefix") or ""
-            extra_headers[inject_header] = f"{prefix}{credential.token}".strip()
-        else:
-            raise CredentialInjectionError(
-                f"Injection mode '{injection_mode}' is not yet implemented; cannot inject "
-                f"credential for tool {tool_record.get('tool_id')}. "
-                "Configure injection_mode='none' or use a supported mode (service, user)."
-            )
+        from app.credential_broker.dispatcher import dispatch_credential_injection
+        extra_headers = await dispatch_credential_injection(
+            tool_record=tool_record,
+            client_id=client_id,
+            user_kc_token=None,
+        )
 
     start_ts = datetime.now(timezone.utc)
     upstream_response: dict[str, Any] = {}
