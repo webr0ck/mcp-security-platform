@@ -402,7 +402,7 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
-      REDIS_URL: "redis://mcp-redis:6379/3"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-devpassword}@mcp-redis:6379/3"
       FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
     networks:
       - lab-net

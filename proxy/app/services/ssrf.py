@@ -84,8 +84,12 @@ def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
     if parsed.scheme == "http":
         if not allow_http_localhost:
             raise SSRFError("HTTP scheme is not allowed; use HTTPS")
-        if host not in ("localhost", "127.0.0.1", "::1"):
-            raise SSRFError("HTTP scheme is only allowed for localhost in development mode")
+        # Dev mode: allow localhost AND internal container hostnames (non-raw-IP names).
+        # Raw IP addresses are still blocked by the IP check below.
+        # Container names (lab-mcp-echo, mcp-netbox, etc.) are non-IP hostnames — allowed.
+        is_raw_ip = _is_blocked_ip(host) or host.replace(".", "").replace(":", "").isdigit()
+        if host not in ("localhost", "127.0.0.1", "::1") and is_raw_ip:
+            raise SSRFError("HTTP scheme with raw IP is only allowed for localhost in development mode")
     elif parsed.scheme != "https":
         raise SSRFError(f"Scheme {parsed.scheme!r} is not allowed; use HTTPS")
 
@@ -94,9 +98,9 @@ def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
         raise SSRFError(f"Host {host!r} resolves to a blocked private/reserved IP range")
 
     # DNS resolution check (best-effort — catches obvious rebind; not a full guard)
-    # Skip for localhost: it's already allowed by scheme check above and DNS resolution
-    # would block it because localhost resolves to 127.0.0.1/::1 (both in blocked ranges).
-    if host in ("localhost",):
+    # Skip for localhost and dev-mode container hostnames: they resolve to private IPs
+    # (10.x Podman network) which are in blocked ranges but intentionally trusted in dev.
+    if host in ("localhost",) or (allow_http_localhost and parsed.scheme == "http"):
         return
 
     try:
