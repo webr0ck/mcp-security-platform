@@ -560,8 +560,11 @@ services:
     tmpfs:
       - /tmp:size=64m,mode=1777
     networks:
-      # internal only — compliance checker and proxy write audit archives here
-      - observability-net
+      observability-net:
+        # Alias so both "minio" (compose DNS) and "mcp-minio" (container name /
+        # MINIO_ENDPOINT in .env) resolve to the same container.
+        aliases:
+          - mcp-minio
     expose:
       - "9000"
       # 9001 (console) is exposed but internal only — not mapped to host in prod
