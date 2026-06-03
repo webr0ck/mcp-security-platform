@@ -32,6 +32,8 @@ services:
       DEX_ALICE_PASSWORD: ${DEX_ALICE_PASSWORD:-labpassword}
       DEX_BOB_PASSWORD: ${DEX_BOB_PASSWORD:-labpassword}
       LAB_HOST: ${LAB_HOST:-localhost}
+      # Cap JVM heap so the Quarkus build phase isn't OOM-killed in rootless Podman (6 GB machine)
+      JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx512m"
     volumes:
       - ./lab/keycloak/realm-mcp.json:/opt/keycloak/data/import/realm-mcp.json:ro
       - lab-keycloak-data:/opt/keycloak/data
@@ -50,7 +52,7 @@ services:
 
   # ── Keycloak seeder — updates client secrets from env vars post-import ─────
   lab-keycloak-seeder:
-    image: curlimages/curl:8.6.0
+    image: alpine:3.19
     container_name: lab-keycloak-seeder
     restart: "no"
     depends_on:
@@ -58,7 +60,7 @@ services:
         condition: service_healthy
     volumes:
       - ./lab/keycloak/seed.sh:/seed.sh:ro
-    command: ["sh", "/seed.sh"]
+    command: ["sh", "-c", "apk add --no-cache curl jq bash -q && bash /seed.sh"]
     environment:
       KC_URL: http://lab-keycloak:8080
       KC_REALM: mcp

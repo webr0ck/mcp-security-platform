@@ -14,7 +14,7 @@
   "minimumQuickLoginWaitSeconds": 60,
   "quickLoginCheckMilliSeconds": 1000,
   "maxDeltaTimeSeconds": 43200,
-  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1) and notUsername()",
+  "passwordPolicy": "",
   "clients": [
     {
       "clientId": "mcp-proxy",

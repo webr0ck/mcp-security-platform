@@ -127,12 +127,12 @@ def _invoke_tool(token: str, tool_name: str, arguments: dict, timeout: float = 2
 
 
 def _list_tools(token: str) -> list:
-    """Return list of tool dicts from the registry."""
-    resp = httpx.get(f"{PROXY_URL}/api/v1/tools", headers=_auth_headers(token), timeout=10)
+    """Return all tool dicts from the registry (all pages)."""
+    resp = httpx.get(f"{PROXY_URL}/api/v1/tools", params={"page_size": 200},
+                     headers=_auth_headers(token), timeout=10)
     if resp.status_code != 200:
         return []
     body = resp.json()
-    # API returns {"data": [...]} or plain list
     if isinstance(body, list):
         return body
     return body.get("data", body.get("tools", []))
