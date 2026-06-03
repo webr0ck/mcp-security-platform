@@ -172,7 +172,7 @@ def setup_vault_secret() -> str:
 
     client.secrets.kv.v2.create_or_update_secret(
         path=kv_path,
-        secret={"value": master_value},
+        secret={"master_secret": master_value},
         mount_point="secret",
     )
     log.info("Broker master secret written to Vault at %s", BROKER_MASTER_SECRET_PATH)
