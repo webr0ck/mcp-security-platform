@@ -65,6 +65,7 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/health/ready",
     "/api/v1/auth/oidc/login",
     "/api/v1/auth/oidc/callback",
+    "/api/v1/auth/oidc/token/refresh",    # self-authenticated via current JWT
     "/api/v1/integrations/jira/webhook",  # authenticated by JIRA_WEBHOOK_SECRET, not RBAC
     "/oauth/register",                    # RFC 7591 dynamic client registration — pre-auth
 })

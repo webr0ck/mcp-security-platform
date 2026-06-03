@@ -520,3 +520,134 @@ async def oidc_session_info(
         "auth_method": claims.get("auth_method"),
         "expires_at": claims.get("exp"),
     })
+
+
+@router.post("/token/refresh")
+async def token_refresh(
+    request: Request,
+    mcp_session: str | None = Cookie(default=None, alias="mcp_session"),
+):
+    """
+    Refresh the internal session JWT using the stored KC refresh token.
+
+    MCP clients call this when their session JWT is near expiry.
+    Accepts the current session JWT via cookie OR Authorization: Bearer header.
+    Returns a new session JWT (same roles, new expiry) and sets the cookie.
+
+    Flow: decode current JWT → look up oidc_sessions row by jti →
+          call KC token endpoint with stored refresh_token →
+          issue new internal session JWT → update DB row.
+    """
+    token = mcp_session
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:].strip()
+
+    if not token:
+        return JSONResponse(status_code=401, content={"error": "no_session"})
+
+    claims = _decode_session_jwt(token)
+    if not claims:
+        return JSONResponse(status_code=401, content={"error": "invalid_session"})
+
+    jti = claims.get("jti")
+    if not jti:
+        return JSONResponse(status_code=401, content={"error": "no_jti"})
+
+    # Look up the stored KC refresh token
+    try:
+        from sqlalchemy import text
+        from app.core.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                text("""
+                    SELECT kc_refresh_token, subject, client_id_resolved, session_id
+                    FROM oidc_sessions
+                    WHERE session_jwt_jti = :jti AND revoked_at IS NULL
+                    LIMIT 1
+                """),
+                {"jti": uuid.UUID(jti)},
+            )
+            row = result.fetchone()
+    except Exception as exc:
+        logger.error("DB error in token/refresh: %s", exc)
+        return JSONResponse(status_code=500, content={"error": "db_error"})
+
+    if row is None:
+        return JSONResponse(status_code=401, content={"error": "session_not_found"})
+
+    kc_refresh_token = row.kc_refresh_token
+    if not kc_refresh_token:
+        return JSONResponse(status_code=400, content={"error": "no_refresh_token_stored"})
+
+    # Exchange refresh token at KC
+    discovery = await _discover()
+    token_endpoint = discovery.get("token_endpoint", "")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                token_endpoint,
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": settings.OIDC_CLIENT_ID,
+                    "client_secret": settings.OIDC_CLIENT_SECRET,
+                    "refresh_token": kc_refresh_token,
+                },
+            )
+            if resp.status_code == 400:
+                return JSONResponse(status_code=401, content={"error": "refresh_token_expired"})
+            resp.raise_for_status()
+            token_data = resp.json()
+    except Exception as exc:
+        logger.error("KC refresh token exchange failed: %s", exc)
+        return JSONResponse(status_code=502, content={"error": "refresh_failed"})
+
+    new_access_token = token_data.get("access_token", "")
+    new_refresh_token = token_data.get("refresh_token", kc_refresh_token)
+    new_jti = str(uuid.uuid4())
+
+    roles: list[str] = claims.get("roles", [])
+    subject: str = row.subject or claims.get("sub", "")
+    client_id: str = row.client_id_resolved or claims.get("client_id", "")
+
+    new_jwt = _issue_session_jwt(subject, client_id, roles, new_jti)
+
+    # Update DB: rotate jti + refresh token, store new KC access token
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                text("""
+                    UPDATE oidc_sessions SET
+                        kc_access_token  = :at,
+                        kc_refresh_token = :rt,
+                        session_jwt_jti  = :new_jti,
+                        expires_at       = NULL
+                    WHERE session_id = :sid
+                """),
+                {
+                    "at": new_access_token,
+                    "rt": new_refresh_token,
+                    "new_jti": uuid.UUID(new_jti),
+                    "sid": row.session_id,
+                },
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.warning("Failed to update session after refresh: %s", exc)
+
+    response = JSONResponse(content={
+        "session_token": new_jwt,
+        "expires_in": settings.SESSION_JWT_EXPIRE_SECONDS,
+        "token_type": "Bearer",
+    })
+    response.set_cookie(
+        key=settings.SESSION_COOKIE_NAME,
+        value=new_jwt,
+        max_age=settings.SESSION_JWT_EXPIRE_SECONDS,
+        httponly=True,
+        secure=settings.SESSION_COOKIE_SECURE,
+        samesite="lax",
+        domain=settings.SESSION_COOKIE_DOMAIN if settings.SESSION_COOKIE_DOMAIN != "localhost" else None,
+    )
+    return response
