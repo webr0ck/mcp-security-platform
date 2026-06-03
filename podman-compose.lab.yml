@@ -332,7 +332,7 @@ services:
       - lab-net
       - internal-net
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/mcp', timeout=5)"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -629,6 +629,7 @@ services:
       - proxy-redis-net
       - proxy-db-net
       - internal-net    # lab: proxy must reach upstream MCP servers on internal-net
+      - lab-net         # lab: proxy reverse proxy to lab-netbox, lab-grafana, lab-keycloak
 
   # ── DB: several rootless-Podman overrides needed:
   # - user: postgres → avoid su-exec user-switch failure

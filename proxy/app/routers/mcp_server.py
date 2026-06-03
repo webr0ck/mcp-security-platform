@@ -9,15 +9,22 @@ Implemented methods
 initialize          — server capabilities + identity echo
 notifications/initialized  — client ready notification (no response)
 ping                — keep-alive
-tools/list          — role-filtered catalogue of demo tools
-tools/call          — execute a demo tool and return result
+tools/list          — platform meta-tools + all grant-filtered registry tools
+tools/call          — platform tools handled inline; registry tools routed through
+                       OPA policy → credential injection → audit pipeline
 
-Role visibility
----------------
-  admin    → all tools
+Role visibility (platform meta-tools)
+--------------------------------------
+  admin    → all platform tools
   analyst  → security_* tools + platform_info
   viewer   → platform_info only
-  (unauthenticated requests are blocked by AuthMiddleware before reaching here)
+
+Registry tools
+--------------
+  All active tools from tool_registry are included in tools/list filtered by the
+  caller's OPA grants (advisory; OPA re-enforces on every tools/call).
+  A direct tools/call for any registered tool name bypasses the invoke_tool wrapper
+  and routes straight through the security pipeline — transparent to the MCP client.
 
 The /mcp path is public at the nginx level (no mTLS) but AuthMiddleware
 enforces Bearer token auth so every request has request.state.client_id.
@@ -163,6 +170,143 @@ def _can_call(tool_name: str, roles: list[str]) -> bool:
     return False
 
 
+def _load_grants_data() -> tuple[dict, dict]:
+    """Return (grants, tools_metadata) from data.json. Mirrors OPA bundle layout."""
+    candidates = [
+        "/app/policies/data.json",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../policies/rego/data.json"),
+    ]
+    for grants_path in candidates:
+        if os.path.exists(grants_path):
+            try:
+                with open(grants_path) as f:
+                    d = json.load(f).get("mcp", {})
+                    return d.get("grants", {}), d.get("tools", {})
+            except Exception:
+                pass
+    return {}, {}
+
+
+async def _registered_tools_for_client(client_id: str, roles: list[str]) -> list[dict]:
+    """Return active registry tools visible to this client.
+
+    Mirrors OPA client_has_invoke_permission logic:
+      - admin/platform_admin → all active tools
+      - others → tools in allowed_tools OR having a tag in allowed_tags
+    This is advisory; OPA re-enforces on every tools/call.
+    """
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+
+    grants, tools_meta = _load_grants_data()
+    role_set = set(roles)
+    is_admin = bool(role_set & {"admin", "platform_admin"})
+
+    if not is_admin:
+        grant = grants.get(client_id, {})
+        allowed_tools: set[str] = set(grant.get("allowed_tools", []))
+        allowed_tags: set[str] = set(grant.get("allowed_tags", []))
+        if not allowed_tools and not allowed_tags:
+            return []
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    "SELECT name, description, schema, tags FROM tool_registry "
+                    "WHERE status = 'active' AND deleted_at IS NULL ORDER BY name"
+                )
+            )
+            rows = result.mappings().fetchall()
+    except Exception as exc:
+        logger.error("DB error fetching tool catalogue: %s", exc)
+        return []
+
+    platform_names = {t["name"] for t in _TOOLS}
+    tools = []
+    for row in rows:
+        if row["name"] in platform_names:
+            continue
+        if not is_admin:
+            # Mirror OPA tag-grant rule exactly:
+            # OPA uses data.mcp.tools[tool_name].tags (data.json), NOT DB tags.
+            meta_tags = set(tools_meta.get(row["name"], {}).get("tags", []))
+            if row["name"] not in allowed_tools and not (meta_tags & allowed_tags):
+                continue
+        schema = row["schema"] or {}
+        if isinstance(schema, str):
+            try:
+                schema = json.loads(schema)
+            except Exception:
+                schema = {}
+        tools.append({
+            "name": row["name"],
+            "description": row["description"] or f"Registered MCP tool: {row['name']}",
+            "inputSchema": schema,
+        })
+    return tools
+
+
+async def _route_to_registry(name: str, args: dict, request: Request, req_id: Any) -> dict:
+    """Route a direct tools/call for a registry tool through the full security pipeline."""
+    from uuid import uuid4
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    from app.services import invocation as inv_svc
+
+    client_id = getattr(request.state, "client_id", "unknown")
+    client_roles = getattr(request.state, "client_roles", [])
+    request_id = getattr(request.state, "request_id", str(uuid4()))
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    "SELECT * FROM tool_registry WHERE name = :name "
+                    "AND status NOT IN ('deprecated', 'quarantined') "
+                    "AND deleted_at IS NULL LIMIT 1"
+                ),
+                {"name": name},
+            )
+            row = result.mappings().fetchone()
+    except Exception as exc:
+        return _err(req_id, -32603, f"DB error looking up tool '{name}': {exc}")
+
+    if row is None:
+        return _err(req_id, -32601, f"Tool '{name}' not found in registry or not callable")
+
+    tool_record = dict(row)
+    json_rpc_request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": args},
+    }
+
+    try:
+        async with _INVOKE_SEMAPHORE:
+            upstream = await inv_svc.invoke_tool(
+                tool_record=tool_record,
+                json_rpc_request=json_rpc_request,
+                client_id=client_id,
+                client_roles=client_roles,
+                is_testing=False,
+                request_id=request_id,
+            )
+    except Exception as exc:
+        logger.exception("Registry tool invocation error for %s", name)
+        return _err(req_id, -32603, f"Tool invocation failed: {exc}")
+
+    if "error" in upstream:
+        err = upstream["error"]
+        return _err(req_id, err.get("code", -32603), err.get("message", "Upstream error"))
+
+    content = upstream.get("result", {}).get("content", [])
+    if not content:
+        content = [{"type": "text", "text": json.dumps(upstream.get("result", {}))}]
+    return _ok(req_id, {"content": content})
+
+
 # ---------------------------------------------------------------------------
 # Tool handlers
 # ---------------------------------------------------------------------------
@@ -200,20 +344,28 @@ def _handle_security_pulse_summary(args: dict, request: Request) -> dict:
     return {"type": "text", "text": json.dumps(data, indent=2)}
 
 
-def _handle_list_registered_tools(args: dict, request: Request) -> dict:
+async def _handle_list_registered_tools(args: dict, request: Request) -> dict:
     status_filter = args.get("status", "all")
-    demo_tools = [
-        {"name": "grafana-reader", "version": "1.0.0", "status": "approved", "risk_score": 12},
-        {"name": "netbox-lookup", "version": "2.1.0", "status": "approved", "risk_score": 8},
-        {"name": "file-writer", "version": "0.9.0", "status": "quarantined", "risk_score": 87,
-         "quarantine_reason": "Detected write access outside /tmp"},
-        {"name": "code-executor", "version": "1.2.0", "status": "pending", "risk_score": None},
-    ]
-    if status_filter != "all":
-        demo_tools = [t for t in demo_tools if t["status"] == status_filter]
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as session:
+            if status_filter == "all":
+                result = await session.execute(
+                    text("SELECT name, version, status, risk_score, upstream_url FROM tool_registry WHERE deleted_at IS NULL ORDER BY name")
+                )
+            else:
+                result = await session.execute(
+                    text("SELECT name, version, status, risk_score, upstream_url FROM tool_registry WHERE deleted_at IS NULL AND status = :s ORDER BY name"),
+                    {"s": status_filter},
+                )
+            rows = result.mappings().fetchall()
+    except Exception as exc:
+        return {"type": "text", "text": f"DB error fetching tool registry: {exc}"}
+    tools = [dict(r) for r in rows]
     return {
         "type": "text",
-        "text": json.dumps({"tools": demo_tools, "total": len(demo_tools)}, indent=2),
+        "text": json.dumps({"tools": tools, "total": len(tools)}, indent=2),
     }
 
 
@@ -370,10 +522,12 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
 
     # ── Tool methods ──────────────────────────────────────────────────────
     if method == "tools/list":
-        tools = _visible_tools(roles)
+        platform_tools = _visible_tools(roles)
+        registry_tools = await _registered_tools_for_client(client_id, roles)
+        tools = platform_tools + registry_tools
         logger.info(
-            "MCP tools/list client=%s roles=%s visible_count=%d",
-            client_id, roles, len(tools),
+            "MCP tools/list client=%s roles=%s visible=%d (platform=%d registry=%d)",
+            client_id, roles, len(tools), len(platform_tools), len(registry_tools),
         )
         return _ok(req_id, {"tools": tools})
 
@@ -381,14 +535,15 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
         name = params.get("name", "")
         args = params.get("arguments") or {}
 
+        # Registry tool — route directly through the security pipeline
         if not _can_call(name, roles):
-            return _err(req_id, -32603, f"Tool '{name}' not found or not accessible with your roles ({roles})")
+            return await _route_to_registry(name, args, request, req_id)
 
         # OPA policy check for internal platform tools.
         # 'invoke_tool' runs its own full pipeline — skip here to avoid double-evaluation.
         if name != "invoke_tool":
             from app.services.policy import evaluate_policy
-            from app.services.invocation import emit_mcp_access_event
+            from app.services.invocation import emit_internal_tool_event
             from uuid import uuid4
             opa_input = {
                 "client_id": client_id,
@@ -403,18 +558,14 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
             }
             opa_result = await evaluate_policy(opa_input)
             if not opa_result["allow"]:
-                await emit_mcp_access_event(
-                    tool_id=None,
+                await emit_internal_tool_event(
                     tool_name=name,
-                    tool_version=None,
                     client_id=client_id,
                     outcome="deny",
                     deny_reasons=opa_result.get("reasons", []),
                     request_id=_effective_request_id,
                     latency_ms=0,
-                    anomaly_score=0.0,
                     opa_decision_id=f"dec_{uuid4().hex[:16]}",
-                    is_testing=False,
                 )
                 return _err(req_id, -32603, f"Policy denied: {opa_result.get('reasons', [])}")
 
@@ -434,20 +585,16 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
 
             # Emit audit for internal tools only (invoke_tool audits internally)
             if name != "invoke_tool":
-                from app.services.invocation import emit_mcp_access_event
+                from app.services.invocation import emit_internal_tool_event
                 from uuid import uuid4
-                await emit_mcp_access_event(
-                    tool_id=None,
+                await emit_internal_tool_event(
                     tool_name=name,
-                    tool_version=None,
                     client_id=client_id,
                     outcome="allow",
                     deny_reasons=[],
                     request_id=_effective_request_id,
                     latency_ms=latency_ms,
-                    anomaly_score=0.0,
                     opa_decision_id=f"dec_{uuid4().hex[:16]}",
-                    is_testing=False,
                 )
             return _ok(req_id, {"content": [content]})
         except Exception as exc:

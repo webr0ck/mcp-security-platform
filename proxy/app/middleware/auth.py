@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 
 # Endpoints that do not require authentication
 PUBLIC_PATHS: frozenset[str] = frozenset({
+    "/",           # redirects to /portal
     "/health",
     "/health/ready",
     "/api/v1/auth/oidc/login",
@@ -73,7 +74,13 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
 # from a header. It is recovered from the single-use server-side nonce
 # created at /auth/enroll/* (a PROTECTED path). /auth/enroll/* is
 # intentionally NOT public and is authenticated by AuthMiddleware.
-_PUBLIC_PATH_PREFIXES: tuple[str, ...] = ("/auth/callback/", "/.well-known/")
+_PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
+    "/auth/callback/",
+    "/.well-known/",
+    "/netbox/",    # lab reverse proxy — target manages its own auth
+    "/grafana/",   # lab reverse proxy — target manages its own auth
+    "/keycloak/",  # lab reverse proxy — target manages its own auth
+)
 
 
 def _is_public(path: str) -> bool:
@@ -436,12 +443,21 @@ async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
                 sub: str = claims.get("sub", "")
                 if not sub:
                     return None, []
-                # Extract roles claim — mock-idp and most enterprise IdPs include this
+                # Use email as client_id when present so it matches role_assignments
+                # and OPA grants (which use email-based identities like alice@corp).
+                # Fall back to sub (UUID) if no email claim.
+                email: str = claims.get("email", "")
+                client_id_from_jwt = email or sub
+                # Extract roles claim — supports top-level "roles" claim.
+                # Also check realm_access.roles (Keycloak default location).
                 jwt_roles: list[str] = claims.get("roles", [])
+                if not jwt_roles:
+                    realm_access = claims.get("realm_access", {})
+                    jwt_roles = realm_access.get("roles", []) if isinstance(realm_access, dict) else []
                 if isinstance(jwt_roles, str):
                     jwt_roles = [jwt_roles]
-                logger.debug("OIDC JWT validated: sub=%s jwt_roles=%s", sub, jwt_roles)
-                return sub, jwt_roles
+                logger.debug("OIDC JWT validated: sub=%s client_id=%s jwt_roles=%s", sub, client_id_from_jwt, jwt_roles)
+                return client_id_from_jwt, jwt_roles
             except JWTError as exc:
                 last_exc = exc
                 continue
