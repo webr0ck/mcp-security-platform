@@ -116,11 +116,13 @@ client_has_invoke_permission if {
     tag in data.mcp.tools[input.tool_name].tags
 }
 
-# Admins (admin/platform_admin) with explicit tool grants may invoke directly.
+# Admins (admin/platform_admin) may invoke any active or internal tool
+# without requiring explicit per-tool grants.  Critical/quarantined tools
+# are still blocked by the risk-gate below.
 client_has_invoke_permission if {
     some role in input.client_roles
     role in {"admin", "platform_admin"}
-    tool_allowed_for_client(input.client_id, input.tool_name)
+    input.tool_status in {"active", "internal"}
 }
 
 # Analysts with explicit grants may invoke tools within their risk threshold.
