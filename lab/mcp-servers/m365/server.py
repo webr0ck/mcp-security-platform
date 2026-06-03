@@ -34,6 +34,16 @@ PORT = int(os.environ.get("PORT", "8000"))
 AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID") or os.environ.get("ENTRA_TENANT_ID", "")
 AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID") or os.environ.get("ENTRA_CLIENT_ID", "")
 AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET") or os.environ.get("ENTRA_CLIENT_SECRET", "")
+# UPN or object ID of the mailbox/calendar to access with app-only token.
+# Example: "user@contoso.com" or a GUID. Required for /me endpoints with client_credentials.
+M365_USER = os.environ.get("M365_USER", "")
+
+
+def _me(path: str = "") -> str:
+    """Return /me/... or /users/{M365_USER}/... depending on whether M365_USER is set."""
+    if M365_USER:
+        return f"/users/{M365_USER}{path}"
+    return f"/me{path}"
 
 mcp = FastMCP("m365-mcp")
 
@@ -102,7 +112,7 @@ async def _post(path: str, body: dict) -> Any:
 @mcp.tool()
 async def get_me() -> dict:
     """Return the authenticated user's profile from Microsoft Graph."""
-    data = await _get("/me")
+    data = await _get(_me())
     return {
         "id": data.get("id"),
         "display_name": data.get("displayName"),
@@ -128,7 +138,7 @@ async def list_emails(top: int = 20, filter: str = "") -> dict:
     }
     if filter:
         params["$filter"] = filter
-    data = await _get("/me/mailFolders/inbox/messages", params)
+    data = await _get(_me("/mailFolders/inbox/messages"), params)
     return {
         "messages": [
             {
@@ -154,7 +164,7 @@ async def get_email(message_id: str) -> dict:
     message_id: the id field from list_emails.
     """
     data = await _get(
-        f"/me/messages/{message_id}",
+        _me(f"/messages/{message_id}"),
         {"$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,body,isRead,importance,hasAttachments"},
     )
     return {
@@ -194,7 +204,7 @@ async def send_email(
     }
     if cc:
         message["ccRecipients"] = [{"emailAddress": {"address": cc}}]
-    await _post("/me/sendMail", {"message": message})
+    await _post(_me("/sendMail"), {"message": message})
     return {"sent": True, "to": to, "subject": subject}
 
 
@@ -224,7 +234,7 @@ async def list_calendar_events(
         "$orderby": "start/dateTime",
         "$select": "id,subject,start,end,location,organizer,isAllDay,isCancelled,onlineMeetingUrl",
     }
-    data = await _get("/me/calendarView", params)
+    data = await _get(_me("/calendarView"), params)
     return {
         "events": [
             {
@@ -281,7 +291,7 @@ async def create_calendar_event(
             for a in attendees.split(",")
             if a.strip()
         ]
-    data = await _post("/me/events", event)
+    data = await _post(_me("/events"), event)
     return {
         "id": data.get("id"),
         "subject": data.get("subject"),
@@ -300,7 +310,7 @@ async def list_files(folder_id: str = "root", top: int = 50) -> dict:
     top: max items to return (max 100).
     """
     top = max(1, min(top, 100))
-    path = f"/me/drive/{folder_id}/children" if folder_id == "root" else f"/me/drive/items/{folder_id}/children"
+    path = _me(f"/drive/{folder_id}/children") if folder_id == "root" else _me(f"/drive/items/{folder_id}/children")
     data = await _get(path, {"$top": top, "$select": "id,name,size,lastModifiedDateTime,folder,file,webUrl"})
     return {
         "items": [
@@ -322,7 +332,7 @@ async def list_files(folder_id: str = "root", top: int = 50) -> dict:
 @mcp.tool()
 async def list_teams() -> dict:
     """List the Microsoft Teams the authenticated user has joined."""
-    data = await _get("/me/joinedTeams", {"$select": "id,displayName,description,isArchived"})
+    data = await _get(_me("/joinedTeams"), {"$select": "id,displayName,description,isArchived"})
     return {
         "teams": [
             {
