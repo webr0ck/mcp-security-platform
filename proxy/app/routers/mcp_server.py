@@ -672,14 +672,44 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
 
 
 @router.get("/mcp", response_model=None)
-async def mcp_get(request: Request) -> JSONResponse:
+async def mcp_get(request: Request) -> JSONResponse | StreamingResponse:
     """
-    MCP GET — returns server info for clients that probe before opening SSE.
-    Full SSE session support can be added here when needed.
+    MCP GET — Streamable HTTP transport (MCP spec 2024-11-05 §6.3.2).
+
+    Clients that send Accept: text/event-stream get a persistent SSE stream
+    (server-to-client push channel + keepalive).  Other clients (probes,
+    healthchecks) get the plain server-info JSON.
     """
-    return JSONResponse({
-        "server": SERVER_INFO,
-        "transport": "streamable-http",
-        "authenticated_as": getattr(request.state, "client_id", None),
-        "roles": getattr(request.state, "client_roles", []),
-    })
+    import asyncio
+
+    accept = request.headers.get("accept", "")
+    if "text/event-stream" not in accept:
+        return JSONResponse({
+            "server": SERVER_INFO,
+            "transport": "streamable-http",
+            "authenticated_as": getattr(request.state, "client_id", None),
+            "roles": getattr(request.state, "client_roles", []),
+        })
+
+    async def _sse_keepalive():
+        """Yield SSE keepalive comments until the client disconnects."""
+        # Initial endpoint event so the client knows the stream is live.
+        yield "event: endpoint\ndata: {\"endpoint\":\"/mcp\"}\n\n"
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                yield ": keepalive\n\n"
+                await asyncio.sleep(15)
+        except Exception:
+            pass
+
+    return StreamingResponse(
+        _sse_keepalive(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
