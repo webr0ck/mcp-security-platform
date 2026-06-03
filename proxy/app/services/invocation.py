@@ -237,9 +237,15 @@ async def invoke_tool(
         # FastMCP's TrustedHostMiddleware rejects container hostnames; override to localhost.
         "Host": "localhost",
     }
+    # Forward caller identity so MCP servers that implement per-user isolation
+    # (notes, self-service) can resolve the user without re-parsing a JWT.
+    # X-User-Role carries the highest-privilege role for admin-gate checks.
+    primary_role = client_roles[0] if client_roles else "user"
     forward_base_headers = {
         **handshake_headers,
         **extra_headers,
+        "X-User-Sub": client_id,
+        "X-User-Role": primary_role,
     }
 
     try:
@@ -528,6 +534,42 @@ async def _emit_audit_event(
 # Public alias so mcp_server.py can call emit_mcp_access_event directly
 # without importing the private _emit_audit_event name.
 emit_mcp_access_event = _emit_audit_event
+
+
+async def emit_internal_tool_event(
+    tool_name: str,
+    client_id: str,
+    outcome: str,
+    deny_reasons: list[str],
+    request_id: str,
+    latency_ms: int,
+    opa_decision_id: str,
+) -> None:
+    """Emit an audit event for internal platform tools (no tool_id/registry entry).
+    Uses INTERNAL_TOOL_INVOCATION event type which doesn't require a tool_id UUID.
+    Failures are logged but not re-raised — internal tool audit is best-effort.
+    """
+    try:
+        from mcp_audit_logger import AuditEvent, AuditEventType, AuditOutcome, MCPAuditLogger
+        outcome_map = {
+            "allow": AuditOutcome.ALLOW,
+            "deny": AuditOutcome.DENY,
+            "error": getattr(AuditOutcome, "ERROR", AuditOutcome.DENY),
+        }
+        audit_logger = _get_audit_logger()
+        event = AuditEvent(
+            event_type=AuditEventType.INTERNAL_TOOL_INVOCATION,
+            client_id=client_id,
+            tool_name=tool_name,
+            outcome=outcome_map.get(outcome, AuditOutcome.DENY),
+            request_id=request_id,
+            latency_ms=latency_ms,
+            deny_reasons=deny_reasons,
+            opa_decision_id=opa_decision_id,
+        )
+        audit_logger.emit(event)
+    except Exception as exc:
+        logger.warning("Internal tool audit emission failed (non-critical): %s", exc)
 
 
 # Module-level singleton so we don't re-instantiate on every invocation

@@ -46,7 +46,9 @@ def build_broker(settings: "Settings", redis_client):
     from app.credential_broker.broker import CredentialBroker
     from app.credential_broker.kms import VaultKMSClient
     from app.credential_broker.session import SessionStore
+    from app.credential_broker.adapters.gitea import GiteaAdapter
     from app.credential_broker.adapters.grafana import GrafanaAdapter
+    from app.credential_broker.adapters.netbox import NetboxAdapter
 
     kms = VaultKMSClient(
         addr=settings.VAULT_ADDR,
@@ -63,6 +65,17 @@ def build_broker(settings: "Settings", redis_client):
             base_url=settings.GRAFANA_BASE_URL,
             service_account_id=settings.GRAFANA_SERVICE_ACCOUNT_ID,
             admin_token=settings.GRAFANA_ADMIN_TOKEN,
+        )
+
+    if settings.NETBOX_ADMIN_TOKEN:
+        approach_b_adapters["netbox"] = NetboxAdapter(
+            base_url=settings.NETBOX_BASE_URL,
+            admin_token=settings.NETBOX_ADMIN_TOKEN,
+        )
+
+    if settings.GITEA_ADMIN_TOKEN:
+        approach_b_adapters["gitea"] = GiteaAdapter(
+            admin_token=settings.GITEA_ADMIN_TOKEN,
         )
 
     broker = CredentialBroker(

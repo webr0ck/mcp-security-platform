@@ -42,7 +42,7 @@ servers:
       adapter: bitbucket
 
   lab-grafana:
-    url: "http://lab-grafana:3000/mcp"
+    url: "http://lab-mcp-grafana:8000/mcp"
     enabled: true
     demand_activate: true
     credential:
@@ -51,6 +51,28 @@ servers:
       inject_header: Authorization
       inject_prefix: "Bearer "
       adapter: grafana
+
+  lab-netbox:
+    url: "http://mcp-netbox:8000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: B
+      type: api_key
+      inject_header: Authorization
+      inject_prefix: "Token "
+      adapter: netbox
+
+  lab-m365:
+    url: "http://lab-mcp-m365:8000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: B
+      type: api_key
+      inject_header: Authorization
+      inject_prefix: "Bearer "
+      adapter: m365
 
   lab-dex:
     url: "http://lab-dex:5556/mcp"
@@ -61,3 +83,54 @@ servers:
       type: oauth2
       flow: authorization_code
       adapter: dex
+
+  lab-gitea:
+    url: "http://lab-mcp-gitea:8000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: B
+      type: api_key
+      inject_header: Authorization
+      inject_prefix: "token "
+      adapter: gitea
+
+  lab-echo:
+    url: "http://lab-mcp-echo:8000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: B
+      type: none
+
+  lab-notes:
+    url: "http://lab-mcp-notes:8000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: A
+      type: user_sub
+
+  lab-self-service:
+    url: "http://lab-mcp-self-service:8000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: A
+      type: user_sub
+
+  lab-search:
+    url: "http://lab-mcp-search:8000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: B
+      type: none
+
+  lab-rag-assistant:
+    url: "http://lab-rag-assistant:8000/mcp"
+    enabled: true
+    demand_activate: true
+    credential:
+      approach: B
+      type: none
