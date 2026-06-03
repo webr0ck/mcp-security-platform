@@ -225,6 +225,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             auth_method = "api_key"
 
         if not client_id:
+            # Browser requests (Accept: text/html) get a login redirect instead of JSON 401.
+            accept = request.headers.get("accept", "")
+            if "text/html" in accept and settings.OIDC_ENABLED:
+                from urllib.parse import quote
+                from starlette.responses import RedirectResponse as _Redirect
+                redirect_to = quote(str(request.url.path), safe="")
+                return _Redirect(
+                    url=f"/api/v1/auth/oidc/login?redirect={redirect_to}",
+                    status_code=302,
+                )
             resource_metadata_url = str(request.base_url).rstrip("/") + "/.well-known/oauth-protected-resource"
             return JSONResponse(
                 status_code=401,

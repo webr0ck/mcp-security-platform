@@ -157,7 +157,11 @@ async def oidc_login(
     # Replace internal URL with external URL for browser redirect
     auth_endpoint = auth_endpoint.replace(_issuer_url_internal(), _issuer_url_external())
 
-    state = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
+    rand_part = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
+    # Embed post-login redirect destination in state so the callback knows where to send the user.
+    # Format: <random>.<base64url(redirect_path)>  — KC round-trips state back unchanged.
+    _safe_redirect = redirect_after if redirect_after.startswith("/") else "/"
+    state = rand_part + "." + base64.urlsafe_b64encode(_safe_redirect.encode()).rstrip(b"=").decode()
     nonce = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
     verifier, challenge = _pkce_pair()
 
@@ -242,6 +246,18 @@ async def oidc_callback(
     stored_nonce = row.nonce
     session_id = str(row.session_id)
     callback_uri = row.redirect_uri
+
+    # Extract post-login redirect from state (<random>.<base64url(path)>)
+    _post_login_redirect = "/portal"
+    if "." in state:
+        try:
+            _encoded = state.split(".", 1)[1]
+            _padding = "=" * (-len(_encoded) % 4)
+            _decoded = base64.urlsafe_b64decode(_encoded + _padding).decode()
+            if _decoded.startswith("/"):
+                _post_login_redirect = _decoded
+        except Exception:
+            pass
 
     # Exchange code for tokens at Keycloak (use internal URL)
     discovery = await _discover()
@@ -427,16 +443,9 @@ async def oidc_callback(
     except Exception as exc:
         logger.warning("Failed to sync KC roles to role_assignments: %s", exc)
 
-    response_data = {
-        "session_token": session_jwt,
-        "subject": subject,
-        "client_id": client_id,
-        "roles": proxy_roles,
-        "expires_in": settings.SESSION_JWT_EXPIRE_SECONDS,
-        "token_type": "Bearer",
-    }
-
-    response = JSONResponse(content=response_data)
+    # Redirect the browser to the post-login destination (or /portal by default).
+    # The session JWT travels as an httpOnly cookie — no token in the URL.
+    response = RedirectResponse(url=_post_login_redirect, status_code=302)
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
         value=session_jwt,
