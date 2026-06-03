@@ -70,11 +70,7 @@ def _require_admin(request: Request) -> None:
 # Shared CSS + JS constants (identical variables to admin_credentials.py)
 # ---------------------------------------------------------------------------
 
-_HTMX_TAG = (
-    '<script src="https://unpkg.com/htmx.org@1.9.12"'
-    ' integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB4IgmFsNghFBFGPYNP5CZqLqSKJOZJlXe/r7"'
-    ' crossorigin="anonymous"></script>'
-)
+_HTMX_TAG = '<script src="/static/htmx.min.js"></script>'
 
 _CSS = """
   :root {

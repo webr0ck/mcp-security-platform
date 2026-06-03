@@ -77,6 +77,7 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/auth/callback/",
     "/.well-known/",
+    "/static/",    # vendored JS/CSS assets — no auth required
     "/netbox/",    # lab reverse proxy — target manages its own auth
     "/grafana/",   # lab reverse proxy — target manages its own auth
     "/keycloak/",  # lab reverse proxy — target manages its own auth

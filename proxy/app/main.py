@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
@@ -172,6 +173,11 @@ app.include_router(portal.router)              # Multi-role portal UI
 app.include_router(server_registry.router)     # Server registry CRUD + approval
 app.include_router(catalog.router)            # Principal-scoped server catalog (discovery==invoke)
 app.include_router(lab_links.router)          # Lab convenience: / → portal, /netbox /grafana /keycloak
+
+# Static assets — served at /static/* (no auth required; public JS/CSS only)
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 
 # ============================================================================

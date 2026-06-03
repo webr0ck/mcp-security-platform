@@ -398,9 +398,7 @@ def _build_html() -> str:
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MCP Credential Manager</title>
-  <script src="https://unpkg.com/htmx.org@1.9.12"
-          integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB4IgmFsNghFBFGPYNP5CZqLqSKJOZJlXe/r7"
-          crossorigin="anonymous"></script>
+  <script src="/static/htmx.min.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; background: #0f172a; color: #e2e8f0; }
     h1 { color: #38bdf8; border-bottom: 1px solid #334155; padding-bottom: 0.5rem; }
