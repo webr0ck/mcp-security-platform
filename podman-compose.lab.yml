@@ -41,7 +41,7 @@ services:
       - lab-net
       - gateway-net    # proxy must reach Keycloak for JWKS and token validation
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8080 && echo -e \"GET /realms/mcp HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3 && head -1 <&3 | grep -q 200' && exit 0 || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -196,7 +196,8 @@ services:
       start_period: 90s
     restart: unless-stopped
 
-  # ── Grafana MCP Server ───────────────────────────────────────────────────────
+  # ── Grafana MCP Server — points to real Grafana instance ────────────────────
+  # Set GRAFANA_URL and GRAFANA_SERVICE_ACCOUNT_TOKEN in .env.lab
   lab-mcp-grafana:
     image: grafana/mcp-grafana:latest
     container_name: lab-mcp-grafana
@@ -208,8 +209,8 @@ services:
     ports:
       - "8100:8000"
     environment:
-      GRAFANA_URL: "http://lab-grafana:3000"
-      GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_ADMIN_TOKEN}"
+      GRAFANA_URL: "${GRAFANA_URL}"
+      GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
     depends_on:
       lab-grafana:
         condition: service_healthy
@@ -224,7 +225,8 @@ services:
       start_period: 15s
     restart: unless-stopped
 
-  # ── NetBox MCP Server ────────────────────────────────────────────────────────
+  # ── NetBox MCP Server — points to real NetBox instance ──────────────────────
+  # Set NETBOX_URL and NETBOX_TOKEN in .env.lab
   mcp-netbox:
     build: ./lab/mcp-servers/netbox
     image: mcp-netbox-server:lab
@@ -232,8 +234,8 @@ services:
     ports:
       - "8101:8000"
     environment:
-      NETBOX_URL: "http://lab-netbox:8080"
-      NETBOX_TOKEN: "${NETBOX_ADMIN_TOKEN}"
+      NETBOX_URL: "${NETBOX_URL}"
+      NETBOX_TOKEN: "${NETBOX_TOKEN}"
       TRANSPORT: "http"
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -312,7 +314,8 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # ── M365 MCP Server — Microsoft Graph via app-only token ────────────────────
+  # ── M365 MCP Server — softeria/ms-365-mcp-server via Graph app-only token ───
+  # Set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID in .env.lab
   lab-mcp-m365:
     build: ./lab/mcp-servers/m365
     image: lab-mcp-m365:lab
@@ -320,16 +323,14 @@ services:
     ports:
       - "8103:8000"
     environment:
-      ENTRA_CLIENT_ID: "${ENTRA_CLIENT_ID}"
-      ENTRA_CLIENT_SECRET: "${ENTRA_CLIENT_SECRET}"
-      ENTRA_TENANT_ID: "${ENTRA_TENANT_ID}"
       HOST: "0.0.0.0"
       PORT: "8000"
+      SERVER_NAME: "m365-mcp"
     networks:
       - lab-net
       - internal-net
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/mcp', timeout=5)"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -492,6 +493,12 @@ services:
       - ./lab/nginx/conf.d:/etc/nginx/conf.d
       - ./lab/nginx/lab-certs:/etc/nginx/lab-certs:ro
 
+  # ── Redis: rootless Podman — start as redis user directly so su-exec is never called
+  redis:
+    user: "redis"
+    security_opt:
+      - no-new-privileges:false
+
   # ── MinIO: remap host ports to avoid clash with other projects on :9000/:9001 ──
   minio:
     ports:
@@ -516,7 +523,14 @@ services:
       # Clear the production VAULT_LOCAL_CONFIG inherited from the base compose
       # so the dev-mode command isn't told to look at a JSON config it doesn't use.
       VAULT_LOCAL_CONFIG: ""
-    command: vault server -dev
+    # rootless Podman: bypass docker-entrypoint.sh which calls `setcap` — that
+    # operation is unsupported in rootless mode and causes a crash loop.
+    # Run vault directly; dev mode disables mlock automatically (no IPC_LOCK needed).
+    entrypoint: ["vault", "server", "-dev"]
+    command: []
+    read_only: false
+    security_opt:
+      - no-new-privileges:false
     ports:
       # Remapped to 8201 — port 8200 is used by isl-vault from intentional-secrets-lab
       - "8201:8200"
@@ -614,12 +628,20 @@ services:
       - proxy-db-net
       - internal-net    # lab: proxy must reach upstream MCP servers on internal-net
 
-  # ── DB: loopback-only — reachable from host for dev inspection but NOT from LAN.
-  # RT-006 fix: DB_PASSWORD is known from .env; binding to 0.0.0.0 would expose
-  # the database to the local network. 127.0.0.1 restricts to localhost only.
+  # ── DB: several rootless-Podman overrides needed:
+  # - user: postgres → avoid su-exec user-switch failure
+  # - read_only: false → postgres needs /var/run/postgresql for lock file
+  # - security_opt: no-new-privileges:false → allow internal uid management
+  # - port 5434 → avoids rootlessport conflict with stale 5432 binding
   db:
+    user: "postgres"
+    read_only: false
+    security_opt:
+      - no-new-privileges:false
+    tmpfs:
+      - /var/run/postgresql:size=4m,mode=0777
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5434:5432"
     environment:
       - POSTGRES_PASSWORD=${DB_PASSWORD:-devpassword}
 

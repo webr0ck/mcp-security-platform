@@ -24,12 +24,7 @@ from typing import Any
 
 import requests
 
-try:
-    import psycopg2
-    import psycopg2.extras
-    _HAS_PSYCOPG2 = True
-except ImportError:
-    _HAS_PSYCOPG2 = False
+import subprocess
 
 # ---------------------------------------------------------------------------
 # Server catalogue
@@ -152,9 +147,14 @@ SERVERS: list[dict[str, Any]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# DB connection (host-exposed port)
+# DB helper — runs SQL via `docker exec mcp-db psql` (no host psycopg2 needed)
 # ---------------------------------------------------------------------------
-DB_DSN = "host=127.0.0.1 port=5434 dbname=mcp_security user=mcp_app password=devpassword"
+DOCKER_HOST = subprocess.run(
+    ["podman", "machine", "inspect", "--format", "unix://{{.ConnectionInfo.PodmanSocket.Path}}"],
+    capture_output=True, text=True,
+).stdout.strip()
+
+PSQL_ENV = {**__import__("os").environ, "DOCKER_HOST": DOCKER_HOST} if DOCKER_HOST else None
 
 
 # ---------------------------------------------------------------------------
@@ -162,25 +162,33 @@ DB_DSN = "host=127.0.0.1 port=5434 dbname=mcp_security user=mcp_app password=dev
 # ---------------------------------------------------------------------------
 
 def _mcp_request(session: requests.Session, base_url: str, payload: dict,
-                 session_id: str | None = None, timeout: int = 10) -> dict:
+                 session_id: str | None = None,
+                 timeout: int = 10) -> tuple[dict, str | None]:
+    """
+    Send one MCP JSON-RPC request.
+    Returns (parsed_body, mcp_session_id_from_response_header).
+    Mcp-Session-Id comes from the response header (FastMCP), not the body.
+    """
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "Host": "localhost",
+        # No Host override — discovery runs from the host against localhost:PORT
     }
     if session_id:
         headers["Mcp-Session-Id"] = session_id
     resp = session.post(base_url, json=payload, headers=headers, timeout=timeout)
     resp.raise_for_status()
 
+    returned_session_id = resp.headers.get("Mcp-Session-Id")
+
     # Streamable HTTP may return SSE — extract the first data: line
     ct = resp.headers.get("content-type", "")
     if "text/event-stream" in ct:
         for line in resp.text.splitlines():
             if line.startswith("data:"):
-                return json.loads(line[len("data:"):].strip())
+                return json.loads(line[len("data:"):].strip()), returned_session_id
         raise ValueError("SSE response had no data: line")
-    return resp.json()
+    return resp.json(), returned_session_id
 
 
 def discover_tools(host_port: int, server_key: str) -> list[dict] | None:
@@ -191,7 +199,7 @@ def discover_tools(host_port: int, server_key: str) -> list[dict] | None:
     base_url = f"http://localhost:{host_port}/mcp"
     s = requests.Session()
 
-    # Step 1: initialize
+    # Step 1: initialize — Mcp-Session-Id returned in response header by FastMCP
     try:
         init_payload = {
             "jsonrpc": "2.0",
@@ -203,20 +211,15 @@ def discover_tools(host_port: int, server_key: str) -> list[dict] | None:
                 "clientInfo": {"name": "discover_and_register_tools", "version": "1.0.0"},
             },
         }
-        init_resp = _mcp_request(s, base_url, init_payload, timeout=5)
+        _, session_id = _mcp_request(s, base_url, init_payload, timeout=8)
     except Exception as exc:
         print(f"  [SKIP] {server_key}: not reachable at :{host_port} — {exc}")
         return None
 
-    session_id = None
-    # Some FastMCP versions return session ID in the response body
-    if isinstance(init_resp.get("result"), dict):
-        session_id = init_resp["result"].get("sessionId")
-
-    # Step 2: tools/list
+    # Step 2: tools/list — must include session ID from initialize response
     try:
         list_payload = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
-        list_resp = _mcp_request(s, base_url, list_payload, session_id=session_id, timeout=10)
+        list_resp, _ = _mcp_request(s, base_url, list_payload, session_id=session_id, timeout=10)
     except Exception as exc:
         print(f"  [SKIP] {server_key}: tools/list failed — {exc}")
         return None
@@ -228,18 +231,27 @@ def discover_tools(host_port: int, server_key: str) -> list[dict] | None:
 
 
 # ---------------------------------------------------------------------------
-# DB upsert
+# DB upsert — generates SQL executed via docker exec mcp-db psql
 # ---------------------------------------------------------------------------
 
-def upsert_tool(cur, tool: dict, server: dict, dry_run: bool) -> str:
-    """
-    Upsert a single tool into tool_registry.
-    Returns 'inserted', 'updated', or 'dry-run'.
-    """
+def _sql_str(v: str | None) -> str:
+    """Escape a string for SQL (single-quote with doubling of internal quotes)."""
+    if v is None:
+        return "NULL"
+    return "'" + v.replace("'", "''") + "'"
+
+
+def _sql_array(items: list[str]) -> str:
+    escaped = ", ".join("'" + t.replace("'", "''") + "'" for t in items)
+    return f"ARRAY[{escaped}]::text[]"
+
+
+def tool_upsert_sql(tool: dict, server: dict) -> str:
+    """Generate idempotent SQL for one tool (INSERT ... ON CONFLICT UPDATE)."""
     name = tool["name"]
     version = "1.0.0"
-    description = tool.get("description") or f"{name} tool from {server['key']}"
-    schema = tool.get("inputSchema") or {"type": "object", "properties": {}}
+    description = (tool.get("description") or f"{name} tool from {server['key']}").replace("'", "''")
+    schema_json = json.dumps(tool.get("inputSchema") or {"type": "object", "properties": {}}).replace("'", "''")
     upstream_url = server["internal_url"]
     injection_mode = server["injection_mode"]
     service_name = server["service_name"]
@@ -249,63 +261,43 @@ def upsert_tool(cur, tool: dict, server: dict, dry_run: bool) -> str:
     risk_score = server["risk_score"]
     tags = server["tags"] + [name]
 
-    if dry_run:
-        print(f"    [dry-run] would upsert: {name}@{version} → {upstream_url} "
-              f"(injection_mode={injection_mode})")
-        return "dry-run"
+    return f"""
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    injection_mode, service_name, inject_header, inject_prefix,
+    tags, metadata, registered_by, created_at, updated_at
+) VALUES (
+    gen_random_uuid(), {_sql_str(name)}, {_sql_str(version)},
+    '{description}', '{schema_json}'::jsonb, {_sql_str(upstream_url)},
+    'active', {_sql_str(risk_level)}, {risk_score}, '[]'::jsonb,
+    {_sql_str(injection_mode)}, {_sql_str(service_name)},
+    {_sql_str(inject_header)}, {_sql_str(inject_prefix)},
+    {_sql_array(tags)}, '{{}}'::jsonb, 'discover-script', NOW(), NOW()
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    description    = EXCLUDED.description,
+    schema         = EXCLUDED.schema,
+    upstream_url   = EXCLUDED.upstream_url,
+    injection_mode = EXCLUDED.injection_mode,
+    service_name   = EXCLUDED.service_name,
+    inject_header  = EXCLUDED.inject_header,
+    inject_prefix  = EXCLUDED.inject_prefix,
+    tags           = EXCLUDED.tags,
+    updated_at     = NOW();"""
 
-    # Check if already exists
-    cur.execute(
-        "SELECT tool_id FROM tool_registry WHERE name = %s AND version = %s AND deleted_at IS NULL",
-        (name, version),
+
+def run_sql(sql: str) -> tuple[bool, str]:
+    """Execute SQL inside mcp-db via docker exec psql. Returns (ok, output)."""
+    cmd = [
+        "docker", "exec", "-i", "mcp-db",
+        "psql", "-U", "mcp_app", "-d", "mcp_security", "-v", "ON_ERROR_STOP=1",
+    ]
+    result = subprocess.run(
+        cmd, input=sql, capture_output=True, text=True, env=PSQL_ENV, timeout=30,
     )
-    row = cur.fetchone()
-
-    if row:
-        cur.execute(
-            """
-            UPDATE tool_registry SET
-                description    = %s,
-                schema         = %s,
-                upstream_url   = %s,
-                injection_mode = %s,
-                service_name   = %s,
-                inject_header  = %s,
-                inject_prefix  = %s,
-                tags           = %s,
-                updated_at     = NOW()
-            WHERE tool_id = %s
-            """,
-            (
-                description, json.dumps(schema), upstream_url,
-                injection_mode, service_name, inject_header, inject_prefix,
-                tags, row[0],
-            ),
-        )
-        return "updated"
-    else:
-        cur.execute(
-            """
-            INSERT INTO tool_registry (
-                tool_id, name, version, description, schema, upstream_url,
-                status, risk_level, risk_score, risk_reasons,
-                injection_mode, service_name, inject_header, inject_prefix,
-                tags, metadata, registered_by, created_at, updated_at
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s,
-                'active', %s, %s, '[]'::jsonb,
-                %s, %s, %s, %s,
-                %s, '{}'::jsonb, 'discover-script', NOW(), NOW()
-            )
-            """,
-            (
-                str(uuid.uuid4()), name, version, description, json.dumps(schema), upstream_url,
-                risk_level, risk_score,
-                injection_mode, service_name, inject_header, inject_prefix,
-                tags,
-            ),
-        )
-        return "inserted"
+    output = (result.stdout + result.stderr).strip()
+    return result.returncode == 0, output
 
 
 # ---------------------------------------------------------------------------
@@ -320,10 +312,6 @@ def main() -> None:
     parser.add_argument("--server", metavar="KEY",
                         help="Process only this server (e.g. lab-echo)")
     args = parser.parse_args()
-
-    if not _HAS_PSYCOPG2 and not args.dry_run:
-        print("ERROR: psycopg2 not installed. Run: pip install psycopg2-binary")
-        sys.exit(1)
 
     servers = SERVERS
     if args.server:
@@ -350,7 +338,7 @@ def main() -> None:
               "-f docker-compose.dev.yml -f podman-compose.lab.yml up -d")
         sys.exit(0)
 
-    total_inserted = total_updated = total_skipped = 0
+    total_ok = total_skipped = 0
 
     if args.dry_run:
         print("\n--- Dry-run results ---")
@@ -363,74 +351,44 @@ def main() -> None:
               f"{len(discovered)} server(s). Re-run without --dry-run to apply.")
         return
 
-    # Write to DB
-    try:
-        conn = psycopg2.connect(DB_DSN)
-        conn.autocommit = False
-    except Exception as exc:
-        print(f"\nERROR: cannot connect to DB at 127.0.0.1:5434 — {exc}")
-        print("Is the lab DB running? Check: docker ps | grep mcp-db")
-        sys.exit(1)
+    print("\n--- Upserting tools via docker exec mcp-db psql ---")
+    for server, tools in discovered:
+        print(f"\n{server['key']}:")
+        for tool in tools:
+            sql = tool_upsert_sql(tool, server)
+            ok, output = run_sql(sql)
+            if ok:
+                total_ok += 1
+                action = "UPDATE" if "UPDATE" in output else "INSERT"
+                print(f"  {'~' if action == 'UPDATE' else '+'} {tool['name']}@1.0.0")
+            else:
+                total_skipped += 1
+                print(f"  ! {tool['name']}: ERROR — {output[:120]}")
 
-    print("\n--- Upserting tools ---")
-    try:
-        with conn.cursor() as cur:
-            for server, tools in discovered:
-                print(f"\n{server['key']}:")
-                for tool in tools:
-                    try:
-                        action = upsert_tool(cur, tool, server, dry_run=False)
-                        if action == "inserted":
-                            total_inserted += 1
-                            print(f"  + {tool['name']}@1.0.0")
-                        elif action == "updated":
-                            total_updated += 1
-                            print(f"  ~ {tool['name']}@1.0.0 (updated)")
-                    except Exception as exc:
-                        total_skipped += 1
-                        print(f"  ! {tool['name']}: ERROR — {exc}")
-                        conn.rollback()
-                        conn.autocommit = False
-        conn.commit()
-    finally:
-        conn.close()
-
-    # Patch existing rows that still have injection_mode='none' because they were
-    # inserted before V010 set the default — covers any rows tools.sql left behind.
-    print("\n--- Patching pre-V010 rows with injection_mode='none' ───────────")
-    try:
-        conn2 = psycopg2.connect(DB_DSN)
-        with conn2.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE tool_registry SET
-                    injection_mode = CASE
-                        WHEN service_name IS NOT NULL AND (credential_approach = 'B' OR inject_header IS NOT NULL)
-                             THEN 'service'::injection_mode_enum
-                        WHEN credential_approach = 'A'
-                             THEN 'user'::injection_mode_enum
-                        ELSE injection_mode
-                    END,
-                    updated_at = NOW()
-                WHERE injection_mode = 'none'
-                  AND deleted_at IS NULL
-                  AND (service_name IS NOT NULL OR credential_approach IS NOT NULL)
-                RETURNING name, injection_mode
-                """
-            )
-            patched = cur.fetchall()
-            conn2.commit()
-        for name, mode in patched:
-            print(f"  patched {name} → injection_mode={mode}")
-        if not patched:
-            print("  (no rows needed patching)")
-    except Exception as exc:
-        print(f"  patch query failed (non-fatal): {exc}")
-    finally:
-        conn2.close()
+    # Patch legacy rows: any tool_registry row whose injection_mode is still
+    # 'none' but has a service_name or approach-B credential_approach should
+    # be upgraded so the broker can inject credentials.
+    print("\n--- Patching legacy rows with wrong injection_mode ---")
+    patch_sql = """
+UPDATE tool_registry SET
+    injection_mode = CASE
+        WHEN service_name IS NOT NULL
+             AND (credential_approach = 'B' OR inject_header IS NOT NULL)
+             THEN 'service'::injection_mode_enum
+        WHEN credential_approach = 'A'
+             THEN 'user'::injection_mode_enum
+        ELSE injection_mode
+    END,
+    updated_at = NOW()
+WHERE injection_mode = 'none'
+  AND deleted_at IS NULL
+  AND (service_name IS NOT NULL OR credential_approach IS NOT NULL);
+"""
+    ok, output = run_sql(patch_sql)
+    print(f"  {'OK' if ok else 'ERROR'}: {output or 'no legacy rows'}")
 
     print(f"\n{'='*50}")
-    print(f"Done.  inserted={total_inserted}  updated={total_updated}  errors={total_skipped}")
+    print(f"Done.  ok={total_ok}  errors={total_skipped}")
     print(f"{'='*50}")
 
 
