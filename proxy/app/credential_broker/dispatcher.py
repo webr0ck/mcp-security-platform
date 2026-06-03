@@ -3,11 +3,12 @@ MCP Security Platform — Credential Injection Dispatcher
 
 Routes credential injection to the correct approach based on tool.injection_mode:
 
-  none              — no-op; upstream called without injected credentials
-  service           — shared service credential (API key or client secret)
-  user              — per-user credential keyed by Keycloak sub
-  service_account   — Keycloak client_credentials token for the tool's KC client
-  oauth_user_token  — user's Keycloak access token exchanged for upstream audience
+  none                      — no-op; upstream called without injected credentials
+  service                   — shared service credential (API key or client secret)
+  user                      — per-user credential keyed by Keycloak sub
+  service_account           — Keycloak client_credentials token for the tool's KC client
+  oauth_user_token          — user's Keycloak access token exchanged for upstream audience
+  entra_client_credentials  — app-only Microsoft Graph token via Azure client_credentials grant
 
 All injection modes return a dict of HTTP headers to merge into the upstream
 request, or an empty dict on failure/no-op.
@@ -15,6 +16,7 @@ request, or an empty dict on failure/no-op.
 from __future__ import annotations
 
 import logging
+import time
 from enum import Enum
 from typing import Any
 
@@ -27,6 +29,11 @@ class InjectionMode(str, Enum):
     USER = "user"
     SERVICE_ACCOUNT = "service_account"
     OAUTH_USER_TOKEN = "oauth_user_token"
+    ENTRA_CLIENT_CREDENTIALS = "entra_client_credentials"
+
+
+# Token cache for entra_client_credentials: {cache_key: (access_token, expires_at)}
+_entra_token_cache: dict[str, tuple[str, float]] = {}
 
 
 class CredentialInjectionError(RuntimeError):
@@ -107,6 +114,12 @@ async def dispatch_credential_injection(
             return await _inject_oauth_user_token(
                 tool_record=tool_record,
                 user_kc_token=user_kc_token,
+                inject_header=inject_header,
+                inject_prefix=inject_prefix,
+            )
+
+        case InjectionMode.ENTRA_CLIENT_CREDENTIALS:
+            return await _inject_entra_client_credentials(
                 inject_header=inject_header,
                 inject_prefix=inject_prefix,
             )
@@ -243,3 +256,65 @@ async def _inject_oauth_user_token(
         return {}
 
     return {inject_header: f"{inject_prefix} {exchanged}".strip()}
+
+
+async def _inject_entra_client_credentials(
+    inject_header: str,
+    inject_prefix: str,
+) -> dict[str, str]:
+    """
+    Obtain an app-only Microsoft Graph access token via Azure AD client_credentials grant.
+
+    Reads AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET from the environment.
+    Caches the token for 50 minutes (tokens are valid for 1 hour).
+    No credential_store entry needed — credentials come from the runtime environment.
+    """
+    import os
+    import httpx
+
+    tenant_id = os.environ.get("AZURE_TENANT_ID") or os.environ.get("ENTRA_TENANT_ID")
+    client_id = os.environ.get("AZURE_CLIENT_ID") or os.environ.get("ENTRA_CLIENT_ID")
+    client_secret = os.environ.get("AZURE_CLIENT_SECRET") or os.environ.get("ENTRA_CLIENT_SECRET")
+
+    if not all([tenant_id, client_id, client_secret]):
+        logger.error(
+            "entra_client_credentials: AZURE_TENANT_ID / AZURE_CLIENT_ID / "
+            "AZURE_CLIENT_SECRET not set in environment"
+        )
+        return {}
+
+    cache_key = f"{tenant_id}:{client_id}"
+    cached = _entra_token_cache.get(cache_key)
+    if cached:
+        token, expires_at = cached
+        if time.monotonic() < expires_at:
+            return {inject_header: f"{inject_prefix} {token}".strip()}
+
+    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "scope": "https://graph.microsoft.com/.default",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.error("entra_client_credentials token fetch failed: %s", exc)
+        return {}
+
+    access_token = data.get("access_token")
+    expires_in = int(data.get("expires_in", 3600))
+    if not access_token:
+        logger.error("entra_client_credentials: no access_token in response")
+        return {}
+
+    # Cache with 10-minute safety margin
+    _entra_token_cache[cache_key] = (access_token, time.monotonic() + expires_in - 600)
+    logger.info("entra_client_credentials: fetched new app-only token (expires_in=%d)", expires_in)
+    return {inject_header: f"{inject_prefix} {access_token}".strip()}
