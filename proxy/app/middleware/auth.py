@@ -79,9 +79,9 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/auth/callback/",
     "/.well-known/",
     "/static/",    # vendored JS/CSS assets — no auth required
-    "/netbox/",    # lab reverse proxy — target manages its own auth
-    "/grafana/",   # lab reverse proxy — target manages its own auth
-    "/keycloak/",  # lab reverse proxy — target manages its own auth
+    # NOTE: Reverse-proxy target prefixes (/netbox/, /grafana/, /keycloak/) are NOT
+    # in this list. Those services manage their own auth, but the proxy layer must
+    # still authenticate the caller before forwarding. Defence in depth.
 )
 
 

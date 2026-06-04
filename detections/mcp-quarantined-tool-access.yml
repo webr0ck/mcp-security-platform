@@ -24,7 +24,7 @@ detection:
     selection:
         event_type: TOOL_INVOCATION
         outcome: deny
-        deny_reasons|contains: TOOL_QUARANTINED
+        deny_reasons|contains: 'tool_quarantined'
     condition: selection
 falsepositives:
     - Client cached tool list before quarantine was applied (use tool catalog refresh)
