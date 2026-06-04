@@ -101,7 +101,7 @@ services:
   step-ca:
     image: smallstep/step-ca:0.26.1
     container_name: mcp-step-ca
-    <<: *restart-always
+    <<: [*restart-always, *security-hardening]
     environment:
       DOCKER_STEPCA_INIT_NAME: MCP Security Platform CA
       DOCKER_STEPCA_INIT_DNS_NAMES: "step-ca,localhost"
@@ -116,6 +116,7 @@ services:
       - step-ca-net
     tmpfs:
       - /tmp
+      - /home/step/logs
     healthcheck:
       test: ["CMD", "step", "ca", "health", "--ca-url=https://step-ca:9000", "--root=/home/step/certs/root_ca.crt"]
       interval: 10s
@@ -127,8 +128,8 @@ services:
   # ── Layer 2: Security Proxy ────────────────────────────────────────────────
   proxy:
     build:
-      context: ./proxy
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: proxy/Dockerfile
       target: production
     image: mcp-security-proxy:latest
     container_name: mcp-proxy
@@ -181,7 +182,6 @@ services:
       - ./policies/rego:/policies:ro
     networks:
       - proxy-opa-net
-      - internal-net
     tmpfs:
       - /tmp
     healthcheck:
@@ -218,6 +218,29 @@ services:
       start_period: 15s
     logging: *default-logging
 
+  # ── Vault TLS init: obtains cert from step-ca before Vault starts ──────────
+  vault-tls-init:
+    image: smallstep/step-cli:latest
+    container_name: mcp-vault-tls-init
+    restart: "no"
+    command: >
+      sh -c "
+        step ca certificate vault vault-tls/server.crt vault-tls/server.key
+          --ca-url=https://step-ca:9000
+          --root=/home/step/certs/root_ca.crt
+          --not-after=8760h
+          --provisioner=admin 2>/dev/null ||
+        echo '[vault-tls-init] cert already exists, skipping'
+      "
+    volumes:
+      - vault-tls:/vault/tls
+      - step-ca-data:/home/step:ro
+    networks:
+      - step-ca-net
+    depends_on:
+      step-ca:
+        condition: service_healthy
+
   # ── Vault: Secrets + credential broker ────────────────────────────────────
   # Production-style: file storage backend, manual init+unseal.
   # Dev mode (in-memory, well-known root token) is enabled ONLY in the
@@ -245,20 +268,23 @@ services:
           "ui": false,
           "disable_mlock": false
         }
-    command: vault server -config=/vault/config/local.json
+    command: ["vault", "server"]
     volumes:
       - vault-data:/vault/data
       - vault-tls:/vault/tls:ro
     networks:
       - vault-net
+    depends_on:
+      vault-tls-init:
+        condition: service_completed_successfully
     tmpfs:
       - /tmp
     healthcheck:
-      test: ["CMD", "vault", "status", "-address=http://localhost:8200"]
+      test: ["CMD", "vault", "status", "-address=https://localhost:8200", "-tls-skip-verify"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 10s
+      start_period: 30s
     logging: *default-logging
 
   # ── Redis: Session + nonce + rate-limit cache ──────────────────────────────
