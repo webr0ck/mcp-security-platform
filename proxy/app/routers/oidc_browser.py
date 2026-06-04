@@ -281,8 +281,8 @@ async def oidc_callback(
             resp.raise_for_status()
             token_data = resp.json()
     except Exception as exc:
-        logger.error("Token exchange failed: %s", exc)
-        return JSONResponse(status_code=502, content={"error": "token_exchange_failed", "detail": str(exc)})
+        logger.exception("Token exchange failed: %s", exc)
+        return JSONResponse(status_code=502, content={"error": "token_exchange_failed", "detail": "Authentication failed. Check server logs for details."})
 
     access_token = token_data.get("access_token", "")
     refresh_token = token_data.get("refresh_token", "")

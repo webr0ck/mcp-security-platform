@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button } from '../common/Button'
 import { Badge } from '../common/Badge'
 import { Card } from '../common/Card'
+import { oidc as oidcApi } from '@/services/api'
 import type { OIDCConfig, MCPServer } from '@/types'
 import './AdminPanel.css'
 
@@ -21,16 +22,23 @@ type Tab = 'oidc' | 'servers' | 'credentials'
 
 export function AdminPanel() {
   const [tab, setTab] = useState<Tab>('oidc')
-  const [oidc, setOidc] = useState<OIDCConfig>(DEFAULT_OIDC)
+  const [oidcState, setOidcState] = useState<OIDCConfig>(DEFAULT_OIDC)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
   const handleSave = async () => {
     setSaving(true)
-    await new Promise(r => setTimeout(r, 800))
-    setSaving(false)
-    setSaved(true)
-    setTimeout(() => setSaved(false), 3000)
+    try {
+      await oidcApi.save(oidcState)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    } catch (err) {
+      // Show error state — don't expose raw error to UI
+      console.error('OIDC save failed:', err)
+      // Could add an error state here; for now fall through
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -56,7 +64,7 @@ export function AdminPanel() {
       </div>
 
       {tab === 'oidc' && (
-        <OIDCForm oidc={oidc} onChange={setOidc} onSave={handleSave} saving={saving} saved={saved} />
+        <OIDCForm oidc={oidcState} onChange={setOidcState} onSave={handleSave} saving={saving} saved={saved} />
       )}
       {tab === 'servers' && <ServerRegistry servers={MOCK_SERVERS} />}
       {tab === 'credentials' && <CredentialsPanel />}

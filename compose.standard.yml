@@ -34,6 +34,13 @@ volumes:
 
 services:
 
+  # ── Keycloak: Identity provider ────────────────────────────────────────────
+  # IMPORTANT: start-dev mode uses an in-memory dev-file database.
+  # All realm configuration and users are LOST on container restart.
+  # For production: use KC_DB: postgres with a persistent external database.
+  # See: https://www.keycloak.org/server/db
+  # To persist realm config across restarts, export and re-import the realm,
+  # or switch to production mode with a PostgreSQL backend.
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     container_name: mcp-keycloak

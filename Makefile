@@ -89,6 +89,9 @@ help:
 	@echo "  make clean             Destroy volumes and remove build artifacts"
 	@echo "                         WARNING: destroys all persistent data"
 	@echo ""
+	@echo "  ⚠  Alertmanager receivers: edit observability/alertmanager/alertmanager.yml"
+	@echo "     Replace placeholder webhook URLs before production deployment."
+	@echo ""
 
 # ─── Service lifecycle ────────────────────────────────────────────────────────
 
