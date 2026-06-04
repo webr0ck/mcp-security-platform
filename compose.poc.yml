@@ -46,6 +46,14 @@ services:
     image: wazuh/wazuh-manager:4.7.5
     container_name: mcp-wazuh-manager
     hostname: wazuh-manager
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_PTRACE  # required for Wazuh agent monitoring (process inspection)
+    tmpfs:
+      - /tmp
     environment:
       INDEXER_URL: https://wazuh-indexer:9200
       INDEXER_USERNAME: admin
@@ -77,6 +85,12 @@ services:
     image: wazuh/wazuh-indexer:4.7.5
     container_name: mcp-wazuh-indexer
     hostname: wazuh-indexer
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
     environment:
       OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
       bootstrap.memory_lock: "true"
@@ -103,6 +117,12 @@ services:
   wazuh-dashboard:
     image: wazuh/wazuh-dashboard:4.7.5
     container_name: mcp-wazuh-dashboard
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
     environment:
       INDEXER_USERNAME: admin
       INDEXER_PASSWORD: ${WAZUH_INDEXER_PASSWORD:?WAZUH_INDEXER_PASSWORD must be set - run bash scripts/init-poc.sh}

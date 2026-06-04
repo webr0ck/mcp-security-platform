@@ -38,6 +38,13 @@ services:
     image: quay.io/keycloak/keycloak:24.0
     container_name: mcp-keycloak
     command: ["start-dev", "--import-realm"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Note: read_only not applied — Keycloak writes to /opt/keycloak/data (mounted volume)
+    tmpfs:
+      - /tmp
     environment:
       KC_DB: dev-file
       KEYCLOAK_ADMIN: admin

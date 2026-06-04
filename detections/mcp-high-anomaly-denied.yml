@@ -1,0 +1,32 @@
+title: MCP High Anomaly Score — Invocation Blocked by Policy
+id: a1b2c3d4-0008-4000-8000-mcp000000008
+status: stable
+description: |
+    A tool invocation was denied by OPA because the anomaly detection engine
+    scored it above the block threshold (> 0.85). This is the complement of
+    mcp-high-anomaly-score.yml which covers allowed invocations. Both rules
+    together ensure full coverage: allowed-but-suspicious AND blocked-as-anomalous.
+references:
+    - https://agentthreatrule.org/en/spec
+author: MCP Security Platform
+date: 2026-06-04
+tags:
+    - attack.exfiltration
+    - owasp.llm.02
+    - mitre_atlas.AML.T0025
+logsource:
+    product: mcp-security-platform
+    service: audit
+detection:
+    selection:
+        event_type: TOOL_INVOCATION
+        outcome: deny
+        anomaly_score|gt: 0.85
+    condition: selection
+falsepositives:
+    - Legitimate batch job whose call pattern is atypical but not malicious
+level: high
+fields:
+    - client_id
+    - tool_name
+    - anomaly_score
