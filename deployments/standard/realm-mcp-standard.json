@@ -1,0 +1,181 @@
+{
+  "realm": "mcp",
+  "enabled": true,
+  "displayName": "MCP Security Platform",
+  "loginWithEmailAllowed": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 900,
+  "refreshTokenMaxReuse": 0,
+  "ssoSessionMaxLifespan": 86400,
+  "bruteForceProtected": true,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 300,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "passwordPolicy": "",
+  "clients": [
+    {
+      "clientId": "mcp-proxy",
+      "name": "MCP Security Proxy",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${KC_PROXY_CLIENT_SECRET}",
+      "redirectUris": [
+        "http://localhost:8000/api/v1/auth/oidc/callback",
+        "http://${LAB_HOST}:8000/api/v1/auth/oidc/callback",
+        "http://${LAB_HOST}:8088/api/v1/auth/oidc/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8000",
+        "http://${LAB_HOST}:8000"
+      ],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": false,
+      "frontchannelLogout": true,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "use.refresh.tokens": "true",
+        "token.response.include.issued.token.type": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "roles-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "client-roles-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "config": {
+            "claim.name": "resource_access.${clientId}.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "usermodel.clientRoleMapping.clientId": "mcp-proxy"
+          }
+        },
+        {
+          "name": "audience-mcp-proxy",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "mcp-proxy",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "grafana",
+      "name": "Grafana",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${KC_GRAFANA_CLIENT_SECRET}",
+      "redirectUris": [
+        "http://localhost:3000/login/generic_oauth",
+        "http://${LAB_HOST}:3000/login/generic_oauth"
+      ],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "admin-cli",
+      "name": "Admin CLI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "bearerOnly": false
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "admin",
+        "description": "Full platform admin"
+      },
+      {
+        "name": "agent",
+        "description": "Can invoke registered tools"
+      },
+      {
+        "name": "auditor",
+        "description": "Read-only audit and reporting"
+      },
+      {
+        "name": "readonly",
+        "description": "Read-only tool catalogue"
+      },
+      {
+        "name": "grafana-admin",
+        "description": "Grafana admin role"
+      },
+      {
+        "name": "grafana-editor",
+        "description": "Grafana editor role"
+      },
+      {
+        "name": "grafana-viewer",
+        "description": "Grafana viewer role"
+      }
+    ]
+  },
+  "users": [],
+  "identityProviders": [],
+  "browserSecurityHeaders": {
+    "contentTypeOptions": "nosniff",
+    "xRobotsTag": "none",
+    "xFrameOptions": "SAMEORIGIN",
+    "contentSecurityPolicy": "frame-src 'self'; frame-ancestors 'self'; object-src 'none';"
+  },
+  "groups": [
+    {
+      "name": "mcp-admin",
+      "realmRoles": [
+        "admin"
+      ]
+    },
+    {
+      "name": "mcp-editor",
+      "realmRoles": [
+        "editor"
+      ]
+    },
+    {
+      "name": "mcp-viewer",
+      "realmRoles": [
+        "viewer"
+      ]
+    },
+    {
+      "name": "mcp-analyst",
+      "realmRoles": [
+        "analyst"
+      ]
+    }
+  ]
+}
