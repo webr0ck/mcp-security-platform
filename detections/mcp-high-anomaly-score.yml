@@ -3,10 +3,12 @@ id: a1b2c3d4-0003-4000-8000-mcp000000003
 status: stable
 description: |
     A tool invocation was allowed by policy but the anomaly detection engine
-    scored it >= 0.8 (on a 0.0-1.0 scale). High anomaly scores indicate
-    unusual call patterns: parameter cardinality explosion, tool-call sequences
-    deviating from the client's baseline, or timing anomalies consistent with
-    automated exfiltration.
+    scored it > 0.85 (on a 0.0-1.0 scale). This threshold matches the OPA
+    block threshold exactly (authz.rego: anomaly_score > 0.85), so every alert
+    corresponds to an event that was genuinely allowed despite a critically high
+    score. High anomaly scores indicate unusual call patterns: parameter
+    cardinality explosion, tool-call sequences deviating from the client's
+    baseline, or timing anomalies consistent with automated exfiltration.
     Mapped to ATR agent-threat pattern: exfiltration via tool calls.
 references:
     - https://agentthreatrule.org/en/spec
@@ -24,7 +26,7 @@ detection:
     selection:
         event_type: TOOL_INVOCATION
         outcome: allow
-        anomaly_score|gte: 0.8
+        anomaly_score|gt: 0.85
     condition: selection
 falsepositives:
     - Newly onboarded client whose call pattern has not yet established a baseline
