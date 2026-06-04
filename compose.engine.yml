@@ -226,7 +226,8 @@ services:
 
   # ── Vault TLS init: obtains cert from step-ca before Vault starts ──────────
   vault-tls-init:
-    image: smallstep/step-cli:latest
+    # Pin to explicit version — never use :latest for the TLS cert bootstrap container
+    image: smallstep/step-cli:0.26.2
     container_name: mcp-vault-tls-init
     restart: "no"
     command: >

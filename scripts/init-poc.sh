@@ -15,7 +15,15 @@ fi
 # Source standard-tier secrets first
 bash "$(dirname "$0")/init-standard.sh"
 
-_gen20() { LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*_+=' </dev/urandom 2>/dev/null | head -c20 || true; }
+_gen20() {
+  local p
+  p=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*_+=' </dev/urandom 2>/dev/null | head -c20 || true)
+  if [[ ${#p} -lt 20 ]]; then
+    echo "[init-poc] ERROR: /dev/urandom unavailable — cannot generate secure passwords" >&2
+    exit 1
+  fi
+  echo "$p"
+}
 
 _ensure_var() {
   local var="$1" val="$2"

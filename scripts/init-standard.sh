@@ -12,8 +12,24 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-_gen20() { LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*_+=' </dev/urandom 2>/dev/null | head -c20 || true; }
-_gen64() { LC_ALL=C tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c64 || true; }
+_gen20() {
+  local p
+  p=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*_+=' </dev/urandom 2>/dev/null | head -c20 || true)
+  if [[ ${#p} -lt 20 ]]; then
+    echo "[init-standard] ERROR: /dev/urandom unavailable — cannot generate secure passwords" >&2
+    exit 1
+  fi
+  echo "$p"
+}
+_gen64() {
+  local p
+  p=$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c64 || true)
+  if [[ ${#p} -lt 64 ]]; then
+    echo "[init-standard] ERROR: /dev/urandom unavailable — cannot generate secure secrets" >&2
+    exit 1
+  fi
+  echo "$p"
+}
 
 _ensure_var() {
   local var="$1" val="$2"
