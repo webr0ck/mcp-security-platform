@@ -1,0 +1,72 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   MCP Security Platform — Design Tokens
+   Modify this file to retheme the entire UI.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ── Backgrounds ──────────────────────────────────────────────────────── */
+  --bg-void:     #08080e;  /* page backdrop */
+  --bg-base:     #0e0e18;  /* main surface */
+  --bg-surface:  #14141f;  /* cards, panels */
+  --bg-elevated: #1c1c2a;  /* dropdowns, tooltips */
+  --bg-hover:    #22223200; /* hover state overlay — transparent by default */
+
+  /* ── Borders ──────────────────────────────────────────────────────────── */
+  --border-dim:    rgba(255,255,255,0.05);
+  --border-base:   rgba(255,255,255,0.08);
+  --border-bright: rgba(255,255,255,0.14);
+
+  /* ── Text ─────────────────────────────────────────────────────────────── */
+  --text-primary:   #f4f4f6;
+  --text-secondary: #9898a8;
+  --text-muted:     #52525e;
+  --text-disabled:  #33333f;
+
+  /* ── Brand accent — burnt amber ───────────────────────────────────────── */
+  --accent:        #f97316;
+  --accent-dim:    rgba(249,115,22,0.12);
+  --accent-bright: #fb923c;
+
+  /* ── Semantic colours ─────────────────────────────────────────────────── */
+  --success:      #4ade80;
+  --success-dim:  rgba(74,222,128,0.10);
+  --warning:      #fbbf24;
+  --warning-dim:  rgba(251,191,36,0.10);
+  --danger:       #f87171;
+  --danger-dim:   rgba(248,113,113,0.10);
+  --info:         #22d3ee;
+  --info-dim:     rgba(34,211,238,0.10);
+
+  /* ── Severity badges ──────────────────────────────────────────────────── */
+  --sev-critical: #ff4d6d;
+  --sev-high:     #f97316;
+  --sev-medium:   #fbbf24;
+  --sev-low:      #94a3b8;
+  --sev-info:     #22d3ee;
+
+  /* ── Typography ───────────────────────────────────────────────────────── */
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-ui:      'Plus Jakarta Sans', system-ui, sans-serif;
+  --font-mono:    'Fira Code', 'Cascadia Code', monospace;
+
+  /* ── Spacing scale ────────────────────────────────────────────────────── */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px; --sp-10: 40px;
+  --sp-12: 48px; --sp-16: 64px;
+
+  /* ── Border radii ─────────────────────────────────────────────────────── */
+  --r-sm: 4px; --r-md: 8px; --r-lg: 12px; --r-xl: 16px; --r-pill: 999px;
+
+  /* ── Shadows ──────────────────────────────────────────────────────────── */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.5);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.6);
+  --glow-accent: 0 0 20px rgba(249,115,22,0.2);
+
+  /* ── Transitions ──────────────────────────────────────────────────────── */
+  --ease: cubic-bezier(0.16,1,0.3,1);
+  --t-fast: 120ms; --t-base: 200ms; --t-slow: 360ms;
+
+  /* ── Sidebar width ────────────────────────────────────────────────────── */
+  --sidebar-w: 220px;
+}

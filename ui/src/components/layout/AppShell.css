@@ -1,0 +1,17 @@
+.app-shell {
+  display: flex;
+  height: 100vh;
+  width: 100%;
+  overflow: hidden;
+}
+
+.app-shell__main {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-base);
+  /* Subtle grid texture */
+  background-image:
+    linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
