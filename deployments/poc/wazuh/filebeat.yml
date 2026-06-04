@@ -1,4 +1,10 @@
 # deployments/poc/wazuh/filebeat.yml
+# LOG SHIPPING TLS: ssl.enabled: true is set. For POC, verification_mode: none
+# uses opportunistic TLS without cert validation. Production deployments must:
+# 1. Generate a CA cert and filebeat client cert from the step-ca service
+# 2. Mount them into the filebeat container at /etc/filebeat/certs/
+# 3. Change ssl.verification_mode: full
+#
 # Filebeat sidecar — ships mcp-proxy structured audit logs to Wazuh manager.
 #
 # Detection rules source of truth: ./detections/*.yml (Sigma format)
@@ -37,7 +43,14 @@ processors:
 
 output.logstash:
   hosts: ["wazuh-manager:5044"]
-  ssl.enabled: false
+  ssl.enabled: true
+  ssl.certificate_authorities:
+    - /etc/filebeat/certs/ca.crt
+  ssl.certificate: /etc/filebeat/certs/filebeat.crt
+  ssl.key: /etc/filebeat/certs/filebeat.key
+  # For POC: set ssl.verification_mode: none if self-signed certs are used.
+  # For production: provide valid CA cert and enable full verification.
+  ssl.verification_mode: none
 
 logging.level: warning
 logging.to_files: false
