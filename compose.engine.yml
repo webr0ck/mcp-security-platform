@@ -90,6 +90,12 @@ services:
       - /var/cache/nginx
       - /var/run
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   # ── step-ca: internal mTLS CA ──────────────────────────────────────────────
   step-ca:
@@ -99,8 +105,9 @@ services:
     environment:
       DOCKER_STEPCA_INIT_NAME: MCP Security Platform CA
       DOCKER_STEPCA_INIT_DNS_NAMES: "step-ca,localhost"
-      DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT: "true"
+      DOCKER_STEPCA_INIT_PROVISIONER_NAME: ${STEP_CA_PROVISIONER_NAME}
       DOCKER_STEPCA_INIT_PASSWORD_FILE: /run/secrets/step_ca_password
+      STEP_CA_MAX_TLS_DURATION: ${STEP_CA_MAX_TLS_DURATION:-24h}
     secrets:
       - step_ca_password
     volumes:
@@ -119,15 +126,19 @@ services:
 
   # ── Layer 2: Security Proxy ────────────────────────────────────────────────
   proxy:
-    image: ghcr.io/mcp-security-platform/proxy:latest
     build:
       context: ./proxy
       dockerfile: Dockerfile
+      target: production
+    image: mcp-security-proxy:latest
     container_name: mcp-proxy
     <<: [*restart-always, *security-hardening]
     env_file: .env
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # Non-root user (UID 1001 defined in proxy/Dockerfile)
+    user: "1001:1001"
     networks:
       - gateway-net
       - proxy-opa-net
@@ -147,10 +158,10 @@ services:
     tmpfs:
       - /tmp
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 10s
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health/ready"]
+      interval: 15s
       timeout: 5s
-      retries: 10
+      retries: 3
       start_period: 30s
     logging: *default-logging
 
@@ -200,7 +211,7 @@ services:
       - /tmp
       - /run
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-mcp_app}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-mcp_app} -d ${DB_NAME:-mcp_security}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -208,6 +219,11 @@ services:
     logging: *default-logging
 
   # ── Vault: Secrets + credential broker ────────────────────────────────────
+  # Production-style: file storage backend, manual init+unseal.
+  # Dev mode (in-memory, well-known root token) is enabled ONLY in the
+  # podman-compose.lab.yml overlay. Running this base compose without an
+  # overlay yields a sealed Vault that requires `vault operator init` and
+  # `vault operator unseal` before use — never a well-known root token.
   vault:
     image: hashicorp/vault:1.17
     container_name: mcp-vault
@@ -215,8 +231,24 @@ services:
     cap_add:
       - IPC_LOCK
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:-change-me-in-production}
-      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_LOCAL_CONFIG: |
+        {
+          "storage": {"file": {"path": "/vault/data"}},
+          "listener": [{
+            "tcp": {
+              "address": "0.0.0.0:8200",
+              "tls_disable": false,
+              "tls_cert_file": "/vault/tls/server.crt",
+              "tls_key_file":  "/vault/tls/server.key"
+            }
+          }],
+          "ui": false,
+          "disable_mlock": false
+        }
+    command: vault server -config=/vault/config/local.json
+    volumes:
+      - vault-data:/vault/data
+      - vault-tls:/vault/tls:ro
     networks:
       - vault-net
     tmpfs:
@@ -234,7 +266,14 @@ services:
     image: redis:7-alpine
     container_name: mcp-redis
     <<: [*restart-always, *security-hardening]
-    command: redis-server --requirepass ${REDIS_PASSWORD} --save ""
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --loglevel notice
     volumes:
       - redis-data:/data
     networks:
