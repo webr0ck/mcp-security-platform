@@ -3,6 +3,7 @@
         db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle \
         assign-role compliance-run sbom-verify \
         security-check health smoke-test \
+        dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
         clean
 
 # =============================================================================
@@ -66,6 +67,11 @@ help:
 	@echo ""
 	@echo "Security:"
 	@echo "  make security-check    Run all machine-verifiable security invariant checks"
+	@echo "  make dep-audit         Scan deps for CVEs (auto-runs before up/build)"
+	@echo "  make dep-audit-report  Full dep audit with JSON report"
+	@echo "  make dep-audit-images  Full audit including pulled container images"
+	@echo "  make ui-dev            Run the UI dev server (dep-audit runs first)"
+	@echo "  make ui-build          Build the UI for production (dep-audit runs first)"
 	@echo "                         (trufflehog scan + rego lint + OPA deny-default)"
 	@echo ""
 	@echo "Infrastructure:"
@@ -86,7 +92,7 @@ help:
 
 # ─── Service lifecycle ────────────────────────────────────────────────────────
 
-up:
+up: dep-audit
 	@echo "Starting MCP Security Platform..."
 	$(COMPOSE) up -d
 	@echo "Services started. Use 'make logs' to follow output."
@@ -95,7 +101,7 @@ up:
 down:
 	$(COMPOSE) down
 
-dev-up:
+dev-up: dep-audit
 	@echo "Starting MCP Security Platform (development mode)..."
 	@echo "Dev features: hot-reload, debug ports, OPA watch mode, Grafana anon access"
 	$(COMPOSE_DEV) up -d
@@ -112,7 +118,7 @@ dev-up:
 dev-down:
 	$(COMPOSE_DEV) down
 
-build:
+build: dep-audit
 	$(COMPOSE) build --no-cache proxy compliance-checker
 
 # ─── Logs and shells ──────────────────────────────────────────────────────────
@@ -176,6 +182,29 @@ lint:
 	$(COMPOSE) exec $(PROXY_CONTAINER) ruff check app/
 	$(COMPOSE) exec $(PROXY_CONTAINER) ruff format --check app/
 	$(COMPOSE) exec $(PROXY_CONTAINER) mypy app/ --ignore-missing-imports
+
+# ─── Dependency audit (runs before up/build/dev-up) ──────────────────────────
+# SKIP_AUDIT=1 bypasses audit for CI pipelines that run it separately.
+# Never skip in production deployments.
+
+dep-audit:
+ifdef SKIP_AUDIT
+	@echo "[dep-audit] Skipped (SKIP_AUDIT=1)"
+else
+	@bash scripts/dep-audit.sh --skip-images --no-fail-low
+endif
+
+dep-audit-report:
+	@bash scripts/dep-audit.sh --skip-images --json && cat dep-audit-report.json
+
+dep-audit-images:
+	@bash scripts/dep-audit.sh --json
+
+ui-dev: dep-audit
+	cd ui && npm ci && npm run dev
+
+ui-build: dep-audit
+	cd ui && npm ci && npm run build
 
 # ─── Security invariant checks (CI gate — make security-check) ────────────────
 # Implements machine-verifiable checks from SECURITY_NONNEGATABLES.md.

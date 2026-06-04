@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.webr0ck.mcp-dep-audit.plist
+  Weekly dependency vulnerability scan for the MCP Security Platform.
+  Fires every Monday at 08:30 local time.
+
+  Install:
+    cp infra/launchagents/com.webr0ck.mcp-dep-audit.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.webr0ck.mcp-dep-audit.plist
+
+  Manual trigger:
+    launchctl start com.webr0ck.mcp-dep-audit
+
+  Logs:
+    /tmp/mcp-dep-audit.out.log
+    /tmp/mcp-dep-audit.err.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.webr0ck.mcp-dep-audit</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/webr0ck/Code/mcp-security-platform/scripts/dep-audit.sh</string>
+    <string>--json</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/webr0ck/Code/mcp-security-platform</string>
+
+  <!-- Weekly: Monday at 08:30 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/mcp-dep-audit.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/mcp-dep-audit.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- PATH must include Homebrew for grype/pip-audit -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/webr0ck</string>
+  </dict>
+</dict>
+</plist>

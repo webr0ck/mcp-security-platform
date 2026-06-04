@@ -30,3 +30,34 @@ repos:
         pass_filenames: false
         files: '^policies/rego/'
         stages: [pre-commit]
+
+      - id: dep-audit-python
+        name: pip-audit — Python dependency CVE scan
+        entry: "bash -c 'command -v pip-audit >/dev/null 2>&1 || { echo pip-audit not installed: pip3 install pip-audit; exit 1; }; cd proxy && pip-audit --progress-spinner off'"
+        language: system
+        pass_filenames: false
+        files: '^proxy/pyproject\.toml$'
+        stages: [pre-commit]
+
+      - id: dep-audit-npm
+        name: npm audit — UI dependency CVE scan
+        entry: "bash -c 'cd ui && npm audit --audit-level=high'"
+        language: system
+        pass_filenames: false
+        files: '^ui/package(-lock)?\.json$'
+        stages: [pre-commit]
+
+      - id: dep-audit-grype
+        name: grype — manifest CVE scan (pip + npm)
+        entry: "bash scripts/dep-audit.sh --skip-images --no-fail-low"
+        language: system
+        pass_filenames: false
+        files: '^(proxy/pyproject\.toml|ui/package-lock\.json)$'
+        stages: [pre-push]
+
+      - id: lockfile-present
+        name: supply chain — lockfile must exist
+        entry: "bash -c 'test -f ui/package-lock.json || { echo ui/package-lock.json missing; exit 1; }'"
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]

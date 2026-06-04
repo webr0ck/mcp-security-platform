@@ -1,0 +1,97 @@
+# .grype.yaml — Grype vulnerability scanner configuration
+# https://github.com/anchore/grype#configuration
+
+# Only scan package manifests — not compiled binaries in $PATH or /usr/local/bin.
+# Binaries from Homebrew (grype itself, step-ca, etc.) contain their own Go stdlib
+# version and would generate noise unrelated to our project's dependencies.
+search:
+  scope: squashed
+
+# ── Ignore rules ──────────────────────────────────────────────────────────────
+# Each entry must include a documented justification and a review-by date.
+# NEVER ignore a finding without: (a) confirmed false positive, or (b) accepted
+# risk signed off in the ADR directory.
+ignore:
+
+  # python-ecdsa (transitive via cyclonedx-python-lib) — Minerva timing attack.
+  # Risk accepted: we do NOT use python-ecdsa directly. All MCP platform crypto
+  # (JWT signing, AES-GCM, HKDF, mTLS) uses the `cryptography` package (OpenSSL
+  # bindings). python-ecdsa is only a transitive dep of cyclonedx for SBOM generation.
+  # Mitigation: cyclonedx-python-lib is not in the request path.
+  # Review by: 2026-09-01 — evaluate replacing cyclonedx-python-lib.
+  - vulnerability: GHSA-wj6h-64fc-37mp
+    package:
+      name: ecdsa
+      type: python
+    reason: "Transitive dep via cyclonedx-python-lib; not in request path; all platform crypto uses cryptography (OpenSSL)"
+
+  # go stdlib CVEs from locally-installed binaries (homebrew, step-ca, grype)
+  # These are not our code — they are binaries at /usr/local/bin/ owned by Homebrew.
+  # Review: update Homebrew packages when upstream publishes patched versions.
+  # Review by: 2026-09-01
+  - vulnerability: CVE-2023-45288
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary, not our code"
+
+  - vulnerability: CVE-2023-24531
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary"
+
+  - vulnerability: CVE-2025-22871
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary"
+
+  - vulnerability: CVE-2024-24790
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary"
+
+  - vulnerability: CVE-2024-24784
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary"
+
+  - vulnerability: CVE-2024-24791
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary"
+
+  - vulnerability: CVE-2024-34156
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary"
+
+  - vulnerability: CVE-2024-34158
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary"
+
+  - vulnerability: CVE-2026-39820
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary"
+
+  - vulnerability: CVE-2025-61725
+    package:
+      name: stdlib
+      type: go-module
+    reason: "False positive — go stdlib in Homebrew-managed binary"
+
+# ── Vulnerability database ────────────────────────────────────────────────────
+db:
+  auto-update: true
+  update-url: https://toolbox-data.anchore.io/grype/databases/listing.json
+  # Cache DB for 24h to avoid hammering the update endpoint on every build
+  max-allowed-built-age: "24h"
