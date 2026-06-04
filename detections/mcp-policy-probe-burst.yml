@@ -1,0 +1,37 @@
+title: MCP Policy Probe — Repeated Denial Burst
+id: a1b2c3d4-0002-4000-8000-mcp000000002
+status: stable
+description: |
+    Five or more tool invocations denied by policy from the same client_id
+    within 60 seconds. Indicates systematic probing of the policy boundary,
+    automated credential stuffing, or a compromised client attempting
+    privilege escalation.
+    Mapped to MITRE ATLAS AML.T0016 (Exploit Public-Facing Application) and
+    ATR agent-threat pattern: permission boundary probing.
+references:
+    - https://agentthreatrule.org/en/spec
+    - https://attack.mitre.org/techniques/T1110/
+author: MCP Security Platform
+date: 2026-06-04
+tags:
+    - attack.credential_access
+    - attack.t1110
+    - owasp.llm.01  # Prompt Injection / boundary bypass
+    - mitre_atlas.AML.T0016
+logsource:
+    product: mcp-security-platform
+    service: audit
+detection:
+    selection:
+        event_type: TOOL_INVOCATION
+        outcome: deny
+    timeframe: 60s
+    condition: selection | count(client_id) by client_id > 5
+falsepositives:
+    - Automated integration tests running against a misconfigured policy fixture
+    - Bulk migration script using wrong credentials
+level: high
+fields:
+    - client_id
+    - tool_name
+    - tool_id

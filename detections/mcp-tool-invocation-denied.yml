@@ -1,0 +1,34 @@
+title: MCP Tool Invocation Denied by Policy
+id: a1b2c3d4-0001-4000-8000-mcp000000001
+status: stable
+description: |
+    A tool invocation was denied by the OPA policy engine. This is expected
+    behaviour for misconfigured clients; repeated denials from the same client
+    indicate misconfiguration, probing, or privilege-escalation attempts.
+    Mapped to MITRE ATLAS AML.T0043 (Discover ML Model Ontology).
+references:
+    - https://agentthreatrule.org/en/spec
+    - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+author: MCP Security Platform
+date: 2026-06-04
+tags:
+    - attack.discovery
+    - owasp.llm.05  # Improper Output Handling
+    - mitre_atlas.AML.T0043
+logsource:
+    product: mcp-security-platform
+    service: audit
+detection:
+    selection:
+        event_type: TOOL_INVOCATION
+        outcome: deny
+    condition: selection
+falsepositives:
+    - Client with incorrect role configuration calling a tool outside their grant
+    - Service account key rotated but not updated in client config
+level: medium
+fields:
+    - client_id
+    - tool_name
+    - tool_id
+    - anomaly_score

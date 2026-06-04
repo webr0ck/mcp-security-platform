@@ -1,0 +1,36 @@
+title: MCP Invocation Attempt on Quarantined Tool
+id: a1b2c3d4-0005-4000-8000-mcp000000005
+status: stable
+description: |
+    A client attempted to invoke a tool whose status is 'quarantined'. Quarantine
+    is applied when a tool manifest fails the LLM risk audit or triggers a
+    compliance violation. Any invocation attempt against a quarantined tool
+    indicates the client is either stale (unaware of quarantine) or actively
+    probing for a bypass. Both require investigation.
+    Mapped to ATR agent-threat pattern: unsafe tool execution.
+references:
+    - https://agentthreatrule.org/en/spec
+    - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+author: MCP Security Platform
+date: 2026-06-04
+tags:
+    - attack.execution
+    - owasp.llm.06  # Sensitive Information Disclosure
+    - mitre_atlas.AML.T0043
+logsource:
+    product: mcp-security-platform
+    service: audit
+detection:
+    selection:
+        event_type: TOOL_INVOCATION
+        # tool_status is set by the proxy at invocation time from the tool_registry
+        tool_status: quarantined
+    condition: selection
+falsepositives:
+    - Client cached tool list before quarantine was applied (use tool catalog refresh)
+level: critical
+fields:
+    - client_id
+    - tool_name
+    - tool_id
+    - outcome

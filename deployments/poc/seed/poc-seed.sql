@@ -1,0 +1,38 @@
+-- deployments/poc/seed/poc-seed.sql
+-- Demo role assignments and server registrations for the POC tier.
+-- Idempotent: ON CONFLICT DO NOTHING on all inserts.
+-- Schema: role_assignments(client_id, role, granted_by) — V008
+--         server_registry(name, upstream_url, status, owner_sub) — V014
+
+-- ── Demo user role assignments ─────────────────────────────────────────────
+
+-- alice — viewer (echo only)
+INSERT INTO role_assignments (client_id, role, granted_by)
+VALUES ('alice', 'viewer', 'poc-seeder')
+ON CONFLICT ON CONSTRAINT idx_role_assignments_client_role DO NOTHING;
+
+-- bob — editor (echo + notes)
+INSERT INTO role_assignments (client_id, role, granted_by)
+VALUES ('bob', 'editor', 'poc-seeder')
+ON CONFLICT ON CONSTRAINT idx_role_assignments_client_role DO NOTHING;
+
+-- carol — analyst (echo + notes + search)
+INSERT INTO role_assignments (client_id, role, granted_by)
+VALUES ('carol', 'analyst', 'poc-seeder')
+ON CONFLICT ON CONSTRAINT idx_role_assignments_client_role DO NOTHING;
+
+-- ── POC MCP server registrations ──────────────────────────────────────────
+-- status 'approved' skips the manual approval step for demo purposes.
+-- owner_sub 'poc-seeder' is the bootstrap identity; update via admin panel.
+
+INSERT INTO server_registry (name, upstream_url, status, owner_sub, injection_mode)
+VALUES ('poc-echo-server', 'http://mcp-echo:8000', 'approved', 'poc-seeder', 'none')
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO server_registry (name, upstream_url, status, owner_sub, injection_mode)
+VALUES ('poc-notes-server', 'http://mcp-notes:8000', 'approved', 'poc-seeder', 'user')
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO server_registry (name, upstream_url, status, owner_sub, injection_mode)
+VALUES ('poc-search-server', 'http://mcp-search:8000', 'approved', 'poc-seeder', 'service')
+ON CONFLICT (name) DO NOTHING;
