@@ -1,0 +1,41 @@
+# compose.logging-agent.yml — Optional Filebeat sidecar overlay
+#
+# Ships mcp-proxy structured audit logs to an external SIEM
+# (Elasticsearch, OpenSearch, Logstash, etc.)
+#
+# Usage — attach to any tier:
+#   docker compose -f compose.engine.yml -f compose.logging-agent.yml up -d
+#   docker compose -f compose.standard.yml -f compose.logging-agent.yml up -d
+#
+# Required env vars:
+#   FILEBEAT_OUTPUT_HOSTS — e.g. "logstash:5044" or "es01:9200"
+#   FILEBEAT_OUTPUT_TYPE  — "logstash" (default) | "elasticsearch"
+#   FILEBEAT_USERNAME     — auth username (Elasticsearch only)
+#   FILEBEAT_PASSWORD     — auth password (Elasticsearch only)
+
+services:
+  filebeat-agent:
+    image: elastic/filebeat:8.14.0
+    container_name: mcp-filebeat-agent
+    user: root
+    environment:
+      FILEBEAT_OUTPUT_HOSTS: ${FILEBEAT_OUTPUT_HOSTS:-logstash:5044}
+      FILEBEAT_OUTPUT_TYPE: ${FILEBEAT_OUTPUT_TYPE:-logstash}
+      FILEBEAT_USERNAME: ${FILEBEAT_USERNAME:-}
+      FILEBEAT_PASSWORD: ${FILEBEAT_PASSWORD:-}
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: >
+      filebeat -e -strict.perms=false
+      -E 'filebeat.inputs=[{type: container, paths: ["/var/lib/docker/containers/*/*.log"],
+          processors: [{add_docker_metadata: {host: "unix:///var/run/docker.sock"}},
+                       {drop_event: {when: {not: {contains: {container.name: "mcp-proxy"}}}}}]}]'
+      -E 'output.${FILEBEAT_OUTPUT_TYPE:-logstash}.hosts=["${FILEBEAT_OUTPUT_HOSTS:-logstash:5044}"]'
+      -E 'logging.level=warning'
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
