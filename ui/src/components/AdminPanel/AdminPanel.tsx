@@ -13,7 +13,7 @@ const MOCK_SERVERS: MCPServer[] = [
 ]
 
 const DEFAULT_OIDC: OIDCConfig = {
-  enabled: false, issuer_url: '', client_id: '', client_secret: '',
+  enabled: false, issuer_url: '', client_id: '', client_secret: '***',
   audience: '', role_claim_path: 'roles', redirect_uri: '',
 }
 
@@ -101,7 +101,16 @@ function OIDCForm({ oidc, onChange, onSave, saving, saved }: {
             </div>
             <div className="form-field">
               <label>Client Secret <span className="required">*</span></label>
-              <input type="password" value={oidc.client_secret} onChange={set('client_secret')} placeholder="••••••••••••••••" />
+              <input
+                type="password"
+                value={oidc.client_secret === '***' ? '' : oidc.client_secret}
+                onChange={set('client_secret')}
+                placeholder="Enter new secret to update (leave blank to keep current)"
+                autoComplete="new-password"
+              />
+              {oidc.client_secret === '***' && (
+                <span className="form-hint" style={{ color: 'var(--success)' }}>✓ Secret configured (stored server-side)</span>
+              )}
             </div>
             <div className="form-field">
               <label>Audience</label>

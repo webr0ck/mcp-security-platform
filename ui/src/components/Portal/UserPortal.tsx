@@ -1,12 +1,9 @@
 import { useState } from 'react'
 import { Badge } from '../common/Badge'
-import { Card } from '../common/Card'
 import { Button } from '../common/Button'
 import type { Role } from '@/types'
+import { useAuth } from '@/auth/AuthContext'
 import './UserPortal.css'
-
-// Mock: in production, role comes from the session JWT
-const MOCK_ROLE: Role = 'analyst'
 
 interface Tool {
   id: string; name: string; server: string; description: string
@@ -30,14 +27,16 @@ const TOOLS: Tool[] = [
 const RISK_ORDER = { low: 0, medium: 1, high: 2, critical: 3 }
 
 export function UserPortal() {
+  const auth = useAuth()
+  const CURRENT_ROLE = (auth.role ?? 'viewer') as Role
   const [query, setQuery] = useState('')
   const [serverFilter, setServerFilter] = useState('all')
 
   const servers = [...new Set(TOOLS.map(t => t.server))]
-  const canUse = (t: Tool) => t.allowed_roles.includes(MOCK_ROLE)
+  const canUse = (t: Tool) => t.allowed_roles.includes(CURRENT_ROLE)
 
   const filtered = TOOLS
-    .filter(t => canUse(t) || true) // show all, grey out inaccessible
+    .filter(t => canUse(t))
     .filter(t => serverFilter === 'all' || t.server === serverFilter)
     .filter(t => !query || t.name.includes(query) || t.description.toLowerCase().includes(query.toLowerCase()))
 
@@ -50,7 +49,7 @@ export function UserPortal() {
         </div>
         <div className="portal__role-chip">
           <span className="portal__role-label">Signed in as</span>
-          <Badge label={MOCK_ROLE} variant="info" dot />
+          <Badge label={CURRENT_ROLE} variant="info" dot />
         </div>
       </header>
 

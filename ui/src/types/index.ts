@@ -60,6 +60,9 @@ export interface OIDCConfig {
   enabled: boolean
   issuer_url: string
   client_id: string
+  // client_secret: API returns '***' when a secret is already set.
+  // Browser should never receive or display the real value.
+  // Send the real value only when the user explicitly enters a new one.
   client_secret: string
   audience: string
   role_claim_path: string
