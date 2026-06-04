@@ -1,0 +1,231 @@
+# compose.poc.yml — MCP Security Platform · Tier 3: Full POC
+#
+# Includes standard tier and adds:
+#   - Wazuh (manager + indexer + dashboard) — SIEM
+#   - Filebeat sidecar — ships proxy audit logs to Wazuh
+#   - mcp-echo   (viewer role demo, port 8000 internal)
+#   - mcp-notes  (editor role demo)
+#   - mcp-search (analyst role demo)
+#   - poc-seeder — inserts alice/bob/carol DB rows + registers servers
+#
+# First-time setup:
+#   cp deployments/poc/.env.example .env
+#   bash scripts/init-poc.sh
+#   docker compose -f compose.poc.yml up -d
+#
+# Wazuh dashboard: http://localhost:5601
+# Admin panel:     https://localhost/admin (LAN only)
+
+include:
+  - compose.standard.yml
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+networks:
+  wazuh-net:
+    driver: bridge
+    internal: true
+  mcp-servers-net:
+    driver: bridge
+    internal: true
+
+volumes:
+  wazuh-manager-data:
+    driver: local
+  wazuh-indexer-data:
+    driver: local
+
+services:
+
+  # ── Wazuh manager ──────────────────────────────────────────────────────────
+  wazuh-manager:
+    image: wazuh/wazuh-manager:4.7.5
+    container_name: mcp-wazuh-manager
+    hostname: wazuh-manager
+    environment:
+      INDEXER_URL: https://wazuh-indexer:9200
+      INDEXER_USERNAME: admin
+      INDEXER_PASSWORD: ${WAZUH_INDEXER_PASSWORD:-SecretPwd1}
+      FILEBEAT_SSL_VERIFICATION_MODE: none
+      SSL_CERTIFICATE_AUTHORITIES: ""
+      SSL_CERTIFICATE: ""
+      SSL_KEY: ""
+    volumes:
+      - wazuh-manager-data:/var/ossec/data
+      - ./deployments/poc/wazuh/rules:/var/ossec/etc/rules/custom:ro
+    ports:
+      - "1514:1514/udp"
+      - "1515:1515"
+      - "55000:55000"
+    networks:
+      - wazuh-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:55000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── Wazuh indexer (OpenSearch) ─────────────────────────────────────────────
+  wazuh-indexer:
+    image: wazuh/wazuh-indexer:4.7.5
+    container_name: mcp-wazuh-indexer
+    hostname: wazuh-indexer
+    environment:
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      bootstrap.memory_lock: "true"
+    volumes:
+      - wazuh-indexer-data:/var/lib/wazuh-indexer
+    ports:
+      - "9200:9200"
+    networks:
+      - wazuh-net
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -u admin:${WAZUH_INDEXER_PASSWORD:-SecretPwd1} -k https://localhost:9200/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── Wazuh dashboard ────────────────────────────────────────────────────────
+  wazuh-dashboard:
+    image: wazuh/wazuh-dashboard:4.7.5
+    container_name: mcp-wazuh-dashboard
+    environment:
+      INDEXER_USERNAME: admin
+      INDEXER_PASSWORD: ${WAZUH_INDEXER_PASSWORD:-SecretPwd1}
+      WAZUH_API_URL: https://wazuh-manager
+      DASHBOARD_USERNAME: kibanaserver
+      DASHBOARD_PASSWORD: ${WAZUH_INDEXER_PASSWORD:-SecretPwd1}
+      API_USERNAME: wazuh-wui
+      API_PASSWORD: ${WAZUH_INDEXER_PASSWORD:-SecretPwd1}
+    ports:
+      - "5601:5601"
+    networks:
+      - wazuh-net
+    depends_on:
+      wazuh-indexer:
+        condition: service_healthy
+      wazuh-manager:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── Filebeat: ships proxy audit logs → Wazuh ──────────────────────────────
+  filebeat:
+    image: elastic/filebeat:8.14.0
+    container_name: mcp-filebeat
+    user: root
+    volumes:
+      - ./deployments/poc/wazuh/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - wazuh-net
+    depends_on:
+      wazuh-manager:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── POC MCP servers ────────────────────────────────────────────────────────
+  mcp-echo:
+    build:
+      context: ./lab/mcp-servers/echo
+    container_name: poc-mcp-echo
+    environment:
+      SERVER_NAME: poc-echo-mcp
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    networks:
+      - mcp-servers-net
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    logging: *default-logging
+
+  mcp-notes:
+    build:
+      context: ./lab/mcp-servers/notes
+    container_name: poc-mcp-notes
+    environment:
+      SERVER_NAME: poc-notes-mcp
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      REDIS_URL: redis://redis:6379/3
+    networks:
+      - mcp-servers-net
+      - proxy-redis-net
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    logging: *default-logging
+
+  mcp-search:
+    build:
+      context: ./lab/mcp-servers/search
+    container_name: poc-mcp-search
+    environment:
+      SERVER_NAME: poc-search-mcp
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    networks:
+      - mcp-servers-net
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── POC seeder: inserts alice/bob/carol + registers servers ───────────────
+  poc-seeder:
+    image: postgres:16-alpine
+    container_name: poc-seeder
+    restart: "no"
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: ${DB_NAME:-mcp_security}
+      PGUSER: ${DB_USER:-mcp_app}
+      PGPASSWORD: ${DB_PASSWORD}
+    volumes:
+      - ./deployments/poc/seed/poc-seed.sql:/seed.sql:ro
+    command: ["sh", "-c", "sleep 10 && psql -f /seed.sql && echo 'POC seed complete'"]
+    networks:
+      - proxy-db-net
+    depends_on:
+      db:
+        condition: service_healthy
+    logging: *default-logging
