@@ -1,0 +1,43 @@
+# deployments/poc/wazuh/filebeat.yml
+# Filebeat sidecar — ships mcp-proxy structured audit logs to Wazuh manager.
+#
+# Detection rules source of truth: ./detections/*.yml (Sigma format)
+# Compiled Wazuh rules (for runtime): loaded by wazuh-manager from
+#   deployments/poc/wazuh/rules/ via volume mount.
+#
+# This config reads Docker container logs via the socket and forwards
+# only mcp-proxy events to Wazuh manager on port 5044 (Logstash/Beats protocol).
+
+filebeat.inputs:
+  - type: container
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    stream: stdout
+    processors:
+      - add_docker_metadata:
+          host: unix:///var/run/docker.sock
+      - decode_json_fields:
+          fields: ["message"]
+          target: "json"
+          overwrite_keys: true
+          add_error_key: false
+
+processors:
+  - drop_event:
+      when:
+        not:
+          contains:
+            container.name: "mcp-proxy"
+  - add_fields:
+      target: fields
+      fields:
+        log_type: mcp_audit
+        platform: mcp-security-platform
+        detection_rules: "detections/*.yml (Sigma)"
+
+output.logstash:
+  hosts: ["wazuh-manager:5044"]
+  ssl.enabled: false
+
+logging.level: warning
+logging.to_files: false
