@@ -23,8 +23,8 @@ logsource:
 detection:
     selection:
         event_type: TOOL_INVOCATION
-        # tool_status is set by the proxy at invocation time from the tool_registry
-        tool_status: quarantined
+        outcome: deny
+        deny_reasons|contains: TOOL_QUARANTINED
     condition: selection
 falsepositives:
     - Client cached tool list before quarantine was applied (use tool catalog refresh)

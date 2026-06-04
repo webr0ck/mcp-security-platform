@@ -26,7 +26,7 @@ detection:
         event_type: TOOL_INVOCATION
         outcome: deny
     timeframe: 60s
-    condition: selection | count(client_id) by client_id > 5
+    condition: selection | count(client_id) by client_id >= 5
 falsepositives:
     - Automated integration tests running against a misconfigured policy fixture
     - Bulk migration script using wrong credentials

@@ -1,0 +1,39 @@
+title: MCP Tool Lifecycle Event — Registration, Status Change, or Deletion
+id: a1b2c3d4-0007-4000-8000-mcp000000007
+status: stable
+description: |
+    A tool was registered, had its status changed (e.g. active→quarantined),
+    or was deleted. These are administrative events that should be rare and
+    operator-initiated. Unexpected tool lifecycle events may indicate a
+    compromised admin session injecting a malicious tool or removing a
+    quarantine classification to enable a denied tool invocation.
+    Mapped to ATR agent-threat pattern: tool supply chain compromise.
+references:
+    - https://agentthreatrule.org/en/spec
+    - https://attack.mitre.org/techniques/T1554/
+author: MCP Security Platform
+date: 2026-06-04
+tags:
+    - attack.persistence
+    - attack.t1554
+    - owasp.llm.03
+    - mitre_atlas.AML.T0019
+logsource:
+    product: mcp-security-platform
+    service: audit
+detection:
+    selection:
+        event_type|contains:
+            - TOOL_REGISTERED
+            - TOOL_STATUS_CHANGED
+            - TOOL_DELETED
+    condition: selection
+falsepositives:
+    - Planned tool deployment or maintenance by platform operator
+    - CI/CD pipeline registering tools during deployment
+level: medium
+fields:
+    - client_id
+    - tool_name
+    - tool_id
+    - event_type

@@ -1,0 +1,34 @@
+title: MCP Sustained Tool Invocation — Potential Slow Exfiltration
+id: a1b2c3d4-0006-4000-8000-mcp000000006
+status: experimental
+description: |
+    A single client_id invokes the same tool 30 or more times within a
+    1-hour window with allowed outcomes. Low-rate sustained invocation
+    of data-retrieval tools (search, notes, email) is characteristic of
+    systematic data exfiltration that evades the burst-detection rule.
+    Mapped to ATR agent-threat pattern: slow data harvesting.
+references:
+    - https://agentthreatrule.org/en/spec
+author: MCP Security Platform
+date: 2026-06-04
+tags:
+    - attack.exfiltration
+    - owasp.llm.02
+    - mitre_atlas.AML.T0025
+logsource:
+    product: mcp-security-platform
+    service: audit
+detection:
+    selection:
+        event_type: TOOL_INVOCATION
+        outcome: allow
+    timeframe: 1h
+    condition: selection | count(tool_name) by client_id, tool_name >= 30
+falsepositives:
+    - Legitimate batch processing job (add to allowlist by client_id)
+    - Integration test suite running against production
+level: medium
+fields:
+    - client_id
+    - tool_name
+    - anomaly_score
