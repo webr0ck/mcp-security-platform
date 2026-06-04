@@ -175,6 +175,8 @@ services:
       - run
       - --server
       - --addr=0.0.0.0:8181
+      - --authentication=token
+      - --authorization=basic
       - --log-level=info
       - --log-format=json
       - /policies
@@ -182,6 +184,10 @@ services:
       - ./policies/rego:/policies:ro
     networks:
       - proxy-opa-net
+    secrets:
+      - opa_bearer_token
+    environment:
+      OPAL_AUTHENTICATION_TOKEN: /run/secrets/opa_bearer_token
     tmpfs:
       - /tmp
     healthcheck:
@@ -318,3 +324,5 @@ services:
 secrets:
   step_ca_password:
     file: ./gateway/step-ca/step_ca_password
+  opa_bearer_token:
+    file: ./infra/secrets/opa-bearer-token

@@ -98,10 +98,9 @@ tool_is_active if {
     input.tool_status == "active"
 }
 
-# Internal first-party platform tools bypass grants/risk checks.
-tool_is_active if {
-    input.tool_status == "internal"
-}
+# REMOVED 2026-06-04: internal bypass was a universal access control bypass.
+# Internal tools now require explicit grant entries and respect risk thresholds.
+# If platform tooling needs elevated access, use role 'platform_admin' with explicit grants.
 
 client_has_invoke_permission if {
     some role in input.client_roles
@@ -116,13 +115,13 @@ client_has_invoke_permission if {
     tag in data.mcp.tools[input.tool_name].tags
 }
 
-# Admins (admin/platform_admin) may invoke any active or internal tool
+# Admins (admin/platform_admin) may invoke any active tool
 # without requiring explicit per-tool grants.  Critical/quarantined tools
 # are still blocked by the risk-gate below.
 client_has_invoke_permission if {
     some role in input.client_roles
     role in {"admin", "platform_admin"}
-    input.tool_status in {"active", "internal"}
+    input.tool_status == "active"
 }
 
 # Analysts with explicit grants may invoke tools within their risk threshold.
@@ -131,13 +130,9 @@ client_has_invoke_permission if {
     tool_allowed_for_client(input.client_id, input.tool_name)
 }
 
-# Internal first-party platform tools: any authenticated role may invoke.
-client_has_invoke_permission if {
-    input.tool_status == "internal"
-    some role in input.client_roles
-    role in {"admin", "platform_admin", "analyst", "agent", "user",
-             "manager", "server_owner", "auditor", "readonly"}
-}
+# REMOVED 2026-06-04: internal bypass was a universal access control bypass.
+# Internal tools now require explicit grant entries and respect risk thresholds.
+# If platform tooling needs elevated access, use role 'platform_admin' with explicit grants.
 
 risk_level_value := {
     "low":      1,
@@ -151,10 +146,9 @@ risk_level_within_threshold if {
     risk_level_value[input.tool_risk_level] <= risk_level_value[client_max]
 }
 
-# Internal first-party platform tools bypass risk threshold checks.
-risk_level_within_threshold if {
-    input.tool_status == "internal"
-}
+# REMOVED 2026-06-04: internal bypass was a universal access control bypass.
+# Internal tools now require explicit grant entries and respect risk thresholds.
+# If platform tooling needs elevated access, use role 'platform_admin' with explicit grants.
 
 # REMOVED: fail-open fallback that allowed low-risk tools when max_risk_level was absent.
 # Missing max_risk_level now falls through to deny (INV-003, FIND-005 fix).

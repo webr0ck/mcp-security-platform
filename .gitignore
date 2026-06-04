@@ -18,3 +18,6 @@ server.key
 lab/nginx/lab-certs/*.pem
 # RT-004 fix: local key override written after red-team rotation — never commit
 proxy/.env
+# OPA-002/003: bearer token is a runtime secret — never commit
+infra/secrets/*
+!infra/secrets/.gitkeep
