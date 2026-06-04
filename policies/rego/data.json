@@ -28,11 +28,7 @@
           "search_by_category",
           "list_available_mcps",
           "get_profile",
-          "enable_mcp",
-          "disable_mcp",
           "list_functions",
-          "enable_function",
-          "disable_function",
           "netbox_get_objects",
           "netbox_get_object_by_id",
           "netbox_get_changelogs",
@@ -141,7 +137,8 @@
         "allowed_tags": [
           "echo",
           "read-only"
-        ]
+        ],
+        "max_risk_level": "low"
       },
       "bob": {
         "allowed_tools": [
@@ -157,7 +154,8 @@
           "echo",
           "read-only",
           "notes"
-        ]
+        ],
+        "max_risk_level": "medium"
       },
       "carol": {
         "allowed_tools": [
@@ -177,7 +175,8 @@
           "read-only",
           "notes",
           "search"
-        ]
+        ],
+        "max_risk_level": "medium"
       }
     },
     "tools": {
