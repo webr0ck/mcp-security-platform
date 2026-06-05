@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     OPA_HOST: str = "opa"
     OPA_PORT: int = 8181
     OPA_TIMEOUT_SECONDS: int = 2
+    OPA_AUTH_TOKEN: str = ""  # Bearer token for OPA --authentication=token; empty = no auth (lab)
 
     @property
     def opa_url(self) -> str:

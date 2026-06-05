@@ -82,6 +82,13 @@ services:
     image: alpine:3.19
     container_name: mcp-keycloak-seeder
     restart: "no"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
     depends_on:
       keycloak:
         condition: service_healthy
@@ -102,9 +109,17 @@ services:
   loki:
     image: grafana/loki:3.0.0
     container_name: mcp-loki
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # read_only skipped: Loki writes WAL and index files to loki-data volume at
+    # paths that vary by config; tmpfs cannot cover them without a custom config.
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
       - loki-data:/loki
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     networks:
       - observability-net
     healthcheck:
@@ -119,11 +134,20 @@ services:
   promtail:
     image: grafana/promtail:3.0.0
     container_name: mcp-promtail
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # read_only skipped: Promtail writes position file to track log offsets;
+    # the path is config-driven and cannot be safely replaced with a tmpfs
+    # without a custom promtail config override.
     command: -config.file=/etc/promtail/config.yml
     volumes:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./observability/promtail:/etc/promtail:ro
+    tmpfs:
+      - /tmp:size=32m,mode=1777
     networks:
       - observability-net
     depends_on:
@@ -135,6 +159,13 @@ services:
   grafana:
     image: grafana/grafana-oss:11.0.0
     container_name: mcp-grafana
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # read_only skipped: Grafana writes plugin data and sqlite session DB to
+    # /var/lib/grafana (the named volume). Enabling read_only without an
+    # exhaustive tmpfs map causes startup failure.
     ports:
       - "3000:3000"
     environment:
@@ -154,6 +185,8 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    tmpfs:
+      - /tmp:size=32m,mode=1777
     networks:
       - gateway-net
       - observability-net

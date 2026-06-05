@@ -46,6 +46,7 @@ async def invoke_tool(
     client_roles: list[str],
     is_testing: bool,
     request_id: str,
+    inbound_auth: str | None = None,
 ) -> dict[str, Any]:
     """
     Execute the full tool invocation pipeline.
@@ -57,6 +58,9 @@ async def invoke_tool(
         client_roles: List of roles for the caller.
         is_testing: True if called by admin for testing (bypasses anomaly).
         request_id: Request correlation ID.
+        inbound_auth: The client's raw inbound Authorization header value. Used
+            only by injection_mode='passthrough' (Case-3 / 3b) to forward a
+            downstream-IDP token to the upstream and relay its 401 challenge.
 
     Returns:
         Dict matching the MCP JSON-RPC 2.0 response format with meta.audit_id.
@@ -195,17 +199,47 @@ async def invoke_tool(
     injection_mode = tool_record.get("injection_mode", "none")
     service_name = tool_record.get("service_name")
 
-    if injection_mode != "none":
+    if injection_mode == "passthrough":
+        # Case-3 (3b) native passthrough: inject none of OUR credentials. Forward
+        # the client's downstream token (if any) and let the upstream challenge
+        # (401 + WWW-Authenticate) when it is absent/invalid — the gateway relays
+        # that challenge to the client (see the 401-relay below).
+        if inbound_auth:
+            extra_headers = {"Authorization": inbound_auth}
+    elif injection_mode != "none":
         from app.credential_broker.dispatcher import dispatch_credential_injection
-        extra_headers = await dispatch_credential_injection(
-            tool_record=tool_record,
-            client_id=client_id,
-            user_kc_token=None,
-        )
+        try:
+            extra_headers = await dispatch_credential_injection(
+                tool_record=tool_record,
+                client_id=client_id,
+                user_kc_token=None,
+            )
+        except CredentialInjectionError:
+            # INV-001: a credential refusal on the auth boundary (e.g. user not
+            # enrolled for delegated access, missing service secret, broker down)
+            # is a security-relevant DENY and MUST be audited — parity with the
+            # OPA-stage deny above. Without this the only signal is a -32603 to
+            # the caller and no audit trail. Emit, then re-raise so the actionable
+            # message still reaches the caller.
+            await _emit_audit_event(
+                tool_id=str(tool_id),
+                tool_name=tool_name,
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=["credential_injection_failed", injection_mode],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=anomaly_score,
+                opa_decision_id=opa_decision_id,
+                is_testing=is_testing,
+            )
+            raise
 
     start_ts = datetime.now(timezone.utc)
     upstream_response: dict[str, Any] = {}
     upstream_error: Exception | None = None
+    upstream_challenge: dict[str, Any] | None = None
     init_failed = False
 
     # MCP streamable-http requires Accept header to signal JSON or SSE response preference.
@@ -218,6 +252,10 @@ async def invoke_tool(
         # FastMCP's TrustedHostMiddleware rejects container hostnames; override to localhost.
         "Host": "localhost",
     }
+    # passthrough: the initialize handshake may also need the downstream token if
+    # the upstream is a protected resource that challenges every request.
+    if injection_mode == "passthrough" and inbound_auth:
+        handshake_headers["Authorization"] = inbound_auth
     # Forward caller identity so MCP servers that implement per-user isolation
     # (notes, self-service) can resolve the user without re-parsing a JWT.
     # X-User-Role carries the highest-privilege role for admin-gate checks.
@@ -254,16 +292,30 @@ async def invoke_tool(
 
                 resp = await client.post(upstream_url, json=json_rpc_request, headers=forward_headers)
 
-                # Defense against unbounded streaming from a malicious upstream.
-                body = resp.content[:_MAX_UPSTREAM_BODY_BYTES]
-                content_type = resp.headers.get("content-type", "")
-                if "text/event-stream" in content_type:
-                    for line in body.decode("utf-8", errors="replace").splitlines():
-                        if line.startswith("data:"):
-                            upstream_response = json.loads(line[5:].strip())
-                            break
+                # Case-3 (3b) relay: a protected-resource upstream answers an
+                # un(der)-authenticated call with 401 + WWW-Authenticate. Do NOT
+                # swallow it as a JSON parse error — capture the challenge so the
+                # client can perform the downstream (e.g. Entra) OAuth itself.
+                if resp.status_code == 401:
+                    upstream_challenge = {
+                        "www_authenticate": resp.headers.get("www-authenticate", ""),
+                        "status": 401,
+                    }
+                    try:
+                        upstream_challenge["body"] = json.loads(resp.content[:_MAX_UPSTREAM_BODY_BYTES])
+                    except Exception:
+                        upstream_challenge["body"] = None
                 else:
-                    upstream_response = json.loads(body)
+                    # Defense against unbounded streaming from a malicious upstream.
+                    body = resp.content[:_MAX_UPSTREAM_BODY_BYTES]
+                    content_type = resp.headers.get("content-type", "")
+                    if "text/event-stream" in content_type:
+                        for line in body.decode("utf-8", errors="replace").splitlines():
+                            if line.startswith("data:"):
+                                upstream_response = json.loads(line[5:].strip())
+                                break
+                    else:
+                        upstream_response = json.loads(body)
     except Exception as exc:
         upstream_error = exc
         logger.error("Upstream MCP server error: %s", exc)
@@ -281,7 +333,12 @@ async def invoke_tool(
     # with a reason so audit reviewers can distinguish this from a genuine
     # successful invocation.
     # -------------------------------------------------------------------------
-    if upstream_error is not None:
+    if upstream_challenge is not None:
+        # Auth challenge from a foreign-IDP upstream — not a successful execution,
+        # not an internal error. Audit as a deny with a clear reason.
+        audit_outcome = "deny"
+        audit_reasons = ["downstream_auth_required"]
+    elif upstream_error is not None:
         audit_outcome = "error"
         audit_reasons = [
             "upstream_init_failed" if init_failed else "upstream_invocation_failed",
@@ -307,6 +364,27 @@ async def invoke_tool(
     # -------------------------------------------------------------------------
     # Step 6: Return proxied response
     # -------------------------------------------------------------------------
+    if upstream_challenge is not None:
+        # Relay the downstream authorization challenge to the client. Code -32001
+        # + a structured `data` block carry the WWW-Authenticate value and the
+        # resource-metadata URL so the client (or gateway transport layer) can
+        # drive the downstream (e.g. Entra) OAuth. The router may promote this to
+        # a real HTTP 401 + WWW-Authenticate header.
+        return {
+            "jsonrpc": "2.0",
+            "id": json_rpc_request.get("id"),
+            "error": {
+                "code": -32001,
+                "message": "Downstream authorization required.",
+                "data": {
+                    "status": 401,
+                    "www_authenticate": upstream_challenge.get("www_authenticate", ""),
+                    "downstream_challenge": upstream_challenge.get("body"),
+                    "audit_id": audit_id,
+                },
+            },
+        }
+
     if upstream_error or not upstream_response:
         return {
             "jsonrpc": "2.0",
@@ -317,6 +395,45 @@ async def invoke_tool(
                 "data": {"audit_id": audit_id},
             },
         }
+
+    # -------------------------------------------------------------------------
+    # Step 6a: Indirect prompt-injection screen on the tool RESPONSE (MCP-003 /
+    # CROSS-001). Perimeter controls cannot intercept tool responses — the LLM
+    # processes them as content, so they must be screened here before return.
+    # -------------------------------------------------------------------------
+    from app.services.response_filter import (
+        screen_response,
+        BLOCK_ON_MATCH,
+        INJECTION_DETECTED_RESPONSE,
+    )
+
+    screened_text = json.dumps(upstream_response.get("result", upstream_response))
+    filter_result = screen_response(screened_text, tool_name, client_id)
+    if filter_result.matched:
+        # Synchronous audit of the detection (INV-001), regardless of block mode.
+        await _emit_audit_event(
+            tool_id=str(tool_id),
+            tool_name=tool_name,
+            tool_version=tool_record.get("version"),
+            client_id=client_id,
+            outcome="error",
+            deny_reasons=["RESPONSE_FILTER_INJECTION"],
+            request_id=request_id,
+            latency_ms=latency_ms,
+            anomaly_score=anomaly_score,
+            opa_decision_id=opa_decision_id,
+            is_testing=is_testing,
+        )
+        if BLOCK_ON_MATCH:
+            return {
+                "jsonrpc": "2.0",
+                "id": json_rpc_request.get("id"),
+                "error": {
+                    "code": -32603,
+                    "message": INJECTION_DETECTED_RESPONSE["detail"],
+                    "data": {"audit_id": audit_id, "filter": "tool_response_injection"},
+                },
+            }
 
     upstream_response.setdefault("meta", {})
     upstream_response["meta"]["audit_id"] = audit_id

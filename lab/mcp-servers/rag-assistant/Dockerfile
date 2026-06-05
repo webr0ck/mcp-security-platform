@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+# TODO: pin @sha256:<digest> — run: docker pull python:3.12.11-slim && docker inspect --format='{{index .RepoDigests 0}}' python:3.12.11-slim
+FROM python:3.12.11-slim
 
 RUN groupadd --gid 1001 appgroup && \
     useradd --uid 1001 --gid appgroup --no-create-home appuser
@@ -6,14 +7,9 @@ RUN groupadd --gid 1001 appgroup && \
 WORKDIR /app
 
 COPY requirements.txt .
-# Pin transitive deps and verify hashes (supply-chain hardening)
-# Generate lockfile with: pip-compile requirements.txt --generate-hashes -o requirements.lock
-COPY requirements.lock* ./
-RUN if [ -f requirements.lock ]; then \
-      pip install --no-cache-dir --require-hashes -r requirements.lock; \
-    else \
-      pip install --no-cache-dir -r requirements.txt; \
-    fi
+# To add hash-pinned lockfile: pip-compile requirements.txt --generate-hashes -o requirements.lock
+# then: COPY requirements.lock . && RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=appuser:appgroup server.py .
 

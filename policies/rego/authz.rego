@@ -130,6 +130,13 @@ client_has_invoke_permission if {
     tool_allowed_for_client(input.client_id, input.tool_name)
 }
 
+# Platform-internal principal: allow access to explicitly granted internal tools only.
+# This replaces the removed tool_status=="internal" bypass (OPA-001 fix).
+client_has_invoke_permission if {
+    input.client_id == "platform_internal"
+    tool_allowed_for_client("platform_internal", input.tool_name)
+}
+
 # REMOVED 2026-06-04: internal bypass was a universal access control bypass.
 # Internal tools now require explicit grant entries and respect risk thresholds.
 # If platform tooling needs elevated access, use role 'platform_admin' with explicit grants.

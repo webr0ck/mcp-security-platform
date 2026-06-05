@@ -66,7 +66,9 @@ services:
 
   # ── Layer 1: Gateway ───────────────────────────────────────────────────────
   gateway:
-    image: owasp/modsecurity-crs:nginx-alpine
+    # TODO @sha256: pin to immutable digest before promoting to staging/prod.
+    # Run: docker pull owasp/modsecurity-crs:4.14.0-nginx-alpine && docker inspect --format='{{index .RepoDigests 0}}' owasp/modsecurity-crs:4.14.0-nginx-alpine
+    image: owasp/modsecurity-crs:4.14.0-nginx-alpine
     container_name: mcp-gateway
     <<: [*restart-always, *security-hardening]
     ports:

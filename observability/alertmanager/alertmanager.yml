@@ -54,29 +54,34 @@ route:
       repeat_interval: 24h
 
 receivers:
+  # HOW TO CONFIGURE: Set ALERT_WEBHOOK_URL in your .env file (never commit the value).
+  # All three receivers share a single configurable webhook endpoint so that one
+  # .env change wires the whole platform. To fan-out to multiple destinations
+  # (Slack + PagerDuty), add a second webhook_configs entry under each receiver.
+  #
+  # Required env var:  ALERT_WEBHOOK_URL
+  # Optional override: ALERT_WEBHOOK_URL_CRITICAL  (defaults to ALERT_WEBHOOK_URL)
+  #
+  # Examples:
+  #   Slack incoming webhook:   https://hooks.slack.com/services/T.../B.../...
+  #   PagerDuty Events API v2:  https://events.pagerduty.com/v2/enqueue
+  #   Platform Telegram bridge: http://mcp-notify:8080/alertmanager  (if deployed)
+
   - name: "default"
     webhook_configs:
-      # ⚠ PLACEHOLDER: Replace this URL before any production deployment.
-      # Alertmanager routes are silently inactive until real endpoints are configured.
-      # Options: PagerDuty, Slack webhook, Telegram bot, email SMTP.
-      # ALERTMANAGER_SLACK_WEBHOOK_URL is set in .env (not committed to git)
-      - url: "http://localhost:9999/alertmanager-placeholder"
+      - url: "${ALERT_WEBHOOK_URL}"
         send_resolved: true
 
   - name: "critical"
     webhook_configs:
-      # ⚠ PLACEHOLDER: Replace this URL before any production deployment.
-      # Alertmanager routes are silently inactive until real endpoints are configured.
-      # Options: PagerDuty, Slack webhook, Telegram bot, email SMTP.
-      - url: "http://localhost:9999/alertmanager-placeholder"
+      # Use ALERT_WEBHOOK_URL_CRITICAL if set; fall back to ALERT_WEBHOOK_URL.
+      # In production, point this at a high-urgency PagerDuty/Opsgenie endpoint.
+      - url: "${ALERT_WEBHOOK_URL_CRITICAL:-${ALERT_WEBHOOK_URL}}"
         send_resolved: true
 
   - name: "security-team"
     webhook_configs:
-      # ⚠ PLACEHOLDER: Replace this URL before any production deployment.
-      # Alertmanager routes are silently inactive until real endpoints are configured.
-      # Options: PagerDuty, Slack webhook, Telegram bot, email SMTP.
-      - url: "http://localhost:9999/alertmanager-placeholder"
+      - url: "${ALERT_WEBHOOK_URL}"
         send_resolved: false
 
 inhibit_rules:

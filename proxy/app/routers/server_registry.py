@@ -22,7 +22,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, field_validator
 from sqlalchemy import text
 
@@ -167,7 +167,7 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
     return JSONResponse({"server_id": server_id, "updated": list(updates)})
 
 
-@router.delete("/api/v1/admin/servers/{server_id}", status_code=204)
+@router.delete("/api/v1/admin/servers/{server_id}", status_code=204, response_class=Response)
 async def delete_server(server_id: str, request: Request):
     _require_platform_admin(request)
     async with AsyncSessionLocal() as db:

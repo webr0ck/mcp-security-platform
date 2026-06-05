@@ -10,8 +10,9 @@ returning them to the LLM client. Any response matching a pattern is:
 This is the integration-layer control for OWASP LLM01 indirect injection
 (CROSS-001). Perimeter controls (nginx, WAF) cannot intercept tool responses.
 
-Current status: detection-only (logs and emits audit event, does not block).
-Set RESPONSE_FILTER_BLOCK=true in env to enable blocking mode.
+Current status: blocking by default (MCP-003). Matching responses are audited
+and replaced with a sanitised error. Set RESPONSE_FILTER_BLOCK=false to fall
+back to detection-only (log + audit, allow through).
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ log = logging.getLogger(__name__)
 
 # Blocking mode — when True, matching responses are replaced with an error.
 # When False (default), matching responses are logged and allowed through.
-BLOCK_ON_MATCH = os.environ.get("RESPONSE_FILTER_BLOCK", "false").lower() == "true"
+BLOCK_ON_MATCH = os.environ.get("RESPONSE_FILTER_BLOCK", "true").lower() == "true"
 
 # ── Injection pattern library ─────────────────────────────────────────────────
 # These patterns detect common indirect prompt injection payloads embedded in

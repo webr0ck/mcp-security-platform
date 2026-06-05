@@ -14,9 +14,7 @@ auth_enabled: false
 server:
   http_listen_port: 3100
   grpc_listen_port: 9096
-  log_level: info
-  # Never log request bodies — they may contain redacted audit event content
-  log_request_at_level: "warn"
+  log_level: warn
 
 common:
   instance_addr: 127.0.0.1

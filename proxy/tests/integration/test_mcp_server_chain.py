@@ -346,7 +346,9 @@ async def test_quarantined_tool_blocked_no_upstream_call():
 
     assert resp.status_code == 403
     body = resp.json()
-    assert "TOOL_QUARANTINED" in body["error"]["data"]["opa_reasons"]
+    # Route-level entitlement check (status != "active") fires before invoke_tool,
+    # so the response uses the HTTP detail envelope, not the JSON-RPC error envelope.
+    assert body["detail"]["code"] == "NOT_ENTITLED"
     opa_mock.assert_not_awaited()  # OPA never called (INV-005)
 
 

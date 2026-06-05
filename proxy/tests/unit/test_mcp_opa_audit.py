@@ -178,7 +178,7 @@ async def test_dispatch_tools_call_platform_info_emits_audit():
     fake_handler = MagicMock(return_value={"type": "text", "text": "{}"})
 
     with patch("app.services.policy.evaluate_policy", mock_eval), \
-         patch("app.services.invocation.emit_mcp_access_event", mock_audit), \
+         patch("app.services.invocation.emit_internal_tool_event", mock_audit), \
          patch("app.routers.mcp_server._TOOL_HANDLERS",
                {"platform_info": fake_handler}):
         from app.routers.mcp_server import _dispatch
@@ -189,19 +189,20 @@ async def test_dispatch_tools_call_platform_info_emits_audit():
     assert "result" in result
     assert result["result"]["content"][0] == {"type": "text", "text": "{}"}
 
-    # OPA was called with internal tool metadata
+    # OPA was called with active status and the platform_internal client id
     mock_eval.assert_awaited_once()
     opa_call_kwargs = mock_eval.call_args[0][0]
-    assert opa_call_kwargs["tool_status"] == "internal"
+    assert opa_call_kwargs["tool_status"] == "active"
     assert opa_call_kwargs["tool_name"] == "platform_info"
-    assert opa_call_kwargs["client_id"] == "alice"
+    assert opa_call_kwargs["client_id"] == "platform_internal"
 
     # Audit was emitted with outcome=allow
     mock_audit.assert_awaited_once()
     audit_kwargs = mock_audit.call_args.kwargs
     assert audit_kwargs["outcome"] == "allow"
     assert audit_kwargs["tool_name"] == "platform_info"
-    assert audit_kwargs["tool_id"] is None
+    # emit_internal_tool_event has no tool_id param (internal tools have no registry entry)
+    assert "tool_id" not in audit_kwargs
 
 
 @pytest.mark.unit
@@ -228,7 +229,7 @@ async def test_dispatch_tools_call_opa_deny_emits_audit():
     }
 
     with patch("app.services.policy.evaluate_policy", mock_eval), \
-         patch("app.services.invocation.emit_mcp_access_event", mock_audit):
+         patch("app.services.invocation.emit_internal_tool_event", mock_audit):
         from app.routers.mcp_server import _dispatch
         result = await _dispatch(body, request)
 
@@ -243,7 +244,8 @@ async def test_dispatch_tools_call_opa_deny_emits_audit():
     audit_kwargs = mock_audit.call_args.kwargs
     assert audit_kwargs["outcome"] == "deny"
     assert audit_kwargs["deny_reasons"] == deny_reasons
-    assert audit_kwargs["tool_id"] is None
+    # emit_internal_tool_event has no tool_id param (internal tools have no registry entry)
+    assert "tool_id" not in audit_kwargs
 
 
 @pytest.mark.unit

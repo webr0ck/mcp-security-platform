@@ -24,7 +24,10 @@ detection:
     selection:
         event_type: TOOL_INVOCATION
         outcome: deny
-        deny_reasons|contains: 'tool_quarantined'
+        # Value must be UPPERCASE — proxy/app/routers/tools.py:982 emits "TOOL_QUARANTINED".
+        # Using case-insensitive modifier (|contains|i) for backend portability in case
+        # a log pipeline normalises case; the authoritative emitted value is uppercase.
+        deny_reasons|contains|i: 'TOOL_QUARANTINED'
     condition: selection
 falsepositives:
     - Client cached tool list before quarantine was applied (use tool catalog refresh)

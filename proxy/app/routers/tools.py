@@ -20,10 +20,14 @@ import uuid
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tools")
 
@@ -97,6 +101,22 @@ async def register_tool(
             },
         )
 
+    # MCP-005: cross-server tool-name collision / shadowing check.
+    # A tool name registered by a DIFFERENT source than an existing one can
+    # shadow a trusted tool in tools/list. Until a server_id FK exists, detect
+    # the collision against source_repo and quarantine the newcomer rather than
+    # silently allowing two same-named tools to coexist.
+    name_collision = await db.execute(
+        text(
+            "SELECT source_repo FROM tool_registry "
+            "WHERE name = :name AND COALESCE(source_repo, '') <> COALESCE(:source_repo, '') "
+            "LIMIT 1"
+        ),
+        {"name": tool_in.name, "source_repo": tool_in.source_repo},
+    )
+    collision_row = name_collision.fetchone()
+    shadow_collision = collision_row is not None
+
     # Run auditor
     tool_id = str(uuid4())
     audit_result = await _run_audit(
@@ -112,8 +132,18 @@ async def register_tool(
     risk_level = audit_result.risk_level
     risk_reasons = json.dumps(audit_result.static_analysis.get("risk_flags", []))
 
-    # Critical-risk tools start quarantined (API.md §2.2)
-    initial_status = "quarantined" if risk_level == "critical" else "active"
+    # Critical-risk tools start quarantined (API.md §2.2).
+    # MCP-005: a cross-source name collision also starts quarantined — a human
+    # must clear it, preventing automatic tool shadowing.
+    initial_status = "quarantined" if (risk_level == "critical" or shadow_collision) else "active"
+    if shadow_collision:
+        logger.warning(
+            "MCP-005 tool-name collision: '%s' already registered by a different source "
+            "(existing=%r, new=%r) — quarantining the new registration.",
+            tool_in.name,
+            collision_row[0] if collision_row else None,
+            tool_in.source_repo,
+        )
 
     # Generate and sign SBOM (INV-006)
     bom_document, schema_hash, sbom_signature = generate_cyclonedx_sbom(
@@ -568,12 +598,12 @@ async def update_tool(
 # ---------------------------------------------------------------------------
 # DELETE /tools/{tool_id}
 # ---------------------------------------------------------------------------
-@router.delete("/{tool_id}", status_code=204)
+@router.delete("/{tool_id}", status_code=204, response_class=Response)
 async def delete_tool(
     tool_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
-) -> None:
+):
     """
     Soft-delete a tool (sets deleted_at, status=deprecated).
     Required role: admin.
@@ -938,6 +968,26 @@ async def invoke_tool(
     # caller holds at least the 'agent' role (already checked above, but re-stated
     # here so the security intent is explicit and cannot be removed without notice).
     if tool_record["status"] != "active":
+        # INV-001: emit audit event for non-active tool rejections before returning 403.
+        # The entitlement check fires before invoke_tool, so we must audit here to
+        # preserve the invariant that every invocation attempt is recorded.
+        try:
+            from app.services.invocation import _emit_audit_event
+            await _emit_audit_event(
+                tool_id=str(tool_record["tool_id"]),
+                tool_name=tool_record["name"],
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=[f"tool_{tool_record['status']}"],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=0.0,
+                opa_decision_id="",
+                is_testing=False,
+            )
+        except Exception as _audit_exc:
+            logger.warning("Audit emit failed for NOT_ENTITLED denial: %s", _audit_exc)
         raise HTTPException(
             status_code=403,
             detail={
@@ -986,8 +1036,22 @@ async def invoke_tool(
                 opa_decision_id="",
                 is_testing=is_testing,
             )
-        except Exception:
-            pass  # Audit failure here should not suppress the 403 response
+        except Exception as audit_exc:
+            # OD-004: fail closed. A quarantined-tool block is a high-sensitivity
+            # security event; if it cannot be audited synchronously we must not
+            # emit a "clean" 403 that leaves no trace. Surface a 500 like every
+            # other deny path so the missing audit record is never silent.
+            logger.error(
+                "Audit emit failed on TOOL_QUARANTINED deny path — failing closed: %s",
+                audit_exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "AUDIT_FAILURE",
+                    "message": "Denied (quarantined) but audit logging failed; failing closed.",
+                },
+            ) from audit_exc
         return JSONResponse(
             status_code=403,
             content={

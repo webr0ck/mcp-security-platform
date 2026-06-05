@@ -49,9 +49,14 @@ def test_kek_is_hkdf_not_single_round_hmac():
 
     from app.credential_broker.approaches.approach_a import _derive_kek
 
-    kek = _derive_kek(USER_SUB_A, MASTER_SECRET)
+    # CB-F002: _derive_kek now takes a per-derivation salt. Hold it fixed here so
+    # the determinism / domain-separation assertions still hold.
+    salt = b"\x11" * 32
+    kek = _derive_kek(USER_SUB_A, MASTER_SECRET, salt)
     assert len(kek) == 32  # 256-bit KEK
-    assert kek == _derive_kek(USER_SUB_A, MASTER_SECRET)  # deterministic
-    assert kek != _derive_kek(USER_SUB_B, MASTER_SECRET)  # domain-separated
+    assert kek == _derive_kek(USER_SUB_A, MASTER_SECRET, salt)  # deterministic for same salt
+    assert kek != _derive_kek(USER_SUB_B, MASTER_SECRET, salt)  # domain-separated by user_sub
+    # CB-F002: different salt → different KEK (the point of the per-derivation salt).
+    assert kek != _derive_kek(USER_SUB_A, MASTER_SECRET, b"\x22" * 32)
     legacy = hmac.new(MASTER_SECRET, USER_SUB_A.encode(), hashlib.sha256).digest()
-    assert kek != legacy  # explicitly NOT the old weak construction
+    assert bytes(kek) != legacy  # explicitly NOT the old weak construction

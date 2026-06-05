@@ -66,9 +66,9 @@ services:
       - wazuh-manager-data:/var/ossec/data
       - ./deployments/poc/wazuh/rules:/var/ossec/etc/rules/custom:ro
     ports:
-      - "1514:1514/udp"
-      - "1515:1515"
-      - "55000:55000"
+      - "127.0.0.1:1514:1514/udp"
+      - "127.0.0.1:1515:1515"
+      - "127.0.0.1:55000:55000"
     networks:
       - wazuh-net
     healthcheck:
@@ -132,7 +132,7 @@ services:
       API_USERNAME: wazuh-wui
       API_PASSWORD: ${WAZUH_INDEXER_PASSWORD:?WAZUH_INDEXER_PASSWORD must be set - run bash scripts/init-poc.sh}
     ports:
-      - "5601:5601"
+      - "127.0.0.1:5601:5601"
     networks:
       - wazuh-net
     depends_on:
@@ -194,7 +194,7 @@ services:
       SERVER_NAME: poc-notes-mcp
       HOST: "0.0.0.0"
       PORT: "8000"
-      REDIS_URL: redis://redis:6379/3
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/3"
     networks:
       - mcp-servers-net
       - proxy-redis-net

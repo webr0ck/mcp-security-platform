@@ -18,7 +18,9 @@ _REQUIRED = dict(
 def test_vault_settings_defaults():
     """Verify the class-level defaults for vault settings without providing them."""
     from app.core.config import Settings
-    s = Settings(**_REQUIRED)
+    # _env_file=None bypasses proxy/.env so we see the class-level defaults,
+    # not the lab overrides (VAULT_ADDR=http://mcp-vault:8200, etc.)
+    s = Settings(**_REQUIRED, _env_file=None)
     # CB-002: the secure default is https:// — the broker master secret must
     # never transit a plaintext channel. http:// is rejected outside dev.
     assert s.VAULT_ADDR == "https://vault:8200"

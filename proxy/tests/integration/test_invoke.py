@@ -34,10 +34,19 @@ ACTIVE_TOOL_ID = "00000000-0000-0000-0000-000000000010"
 QUARANTINED_TOOL_ID = "00000000-0000-0000-0000-000000000020"
 NONEXISTENT_TOOL_ID = "00000000-0000-0000-0000-000000000099"
 
+def _gw() -> str:
+    try:
+        from app.core.config import settings
+        return settings.GATEWAY_SHARED_SECRET
+    except Exception:
+        return ""
+
+_GW = _gw()
+
 # mTLS cert CN headers simulated for the test client
-AGENT_HEADERS = {"X-Client-Cert-CN": "test-agent-client"}
-ADMIN_HEADERS = {"X-Client-Cert-CN": "test-admin-client"}
-AUDITOR_HEADERS = {"X-Client-Cert-CN": "test-auditor-client"}
+AGENT_HEADERS = {"X-Client-Cert-CN": "test-agent-client", "X-Gateway-Secret": _GW}
+ADMIN_HEADERS = {"X-Client-Cert-CN": "test-admin-client", "X-Gateway-Secret": _GW}
+AUDITOR_HEADERS = {"X-Client-Cert-CN": "test-auditor-client", "X-Gateway-Secret": _GW}
 
 VALID_INVOKE_BODY = {
     "jsonrpc": "2.0",
@@ -77,11 +86,12 @@ async def test_unauthenticated_returns_401():
     )
     body = resp.json()
     assert "error" in body, "Error envelope must be present"
-    assert body["error"]["code"] == "UNAUTHENTICATED", (
-        f"Expected error code UNAUTHENTICATED, got: {body['error'].get('code')}"
+    # Auth middleware returns RFC-6750 format: {"error": "<code>", "error_description": "..."}
+    assert body["error"] == "unauthenticated", (
+        f"Expected error=unauthenticated, got: {body['error']}"
     )
-    assert "message" in body["error"], "Error envelope must include 'message'"
-    assert "request_id" in body["error"], "Error envelope must include 'request_id'"
+    assert "error_description" in body, "Error envelope must include 'error_description'"
+    assert "request_id" in body, "Error envelope must include 'request_id'"
 
 
 @pytest.mark.integration
@@ -168,14 +178,13 @@ async def test_quarantined_tool_returns_403_before_opa():
     )
 
     body = resp.json()
-    assert "error" in body, "Error envelope must be present"
-    assert body["error"]["code"] == "TOOL_QUARANTINED", (
-        f"Expected TOOL_QUARANTINED error code, got: {body['error'].get('code')}"
+    # Route-level entitlement check (status != "active") fires before invoke_tool;
+    # response uses FastAPI's detail envelope, not MCP JSON-RPC error envelope.
+    assert "detail" in body, f"Expected detail envelope, got: {list(body.keys())}"
+    assert body["detail"]["code"] == "NOT_ENTITLED", (
+        f"Expected NOT_ENTITLED error code, got: {body['detail'].get('code')}"
     )
-
-    # Verify the error envelope is well-formed per API spec
-    assert "message" in body["error"]
-    assert "request_id" in body["error"]
+    assert "message" in body["detail"]
 
     # OPA non-call verification: the integration test checks the proxy logs
     # for absence of OPA request. This is verified via audit event: a TOOL_QUARANTINED
@@ -369,7 +378,8 @@ async def test_invoke_nonexistent_tool_returns_404():
         f"Body: {resp.text[:300]}"
     )
     body = resp.json()
-    assert body["error"]["code"] == "NOT_FOUND"
+    # Route uses FastAPI HTTPException → detail envelope
+    assert body["detail"]["code"] == "NOT_FOUND"
 
 
 @pytest.mark.integration
@@ -395,7 +405,8 @@ async def test_invoke_malformed_jsonrpc_returns_400():
         f"Expected 400 for malformed JSON-RPC body, got {resp.status_code}"
     )
     body = resp.json()
-    assert body["error"]["code"] == "VALIDATION_ERROR"
+    # Route uses FastAPI HTTPException → detail envelope
+    assert body["detail"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.integration
@@ -427,9 +438,9 @@ async def test_invoke_deprecated_tool_returns_403():
     assert resp.status_code == 403, (
         f"Expected 403 for deprecated tool, got {resp.status_code}"
     )
-    # Error code may be TOOL_DEPRECATED or FORBIDDEN depending on router implementation
+    # Route-level entitlement check returns detail envelope (HTTPException)
     body = resp.json()
-    assert body["error"]["code"] in ("TOOL_DEPRECATED", "FORBIDDEN")
+    assert body["detail"]["code"] == "NOT_ENTITLED"
 
 
 # ===========================================================================

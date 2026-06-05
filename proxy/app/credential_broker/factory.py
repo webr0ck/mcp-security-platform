@@ -49,6 +49,7 @@ def build_broker(settings: "Settings", redis_client):
     from app.credential_broker.adapters.gitea import GiteaAdapter
     from app.credential_broker.adapters.grafana import GrafanaAdapter
     from app.credential_broker.adapters.netbox import NetboxAdapter
+    from app.credential_broker.adapters.m365 import M365Adapter
 
     kms = VaultKMSClient(
         addr=settings.VAULT_ADDR,
@@ -76,6 +77,21 @@ def build_broker(settings: "Settings", redis_client):
     if settings.GITEA_ADMIN_TOKEN:
         approach_b_adapters["gitea"] = GiteaAdapter(
             admin_token=settings.GITEA_ADMIN_TOKEN,
+        )
+
+    # Approach A (per-user OAuth refresh): delegated Entra/M365 access. The
+    # refresh token is stored encrypted per Keycloak sub at /auth/callback/m365;
+    # broker._resolve_a() decrypts it and calls M365Adapter.refresh() per call to
+    # mint a fresh DELEGATED Graph access token (acts as the signed-in user).
+    if settings.ENTRA_CLIENT_ID and settings.ENTRA_CLIENT_SECRET:
+        approach_a_adapters["m365"] = M365Adapter(
+            client_id=settings.ENTRA_CLIENT_ID,
+            client_secret=settings.ENTRA_CLIENT_SECRET,
+            tenant_id=settings.ENTRA_TENANT_ID,
+            redirect_uri=settings.ENTRA_REDIRECT_URI,
+            scopes=settings.entra_scopes_list,
+            token_url=settings.entra_token_url,
+            auth_url=settings.entra_auth_url,
         )
 
     broker = CredentialBroker(

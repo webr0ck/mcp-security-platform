@@ -11,40 +11,40 @@ license = { text = "Apache-2.0" }
 
 dependencies = [
     # Web framework
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
-    "pydantic>=2.8.0",
-    "pydantic-settings>=2.4.0",
+    "fastapi==0.115.12",
+    "uvicorn[standard]==0.34.3",
+    "pydantic==2.11.5",
+    "pydantic-settings==2.9.1",
 
     # Database
-    "sqlalchemy>=2.0.0",
-    "asyncpg>=0.30.0",       # Async PostgreSQL driver
-    "alembic>=1.13.0",
+    "sqlalchemy==2.0.41",
+    "asyncpg==0.30.0",       # Async PostgreSQL driver
+    "alembic==1.15.2",
 
     # Redis
-    "redis[asyncio]>=5.1.0",
+    "redis[asyncio]==5.2.1",
 
     # HTTP client (for OPA, Ollama, upstream MCP servers)
-    "httpx>=0.27.0",
+    "httpx==0.28.1",
 
     # SBOM generation
-    "cyclonedx-python-lib>=7.0.0",
+    "cyclonedx-python-lib==7.6.1",
 
     # Web framework — starlette pinned to fix PYSEC-2026-161 Host header auth bypass
-    "starlette>=1.0.1",
+    "starlette==0.46.2",
 
     # Security
-    "cryptography>=43.0.0",
-    "PyJWT[crypto]>=2.8.0",              # JWT / OIDC — replaces python-jose (unmaintained, CVE: algorithm confusion, DoS, non-constant-time HMAC)
-    "idna>=3.15",                         # CVE-2026-45409 ReDoS (transitive via httpx/anyio — pinned explicitly)
-    "ecdsa>=0.19.0",                      # GHSA-wj6h-64fc-37mp Minerva timing attack on P-256 (transitive via cyclonedx-python-lib — pinned explicitly)
+    "cryptography==44.0.3",
+    "PyJWT[crypto]==2.10.1",              # JWT / OIDC — replaces python-jose (unmaintained, CVE: algorithm confusion, DoS, non-constant-time HMAC)
+    "idna==3.10",                          # CVE-2026-45409 ReDoS (transitive via httpx/anyio — pinned explicitly)
+    "ecdsa==0.19.0",                       # GHSA-wj6h-64fc-37mp Minerva timing attack on P-256 (transitive via cyclonedx-python-lib — pinned explicitly)
 
     # Configuration
-    "pyyaml>=6.0",
+    "pyyaml==6.0.2",
 
     # Utilities
-    "structlog>=24.0.0",
-    "tenacity>=9.0.0",       # Retry logic for OPA/Ollama calls
+    "structlog==24.4.0",
+    "tenacity==9.1.2",       # Retry logic for OPA/Ollama calls
 
     # Internal
     "mcp-audit-logger",      # From observability/mcp-audit-logger (local package)
@@ -52,14 +52,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.3.0",
-    "pytest-asyncio>=0.24.0",
-    "pytest-cov>=5.0.0",
-    "httpx>=0.27.0",         # TestClient
-    "ruff>=0.7.0",
-    "mypy>=1.12.0",
-    "factory-boy>=3.3.0",
-    "freezegun>=1.5.0",
+    "pytest==8.3.5",
+    "pytest-asyncio==0.24.0",
+    "pytest-cov==5.0.0",
+    "httpx==0.28.1",         # TestClient
+    "ruff==0.11.13",
+    "mypy==1.15.0",
+    "factory-boy==3.3.3",
+    "freezegun==1.5.1",
 ]
 
 [tool.hatch.build.targets.wheel]

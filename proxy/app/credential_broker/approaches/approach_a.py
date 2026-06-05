@@ -6,30 +6,35 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-_NONCE_SIZE = 12  # 96-bit nonce for AES-GCM
-_KEK_SIZE = 32  # 256-bit KEK for AES-256-GCM
-# Domain-separation prefix; bump the version suffix if the KDF construction
-# ever changes so old and new KEKs can never collide.
-_HKDF_INFO_PREFIX = b"mcp-credential-broker-kek-v1:"
+_NONCE_SIZE = 12   # 96-bit nonce for AES-GCM
+_KEK_SIZE = 32    # 256-bit KEK for AES-256-GCM
+_SALT_SIZE = 32   # 256-bit random salt prepended to every blob (CB-F002)
+# Domain-separation prefix; bumped to v2 because the on-disk blob format changed
+# (salt prepended) — v1 blobs lack the salt prefix and are now unreadable.
+# CB-F002: old v1 blobs stored with salt=None are intentionally not migrated;
+# the lab seeder re-encrypts on startup so this breakage is acceptable.
+_HKDF_INFO_PREFIX = b"mcp-credential-broker-kek-v2:"
 # AAD prefix; binds ciphertext to its row context so blobs cannot be moved
 # between rows to cause credential confusion (FIND-010 fix).
-_AAD_PREFIX = "mcp-cred-v1"
+_AAD_PREFIX = "mcp-cred-v2"
 
 
-def _derive_kek(user_sub: str, master_secret: bytes) -> bytes:
+def _derive_kek(user_sub: str, master_secret: bytes, salt: bytes) -> bytearray:
     """
-    CB-007: derive the per-user Key Encryption Key with HKDF-SHA256
-    (RFC 5869) instead of a single-round HMAC. The user identity is bound
-    into the HKDF `info` for domain separation, so a leaked master secret
-    cannot be turned into a per-user KEK with one trivial HMAC call.
+    CB-007 / CB-F002: derive the per-user Key Encryption Key with HKDF-SHA256
+    (RFC 5869) with a per-derivation random salt. The user identity is bound
+    into the HKDF `info` for domain separation. Salt is caller-supplied so that
+    encrypt() generates it fresh each call and decrypt() reads it back from the blob.
+
+    Returns a bytearray so callers can zero it in a finally block (CB-F004).
     """
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=_KEK_SIZE,
-        salt=None,
+        salt=salt,
         info=_HKDF_INFO_PREFIX + user_sub.encode(),
     )
-    return hkdf.derive(master_secret)
+    return bytearray(hkdf.derive(master_secret))
 
 
 def _make_aad(user_sub: str, service: str, tool_id: str | None, owner_type: str) -> bytes:
@@ -53,13 +58,21 @@ def encrypt(
     """
     Encrypt plaintext using AES-256-GCM with a user-derived KEK.
     AAD binds the ciphertext to its row context (user_sub, service, tool_id, owner_type).
-    Returns: nonce(12B) || ciphertext+tag
+
+    CB-F002: a fresh random salt is generated per-call and prepended to the blob.
+    Stored format: salt(32B) || nonce(12B) || ciphertext+tag
     """
-    kek = _derive_kek(user_sub, master_secret)
-    nonce = os.urandom(_NONCE_SIZE)
-    aad = _make_aad(user_sub, service, tool_id, owner_type)
-    ct = AESGCM(kek).encrypt(nonce, plaintext.encode(), aad)
-    return nonce + ct
+    salt = os.urandom(_SALT_SIZE)
+    kek = _derive_kek(user_sub, master_secret, salt)
+    try:
+        nonce = os.urandom(_NONCE_SIZE)
+        aad = _make_aad(user_sub, service, tool_id, owner_type)
+        ct = AESGCM(bytes(kek)).encrypt(nonce, plaintext.encode(), aad)
+        return salt + nonce + ct
+    finally:
+        # CB-F004: best-effort zero of the derived KEK (bytearray is mutable)
+        for i in range(len(kek)):
+            kek[i] = 0
 
 
 def decrypt(
@@ -73,14 +86,30 @@ def decrypt(
 ) -> str:
     """
     Decrypt blob produced by encrypt().
+
+    CB-F002: reads the per-derivation salt from the first 32 bytes of the blob.
+    Expected format: salt(32B) || nonce(12B) || ciphertext+tag
+
     Raises cryptography.exceptions.InvalidTag if user_sub, service, tool_id, owner_type,
-    or the ciphertext itself is wrong or tampered.
+    or the ciphertext itself is wrong or tampered. Raises ValueError for truncated blobs.
     """
-    kek = _derive_kek(user_sub, master_secret)
-    nonce = blob[:_NONCE_SIZE]
-    ct = blob[_NONCE_SIZE:]
-    aad = _make_aad(user_sub, service, tool_id, owner_type)
-    return AESGCM(kek).decrypt(nonce, ct, aad).decode()
+    min_size = _SALT_SIZE + _NONCE_SIZE + 1
+    if len(blob) < min_size:
+        raise ValueError(
+            f"Credential blob too short ({len(blob)} bytes); expected at least {min_size}. "
+            "This may be a v1 blob (pre-CB-F002 salt format); re-enrolment required."
+        )
+    salt = blob[:_SALT_SIZE]
+    nonce = blob[_SALT_SIZE : _SALT_SIZE + _NONCE_SIZE]
+    ct = blob[_SALT_SIZE + _NONCE_SIZE :]
+    kek = _derive_kek(user_sub, master_secret, salt)
+    try:
+        aad = _make_aad(user_sub, service, tool_id, owner_type)
+        return AESGCM(bytes(kek)).decrypt(nonce, ct, aad).decode()
+    finally:
+        # CB-F004: best-effort zero of the derived KEK
+        for i in range(len(kek)):
+            kek[i] = 0
 
 
 async def decrypt_credential(

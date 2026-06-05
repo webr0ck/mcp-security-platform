@@ -127,17 +127,19 @@
         ],
         "max_risk_level": "low"
       },
-      "alice": {
+      "agent:step-ca:test-agent-client": {
         "allowed_tools": [
-          "ping",
-          "echo_args",
-          "whoami",
-          "slow_tool"
+          "active-low-risk-tool"
         ],
-        "allowed_tags": [
-          "echo",
-          "read-only"
+        "max_risk_level": "low"
+      },
+      "platform_internal": {
+        "allowed_tools": [
+          "platform_info",
+          "security_pulse_summary",
+          "list_registered_tools"
         ],
+        "allowed_tags": [],
         "max_risk_level": "low"
       },
       "bob": {

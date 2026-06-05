@@ -52,6 +52,12 @@ _MAX_BATCH_SIZE = 20  # MCP spec doesn't define a limit; 20 is generous for real
 
 _INVOKE_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("MCP_INVOKE_CONCURRENCY", "10")))  # max concurrent invoke_tool calls
 
+# MCP-006: when the rate-limit backend (Redis) is unavailable, fail CLOSED by
+# default (deny) rather than silently disabling rate limiting. This is an
+# explicit, documented availability/security tradeoff — set RATE_LIMIT_FAIL_OPEN=true
+# to restore the old fail-open behaviour if availability must win in a given env.
+_RATE_LIMIT_FAIL_OPEN = os.environ.get("RATE_LIMIT_FAIL_OPEN", "false").lower() == "true"
+
 
 async def _check_rate_limit(client_id: str, limit: int = 300, window_seconds: int = 60) -> bool:
     """Returns True if request allowed, False if rate limited."""
@@ -59,7 +65,7 @@ async def _check_rate_limit(client_id: str, limit: int = 300, window_seconds: in
     try:
         rl_client = redis_pool.rate_limit_client
     except RuntimeError:
-        return True  # fail-open if Redis unavailable
+        return _RATE_LIMIT_FAIL_OPEN  # MCP-006: fail closed by default
     try:
         key = f"rl:mcp:{client_id}"
         pipe = rl_client.pipeline()
@@ -68,7 +74,7 @@ async def _check_rate_limit(client_id: str, limit: int = 300, window_seconds: in
         results = await pipe.execute()
         return results[0] <= limit
     except Exception:
-        return True  # fail-open
+        return _RATE_LIMIT_FAIL_OPEN  # MCP-006: fail closed by default
 
 
 async def _check_rate_limit_by_key(key: str, limit: int, window_seconds: int = 60) -> bool:
@@ -77,7 +83,7 @@ async def _check_rate_limit_by_key(key: str, limit: int, window_seconds: int = 6
     try:
         rl_client = redis_pool.rate_limit_client
     except RuntimeError:
-        return True  # fail-open if Redis unavailable
+        return _RATE_LIMIT_FAIL_OPEN  # MCP-006: fail closed by default
     try:
         pipe = rl_client.pipeline()
         pipe.incr(key)
@@ -85,7 +91,7 @@ async def _check_rate_limit_by_key(key: str, limit: int, window_seconds: int = 6
         results = await pipe.execute()
         return results[0] <= limit
     except Exception:
-        return True  # fail-open
+        return _RATE_LIMIT_FAIL_OPEN  # MCP-006: fail closed by default
 
 SERVER_INFO = {
     "name": "mcp-security-platform",
@@ -95,6 +101,42 @@ SERVER_INFO = {
 # ---------------------------------------------------------------------------
 # Tool catalogue — each entry declares which roles may call it
 # ---------------------------------------------------------------------------
+_OAUTH_SERVICES: list[str] = ["m365", "bitbucket", "dex"]
+
+
+async def _get_enrollment_status(client_id: str, base_url: str) -> list[dict]:
+    """
+    For each approach-A OAuth service, check whether client_id has a stored
+    credential in credential_store. Returns a list of status dicts.
+    """
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+
+    base = base_url.rstrip("/")
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    "SELECT service FROM credential_store WHERE user_sub = :sub "
+                    "AND service = ANY(:services)"
+                ),
+                {"sub": client_id, "services": _OAUTH_SERVICES},
+            )
+            enrolled = {row[0] for row in result.fetchall()}
+    except Exception as exc:
+        logger.warning("enrollment_status DB check failed: %s", exc)
+        enrolled = set()
+
+    return [
+        {
+            "service": svc,
+            "enrolled": svc in enrolled,
+            "enrollment_url": f"{base}/auth/enroll/{svc}" if svc not in enrolled else None,
+        }
+        for svc in _OAUTH_SERVICES
+    ]
+
+
 _TOOLS: list[dict[str, Any]] = [
     {
         "name": "platform_info",
@@ -133,6 +175,12 @@ _TOOLS: list[dict[str, Any]] = [
             "required": [],
         },
         "_roles": {"admin", "analyst"},
+    },
+    {
+        "name": "enrollment_status",
+        "description": "List OAuth enrollment state for all delegated-auth services (m365, bitbucket, dex). Returns enrolled=true/false and an enrollment_url for any service that still needs browser authentication.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "_roles": {"admin", "analyst", "viewer"},
     },
     {
         "name": "invoke_tool",
@@ -292,14 +340,36 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                 client_roles=client_roles,
                 is_testing=False,
                 request_id=request_id,
+                # Case-3 (3b): downstream-IDP token rides a dedicated header so the
+                # gateway's own Authorization (Keycloak) stays free for its authz.
+                inbound_auth=request.headers.get("x-downstream-authorization"),
             )
     except Exception as exc:
+        from app.credential_broker.dispatcher import CredentialEnrollmentRequiredError
+        if isinstance(exc, CredentialEnrollmentRequiredError):
+            return _err(
+                req_id,
+                -32010,
+                f"OAuth enrollment required for '{exc.service}'",
+                data={
+                    "service": exc.service,
+                    "enrollment_url": exc.enrollment_url,
+                    "action": "open_browser",
+                    "instructions": (
+                        f"Open {exc.enrollment_url} in your browser while authenticated "
+                        "to the proxy. After completing consent, retry this tool call."
+                    ),
+                },
+            )
         logger.exception("Registry tool invocation error for %s", name)
         return _err(req_id, -32603, f"Tool invocation failed: {exc}")
 
     if "error" in upstream:
         err = upstream["error"]
-        return _err(req_id, err.get("code", -32603), err.get("message", "Upstream error"))
+        # Preserve `data` — it carries the downstream auth challenge
+        # (www_authenticate / resource metadata) for Case-3 passthrough.
+        return _err(req_id, err.get("code", -32603), err.get("message", "Upstream error"),
+                    data=err.get("data"))
 
     content = upstream.get("result", {}).get("content", [])
     if not content:
@@ -342,6 +412,25 @@ def _handle_security_pulse_summary(args: dict, request: Request) -> dict:
     elif severity == "high":
         data.pop("critical_cves")
     return {"type": "text", "text": json.dumps(data, indent=2)}
+
+
+async def _handle_enrollment_status(args: dict, request: Request) -> dict:
+    from app.core.config import get_settings
+    client_id = getattr(request.state, "client_id", "unknown")
+    base_url = get_settings().PROXY_BASE_URL
+    statuses = await _get_enrollment_status(client_id, base_url)
+    pending = [s for s in statuses if not s["enrolled"]]
+    return {
+        "type": "text",
+        "text": json.dumps({
+            "services": statuses,
+            "pending_count": len(pending),
+            "instructions": (
+                "Open each enrollment_url in your browser while authenticated to the proxy. "
+                "After completing the Microsoft/OAuth consent flow, retry the tool call."
+            ) if pending else "All OAuth services are enrolled.",
+        }, indent=2),
+    }
 
 
 async def _handle_list_registered_tools(args: dict, request: Request) -> dict:
@@ -455,6 +544,7 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 client_roles=client_roles,
                 is_testing=False,
                 request_id=request_id,
+                inbound_auth=request.headers.get("x-downstream-authorization"),
             )
         return {"type": "text", "text": json.dumps(result, indent=2)}
     except Exception as exc:
@@ -465,6 +555,7 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
 _TOOL_HANDLERS = {
     "platform_info": _handle_platform_info,
     "security_pulse_summary": _handle_security_pulse_summary,
+    "enrollment_status": _handle_enrollment_status,
     "list_registered_tools": _handle_list_registered_tools,
     "invoke_tool": _handle_invoke_tool_real,
 }
@@ -511,10 +602,27 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
 
     # ── Core protocol ────────────────────────────────────────────────────
     if method == "initialize":
+        from app.core.config import get_settings
+        base_url = get_settings().PROXY_BASE_URL
+        enrollment = await _get_enrollment_status(client_id, base_url)
+        pending = [
+            {"service": s["service"], "enrollment_url": s["enrollment_url"]}
+            for s in enrollment
+            if not s["enrolled"]
+        ]
+        meta: dict[str, Any] = {}
+        if pending:
+            meta["pending_enrollments"] = pending
+            meta["enrollment_hint"] = (
+                f"{len(pending)} service(s) need browser authentication before their tools will work. "
+                "Call the 'enrollment_status' tool for details and URLs, or open each "
+                "enrollment_url directly in your browser while authenticated."
+            )
         return _ok(req_id, {
             "protocolVersion": "2024-11-05",
             "serverInfo": SERVER_INFO,
             "capabilities": {"tools": {"listChanged": False}},
+            **({"_meta": meta} if meta else {}),
         })
 
     if method == "ping":
@@ -546,11 +654,11 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
             from app.services.invocation import emit_internal_tool_event
             from uuid import uuid4
             opa_input = {
-                "client_id": client_id,
-                "client_roles": roles,
+                "client_id": "platform_internal",
+                "client_roles": ["platform_admin"],
                 "tool_id": "",
                 "tool_name": name,
-                "tool_status": "internal",
+                "tool_status": "active",
                 "tool_risk_level": "low",
                 "params": args,
                 "anomaly_score": 0.0,

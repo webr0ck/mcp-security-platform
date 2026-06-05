@@ -11,7 +11,7 @@ import pytest
 import httpx
 
 OPA_URL = "http://localhost:8181"
-AUTHZ_ENDPOINT = f"{OPA_URL}/v1/data/mcp/authz/allow"
+AUTHZ_ENDPOINT = f"{OPA_URL}/v1/data/mcp/authz"
 
 
 @pytest.mark.integration

@@ -1,8 +1,8 @@
 # Lab targets for Podman-based full-stack testing
 # Usage: make -f Makefile.lab <target>
-# Prerequisites: podman, podman compose, python3, curl, jq
+# Prerequisites: podman, podman-compose, python3, curl, jq
 
-LAB_COMPOSE = podman compose \
+LAB_COMPOSE = podman-compose \
   -f docker-compose.yml \
   -f docker-compose.dev.yml \
   -f podman-compose.lab.yml

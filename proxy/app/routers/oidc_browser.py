@@ -321,6 +321,7 @@ async def oidc_callback(
                             pub,
                             algorithms=["RS256"],
                             audience=settings.OIDC_AUDIENCE or None,
+                            issuer=settings.OIDC_ISSUER_URL or None,  # AUTH-001: validate iss claim
                             options=decode_opts,
                         )
                         break
@@ -332,17 +333,19 @@ async def oidc_callback(
             else:
                 raise ValueError("JWKS unavailable — no keys returned")
         except Exception as verify_exc:
-            logger.warning(
-                "ID token signature verification failed (%s), falling back to "
-                "unverified claims (fail-open — JWKS may be temporarily unreachable)",
+            # AUTH-002: fail closed — never skip signature verification.
+            # A 503 here is safer than issuing a session backed by unverified claims.
+            logger.error(
+                "ID token signature verification failed (%s); JWKS unavailable or "
+                "token invalid — returning 503 to caller (fail-closed).",
                 verify_exc,
             )
-            # PyJWT equivalent of get_unverified_claims
-            raw_token = id_token or access_token
-            id_token_claims = jose_jwt.decode(
-                raw_token,
-                options={"verify_signature": False},
-                algorithms=["RS256", "HS256"],
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "oidc_jwks_unavailable",
+                    "message": "Identity provider keys are temporarily unavailable. Please retry.",
+                },
             )
     except Exception:
         id_token_claims = {}
@@ -384,6 +387,26 @@ async def oidc_callback(
     expires_at = datetime.now(timezone.utc).replace(microsecond=0)
     expires_at = datetime.fromtimestamp(time.time() + settings.SESSION_JWT_EXPIRE_SECONDS, tz=timezone.utc)
 
+    # AUTH-007: encrypt KC tokens at rest before persisting.
+    # Reuses the platform's AES-256-GCM helper (approach_a) with the same
+    # master secret used by the credential broker. The subject is used as
+    # user_sub for key derivation; service="oidc_session" for AAD separation.
+    try:
+        from app.credential_broker.approaches.approach_a import encrypt as _enc
+        from app.credential_broker.kms import load_master_secret_standalone
+        _master = await load_master_secret_standalone()
+        # encrypt() returns bytes; columns are TEXT, so base64-encode for storage.
+        _enc_access = base64.b64encode(
+            _enc(access_token, subject, _master, service="oidc_session")
+        ).decode("ascii")
+        _enc_refresh = base64.b64encode(
+            _enc(refresh_token, subject, _master, service="oidc_session")
+        ).decode("ascii")
+    except Exception as enc_exc:
+        logger.error("Failed to encrypt KC tokens for session %s: %s", session_id, enc_exc)
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail="Session encryption failed.") from enc_exc
+
     # Update session record with identity + tokens
     try:
         from sqlalchemy import text
@@ -405,8 +428,8 @@ async def oidc_callback(
                 {
                     "sub": subject,
                     "client_id": client_id,
-                    "at": access_token,
-                    "rt": refresh_token,
+                    "at": _enc_access,
+                    "rt": _enc_refresh,
                     "jti": jti,
                     "exp": expires_at,
                     "ip": request.client.host if request.client else None,
@@ -577,9 +600,22 @@ async def token_refresh(
     if row is None:
         return JSONResponse(status_code=401, content={"error": "session_not_found"})
 
-    kc_refresh_token = row.kc_refresh_token
-    if not kc_refresh_token:
+    # AUTH-007: decrypt the stored KC refresh token before using it.
+    _raw_rt_blob = row.kc_refresh_token
+    if not _raw_rt_blob:
         return JSONResponse(status_code=400, content={"error": "no_refresh_token_stored"})
+    try:
+        from app.credential_broker.approaches.approach_a import decrypt as _dec
+        from app.credential_broker.kms import load_master_secret_standalone
+        _master_rt = await load_master_secret_standalone()
+        # subject comes from the row; fall back to JWT claims if missing.
+        _rt_subject = row.subject or claims.get("sub", "")
+        kc_refresh_token = _dec(
+            base64.b64decode(_raw_rt_blob), _rt_subject, _master_rt, service="oidc_session"
+        )
+    except Exception as dec_exc:
+        logger.error("Failed to decrypt KC refresh token for session %s: %s", row.session_id, dec_exc)
+        return JSONResponse(status_code=500, content={"error": "token_decryption_failed"})
 
     # Exchange refresh token at KC
     discovery = await _discover()

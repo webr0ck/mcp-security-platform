@@ -32,7 +32,7 @@ REDACTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("jwt_token", re.compile(r"eyJ[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+\.?[A-Za-z0-9\-_.+/=]*")),
     # 7. Database connection strings with credentials
     ("db_connection_string", re.compile(
-        r"(?i)(postgres|mysql|mongodb|redis):\/\/[^:]+:[^@]+@"
+        r"(?i)(postgres(?:ql)?|mysql|mongodb|redis):\/\/[^:]+:[^@]+@"
     )),
     # 8. Email addresses (GDPR)
     ("email_address", re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")),

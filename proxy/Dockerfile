@@ -7,7 +7,8 @@
 #   docker build -f proxy/Dockerfile --target production -t mcp-security-proxy:latest .
 
 # ─── Base ─────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS base
+# TODO: pin @sha256:<digest> — run: docker pull python:3.12.11-slim && docker inspect --format='{{index .RepoDigests 0}}' python:3.12.11-slim
+FROM python:3.12.11-slim AS base
 
 # Security: run as non-root user
 RUN groupadd --gid 1001 appgroup && \

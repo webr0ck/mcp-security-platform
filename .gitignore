@@ -21,3 +21,11 @@ proxy/.env
 # OPA-002/003: bearer token is a runtime secret — never commit
 infra/secrets/*
 !infra/secrets/.gitkeep
+# Vendored / generated / local-state — never commit
+node_modules/
+.claude/
+.understand-anything/
+out/
+lab/logs/
+# lab secrets (step-ca CA password etc.) — never commit
+lab/step-ca-password

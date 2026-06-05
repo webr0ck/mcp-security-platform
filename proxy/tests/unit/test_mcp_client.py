@@ -140,7 +140,9 @@ async def test_quarantined_blocked_before_opa_inv005():
                              json=RPC, headers=AGENT_HEADERS)
     assert r.status_code == 403
     body = r.json()
-    assert body["error"]["data"]["opa_reasons"] == ["TOOL_QUARANTINED"]
+    # The route-level entitlement check (status != "active") fires before invoke_tool,
+    # so the response uses the HTTP detail envelope, not the JSON-RPC error envelope.
+    assert body["detail"]["code"] == "NOT_ENTITLED"
     opa.assert_not_awaited()  # INV-005: OPA never consulted
 
 

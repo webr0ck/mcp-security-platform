@@ -18,6 +18,9 @@ Tools:
 """
 from __future__ import annotations
 
+import contextvars
+import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
@@ -27,9 +30,58 @@ import httpx
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("m365-mcp")
+
 GRAPH = "https://graph.microsoft.com/v1.0"
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
+
+# Hardening switch (CR finding #2): when true, refuse to fall back to the
+# app-only token if the gateway did not inject a per-user delegated token.
+# This prevents the server from silently acting as the APPLICATION (and reading
+# the fixed M365_USER mailbox) when an operator believes delegated mode is active.
+REQUIRE_DELEGATED = os.environ.get("REQUIRE_DELEGATED", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+# Case-3 "native passthrough" (3b): when true, this server behaves as an OAuth
+# 2.0 PROTECTED RESOURCE (RFC 9728). A tools/call without a usable bearer token
+# gets HTTP 401 + WWW-Authenticate pointing at this server's protected-resource
+# metadata, which names Entra as the authorization server. The gateway relays
+# that challenge to the client, which then performs the Entra OAuth itself.
+NATIVE_AUTH = os.environ.get("NATIVE_AUTH", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+# Public base URL of THIS resource as seen by the client (through the gateway).
+# Used as the `resource` identifier and to build the metadata URL in challenges.
+RESOURCE_URL = os.environ.get("M365_RESOURCE_URL", "http://203.0.113.10:8000/mcp")
+_PRM_PATH = "/.well-known/oauth-protected-resource"
+
+# ---------------------------------------------------------------------------
+# Delegated-token plumbing.
+#
+# The gateway may inject a per-user DELEGATED Microsoft Graph token via the
+# inbound Authorization header (injection_mode=entra_user_token). When present,
+# the server acts AS THE USER (/me has meaning). When absent, it falls back to
+# the app-only client_credentials token (acts as the application, /users/{id}).
+# The inbound header is captured by an ASGI middleware (see __main__) into this
+# contextvar so @mcp.tool() functions — which have no request object — can read it.
+# ---------------------------------------------------------------------------
+_injected_auth: contextvars.ContextVar[str] = contextvars.ContextVar("injected_auth", default="")
+
+
+def _injected_token() -> str:
+    """Return the bearer token the gateway injected for this request, or ''."""
+    raw = _injected_auth.get()
+    if raw and raw[:7].lower() == "bearer ":
+        return raw[7:].strip()
+    return ""
+
+
+def _is_delegated() -> bool:
+    """True when a gateway-injected per-user token is in play for this request."""
+    return bool(_injected_token())
 
 AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID") or os.environ.get("ENTRA_TENANT_ID", "")
 AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID") or os.environ.get("ENTRA_CLIENT_ID", "")
@@ -38,9 +90,24 @@ AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET") or os.environ.get("E
 # Example: "user@contoso.com" or a GUID. Required for /me endpoints with client_credentials.
 M365_USER = os.environ.get("M365_USER", "")
 
+# Entra authorization-server issuer for this tenant (advertised in RFC 9728 PRM).
+_ENTRA_ISSUER = (
+    f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0"
+    if AZURE_TENANT_ID else "https://login.microsoftonline.com/common/v2.0"
+)
+
 
 def _me(path: str = "") -> str:
-    """Return /me/... or /users/{M365_USER}/... depending on whether M365_USER is set."""
+    """
+    Resolve the Graph target for "the current user".
+
+    - Delegated (gateway-injected user token): use /me — the token carries the
+      signed-in user's context, so /me is valid and resolves to that human.
+    - App-only fallback: /me is invalid (no user); target /users/{M365_USER} if
+      configured, else /me (which will 400 — surfaces the misconfig clearly).
+    """
+    if _is_delegated():
+        return f"/me{path}"
     if M365_USER:
         return f"/users/{M365_USER}{path}"
     return f"/me{path}"
@@ -84,7 +151,30 @@ async def _get_app_token() -> str:
 
 
 async def _headers() -> dict[str, str]:
-    token = await _get_app_token()
+    # Prefer the gateway-injected delegated token (acts as the user).
+    token = _injected_token()
+    if not token:
+        # No per-user token was injected. Either delegated mode is not wired on
+        # the gateway, or the caller is not enrolled. Falling back to app-only
+        # silently changes identity from "the user" to "the application" — the
+        # exact footgun behind the confusing glass@ results. Make it loud, and
+        # refuse outright when REQUIRE_DELEGATED is set.
+        if REQUIRE_DELEGATED:
+            raise PermissionError(
+                "REQUIRE_DELEGATED is set but the gateway injected no per-user "
+                "token. Refusing app-only fallback. Ensure the gateway tool uses "
+                "injection_mode=entra_user_token and that the caller has enrolled "
+                "via /auth/enroll/m365."
+            )
+        logger.warning(
+            "No gateway-injected delegated token — falling back to APP-ONLY "
+            "credentials (acting as the application '%s', reading M365_USER=%s, "
+            "NOT the calling user). For per-user access set the gateway tool to "
+            "injection_mode=entra_user_token and enroll via /auth/enroll/m365.",
+            AZURE_CLIENT_ID or "(unset)",
+            M365_USER or "(unset)",
+        )
+        token = await _get_app_token()
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -376,11 +466,115 @@ async def list_team_channels(team_id: str) -> dict:
 # App wiring
 # ---------------------------------------------------------------------------
 
+
+def _protected_resource_metadata() -> dict:
+    """RFC 9728 Protected Resource Metadata: names Entra as the auth server."""
+    return {
+        "resource": RESOURCE_URL,
+        "authorization_servers": [_ENTRA_ISSUER],
+        "scopes_supported": (os.environ.get("ENTRA_SCOPES", "") or "User.Read").split(),
+        "bearer_methods_supported": ["header"],
+    }
+
+
+async def _send_json(send, status: int, payload: dict, extra_headers: list | None = None) -> None:
+    body = json.dumps(payload).encode()
+    headers = [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
+    if extra_headers:
+        headers.extend(extra_headers)
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
+
+
+class _InjectedAuthMiddleware:
+    """
+    Pure-ASGI middleware with two jobs:
+
+    1. Capture the inbound Authorization header into a contextvar BEFORE FastMCP
+       handles the request, so tool functions (no request object) can read the
+       gateway-injected token. Pure-ASGI (not Starlette BaseHTTPMiddleware) on
+       purpose: the contextvar set here is visible in the same task that runs the
+       JSON-RPC tool call; BaseHTTPMiddleware runs the app in a child task and the
+       value would not propagate.
+
+    2. NATIVE_AUTH (Case-3 / 3b) — act as an OAuth 2.0 protected resource:
+       - serve RFC 9728 metadata at /.well-known/oauth-protected-resource
+       - answer a tools/call that carries no bearer token with HTTP 401 +
+         WWW-Authenticate, pointing the client at that metadata (→ Entra).
+       initialize / notifications / tools/list pass through unchallenged so the
+       gateway can still set up the session and enumerate tools.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        auth = ""
+        for k, v in scope.get("headers", []):
+            if k == b"authorization":
+                auth = v.decode("latin-1")
+                break
+        _injected_auth.set(auth)
+
+        # NATIVE_AUTH: serve protected-resource metadata.
+        if NATIVE_AUTH and path == _PRM_PATH:
+            await _send_json(send, 200, _protected_resource_metadata())
+            return
+
+        # NATIVE_AUTH: challenge token-less tools/call with a 401.
+        if NATIVE_AUTH and scope.get("method") == "POST" and not _injected_token():
+            body_chunks = []
+            more = True
+            while more:
+                msg = await receive()
+                body_chunks.append(msg.get("body", b""))
+                more = msg.get("more_body", False)
+            raw = b"".join(body_chunks)
+            try:
+                method = json.loads(raw or b"{}").get("method", "")
+            except Exception:
+                method = ""
+            if method == "tools/call":
+                meta_url = RESOURCE_URL.rsplit("/mcp", 1)[0].rstrip("/") + _PRM_PATH
+                www = (
+                    f'Bearer realm="m365-mcp", '
+                    f'authorization_uri="{_ENTRA_ISSUER}", '
+                    f'resource_metadata="{meta_url}"'
+                )
+                await _send_json(
+                    send, 401,
+                    {"error": "unauthorized",
+                     "error_description": "Delegated Microsoft Graph token required. "
+                                          "Authenticate via the resource metadata authorization server (Entra).",
+                     "authorization_servers": [_ENTRA_ISSUER]},
+                    extra_headers=[(b"www-authenticate", www.encode())],
+                )
+                return
+            # Not a tools/call — replay the buffered body downstream.
+            replayed = {"sent": False}
+
+            async def _replay_receive():
+                if not replayed["sent"]:
+                    replayed["sent"] = True
+                    return {"type": "http.request", "body": raw, "more_body": False}
+                return await receive()
+
+            await self.app(scope, _replay_receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
 if __name__ == "__main__":
     from mcp.server.transport_security import TransportSecuritySettings
 
     mcp.settings.transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=False
     )
-    app = mcp.streamable_http_app()
+    app = _InjectedAuthMiddleware(mcp.streamable_http_app())
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

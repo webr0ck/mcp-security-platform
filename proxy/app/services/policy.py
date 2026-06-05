@@ -52,9 +52,13 @@ async def evaluate_policy(input_data: dict[str, Any]) -> dict[str, Any]:
     url = settings.opa_authz_url
     payload = {"input": input_data}
 
+    opa_headers: dict[str, str] = {}
+    if settings.OPA_AUTH_TOKEN:
+        opa_headers["Authorization"] = f"Bearer {settings.OPA_AUTH_TOKEN}"
+
     try:
         async with httpx.AsyncClient(timeout=float(settings.OPA_TIMEOUT_SECONDS)) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(url, json=payload, headers=opa_headers)
     except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
         logger.error(
             "OPA unreachable — failing closed per INV-004",

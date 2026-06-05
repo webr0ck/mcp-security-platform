@@ -9,7 +9,7 @@
 # =============================================================================
 # MCP Security Platform — Makefile
 # =============================================================================
-# Prerequisites: docker, docker compose v2, python 3.12+, curl
+# Prerequisites: podman, podman-compose, python 3.12+, curl
 # Quick start (first time):
 #   cp .env.example .env
 #   # Edit .env with real secrets
@@ -21,7 +21,7 @@
 #   make up
 #   make health
 
-COMPOSE         := docker compose
+COMPOSE         := podman-compose
 COMPOSE_DEV     := $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 PROXY_CONTAINER := mcp-proxy
 DB_CONTAINER    := mcp-db

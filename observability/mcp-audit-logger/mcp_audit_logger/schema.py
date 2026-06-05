@@ -37,6 +37,7 @@ class AuditEventType(str, Enum):
     COMPLIANCE_RUN_TRIGGERED = "COMPLIANCE_RUN_TRIGGERED"
     ANOMALY_ALERT_RESOLVED = "ANOMALY_ALERT_RESOLVED"
     POLICY_EVAL_MANUAL = "POLICY_EVAL_MANUAL"
+    INTERNAL_TOOL_INVOCATION = "INTERNAL_TOOL_INVOCATION"
     API_KEY_CREATED = "API_KEY_CREATED"
     API_KEY_REVOKED = "API_KEY_REVOKED"
     CREDENTIAL_UPLOADED = "CREDENTIAL_UPLOADED"
@@ -77,6 +78,21 @@ class AuditEvent:
     anomaly_score: float | None = None
     opa_decision_id: str | None = None
     is_testing: bool = False
+
+    # Optional — originating client IP address (from X-Forwarded-For or REMOTE_ADDR).
+    # Stored as a plain string (v4 or v6). Never populated for internal synthetic events.
+    # INV-002 redaction applies: if this value matches a secret pattern it will be
+    # replaced with [REDACTED] in the emitted log (source_ip patterns are unlikely,
+    # but the redaction pass runs unconditionally over all string fields).
+    source_ip: str | None = None
+
+    # Hash-chain field — SHA-256 of the immediately preceding event in this stream.
+    # Set to None for the first event in a session/stream (chain anchor).
+    # Callers (MCPAuditLogger or the proxy router) must pass the hash returned by
+    # the previous emit() call. When None, the chain is anchored at this event.
+    # This links events into a tamper-evident sequence: altering any event breaks
+    # the chain from that point forward (INV-001, INV-007).
+    prev_hash: str | None = None
 
     # Computed — set automatically in __post_init__
     sha256_hash: str = field(default="", init=False)

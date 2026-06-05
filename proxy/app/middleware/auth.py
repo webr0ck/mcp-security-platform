@@ -47,14 +47,24 @@ def _is_trusted_proxy(request: Request) -> bool:
 
     Design: Nginx sets `proxy_set_header X-Gateway-Secret <secret>` on every
     proxied request. Direct callers cannot know this secret and are rejected.
-    If GATEWAY_SHARED_SECRET is empty, mTLS CN auth is disabled entirely.
+    If GATEWAY_SHARED_SECRET is empty (lab), mTLS CN auth is disabled entirely
+    rather than trusting unverified headers. When the secret IS configured,
+    a missing or mismatched header is denied (fail-closed, GW-001).
     """
     secret = settings.GATEWAY_SHARED_SECRET
     if not secret:
+        # Lab mode: secret not configured — CN auth disabled. Safe: no grant is given.
         return False
     provided = request.headers.get("X-Gateway-Secret", "")
+    if not provided:
+        # Secret configured but header absent — deny (GW-001: fail closed)
+        logger.warning(
+            "X-Gateway-Secret not present but GATEWAY_SHARED_SECRET is set — "
+            "denying CN auth (possible direct-connect bypass attempt)"
+        )
+        return False
     import hmac as _hmac
-    return bool(provided) and _hmac.compare_digest(provided, secret)
+    return _hmac.compare_digest(provided, secret)
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +460,7 @@ async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
                     pub,
                     algorithms=["RS256"],
                     audience=expected_aud,
+                    issuer=settings.OIDC_ISSUER_URL or None,  # AUTH-001: validate iss (mirror oidc_browser)
                     options=decode_options,
                 )
                 sub: str = claims.get("sub", "")

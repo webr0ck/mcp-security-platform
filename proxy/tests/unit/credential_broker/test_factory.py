@@ -30,6 +30,8 @@ def test_build_broker_returns_broker_for_valid_token():
     mock_settings.GRAFANA_ADMIN_TOKEN = ""      # Grafana not configured — no adapter
     mock_settings.GRAFANA_BASE_URL = "http://grafana:3000"
     mock_settings.GRAFANA_SERVICE_ACCOUNT_ID = 1
+    mock_settings.GITEA_ADMIN_TOKEN = ""        # Gitea not configured
+    mock_settings.NETBOX_ADMIN_TOKEN = ""       # NetBox not configured
 
     mock_redis = MagicMock()
 
@@ -37,7 +39,7 @@ def test_build_broker_returns_broker_for_valid_token():
         result = build_broker(mock_settings, mock_redis)
 
     assert isinstance(result, CredentialBroker)
-    # Adapter dict must be empty — GRAFANA_ADMIN_TOKEN was empty
+    # Adapter dict must be empty — all ADMIN_TOKENs were empty
     assert result._approach_b_adapters == {}
     assert result._db_factory is mock_factory
 

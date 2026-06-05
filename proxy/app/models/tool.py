@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, BaseModel, Field, field_validator, model_config
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
 
 class ToolStatus(str, Enum):
@@ -44,11 +44,14 @@ _TOOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,62}[a-z0-9]$|^[a-z0-9]$
 class ToolCreate(BaseModel):
     """Request body for POST /tools/register. Matches API.md §2.2."""
 
-    model_config = model_config(str_strip_whitespace=True)
+    model_config = ConfigDict(str_strip_whitespace=True)
 
     name: str = Field(..., min_length=1, max_length=64, description="Tool identifier")
     version: str = Field(..., min_length=1, max_length=32, description="Semver version")
-    description: str = Field(..., min_length=1, description="Human-readable description")
+    description: str = Field(
+        ..., min_length=1, max_length=4096,
+        description="Human-readable description",
+    )
     schema: dict[str, Any] = Field(..., description="JSON Schema defining tool parameters")
     upstream_url: AnyHttpUrl = Field(..., description="URL the proxy forwards tool calls to")
     source_repo: str | None = Field(None, description="Source repository URL")
@@ -86,7 +89,7 @@ class ToolCreate(BaseModel):
 class ToolUpdate(BaseModel):
     """Request body for PATCH /tools/{tool_id}. Matches API.md §2.2."""
 
-    model_config = model_config(str_strip_whitespace=True)
+    model_config = ConfigDict(str_strip_whitespace=True)
 
     status: ToolStatus | None = Field(None, description="New tool status")
     metadata: dict[str, Any] | None = Field(None, description="Metadata to merge (not replace)")
