@@ -1,5 +1,12 @@
 # MCP Security Platform — UI
 
+> **STATUS (2026-06): DEMO / NOT WIRED.** This standalone React SPA is **not mounted by any
+> deployment tier** and currently renders **mock data** (dashboard, server registry, portal,
+> install wizard); several buttons are stubs. The UI actually served by the proxy is the
+> server-rendered **htmx portal** (`proxy/app/routers/portal.py`, `admin_credentials.py`).
+> Treat this SPA as a design prototype — wiring it to the live API (`src/services/api.ts` →
+> backend routes) is roadmap. See the repo README "Admin credentials UI" row.
+
 Standalone React + TypeScript + Vite frontend. **Zero external UI library dependency** — every component is hand-rolled with CSS custom properties, making it trivial to retheme or port to any stack.
 
 ## Structure

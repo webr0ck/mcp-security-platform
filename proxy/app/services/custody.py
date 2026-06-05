@@ -1,6 +1,10 @@
 """
 MCP Security Platform — Key Custody Service
 
+STATUS (2026-06): IMPLEMENTED BUT NOT WIRED into the live invocation/request path —
+treat as design/roadmap, not an enforced control. The running proxy does not derive
+SUKs on the hot path today. See the repo README, "Implemented but NOT active / partial".
+
 Implements the ZK-at-rest guarantee:
   SUK = HKDF(ikm=session_secret, salt=server_nonce, info=principal_id|server_id)
 

@@ -10,7 +10,11 @@ Detection patterns:
 
 Anomaly score 0.0–1.0. Score >= 0.85 triggers an AnomalyAlert record in PostgreSQL.
 
-Per ARCHITECTURE.md §7.4 Threat T1: this is the primary exfiltration chain detector.
+STATUS (2026-06): scoring is STATIC keyword/window heuristics only. The persisted
+per-client baseline written by update_baseline_async is NOT read by the scorer — there
+is no learned/statistical baseline yet (roadmap), and the literal-tool-name rules are
+evadable by renaming a tool. The "primary exfiltration chain detector" framing below is
+aspirational, not a learned behavioural model.
 """
 from __future__ import annotations
 

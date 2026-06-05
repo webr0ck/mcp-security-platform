@@ -1,6 +1,10 @@
 """
 Owner-consent token — cryptographically-bound, single-use, signed payload.
 
+STATUS (2026-06): NOT ENFORCED — `verify_consent_token` currently has no non-test
+callers, so mode/credential PATCH endpoints do NOT require consent yet. The primitive
+is implemented; wiring it into server_registry / admin_credentials is roadmap.
+
 Governs: server_registry mode changes (custody_mode, injection_mode, upstream_url)
 that require owner consent per the spec (D3 flow).
 

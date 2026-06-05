@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 
 import httpx
 
@@ -10,6 +11,21 @@ logger = logging.getLogger(__name__)
 
 class KMSError(Exception):
     """Raised when Vault is unreachable or returns an error."""
+
+
+def _decode_master_secret(encoded: str) -> bytes:
+    """Decode the stored master secret to raw bytes.
+
+    Lab seeders write it as HEX (``openssl rand -hex 32`` / ``os.urandom(32).hex()``
+    → 64 hex chars). The earlier code base64-decoded that, mangling 32 bytes of
+    entropy into ~48 garbage bytes (so the "256-bit master key" claim was false).
+    Decode hex when the value is unambiguously hex (even length, all hex digits);
+    otherwise fall back to base64 for deployments that stored a base64 value.
+    """
+    s = encoded.strip()
+    if len(s) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", s):
+        return bytes.fromhex(s)
+    return base64.b64decode(s)
 
 
 class VaultKMSClient:
@@ -38,7 +54,7 @@ class VaultKMSClient:
 
         try:
             encoded = resp.json()["data"]["data"]["master_secret"]
-            return base64.b64decode(encoded)
+            return _decode_master_secret(encoded)
         except (KeyError, ValueError) as exc:
             raise KMSError(f"Unexpected Vault response structure: {exc}") from exc
 

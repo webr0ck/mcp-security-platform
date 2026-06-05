@@ -77,9 +77,15 @@ async def check_entitlement(
                 )
 
             # Step 2: Check entitlement table (explicit per-principal grant).
+            # The entitlement table (V015) has NO `role` column — it grants USE,
+            # so a plain entitlement = 'user' access; elevated roles come from
+            # server_role_grant (Step 3). The 'user' literal keeps this valid
+            # against the real schema. (The prior `SELECT role` referenced a
+            # non-existent column, so the query threw, was swallowed, and silently
+            # disabled per-server grants / the discovery==invoke invariant.)
             ent_row = await db.execute(
                 text(
-                    "SELECT role FROM entitlement "
+                    "SELECT 'user' AS role FROM entitlement "
                     "WHERE principal_type = :pt "
                     "  AND principal_id = :pid "
                     "  AND server_id = :sid "
