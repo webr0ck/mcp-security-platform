@@ -653,9 +653,20 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
             from app.services.policy import evaluate_policy
             from app.services.invocation import emit_internal_tool_event
             from uuid import uuid4
+            # 6.1: evaluate OPA under the REAL caller identity, not a hardcoded
+            # platform_internal/platform_admin principal. authz.rego authorizes
+            # platform meta-tools by role (platform_meta_tool_roles) without
+            # requiring a per-client grant.
+            #
+            # is_platform_meta=true is the ONLY trigger for the meta-tool rules in
+            # authz.rego. It is set exclusively on this inline dispatch path; the
+            # registry invoke path (services/invocation.py) never sets it. This
+            # prevents a registry tool *registered* with a reserved meta-tool name
+            # (e.g. "platform_info") from inheriting the meta-tool risk/grant
+            # bypass — the policy must not trust tool_name alone.
             opa_input = {
-                "client_id": "platform_internal",
-                "client_roles": ["platform_admin"],
+                "client_id": client_id,
+                "client_roles": roles,
                 "tool_id": "",
                 "tool_name": name,
                 "tool_status": "active",
@@ -663,6 +674,7 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
                 "params": args,
                 "anomaly_score": 0.0,
                 "is_testing": False,
+                "is_platform_meta": True,
             }
             opa_result = await evaluate_policy(opa_input)
             if not opa_result["allow"]:

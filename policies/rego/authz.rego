@@ -137,6 +137,15 @@ client_has_invoke_permission if {
     tool_allowed_for_client("platform_internal", input.tool_name)
 }
 
+# 6.1: Platform meta-tools are authorized by ROLE, independent of per-client
+# tool grants. They have no tool_registry row and no grant object, so the
+# grant-based rules above never fire for them. Before this rule the proxy
+# evaluated meta-tools under a hardcoded platform_admin identity, making OPA
+# decorative for the /mcp built-ins. Now the real caller's roles decide.
+client_has_invoke_permission if {
+    caller_may_use_meta_tool
+}
+
 # REMOVED 2026-06-04: internal bypass was a universal access control bypass.
 # Internal tools now require explicit grant entries and respect risk thresholds.
 # If platform tooling needs elevated access, use role 'platform_admin' with explicit grants.
@@ -153,6 +162,14 @@ risk_level_within_threshold if {
     risk_level_value[input.tool_risk_level] <= risk_level_value[client_max]
 }
 
+# 6.1: Platform meta-tools are inherently low-risk platform reads with no
+# per-client grant, so the grant-based risk gate does not apply to them.
+# Role authorization (caller_may_use_meta_tool) is the control for meta-tools;
+# deny rules (quarantine, prompt injection) still apply via count(deny)==0.
+risk_level_within_threshold if {
+    is_platform_meta_tool
+}
+
 # REMOVED 2026-06-04: internal bypass was a universal access control bypass.
 # Internal tools now require explicit grant entries and respect risk thresholds.
 # If platform tooling needs elevated access, use role 'platform_admin' with explicit grants.
@@ -167,6 +184,43 @@ anomaly_threshold_exceeded if {
 
 tool_allowed_for_client(client_id, tool_name) if {
     tool_name in data.mcp.grants[client_id].allowed_tools
+}
+
+# =============================================================================
+# 6.1 — PLATFORM META-TOOLS (proxy/app/routers/mcp_server.py _TOOLS)
+# This map MUST mirror the _roles set declared on each entry in _TOOLS.
+# If you change a meta-tool's _roles in the router, change it here too — the
+# Python _can_call pre-filter and this OPA gate must agree.
+# 'invoke_tool' is intentionally absent: it runs its own full OPA pipeline.
+# =============================================================================
+platform_meta_tool_roles := {
+    "platform_info":          {"admin", "analyst", "viewer"},
+    "security_pulse_summary": {"admin", "analyst"},
+    "list_registered_tools":  {"admin", "analyst"},
+    "enrollment_status":      {"admin", "analyst", "viewer"},
+}
+
+# A request is a platform meta-tool ONLY when the inline /mcp meta dispatch
+# explicitly marks it (input.is_platform_meta == true) AND the name is one of the
+# known meta-tools. The marker is never set on the registry invoke path
+# (services/invocation.py), so a registry tool registered with a reserved name
+# cannot inherit the meta-tool risk/grant bypass — the policy never trusts
+# tool_name alone.
+is_platform_meta_tool if {
+    input.is_platform_meta == true
+    platform_meta_tool_roles[input.tool_name]
+}
+
+caller_may_use_meta_tool if {
+    some role in input.client_roles
+    role in platform_meta_tool_roles[input.tool_name]
+}
+
+# Explicit deny reason for the audit trail when a caller reaches a meta-tool
+# they are not entitled to (defense in depth behind the Python _can_call filter).
+deny contains "meta_tool_role_not_authorized" if {
+    is_platform_meta_tool
+    not caller_may_use_meta_tool
 }
 
 matches_prompt_injection(s) if {

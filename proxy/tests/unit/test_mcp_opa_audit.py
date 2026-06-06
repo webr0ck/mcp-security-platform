@@ -189,12 +189,14 @@ async def test_dispatch_tools_call_platform_info_emits_audit():
     assert "result" in result
     assert result["result"]["content"][0] == {"type": "text", "text": "{}"}
 
-    # OPA was called with active status and the platform_internal client id
+    # OPA was called for the REAL caller identity (6.1 fix), not a hardcoded
+    # platform_internal/platform_admin principal.
     mock_eval.assert_awaited_once()
     opa_call_kwargs = mock_eval.call_args[0][0]
     assert opa_call_kwargs["tool_status"] == "active"
     assert opa_call_kwargs["tool_name"] == "platform_info"
-    assert opa_call_kwargs["client_id"] == "platform_internal"
+    assert opa_call_kwargs["client_id"] == "alice"
+    assert opa_call_kwargs["client_roles"] == ["analyst"]
 
     # Audit was emitted with outcome=allow
     mock_audit.assert_awaited_once()
@@ -203,6 +205,47 @@ async def test_dispatch_tools_call_platform_info_emits_audit():
     assert audit_kwargs["tool_name"] == "platform_info"
     # emit_internal_tool_event has no tool_id param (internal tools have no registry entry)
     assert "tool_id" not in audit_kwargs
+
+
+@pytest.mark.unit
+async def test_dispatch_meta_tool_opa_uses_real_caller_identity():
+    """6.1 regression: the inline meta-tool OPA check must evaluate the REAL
+    caller (request.state.client_id / client_roles), never a hardcoded
+    'platform_internal' / 'platform_admin' principal. The previous code
+    rubber-stamped every meta-tool as platform_admin, making OPA decorative
+    and corrupting the audit identity.
+    """
+    request = _make_request(client_id="alice", roles=["analyst"])
+
+    mock_eval = AsyncMock(return_value={"allow": True, "reasons": []})
+    mock_audit = AsyncMock(return_value="evt-real-id")
+
+    body = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": "platform_info", "arguments": {}},
+    }
+    fake_handler = MagicMock(return_value={"type": "text", "text": "{}"})
+
+    with patch("app.services.policy.evaluate_policy", mock_eval), \
+         patch("app.services.invocation.emit_internal_tool_event", mock_audit), \
+         patch("app.routers.mcp_server._TOOL_HANDLERS",
+               {"platform_info": fake_handler}):
+        from app.routers.mcp_server import _dispatch
+        await _dispatch(body, request)
+
+    mock_eval.assert_awaited_once()
+    opa_input = mock_eval.call_args[0][0]
+    assert opa_input["client_id"] == "alice"
+    assert opa_input["client_roles"] == ["analyst"]
+    # The bug we are closing: identity must NOT be the hardcoded platform principal.
+    assert opa_input["client_id"] != "platform_internal"
+    assert "platform_admin" not in opa_input["client_roles"]
+    # Hardening: the inline meta dispatch MUST tag the request so authz.rego's
+    # meta-tool rules cannot be triggered by a registry tool registered with a
+    # reserved name (the policy never trusts tool_name alone).
+    assert opa_input["is_platform_meta"] is True
 
 
 @pytest.mark.unit

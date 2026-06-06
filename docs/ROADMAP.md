@@ -15,7 +15,8 @@ Principle: **no new features until the platform is honest and not exploitable.**
 | **P2 — Hardening** | ✅ **DONE** | HKDF KEK, master-secret TTL + zero, adapters raise typed errors, pre-commit gate, `.pre-commit-config.yaml` fails closed. CB-008/INV-007 partial (see notes). |
 | **P3 — Feature completion** | 🟡 **PARTIAL** | OIDC browser login + KC session JWT + Grafana SSO ✅. Learned anomaly baseline, real Helm, outbound Jira, per-tool rate-limit still roadmap. |
 | **P4 — Self-service MCP** | ✅ **DONE** | `self-service-mcp` (port 8108) live: 7 tools, `mcp_profiles` + `mcp_profile_events` tables (V020), OPA profile enforcement, 57 lab tests pass. |
-| **P5 — OAuth API + scripts** | ⏳ **NEXT** | Thin OAuth2-authenticated REST + Python CLI scripts for MCP management without MCP context overhead. |
+| **P5 — OAuth API + scripts** | ⏳ **DEFERRED** | Thin OAuth2-authenticated REST + Python CLI scripts. Non-security; sequence after P6. |
+| **P6 — Runtime-enforcement closure** | 🔴 **NEXT** | Four `/mcp`-path authorization & telemetry gaps verified open 2026-06-06 (graphify + source audit). Two are **security-relevant** (privileged-caller authz bypass). See Phase 6. |
 
 **Test coverage (2026-06-01):** 440 tests (383 proxy + 57 lab). Stress test: 2000 VUs (800 ROPC + 200 SA + 200 per-user + 1400 API-key), 50+ MCP requests/VU, p95 latency <500ms with token caching.
 
@@ -170,6 +171,53 @@ A **profile** is a named permission set (maps 1:1 to a KC role or user sub). Pro
 ### Non-goals
 - No new UI beyond the admin panel already built.
 - No new auth mechanism — KC tokens already work.
+
+---
+
+## Phase 6 — RUNTIME-ENFORCEMENT CLOSURE — 🔴 NEXT (added 2026-06-06)
+
+**Driver:** `GRAPHIFY-FINDINGS-2026-06-06.md` + a verified source audit of the `/mcp` path. P0–P2 hardened the **REST** invoke path and the credential broker's *crypto*; this phase closes the gaps that remain on the **`/mcp` protocol path** and in the advisory/telemetry layers. CB-002 (KMS hex/base64) and the entitlement query bug are now **FIXED** (commit `ee47c2c`) and are NOT in this phase.
+
+Sequencing rule (unchanged from the top of this doc): **the two authorization bypasses (6.1, 6.2) ship before the feature-completion items (6.3, 6.4).** A privileged-caller authz bypass on the headline `/mcp` surface is a P0-class defect, not polish.
+
+### 6.1 — `/mcp` meta-tools evaluate OPA as `platform_admin`, not the real caller — ✅ DONE (2026-06-06)
+- **Was:** `mcp_server.py` built `opa_input` for inline platform meta-tools with hardcoded `"client_id": "platform_internal"`, `"client_roles": ["platform_admin"]`. OPA authorized every meta-tool as `platform_admin` regardless of caller, and the audit identity was corrupted.
+- **Fix shipped:**
+  - `proxy/app/routers/mcp_server.py` — `opa_input` now carries the real `client_id` / `roles` from `request.state`.
+  - `policies/rego/authz.rego` — new `platform_meta_tool_roles` map (mirrors `_TOOLS._roles`), `is_platform_meta_tool` / `caller_may_use_meta_tool` helpers, a role-based `client_has_invoke_permission` clause and a `risk_level_within_threshold` clause for meta-tools (no per-client grant required), plus an explicit `deny["meta_tool_role_not_authorized"]` reason. Deny rules (quarantine, prompt-injection) still apply via `count(deny)==0`.
+- **Tests (TDD, red→green):**
+  - `policies/rego/meta_tools_test.rego` — 8 tests: viewer→platform_info/enrollment_status allow (no grant), viewer→security_pulse deny, analyst→security_pulse/list_registered_tools allow, prompt-injection deny on a meta-tool, no-roles deny, and a non-meta registry tool still denied without a grant (no accidental widening). `opa test`: **14/14**.
+  - `proxy/tests/unit/test_mcp_opa_audit.py` — new `test_dispatch_meta_tool_opa_uses_real_caller_identity`; **eliminated drift**: the prior `test_dispatch_tools_call_platform_info_emits_audit` asserted `client_id == "platform_internal"` (locking in the bug) — now asserts the real `alice`/`["analyst"]`. **7/7**.
+- **AppSec review (self-conducted; appsec-reviewer agent was rate-limited):** found a real privilege-escalation vector in the first cut — the meta-tool Rego rules keyed on `input.tool_name` alone, so a registry tool *registered* with a reserved name (e.g. `platform_info`) would, on the registry invoke path (`services/invocation.py`), inherit the meta-tool risk-gate + grant bypass. **Closed** by requiring an explicit `is_platform_meta=true` marker that only the inline `/mcp` meta dispatch sets; `is_platform_meta_tool` now requires both the marker and a known name. Two bypass-regression tests added (`test_registry_tool_named_like_meta_no_marker_denied`, `test_registry_tool_named_like_meta_risk_gate_applies`). `default allow = false` unchanged (INV-003 intact).
+- **Docs:** README enforced-vs-roadmap (Policy + RBAC rows) updated. **INV-003.** opa check --strict clean; `opa test` 16/16; pytest 7/7.
+
+### 6.2 — discovery≠invoke: server entitlement not enforced on the invoke path 🔴 SECURITY
+- **Gap:** the query bug is fixed (`entitlement.py:88` now `SELECT 'user' AS role`), but `check_entitlement()` is **never called** before invoke. `mcp_server.py:496-514` carries a ROADMAP comment admitting *"a principal with the admin/platform_admin RBAC role can invoke any tool by name regardless of server-level grants, which violates the discovery==invoke invariant."* The call is gated behind an unshipped `tool_registry.server_id` FK (the referenced `V020` is `mcp_profiles`, not the tool→server FK).
+- **Fix:** (a) migration adding `tool_registry.server_id` FK → `mcp_servers`, with explicit GRANT/REVOKE (INV-011); (b) call `check_entitlement(caller, server_id)` in `_handle_invoke_tool_real` before dispatch; deny if not entitled — **including** for admin/platform_admin (discovery==invoke admits no role exception).
+- **Test:** caller entitled to server A, not B → invoke tool on A allowed, tool on B denied 403, even as admin. Tampered tool-name that resolves to a non-entitled server → denied.
+- **INV touched:** INV-011 (new GRANT), discovery==invoke invariant. `appsec-reviewer` sign-off (migrations + invoke path).
+
+### 6.3 — `oauth_user_token` (RFC 8693) injection mode: thread the caller's KC token 🟡 FEATURE
+- **Gap:** fail-closed stub. `invocation.py:215` hardcodes `user_kc_token=None`; `dispatcher.py:288-295` then raises `CredentialInjectionError`. The token-exchange machinery (`keycloak_client.exchange_token`, `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, dispatcher.py:304) exists but is unreachable because the subject token never arrives.
+- **Fix:** capture the caller's KC access token at the auth layer (`request.state`), thread it through `invoke_tool(... user_kc_token=...)` into the dispatcher. Only for OIDC-authenticated callers; mTLS/API-key callers keep the current fail-closed deny for this mode.
+- **Test:** OIDC caller with valid KC token → on-behalf-of exchange succeeds, downstream sees the exchanged token; missing/expired token → fail-closed 403 (not 500, not allow-through). Redaction: exchanged token never logged (INV-002).
+- **INV touched:** INV-002. Keep fail-closed discipline (CLAUDE.md known gap #1). `appsec-reviewer` sign-off.
+
+### 6.4 — Behavioral anomaly baseline: wire write→read or relabel honestly 🟡 FEATURE
+- **Gap:** `update_baseline_async` (`anomaly.py:198-237`) writes `anomaly_baselines` but has **zero callers**; the scorer `_score_window` (`:47-105`) reads only the Redis sliding window + hardcoded keyword/count rules and never queries the baseline. Rules are evadable by renaming a tool. Already disclosed honestly in code (`anomaly.py` docstring) and in the README Enforced-vs-Roadmap table.
+- **Decision required (pick one, don't ship both half-done):**
+  - **(A) Make it real:** call `update_baseline_async` on the invoke path (async, non-blocking, must never gate the response — anomaly is *advisory*), and have `_score_window` read the persisted per-client baseline as one input. Statistical deviation, not just keyword rules.
+  - **(B) Relabel:** if a learned baseline isn't worth the complexity yet, delete `update_baseline_async` (dead code) and keep the heuristic scorer, clearly labeled "advisory heuristic, not a learned baseline" everywhere.
+- **Recommendation:** **(B) now, (A) later.** Dead write-only code is a worse liability than an honest heuristic. Don't build statistical baselining until there's a consumer for the signal.
+- **INV touched:** none (advisory). No appsec gate unless it becomes enforcing — which it must not, silently.
+
+### Carried-forward hardening (still open from P2)
+- **6.5 (=P2.4)** — INV-007 startup Object-Lock verification in compliance-checker; decide GOVERNANCE vs COMPLIANCE mode and align the doc. Today the "startup check" is aspirational.
+- **6.6 (=P2.8)** — Wire F-002 signed bundles into a **running** staging deploy and prove OPA refuses an unsigned/tampered bundle at runtime (mechanism exists, only statically validated).
+- **6.7 (=P2.7 tail)** — `make lab-init` generates lab key material instead of `devpassword` constants (CB-006, lab-only hygiene).
+
+### Phase 6 exit criteria
+6.1 and 6.2 merged with blocking regression tests + `appsec-reviewer` green; 6.3 merged or explicitly deferred with the stub's fail-closed behavior re-confirmed by test; 6.4 resolved by an explicit (A)/(B) decision (no lingering write-only code); README Enforced-vs-Roadmap table updated so `/mcp` built-ins move from "Roadmap / NOT yet" to "Enforced today" **only** for the parts actually wired. Update `ARCHITECTURE-v2.md` §5.3 status markers and `SECURITY_NONNEGATABLES.md` if a meta-tool/entitlement invariant is added.
 
 ---
 
