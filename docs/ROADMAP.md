@@ -202,11 +202,17 @@ Sequencing rule (unchanged from the top of this doc): **the two authorization by
 - **AppSec review (self-conducted):** moved the deny audit from the REST handler into the `invoke_tool` chokepoint so the `/mcp` deny paths are no longer a silent INV-001 gap. Accepted nit: invoke returns 403 (confirms tool exists) while server *discovery* returns 404 — consistent with the existing quarantine path; tool-name enumeration is already bounded by grant-filtered `tools/list`.
 - **Docs:** README Policy row → discovery==invoke enforced. **INV-011 + discovery==invoke invariant.**
 
-### 6.3 — `oauth_user_token` (RFC 8693) injection mode: thread the caller's KC token 🟡 FEATURE
-- **Gap:** fail-closed stub. `invocation.py:215` hardcodes `user_kc_token=None`; `dispatcher.py:288-295` then raises `CredentialInjectionError`. The token-exchange machinery (`keycloak_client.exchange_token`, `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, dispatcher.py:304) exists but is unreachable because the subject token never arrives.
-- **Fix:** capture the caller's KC access token at the auth layer (`request.state`), thread it through `invoke_tool(... user_kc_token=...)` into the dispatcher. Only for OIDC-authenticated callers; mTLS/API-key callers keep the current fail-closed deny for this mode.
-- **Test:** OIDC caller with valid KC token → on-behalf-of exchange succeeds, downstream sees the exchanged token; missing/expired token → fail-closed 403 (not 500, not allow-through). Redaction: exchanged token never logged (INV-002).
-- **INV touched:** INV-002. Keep fail-closed discipline (CLAUDE.md known gap #1). `appsec-reviewer` sign-off.
+### 6.3 — `oauth_user_token` (RFC 8693) injection mode: thread the caller's KC token — ✅ DONE (2026-06-06)
+- **Was:** fail-closed stub — `invocation.py` hardcoded `user_kc_token=None`, so the dispatcher always raised. The token-exchange machinery existed but was unreachable. Users could not use on-behalf-of without holding a secret.
+- **Fix shipped (no secrets on the user side — pure OAuth on-behalf-of):**
+  - `proxy/app/middleware/auth.py` — the direct-OIDC path (3b) stashes the raw KC access token on `request.state.user_kc_token` (it IS a valid RFC 8693 subject token there). All other auth methods default it to `None`. In-memory for the request only; never logged (INV-002).
+  - `proxy/app/services/invocation.py` — `invoke_tool()` gains `user_kc_token` and forwards it to `dispatch_credential_injection` (was `None`).
+  - Callers threaded: REST (`tools.py`) + both `/mcp` paths (`mcp_server.py`) pass `request.state.user_kc_token`.
+  - The dispatcher (`_inject_oauth_user_token` → `keycloak_client.exchange_token`, `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`) was already correct; it now receives the subject token.
+- **Tests (TDD, red→green):** `proxy/tests/unit/test_oauth_user_token_threading.py` — 4 tests: `invoke_tool` forwards the token to the dispatcher; dispatcher uses it as the RFC 8693 `subject_token` for the configured audience; **fails closed without a token**; and the auth middleware stashes the token **only** for direct-OIDC callers (None for API-key). Full unit suite: **279 passed, 1 xfailed**.
+- **Limitation (documented):** internal-session / browser-portal callers still fail closed for this mode — their bearer is a session JWT, not a KC subject token (decrypting the stored KC token is a follow-up).
+- **AppSec (self-conducted):** token never logged (INV-002); non-OIDC callers fail closed (verified by test); only the 3b path stashes. **INV-002.**
+- **Docs:** README credential-modes row, CLAUDE.md known-gap #1.
 
 ### 6.4 — Behavioral anomaly baseline: wire write→read or relabel honestly 🟡 FEATURE
 - **Gap:** `update_baseline_async` (`anomaly.py:198-237`) writes `anomaly_baselines` but has **zero callers**; the scorer `_score_window` (`:47-105`) reads only the Redis sliding window + hardcoded keyword/count rules and never queries the baseline. Rules are evadable by renaming a tool. Already disclosed honestly in code (`anomaly.py` docstring) and in the README Enforced-vs-Roadmap table.

@@ -1020,6 +1020,8 @@ async def invoke_tool(
             # 6.2: typed principal for the discovery==invoke entitlement gate.
             principal_id=getattr(request.state, "principal_id", None),
             principal_type=getattr(request.state, "principal_type", None),
+            # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
+            user_kc_token=getattr(request.state, "user_kc_token", None),
         )
         return JSONResponse(content=response)
 

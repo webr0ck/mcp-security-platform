@@ -228,6 +228,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             client_id = oidc_client_id
                             auth_method = "oidc"
                             request.state._jwt_roles = jwt_roles
+                            # 6.3: the bearer IS a Keycloak access token here, so it
+                            # can serve as the RFC 8693 subject_token for
+                            # oauth_user_token on-behalf-of exchange. Stash it for the
+                            # invoke path. NOT set for api_key/mtls/internal-session
+                            # callers — their bearer is not a KC subject token.
+                            # In-memory for the request only; never logged (INV-002).
+                            request.state.user_kc_token = token
 
                     # 3c. API key hash lookup (no OIDC dependency).
                     if not client_id:
@@ -247,7 +254,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     url=f"/api/v1/auth/oidc/login?redirect={redirect_to}",
                     status_code=302,
                 )
-            resource_metadata_url = str(request.base_url).rstrip("/") + "/.well-known/oauth-protected-resource"
+            _base = settings.PROXY_BASE_URL.rstrip("/") if settings.PROXY_BASE_URL else str(request.base_url).rstrip("/")
+            resource_metadata_url = _base + "/.well-known/oauth-protected-resource"
             return JSONResponse(
                 status_code=401,
                 content={
@@ -266,6 +274,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         request.state.client_id = client_id
         request.state.auth_method = auth_method
+        # 6.3: default — only the direct-OIDC path (3b) sets a real KC subject token.
+        if not hasattr(request.state, "user_kc_token"):
+            request.state.user_kc_token = None
         principal_id, principal_type = _build_principal_id(auth_method, client_id)
         request.state.principal_id = principal_id
         request.state.principal_type = principal_type

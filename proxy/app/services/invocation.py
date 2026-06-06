@@ -49,6 +49,7 @@ async def invoke_tool(
     inbound_auth: str | None = None,
     principal_id: str | None = None,
     principal_type: str | None = None,
+    user_kc_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Execute the full tool invocation pipeline.
@@ -67,6 +68,11 @@ async def invoke_tool(
             discovery==invoke entitlement gate when the tool is server-linked).
         principal_type: Typed principal type ('human' | 'agent') from
             request.state, paired with principal_id.
+        user_kc_token: The caller's raw Keycloak access token (6.3). Threaded to
+            the credential dispatcher for injection_mode='oauth_user_token'
+            (RFC 8693 on-behalf-of exchange). Set only for direct-OIDC callers;
+            None for api_key/mtls/session callers (oauth_user_token then fails
+            closed in the dispatcher). Never logged (INV-002).
 
     Returns:
         Dict matching the MCP JSON-RPC 2.0 response format with meta.audit_id.
@@ -248,7 +254,9 @@ async def invoke_tool(
             extra_headers = await dispatch_credential_injection(
                 tool_record=tool_record,
                 client_id=client_id,
-                user_kc_token=None,
+                # 6.3: thread the caller's KC token for oauth_user_token (RFC 8693).
+                # None for non-OIDC callers → that mode fails closed downstream.
+                user_kc_token=user_kc_token,
             )
         except CredentialInjectionError:
             # INV-001: a credential refusal on the auth boundary (e.g. user not

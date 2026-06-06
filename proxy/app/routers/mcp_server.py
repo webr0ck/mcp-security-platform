@@ -346,6 +346,8 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                 # 6.2: typed principal for the discovery==invoke entitlement gate.
                 principal_id=getattr(request.state, "principal_id", None),
                 principal_type=getattr(request.state, "principal_type", None),
+                # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
+                user_kc_token=getattr(request.state, "user_kc_token", None),
             )
     except Exception as exc:
         from app.credential_broker.dispatcher import CredentialEnrollmentRequiredError
@@ -544,6 +546,8 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 # 6.2: typed principal for the discovery==invoke entitlement gate.
                 principal_id=getattr(request.state, "principal_id", None),
                 principal_type=getattr(request.state, "principal_type", None),
+                # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
+                user_kc_token=getattr(request.state, "user_kc_token", None),
             )
         return {"type": "text", "text": json.dumps(result, indent=2)}
     except Exception as exc:
