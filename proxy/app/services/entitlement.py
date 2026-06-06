@@ -39,6 +39,56 @@ class EntitlementResult:
     reason: str               # 'entitlement_table' | 'role_grant' | 'not_found' | 'server_not_approved'
 
 
+class NotEntitledError(Exception):
+    """Raised on the invoke path when a server-linked tool is invoked by a
+    principal not entitled to its server (6.2, discovery==invoke). Carries no
+    role context by design — there is no admin exception to this gate."""
+
+    def __init__(self, server_id: str, reason: str) -> None:
+        self.server_id = server_id
+        self.reason = reason
+        super().__init__(f"not entitled to server {server_id} ({reason})")
+
+
+async def enforce_tool_entitlement(
+    tool_record: dict,
+    principal_id: str | None,
+    principal_type: str | None,
+) -> None:
+    """discovery==invoke enforcement for the invoke path.
+
+    If the tool is linked to a server (``tool_record['server_id']`` is set), the
+    caller MUST be entitled to that server — checked via the same
+    :func:`check_entitlement` resolver the catalog uses for discovery, so the two
+    can never drift. There is intentionally NO role exception: enforcement is
+    identity-based, so an admin/platform_admin who is not entitled is still
+    denied.
+
+    Tools with no ``server_id`` are not yet server-scoped (legacy / unlinked) and
+    are a no-op here; OPA still governs them downstream.
+
+    Fail-closed: a server-linked tool with an unresolved principal is denied.
+
+    Raises:
+        NotEntitledError: caller is not entitled to the tool's server.
+    """
+    server_id = tool_record.get("server_id")
+    if not server_id:
+        return  # unlinked tool — not server-scoped yet
+
+    if not principal_id or not principal_type:
+        # A server-scoped tool with no resolvable principal must fail closed.
+        raise NotEntitledError(str(server_id), "principal_unresolved")
+
+    result = await check_entitlement(
+        principal_type=principal_type,
+        principal_id=principal_id,
+        server_id=str(server_id),
+    )
+    if not result.entitled:
+        raise NotEntitledError(str(server_id), result.reason)
+
+
 async def check_entitlement(
     principal_type: str,
     principal_id: str,

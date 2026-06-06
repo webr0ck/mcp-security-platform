@@ -47,6 +47,8 @@ async def invoke_tool(
     is_testing: bool,
     request_id: str,
     inbound_auth: str | None = None,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
 ) -> dict[str, Any]:
     """
     Execute the full tool invocation pipeline.
@@ -61,12 +63,18 @@ async def invoke_tool(
         inbound_auth: The client's raw inbound Authorization header value. Used
             only by injection_mode='passthrough' (Case-3 / 3b) to forward a
             downstream-IDP token to the upstream and relay its 401 challenge.
+        principal_id: Typed principal id from request.state (6.2 — used for the
+            discovery==invoke entitlement gate when the tool is server-linked).
+        principal_type: Typed principal type ('human' | 'agent') from
+            request.state, paired with principal_id.
 
     Returns:
         Dict matching the MCP JSON-RPC 2.0 response format with meta.audit_id.
 
     Raises:
         ToolQuarantinedError: If tool status == 'quarantined' (INV-005).
+        NotEntitledError: If the tool is server-linked and the caller is not
+            entitled to that server (6.2, discovery==invoke — no role exception).
         OPADenyError: If OPA denies the invocation.
         OPAUnavailableError: If OPA is unreachable (returns 503).
     """
@@ -88,6 +96,34 @@ async def invoke_tool(
 
     if tool_status == "deprecated":
         raise ToolDeprecatedError(tool_id, tool_name)
+
+    # -------------------------------------------------------------------------
+    # Step 1.5: 6.2 — discovery==invoke. If the tool is linked to a server,
+    # the caller must be entitled to that server (same resolver the catalog
+    # uses for discovery). No role exception: admin/platform_admin are gated
+    # identically. Unlinked tools (server_id is NULL) are unaffected here.
+    # App-layer, pre-OPA, fail-closed — like the INV-005 quarantine gate above.
+    # INV-001: emit a synchronous deny audit here so the gate is recorded
+    # uniformly on every path (REST + both /mcp) before the exception propagates.
+    # -------------------------------------------------------------------------
+    from app.services.entitlement import NotEntitledError, enforce_tool_entitlement
+    try:
+        await enforce_tool_entitlement(tool_record, principal_id, principal_type)
+    except NotEntitledError as ent_exc:
+        await _emit_audit_event(
+            tool_id=str(tool_id) if tool_id is not None else None,
+            tool_name=tool_name,
+            tool_version=tool_record.get("version"),
+            client_id=client_id,
+            outcome="deny",
+            deny_reasons=[f"not_entitled:{ent_exc.reason}"],
+            request_id=request_id,
+            latency_ms=0,
+            anomaly_score=0.0,
+            opa_decision_id="",
+            is_testing=is_testing,
+        )
+        raise
 
     # -------------------------------------------------------------------------
     # Step 2: Anomaly detection

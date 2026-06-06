@@ -43,6 +43,8 @@ def _tool_row(status: str = "active"):
         injection_mode="none", service_name=None,
         inject_header="Authorization", inject_prefix="Bearer",
         kc_client_id=None, kc_token_audience=None,
+        # 6.2: server_id FK (V023) — None = unlinked tool, entitlement gate is a no-op.
+        server_id=None,
     )
 
 

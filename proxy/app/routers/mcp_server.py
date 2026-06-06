@@ -343,9 +343,19 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                 # Case-3 (3b): downstream-IDP token rides a dedicated header so the
                 # gateway's own Authorization (Keycloak) stays free for its authz.
                 inbound_auth=request.headers.get("x-downstream-authorization"),
+                # 6.2: typed principal for the discovery==invoke entitlement gate.
+                principal_id=getattr(request.state, "principal_id", None),
+                principal_type=getattr(request.state, "principal_type", None),
             )
     except Exception as exc:
         from app.credential_broker.dispatcher import CredentialEnrollmentRequiredError
+        from app.services.entitlement import NotEntitledError
+        if isinstance(exc, NotEntitledError):
+            # 6.2 discovery==invoke: caller is not entitled to this tool's server.
+            # Return a deny without leaking the server_id / reason internals.
+            logger.info("MCP invoke denied (not entitled) tool=%s client=%s reason=%s",
+                        name, client_id, exc.reason)
+            return _err(req_id, -32003, "Access denied: not entitled to this tool's server")
         if isinstance(exc, CredentialEnrollmentRequiredError):
             return _err(
                 req_id,
@@ -493,25 +503,11 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
 
     tool_record = dict(row)
 
-    # ROADMAP — discovery==invoke entitlement enforcement [C6]:
-    # tool_registry currently has no server_id FK column linking tools to
-    # server_registry rows. Once migration V020__tool_server_fk.sql adds
-    #   ALTER TABLE tool_registry ADD COLUMN server_id UUID REFERENCES server_registry(server_id);
-    # this handler should call check_entitlement() before inv_svc.invoke_tool():
-    #
-    #   from app.services.entitlement import check_entitlement
-    #   server_id = tool_record.get("server_id")
-    #   if server_id:
-    #       principal_type = getattr(request.state, "principal_type", "human")
-    #       principal_id   = getattr(request.state, "principal_id", client_id)
-    #       ent = await check_entitlement(principal_type, principal_id, str(server_id))
-    #       if not ent.entitled:
-    #           return {"type": "text",
-    #                   "text": f"Access denied: not entitled to server {server_id} ({ent.reason})"}
-    #
-    # Until that migration ships, a principal with the admin/platform_admin RBAC
-    # role can invoke any tool by name regardless of server-level grants, which
-    # violates the discovery==invoke invariant established in P6.
+    # 6.2 — discovery==invoke entitlement is now enforced inside
+    # inv_svc.invoke_tool() (services/invocation.py → enforce_tool_entitlement),
+    # the single chokepoint shared by REST + both /mcp paths. V023 added
+    # tool_registry.server_id; SELECT * above carries it into tool_record. When
+    # it is set, the caller must be entitled to that server — no role exception.
 
     client_id = getattr(request.state, "client_id", "unknown")
     client_roles = getattr(request.state, "client_roles", [])
@@ -545,9 +541,19 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 is_testing=False,
                 request_id=request_id,
                 inbound_auth=request.headers.get("x-downstream-authorization"),
+                # 6.2: typed principal for the discovery==invoke entitlement gate.
+                principal_id=getattr(request.state, "principal_id", None),
+                principal_type=getattr(request.state, "principal_type", None),
             )
         return {"type": "text", "text": json.dumps(result, indent=2)}
     except Exception as exc:
+        from app.services.entitlement import NotEntitledError
+        if isinstance(exc, NotEntitledError):
+            # 6.2 discovery==invoke: not entitled to this tool's server. Clean
+            # deny, no info leak about the server_id / internal reason.
+            logger.info("invoke_tool denied (not entitled) tool=%s client=%s reason=%s",
+                        tool_name, client_id, exc.reason)
+            return {"type": "text", "text": "Access denied: not entitled to this tool's server"}
         logger.exception("invoke_tool pipeline error for %s", tool_name)
         return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}
 

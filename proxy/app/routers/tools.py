@@ -885,6 +885,7 @@ async def invoke_tool(
         ToolQuarantinedError,
         invoke_tool as _invoke,
     )
+    from app.services.entitlement import NotEntitledError
     from app.services.policy import OPADenyError, OPAUnavailableError
 
     client_roles: list[str] = getattr(request.state, "client_roles", [])
@@ -926,7 +927,7 @@ async def invoke_tool(
             """
             SELECT tool_id, name, version, status, risk_level, upstream_url,
                    injection_mode, service_name, inject_header, inject_prefix,
-                   kc_client_id, kc_token_audience
+                   kc_client_id, kc_token_audience, server_id
             FROM tool_registry
             WHERE tool_id = :tool_id AND deleted_at IS NULL
             LIMIT 1
@@ -955,18 +956,18 @@ async def invoke_tool(
         "inject_prefix": tool_row.inject_prefix or "Bearer",
         "kc_client_id": tool_row.kc_client_id,
         "kc_token_audience": tool_row.kc_token_audience,
+        "server_id": str(tool_row.server_id) if tool_row.server_id else None,
     }
 
     # ENTITLEMENT CHECK (discovery == invoke invariant)
     #
-    # Full per-server entitlement check is deferred pending the server_id FK column
-    # being added to tool_registry (see ROADMAP comment in mcp_server.py [C6]):
-    #   ALTER TABLE tool_registry ADD COLUMN server_id UUID REFERENCES server_registry(server_id);
-    # Once that migration lands, replace this block with check_entitlement() per mcp_server.py stub.
+    # 6.2: per-server entitlement is now enforced inside invoke_tool()
+    # (services/invocation.py → enforce_tool_entitlement) using tool_record's
+    # server_id (V023). It applies to ALL callers with no role exception and
+    # surfaces as NotEntitledError (mapped to 403 below).
     #
-    # Interim guard: reject invocations against non-active tools and verify the
-    # caller holds at least the 'agent' role (already checked above, but re-stated
-    # here so the security intent is explicit and cannot be removed without notice).
+    # The status/role guards below remain as defense-in-depth: reject non-active
+    # tools and verify the caller holds at least the 'agent' role.
     if tool_record["status"] != "active":
         # INV-001: emit audit event for non-active tool rejections before returning 403.
         # The entitlement check fires before invoke_tool, so we must audit here to
@@ -1016,8 +1017,24 @@ async def invoke_tool(
             client_roles=client_roles,
             is_testing=is_testing,
             request_id=request_id,
+            # 6.2: typed principal for the discovery==invoke entitlement gate.
+            principal_id=getattr(request.state, "principal_id", None),
+            principal_type=getattr(request.state, "principal_type", None),
         )
         return JSONResponse(content=response)
+
+    except NotEntitledError:
+        # 6.2 discovery==invoke: caller not entitled to this tool's server.
+        # The synchronous deny audit (INV-001) is emitted at the chokepoint
+        # inside invoke_tool() so every path records it uniformly; here we only
+        # map to HTTP 403 without leaking the server_id / internal reason.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "NOT_ENTITLED",
+                "message": "Not entitled to this tool's server.",
+            },
+        )
 
     except ToolQuarantinedError as exc:
         # INV-001: emit audit event for quarantined tool blocks
