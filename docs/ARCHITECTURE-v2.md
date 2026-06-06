@@ -115,7 +115,58 @@ mTLS/API-key → nginx (TLS, WAF, per-CN rate, JSON log, sanitized CN header) �
 ### 5.2 Credential enrollment (🆕 — was entirely undocumented)
 Authenticated user → `/auth/enroll/{service}` → server-side random nonce stored in Redis (TTL 5m, keyed to authenticated identity) → redirect to IdP (M365/Bitbucket/Dex) with PKCE → IdP → `/auth/callback/{service}` → nonce verified & consumed → token exchanged → refresh token envelope-encrypted (AES-256-GCM, KEK = HKDF(master, authenticated user_sub)) → `credential_store` upsert keyed by *authenticated* identity → **synchronous `CREDENTIAL_ENROLLED` audit event** → done. (Target state; current code violates the bolded/italic parts — see CB-001/3/4/7.)
 
-### 5.3 SBOM / registration, 5.4 compliance, 5.5 auth — as in v1 §5.2/§5.3/§5.4, with: SPDX removed (not built), outbound Jira removed (not built), OIDC marked stub.
+### 5.3 Credential broker resolution (🆕 implementation details)
+**Triggered by:** `invoke_tool()` when tool config has `injection_mode != "none"` and broker_instance is not None.
+
+**Flow (dispatched in `proxy/app/credential_broker/broker.py:resolve()`):**
+
+1. **Approach B (Session Cache)** — default:
+   - Check Redis for `(session_id, service)` token with non-expired `expires_at`
+   - Hit: return immediately
+   - Miss: fetch adapter for service (Keycloak, M365, Bitbucket, Grafana, NetBox, Dex)
+   - Adapter calls OAuth2 client_credentials or refresh_token endpoint
+   - Save to Redis with TTL; return token
+
+2. **Approach A (Persistent Encrypted Refresh Token)** — for service accounts:
+   - Read `credential_store` row by `(user_sub, service)`
+   - Decrypt `encrypted_ref` blob:
+     - **KEK derivation** (`proxy/app/credential_broker/approaches/approach_a.py:_derive_kek()`):
+       - Fetch `master_secret` from Vault via `VaultKMSClient` (kms.py:40-59)
+       - Vault path: `/v1/secret/data/{BROKER_MASTER_SECRET_PATH}` (e.g., `secret/data/mcp/broker-master-secret`)
+       - ⚠️ **CB-002 OPEN**: format mismatch — lab seeders write HEX, kms.py tries base64 first
+       - Extract random salt from blob (first 32 bytes)
+       - HKDF-SHA256: `info = b"mcp-credential-broker-kek-v2:{user_sub}"`, length=32
+       - Derive per-user KEK
+     - Extract nonce (next 12 bytes)
+     - AES-256-GCM decrypt: ciphertext checked against AAD binding `(user_sub, service, tool_id, owner_type)`
+     - ✅ **CB-F004**: KEK bytearray explicitly zeroed after decryption (proxy/app/credential_broker/approaches/approach_a.py:74-75)
+   - Use decrypted refresh_token to call adapter OAuth2 token exchange
+   - Return fresh access_token
+
+3. **Credential injection** (back in `invocation.py`):
+   - Resolved token injected into upstream MCP call as `Authorization: Bearer <token>`
+   - Token is **never** logged (INV-002 redaction: `[REDACTED:credential_ref]`)
+
+4. **Master secret lifecycle** (`broker.py:51-67`):
+   - Fetched once per TTL (default: 300s, settable `BROKER_MASTER_SECRET_TTL_SECONDS`)
+   - Stored as bytearray to allow explicit zeroing (CB-008)
+   - Refreshed on every batch of invocations after TTL expires
+   - On startup (lifespan): `test_lifespan_broker.py` confirms broker_instance wires correctly; on shutdown: master_secret.bytearray is zeroed
+
+**Security properties:**
+- ✅ Per-user KEK: different user → different decryption key (no key reuse across identities)
+- ✅ Per-cred salt: blob format includes random salt; same credential encrypted twice → different ciphertexts (CB-F002)
+- ✅ AAD binding: prevents credential-swap attacks (FIND-010); decrypt fails if user_sub/service/tool_id/owner_type don't match
+- ✅ Fail-closed: if KEK derivation fails, CredentialInjectionError → AuditEmissionError → 500 aborts invocation
+- ⚠️ **CB-002 OPEN**: Vault transport must be `https://` (enforced by model-validator in development mode, but can be overridden in prod)
+- ⚠️ **CB-007 PARTIAL**: HKDF-SHA256 correct, but master_secret entropy reduced by format mismatch
+
+**Tested by:**
+- `proxy/tests/unit/test_invocation_broker.py` (13 unit tests: injection modes, failure cases, broker=None)
+- `proxy/tests/unit/test_lifespan_broker.py` (broker wiring, master_secret zeroing)
+- `proxy/tests/integration/test_mcp_server_chain.py` (E2E: resolve → inject → call upstream → audit)
+
+### 5.4 SBOM / registration, 5.5 compliance, 5.6 auth — as in v1 §5.2/§5.3/§5.4, with: SPDX removed (not built), outbound Jira removed (not built), OIDC marked stub.
 
 ---
 
@@ -129,6 +180,40 @@ v1 §7 stands, with these added/corrected entries:
 | **T8 — Master-key network sniff** (CB-002): cleartext Vault transport exposes the master that decrypts all stored credentials. | **Active critical defect.** Mitigation = §4.2 item 3. |
 | T3 (audit log tampering) overstated | MinIO GOVERNANCE mode is bypassable with a privileged key; it is **not** MFA-WORM. Either move to COMPLIANCE mode or correct the claim. |
 | T5 (policy bypass) | F-002 OPEN — no runtime bundle-signature verification anywhere. |
+
+---
+
+## 6.1 Evidence: Credential Broker Flow Trace (graphified knowledge graph)
+
+A knowledge graph analysis (June 2026) of the entire codebase extracted the credential broker's actual operational flow. Key traced paths and gaps:
+
+**Service Account Injection → Vault/KMS → Decryption Path:**
+- `invoke_tool()` (invocation.py:87) → `broker.resolve(user_sub, service, session_id, approach)` → Approach A reads encrypted_ref from credential_store
+- KEK derivation: `_derive_kek()` (approach_a.py:22-37) fetches master_secret via `VaultKMSClient.get_master_secret()` (kms.py:40-59)
+- Vault transport: `GET /v1/{BROKER_MASTER_SECRET_PATH}` with `X-Vault-Token` header over **current default: `http://`** ⚠️ CB-002
+- Master secret format: Lab seeder writes HEX; kms.py._decode_master_secret() (line 16-28) tries base64 first, reducing effective entropy
+- HKDF: `HKDF(SHA256, salt=extracted_from_blob, info=b"mcp-credential-broker-kek-v2:{user_sub}", length=32)` ✅ correct
+- AES-256-GCM: decrypt with nonce (next 12 bytes after salt), ciphertext verified against AAD = `f"{user_sub}|{service}|{tool_id}|{owner_type}"` ✅ prevents blob-swapping
+- KEK zeroing: explicit loop to overwrite bytearray before drop ✅ CB-F004
+
+**Audit cascade:**
+- Every resolved token is injected as `Authorization: Bearer <token>` into upstream MCP call ✅
+- Token **never** logged (INV-002: `[REDACTED:credential_ref]`) ✅
+- Synchronous audit event emitted before response ⚠️ **except** on refresh/revoke/delete (CB-004, CB-012)
+
+**Identified gaps requiring Phase 2+ fixes:**
+1. CB-002: Vault `http://` default → master secret in plaintext (network-sniffable) — **CRITICAL**
+2. CB-001 residual: identity from header (fixed in code, §4.2.2) — **CLOSED** but retrofit needed for old enrollments
+3. CB-007: single-round `HMAC(master, user_sub)` now fixed to HKDF (§3, service_account line 2) — **UPGRADED**
+4. CB-008: master_secret cached forever (no TTL re-fetch); add `BROKER_MASTER_SECRET_TTL_SECONDS` → **IN PROGRESS**
+5. CB-004/CB-012: no audit on refresh/revoke/delete; need audit-before-delete DB trigger — **ROADMAP P2**
+
+**Test coverage:**
+- `test_invocation_broker.py` (13 unit tests: modes, failures, broker=None) ✅
+- `test_lifespan_broker.py` (startup wiring, master_secret zeroing) ✅
+- `test_mcp_server_chain.py` (E2E: resolve → inject → call → audit) ✅
+- `test_vault_tls_enforcement.py` (no `http://` outside dev) ✅
+- `test_approach_a.py` (HKDF KEK derivation) ✅
 
 ---
 
