@@ -25,7 +25,7 @@ classify MCP servers as safe.
 | **Audit / observability** | Synchronous audit on REST + `/mcp` invocation + credential enrollment; SHA-256 per-event; raw tool args never persisted (hashes only); Loki/Grafana | Quarantine/error and `/mcp` meta-tool audit paths fail open (best-effort); MinIO uses GOVERNANCE retention (not tamper-proof WORM); compliance checker is advisory |
 | **Gateway** | mTLS, structured logs, rate limiting by client-CN / source-IP | `conf.d/default.conf` template needs cleanup (TLS-1.3-only not guaranteed); **per-tool** rate limiting not built; production tier does not expose the MCP/OAuth endpoints (see Identity row) |
 | **SBOM** | CycloneDX per tool | SPDX **not implemented** (route should not be relied on for SPDX) |
-| **Anomaly detection** | Per-call static heuristics (keyword/tool-name rules) feed an OPA input score | Advertised **behavioral baseline is decorative** — `update_baseline_async` writes a per-client baseline that the scorer never reads; trivially evaded by renaming a tool. Learned/statistical baseline = roadmap |
+| **Anomaly detection** | Per-call static **advisory heuristic** (keyword/tool-name rules) feeds an OPA input score — honestly labelled as a heuristic, not a learned model | Learned/statistical per-client baseline = roadmap. (6.4 removed the former write-only baseline writer that wrote a row the scorer never read; the heuristic is trivially evaded by renaming a tool — do not rely on it as a behavioural model) |
 | **Not built** | — | Helm/K8s (template stubs) · admin-UI IDP configuration (no backend route) · outbound Jira (inbound webhook only) · learned anomaly baseline |
 
 **Verified findings remediated:** the security findings in `docs/REVIEW-2026-05-16.md` (CB-001…CB-011)

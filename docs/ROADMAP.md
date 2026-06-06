@@ -16,7 +16,7 @@ Principle: **no new features until the platform is honest and not exploitable.**
 | **P3 — Feature completion** | 🟡 **PARTIAL** | OIDC browser login + KC session JWT + Grafana SSO ✅. Learned anomaly baseline, real Helm, outbound Jira, per-tool rate-limit still roadmap. |
 | **P4 — Self-service MCP** | ✅ **DONE** | `self-service-mcp` (port 8108) live: 7 tools, `mcp_profiles` + `mcp_profile_events` tables (V020), OPA profile enforcement, 57 lab tests pass. |
 | **P5 — OAuth API + scripts** | ⏳ **DEFERRED** | Thin OAuth2-authenticated REST + Python CLI scripts. Non-security; sequence after P6. |
-| **P6 — Runtime-enforcement closure** | 🔴 **NEXT** | Four `/mcp`-path authorization & telemetry gaps verified open 2026-06-06 (graphify + source audit). Two are **security-relevant** (privileged-caller authz bypass). See Phase 6. |
+| **P6 — Runtime-enforcement closure** | 🟢 **CORE DONE** (2026-06-06) | 6.1 meta-tool OPA identity ✅, 6.2 discovery==invoke enforcement ✅, 6.3 oauth_user_token RFC 8693 ✅, 6.4 anomaly dead-code removed ✅. Carried-forward hardening (6.5 INV-007 object-lock, 6.6 F-002 signed-bundle staging, 6.7 lab key material) still open. See Phase 6. |
 
 **Test coverage (2026-06-01):** 440 tests (383 proxy + 57 lab). Stress test: 2000 VUs (800 ROPC + 200 SA + 200 per-user + 1400 API-key), 50+ MCP requests/VU, p95 latency <500ms with token caching.
 
@@ -214,13 +214,13 @@ Sequencing rule (unchanged from the top of this doc): **the two authorization by
 - **AppSec (self-conducted):** token never logged (INV-002); non-OIDC callers fail closed (verified by test); only the 3b path stashes. **INV-002.**
 - **Docs:** README credential-modes row, CLAUDE.md known-gap #1.
 
-### 6.4 — Behavioral anomaly baseline: wire write→read or relabel honestly 🟡 FEATURE
-- **Gap:** `update_baseline_async` (`anomaly.py:198-237`) writes `anomaly_baselines` but has **zero callers**; the scorer `_score_window` (`:47-105`) reads only the Redis sliding window + hardcoded keyword/count rules and never queries the baseline. Rules are evadable by renaming a tool. Already disclosed honestly in code (`anomaly.py` docstring) and in the README Enforced-vs-Roadmap table.
-- **Decision required (pick one, don't ship both half-done):**
-  - **(A) Make it real:** call `update_baseline_async` on the invoke path (async, non-blocking, must never gate the response — anomaly is *advisory*), and have `_score_window` read the persisted per-client baseline as one input. Statistical deviation, not just keyword rules.
-  - **(B) Relabel:** if a learned baseline isn't worth the complexity yet, delete `update_baseline_async` (dead code) and keep the heuristic scorer, clearly labeled "advisory heuristic, not a learned baseline" everywhere.
-- **Recommendation:** **(B) now, (A) later.** Dead write-only code is a worse liability than an honest heuristic. Don't build statistical baselining until there's a consumer for the signal.
-- **INV touched:** none (advisory). No appsec gate unless it becomes enforcing — which it must not, silently.
+### 6.4 — Behavioral anomaly baseline: relabel honestly — ✅ DONE (2026-06-06, option B)
+- **Was:** `update_baseline_async` wrote `anomaly_baselines` but had **zero callers**; the scorer read only the Redis window + hardcoded rules and never queried the baseline — write-only dead code implying a learned model that did not exist.
+- **Fix shipped (option B — honest heuristic beats dead code):**
+  - `proxy/app/services/anomaly.py` — removed `update_baseline_async`; rewrote the module docstring to label the scorer an **advisory heuristic** (static keyword/window matching, evadable by tool rename, no statistical baseline). The `anomaly_baselines` table is kept (admin read-only view + future learned baseline) and is intentionally unpopulated.
+- **Tests (TDD, red→green):** `proxy/tests/unit/test_anomaly_no_dead_baseline.py` — 3 drift guards: the write-only writer is gone, `detect`/`evaluate_anomaly` remain the entry point, and the docstring makes no learned-baseline claim. Existing `test_anomaly_detector.py` unchanged & green. Full unit suite: **282 passed, 1 xfailed**.
+- **Decision deferred:** option (A) — a real learned/statistical per-client baseline — remains future work; do not build it until there is a consumer for the signal, and it must stay advisory (never silently enforcing).
+- **INV touched:** none (advisory). **Docs:** README anomaly row, CLAUDE.md known-gap #2.
 
 ### Carried-forward hardening (still open from P2)
 - **6.5 (=P2.4)** — INV-007 startup Object-Lock verification in compliance-checker; decide GOVERNANCE vs COMPLIANCE mode and align the doc. Today the "startup check" is aspirational.

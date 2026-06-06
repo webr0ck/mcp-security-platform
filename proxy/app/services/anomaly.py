@@ -10,11 +10,13 @@ Detection patterns:
 
 Anomaly score 0.0–1.0. Score >= 0.85 triggers an AnomalyAlert record in PostgreSQL.
 
-STATUS (2026-06): scoring is STATIC keyword/window heuristics only. The persisted
-per-client baseline written by update_baseline_async is NOT read by the scorer — there
-is no learned/statistical baseline yet (roadmap), and the literal-tool-name rules are
-evadable by renaming a tool. The "primary exfiltration chain detector" framing below is
-aspirational, not a learned behavioural model.
+STATUS (2026-06): this is an ADVISORY heuristic, not a learned behavioural model.
+Scoring is STATIC keyword/window matching only — the literal tool-name rules below
+are evadable by renaming a tool, and there is no per-client statistical baseline.
+(6.4 removed the former write-only baseline writer, which wrote an
+`anomaly_baselines` row that the scorer never read — dead code that implied a model
+that did not exist. A real learned baseline is future work; until then this stays
+labelled as the heuristic it is.)
 """
 from __future__ import annotations
 
@@ -195,46 +197,11 @@ async def _persist_alert(
     )
 
 
-async def update_baseline_async(client_id: str, tool_name: str) -> None:
-    """
-    Update the anomaly baseline in PostgreSQL (write-behind, best-effort).
-
-    Updates the tools_in_baseline and sample_count for the client.
-    Creates a baseline row if none exists yet.
-    """
-    try:
-        from sqlalchemy import text
-        from app.core.database import AsyncSessionLocal
-
-        async with AsyncSessionLocal() as session:
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO anomaly_baselines
-                      (client_id, baseline_version, tools_in_baseline,
-                       tool_sequence_patterns, last_updated, created_at, updated_at)
-                    VALUES
-                      (:client_id, 1,
-                       ARRAY[:tool_name]::TEXT[], '[]', NOW(), NOW(), NOW())
-                    ON CONFLICT (client_id) DO UPDATE SET
-                      tools_in_baseline = CASE
-                        WHEN :tool_name = ANY(anomaly_baselines.tools_in_baseline)
-                        THEN anomaly_baselines.tools_in_baseline
-                        ELSE array_append(anomaly_baselines.tools_in_baseline, :tool_name)
-                      END,
-                      baseline_version = anomaly_baselines.baseline_version + 1,
-                      last_updated = NOW(),
-                      updated_at = NOW()
-                    """
-                ),
-                {"client_id": client_id, "tool_name": tool_name},
-            )
-            await session.commit()
-    except Exception as exc:
-        logger.error(
-            "Baseline update failed",
-            extra={"client_id": client_id, "tool_name": tool_name, "error": str(exc)},
-        )
+# 6.4: `update_baseline_async` was removed here. It wrote an `anomaly_baselines`
+# row that the scorer never read (write-only dead code implying a learned model
+# that does not exist). The `anomaly_baselines` table remains for the admin
+# read-only view (routers/anomaly.py) and for a future learned-baseline feature;
+# it is intentionally unpopulated today.
 
 # Alias for backward compatibility with invocation.py
 evaluate_anomaly = detect
