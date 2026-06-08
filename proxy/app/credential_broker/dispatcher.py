@@ -286,9 +286,9 @@ async def _inject_oauth_user_token(
     # NO Authorization header — silently bypassing the credential boundary that is
     # the platform's reason to exist (parity with service/user/service_account modes).
     if not user_kc_token:
-        # NOTE: invoke_tool currently passes user_kc_token=None — threading the
-        # caller's real Keycloak access token through is the P1 follow-up. Until
-        # then, oauth_user_token tools fail CLOSED here rather than fail open.
+        # Fail-closed: no caller KC token → refuse rather than forward unauthenticated.
+        # (6.3 wired invoke_tool to pass the real token; this path fires only for
+        # non-OIDC callers whose bearer is not a KC subject token.)
         raise CredentialInjectionError(
             f"oauth_user_token mode: no caller Keycloak access token available for tool "
             f"{tool_record.get('tool_id')}; refusing to forward unauthenticated request"

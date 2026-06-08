@@ -153,6 +153,9 @@ async def check_entitlement(
                 )
 
             # Step 3: Fallback to server_role_grant.
+            # No revoked_at guard needed — server_role_grant has no revoked_at column
+            # (see V015). Revocation is by DELETE on this table, not soft-delete.
+            # If a future migration adds revoked_at, add 'AND revoked_at IS NULL' here.
             srg_row = await db.execute(
                 text(
                     "SELECT role FROM server_role_grant "
@@ -229,7 +232,7 @@ async def list_entitled_servers(
 
                         UNION ALL
 
-                        -- Role-based grants
+                        -- Role-based grants (no revoked_at — revocation is by DELETE on this table)
                         SELECT server_id, role
                         FROM server_role_grant
                         WHERE principal_type = :pt
