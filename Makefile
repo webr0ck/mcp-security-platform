@@ -4,6 +4,7 @@
         assign-role compliance-run sbom-verify \
         security-check health smoke-test \
         dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
+        lab-init lab-init-force lab-up lab-down \
         clean
 
 # =============================================================================
@@ -122,7 +123,14 @@ dev-up: dep-audit
 dev-down:
 	$(COMPOSE_DEV) down
 
+lab-init:
+	@scripts/lab-init.sh
+
+lab-init-force:
+	@scripts/lab-init.sh --force
+
 lab-up:
+	@[ -f .env.lab ] || scripts/lab-init.sh
 	@echo "Starting MCP Security Platform (lab mode)..."
 	$(COMPOSE_LAB) up -d
 	@echo ""
