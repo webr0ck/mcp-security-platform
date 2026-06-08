@@ -121,6 +121,55 @@ def verify_hash_integrity(event: dict[str, Any]) -> bool:
     return computed == stored_hash
 
 
+def verify_object_lock_startup(s3_client: Any, bucket: str) -> dict[str, Any]:
+    """
+    Verify that the MinIO/S3 audit bucket has Object Lock enabled (INV-007).
+
+    Called once at the start of each compliance run to confirm the WORM
+    configuration is intact before writing reports.
+
+    Design decision: GOVERNANCE mode is the chosen mode for this reference
+    implementation. It is NOT MFA-enforced WORM — a privileged key can bypass
+    it. Only COMPLIANCE mode (which locks out even the root key without a
+    notary or MFA unlock) would be true WORM. COMPLIANCE mode is the correct
+    choice for a production deployment; GOVERNANCE is accepted here because
+    this is a learning/reference build and COMPLIANCE mode creates irreversible
+    object locks that complicate lab teardown.
+
+    Returns a dict with:
+      - enabled (bool): True if ObjectLockEnabled == "Enabled"
+      - mode (str|None): "GOVERNANCE", "COMPLIANCE", or None if no default retention
+      - retention_days (int|None): default retention configured
+      - error (str|None): set if boto3 raised an exception
+    """
+    try:
+        resp = s3_client.get_bucket_object_lock_configuration(Bucket=bucket)
+        config = resp.get("ObjectLockConfiguration", {})
+        enabled = config.get("ObjectLockEnabled") == "Enabled"
+        rule = config.get("Rule", {}).get("DefaultRetention", {})
+        mode = rule.get("Mode")
+        days = rule.get("Days")
+        if enabled:
+            logger.info(
+                "INV-007 Object Lock: ENABLED on bucket %s (mode=%s, days=%s)",
+                bucket, mode, days,
+            )
+        else:
+            logger.warning(
+                "INV-007 Object Lock: DISABLED on bucket %s — "
+                "compliance reports are NOT WORM-protected",
+                bucket,
+            )
+        return {"enabled": enabled, "mode": mode, "retention_days": days, "error": None}
+    except Exception as exc:
+        logger.warning(
+            "INV-007 Object Lock: could not verify bucket %s: %s — "
+            "proceeding; check MinIO admin credentials and bucket configuration",
+            bucket, exc,
+        )
+        return {"enabled": False, "mode": None, "retention_days": None, "error": str(exc)}
+
+
 def post_alert(report_id: str, categories_failed: int, period: str) -> None:
     """Post a compliance failure alert to Alertmanager."""
     alert_payload = [
@@ -189,6 +238,16 @@ async def _run_async() -> int:
         f"postgresql://{COMPLIANCE_DB_USER}:{COMPLIANCE_DB_PASSWORD}"
         f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
+
+    # INV-007: Verify Object Lock before writing any reports.
+    import boto3  # type: ignore[import]
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=MINIO_ENDPOINT,
+        aws_access_key_id=MINIO_ROOT_USER,
+        aws_secret_access_key=MINIO_ROOT_PASSWORD,
+    )
+    object_lock_status = verify_object_lock_startup(s3, MINIO_AUDIT_BUCKET)
 
     try:
         conn = await asyncpg.connect(dsn)
@@ -267,6 +326,7 @@ async def _run_async() -> int:
             "hash_mismatches": hash_mismatches,
             "status": "pass" if hash_mismatches == 0 else "fail",
         },
+        "object_lock": object_lock_status,
     }
 
     # Write compliance report to PostgreSQL
@@ -296,16 +356,8 @@ async def _run_async() -> int:
     finally:
         await conn.close()
 
-    # Archive to MinIO WORM bucket (INV-007)
+    # Archive to MinIO WORM bucket (INV-007) — reuse the s3 client from startup.
     try:
-        import boto3  # type: ignore[import]
-
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=MINIO_ENDPOINT,
-            aws_access_key_id=MINIO_ROOT_USER,
-            aws_secret_access_key=MINIO_ROOT_PASSWORD,
-        )
         date_path = run_at.strftime("%Y/%m/%d")
         key = f"compliance/{date_path}/{report_id}.json"
         s3.put_object(

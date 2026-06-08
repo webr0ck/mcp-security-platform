@@ -26,8 +26,8 @@ The per-INV "Enforcement:" lines below describe the *intended* control. Audited 
 | INV-009, INV-010 | 🟡 Config-only; verified at deploy, no automated test. |
 | INV-008 | 🟡 CI trufflehog real; **no pre-commit hook in repo**, `make security-check` skips trufflehog if absent (ROADMAP P2.5). |
 | INV-011 | 🟡 `V003`+`V009` grants real; written scope still omits `credential_store`/`role_assignments` (P1.6). |
-| INV-007 | ⚠️ Object Lock is configured, but the "compliance checker verifies on startup" claim below is **aspirational — no such startup check exists**. GOVERNANCE mode is **not** MFA-enforced WORM (a privileged key can still delete). Decide GOVERNANCE→COMPLIANCE or downgrade the guarantee (ROADMAP P2.4). |
-| INV-012 | 🟡 Signing mechanism now delivered (`scripts/sign_policy_bundle.sh` + `docker-compose.opa-signed.yml`); **not yet enforced in a running staging deploy** (ROADMAP P2.8). |
+| INV-007 | 🟡 `verify_object_lock_startup()` in `observability/compliance-checker/checker.py` runs at the start of every compliance check and logs WARN if Object Lock is absent. **Mode decision: GOVERNANCE** (not COMPLIANCE) — accepted for this reference implementation; GOVERNANCE is not MFA-enforced WORM (a privileged key can bypass it). Production deployments requiring true WORM must switch to COMPLIANCE mode. Tested by `observability/compliance-checker/tests/test_object_lock.py`. |
+| INV-012 | 🟡 Signing mechanism delivered (`scripts/sign_policy_bundle.sh` + `docker-compose.opa-signed.yml`) and **runtime-proven by `make test-signed-bundle`** (signs, verifies with correct key, confirms rejection of tampered bundle). Not enforced in a permanently-running staging deploy (no persistent staging env). |
 
 ---
 
@@ -121,7 +121,11 @@ This line must never be removed or changed to `default allow = true`.
 
 **Why:** WORM storage is the only reliable guarantee against insider log deletion. A platform that claims compliance logging but allows log deletion is worthless.
 
-**Enforcement:** `infra/scripts/setup-minio.sh` configures Object Lock at bucket creation time. ⚠️ **Correction (2026-05-16):** there is currently **no** compliance-checker startup verification of Object Lock — that is aspirational (ROADMAP P2.4). Also, GOVERNANCE mode does **not** require MFA to delete (a privileged key can bypass it); only COMPLIANCE mode is true WORM. Either move to COMPLIANCE mode or downgrade this guarantee in the docs.
+**Enforcement:** `infra/scripts/setup-minio.sh` configures Object Lock at bucket creation time. `observability/compliance-checker/checker.py::verify_object_lock_startup()` calls `GetBucketObjectLockConfiguration` at the start of each compliance run and logs WARN if Object Lock is absent; the check result is included in every compliance report.
+
+**Mode decision (2026-06-08):** GOVERNANCE mode is chosen for this reference implementation. GOVERNANCE is NOT MFA-enforced WORM — a privileged key can bypass it. Only COMPLIANCE mode is true WORM. This choice is accepted here because (a) this is a learning/reference build, not a production security gateway, and (b) COMPLIANCE mode creates irreversible object locks that complicate lab teardown. Production deployments must switch to COMPLIANCE mode.
+
+**Tested:** `observability/compliance-checker/tests/test_object_lock.py` — 5 tests covering enabled/disabled/boto3-error/COMPLIANCE mode.
 
 ---
 
