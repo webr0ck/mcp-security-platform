@@ -4,7 +4,7 @@
         assign-role compliance-run sbom-verify \
         security-check health smoke-test \
         dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
-        lab-init lab-init-force lab-up lab-down \
+        lab-init lab-init-force lab-up lab-down lab-down-volumes \
         clean
 
 # =============================================================================
@@ -162,6 +162,9 @@ lab-up:
 
 lab-down:
 	$(COMPOSE_LAB) down --remove-orphans
+
+lab-down-volumes:
+	$(COMPOSE_LAB) down --remove-orphans --volumes
 
 build: dep-audit
 	$(COMPOSE) build --no-cache proxy compliance-checker
