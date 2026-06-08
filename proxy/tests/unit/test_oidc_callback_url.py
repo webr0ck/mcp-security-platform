@@ -11,17 +11,17 @@ X-Forwarded-Host (set by the gateway) or the Host header (direct access), so the
 redirect_uri always matches what the browser sees. PROXY_BASE_URL still takes
 precedence when set (backward-compatible; production should set it explicitly).
 
-Security note: trusting the Host header is safe only when either:
-  a) the proxy is behind a trusted reverse proxy that overwrites it, or
-  b) Keycloak's valid redirect URI list restricts which hosts are accepted.
-  The lab sets OIDC_TRUST_FORWARDED_HOST=true and uses a broad KC wildcard
-  because ALL traffic is on trusted local/VPN networks.
+Security mitigations (AppSec finding HIGH-2, MEDIUM-3):
+  - PROXY_ALLOWED_HOSTS allow-list: when non-empty, the derived host must be in
+    the set, otherwise 400. Prevents Host-header injection.
+  - Host format validation: only [A-Za-z0-9.-]+(:port)? is accepted.
+    Prevents @, /, ?, # from injecting characters into the redirect_uri.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
 import pytest
+from fastapi import HTTPException
+from unittest.mock import patch
 from starlette.requests import Request
 
 
@@ -62,6 +62,7 @@ def test_derive_callback_uses_host_header_when_base_url_empty():
     with patch("app.routers.oidc_browser.settings") as s:
         s.PROXY_BASE_URL = ""
         s.OIDC_TRUST_FORWARDED_HOST = True
+        s.PROXY_ALLOWED_HOSTS = ""
         url = _derive_callback_url(req)
     assert url == "http://203.0.113.10:8000/api/v1/auth/oidc/callback"
 
@@ -75,6 +76,7 @@ def test_derive_callback_prefers_x_forwarded_host():
     with patch("app.routers.oidc_browser.settings") as s:
         s.PROXY_BASE_URL = ""
         s.OIDC_TRUST_FORWARDED_HOST = True
+        s.PROXY_ALLOWED_HOSTS = ""
         url = _derive_callback_url(req)
     assert url == "http://203.0.113.10:8000/api/v1/auth/oidc/callback"
 
@@ -100,5 +102,64 @@ def test_derive_callback_tailscale_ip_works():
     with patch("app.routers.oidc_browser.settings") as s:
         s.PROXY_BASE_URL = ""
         s.OIDC_TRUST_FORWARDED_HOST = True
+        s.PROXY_ALLOWED_HOSTS = ""
         url = _derive_callback_url(req)
     assert url == "http://203.0.113.10:8000/api/v1/auth/oidc/callback"
+
+
+@pytest.mark.unit
+def test_derive_callback_allow_list_accepts_listed_host():
+    """When PROXY_ALLOWED_HOSTS is set, a host in the list is accepted."""
+    from app.routers.oidc_browser import _derive_callback_url
+    req = _make_request("203.0.113.10:8000")
+    with patch("app.routers.oidc_browser.settings") as s:
+        s.PROXY_BASE_URL = ""
+        s.OIDC_TRUST_FORWARDED_HOST = True
+        s.PROXY_ALLOWED_HOSTS = "localhost:8000,203.0.113.10:8000,203.0.113.10:8000"
+        url = _derive_callback_url(req)
+    assert url == "http://203.0.113.10:8000/api/v1/auth/oidc/callback"
+
+
+@pytest.mark.unit
+def test_derive_callback_allow_list_rejects_unlisted_host():
+    """When PROXY_ALLOWED_HOSTS is set, a host NOT in the list is rejected with 400."""
+    from app.routers.oidc_browser import _derive_callback_url
+    req = _make_request("attacker.evil.com:8000")
+    with patch("app.routers.oidc_browser.settings") as s:
+        s.PROXY_BASE_URL = ""
+        s.OIDC_TRUST_FORWARDED_HOST = True
+        s.PROXY_ALLOWED_HOSTS = "localhost:8000,203.0.113.10:8000"
+        with pytest.raises(HTTPException) as exc_info:
+            _derive_callback_url(req)
+    assert exc_info.value.status_code == 400
+    assert "Untrusted" in exc_info.value.detail
+
+
+@pytest.mark.unit
+def test_derive_callback_rejects_malformed_host_with_at():
+    """A Host header with '@' (credential injection attempt) is rejected with 400."""
+    from app.routers.oidc_browser import _derive_callback_url
+    req = _make_request("attacker@evil.com:8000")
+    with patch("app.routers.oidc_browser.settings") as s:
+        s.PROXY_BASE_URL = ""
+        s.OIDC_TRUST_FORWARDED_HOST = True
+        s.PROXY_ALLOWED_HOSTS = ""
+        with pytest.raises(HTTPException) as exc_info:
+            _derive_callback_url(req)
+    assert exc_info.value.status_code == 400
+    assert "Invalid" in exc_info.value.detail
+
+
+@pytest.mark.unit
+def test_derive_callback_rejects_malformed_host_with_path():
+    """A Host header with '/' (path injection) is rejected with 400."""
+    from app.routers.oidc_browser import _derive_callback_url
+    req = _make_request("evil.com/injected")
+    with patch("app.routers.oidc_browser.settings") as s:
+        s.PROXY_BASE_URL = ""
+        s.OIDC_TRUST_FORWARDED_HOST = True
+        s.PROXY_ALLOWED_HOSTS = ""
+        with pytest.raises(HTTPException) as exc_info:
+            _derive_callback_url(req)
+    assert exc_info.value.status_code == 400
+    assert "Invalid" in exc_info.value.detail

@@ -22,13 +22,14 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Cookie, Query, Request
+from fastapi import APIRouter, Cookie, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.core.config import settings
@@ -104,6 +105,8 @@ def _derive_callback_url(request: Request) -> str:
     Security: only enable ``OIDC_TRUST_FORWARDED_HOST`` when either:
     - the proxy sits behind a trusted reverse proxy that overwrites Host, OR
     - Keycloak's valid redirect URI list is scoped to trusted hosts.
+    When ``PROXY_ALLOWED_HOSTS`` is set, the derived host is validated against
+    that allow-list to prevent Host-header injection attacks.
     """
     if settings.PROXY_BASE_URL:
         return f"{settings.PROXY_BASE_URL}/api/v1/auth/oidc/callback"
@@ -111,6 +114,18 @@ def _derive_callback_url(request: Request) -> str:
     if settings.OIDC_TRUST_FORWARDED_HOST:
         proto = request.headers.get("x-forwarded-proto", request.url.scheme)
         host = request.headers.get("x-forwarded-host") or request.headers.get("host", "localhost")
+
+        # Reject malformed host values that could inject characters into the URL.
+        # Only allow hostname chars, dots, hyphens, and a single optional :port.
+        if not re.match(r'^[A-Za-z0-9.\-]+(:\d{1,5})?$', host):
+            raise HTTPException(status_code=400, detail="Invalid Host header")
+
+        # Validate against the explicit allow-list when one is configured.
+        if settings.PROXY_ALLOWED_HOSTS:
+            allowed = {h.strip() for h in settings.PROXY_ALLOWED_HOSTS.split(",") if h.strip()}
+            if host not in allowed:
+                raise HTTPException(status_code=400, detail="Untrusted Host header")
+
         return f"{proto}://{host}/api/v1/auth/oidc/callback"
 
     # Fallback: PROXY_BASE_URL is empty and trust is off — use configured value.
@@ -383,7 +398,6 @@ async def oidc_callback(
     # Validate nonce binding to prevent token injection / replay attacks.
     # Even without full signature verification, this binds the token to the
     # specific login session initiated by /login.
-    from fastapi import HTTPException
     token_nonce = id_token_claims.get("nonce")
     if stored_nonce and token_nonce != stored_nonce:
         logger.warning(
@@ -434,7 +448,6 @@ async def oidc_callback(
         ).decode("ascii")
     except Exception as enc_exc:
         logger.error("Failed to encrypt KC tokens for session %s: %s", session_id, enc_exc)
-        from fastapi import HTTPException
         raise HTTPException(status_code=500, detail="Session encryption failed.") from enc_exc
 
     # Update session record with identity + tokens

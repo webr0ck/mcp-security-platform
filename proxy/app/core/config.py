@@ -154,6 +154,12 @@ class Settings(BaseSettings):
     # proxy is reachable from multiple IPs (LAN + Tailscale). Keep False in
     # production where PROXY_BASE_URL must be explicitly configured.
     OIDC_TRUST_FORWARDED_HOST: bool = False
+    # Comma-separated list of allowed Host/X-Forwarded-Host values when
+    # OIDC_TRUST_FORWARDED_HOST=True (e.g. "localhost:8000,203.0.113.10:8000").
+    # When non-empty, any derived host NOT in this list is rejected with 400
+    # to prevent Host-header injection attacks. Empty = no allow-list check
+    # (lab-only; not safe when the proxy is internet-exposed).
+    PROXY_ALLOWED_HOSTS: str = ""
 
     # Session JWT (issued after Keycloak browser login; short-lived)
     SESSION_JWT_EXPIRE_SECONDS: int = 900      # 15 min default
