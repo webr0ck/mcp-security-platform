@@ -491,6 +491,16 @@ services:
     # rootless Podman: run as root so nginx master can bind ports 80/443 inside
     # the container's network namespace (maps to 8088/8443 on the host).
     user: root
+    # Restore caps dropped by *security-hardening: nginx chowns cache/temp dirs to
+    # the worker user (uid 101) at startup; SETUID/SETGID needed for worker privilege drop.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:false
     # 91-update-resolver.sh uses `sed -i` (creates temp + renames) which fails on
     # bind mounts in rootless Podman. Run the CRS init steps explicitly (no shell
     # loop vars — $var in compose command strings is expanded at create time, not
@@ -514,8 +524,9 @@ services:
       - ./lab/nginx/nginx.conf:/etc/nginx/nginx.conf
       - ./lab/nginx/conf.d:/etc/nginx/conf.d
       - ./lab/nginx/lab-certs:/etc/nginx/lab-certs:ro
-      # Pre-create ModSecurity config files so 90-copy-modsecurity-config.sh can write to them
-      # (image files are not writable in rootless Podman overlay; mounted files are).
+      # bind-mount all three modsecurity.d config files — the container rootfs is read_only:true
+      # so 90-copy-modsecurity-config.sh cannot create new files there at runtime.
+      - ./lab/modsecurity-crs/modsecurity.conf:/etc/modsecurity.d/modsecurity.conf
       - ./lab/modsecurity-crs/modsecurity-override.conf:/etc/modsecurity.d/modsecurity-override.conf
       - ./lab/modsecurity-crs/setup.conf:/etc/modsecurity.d/setup.conf
 
@@ -640,6 +651,12 @@ services:
       - ENVIRONMENT=development
       - LOG_LEVEL=DEBUG
       - RELOAD=true
+      # Option B: derive the OIDC callback URL from the incoming request's Host
+      # header so the proxy works from any IP (LAN, Tailscale, localhost) without
+      # reconfiguring PROXY_BASE_URL. Safe here because all traffic is on trusted
+      # local/VPN networks and Keycloak's realm whitelists port-8000 callbacks.
+      - OIDC_TRUST_FORWARDED_HOST=true
+      - PROXY_BASE_URL=
     command: >
       uvicorn app.main:app
       --host 0.0.0.0

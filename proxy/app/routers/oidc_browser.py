@@ -87,6 +87,36 @@ async def _discover() -> dict[str, Any]:
     return doc
 
 
+def _derive_callback_url(request: Request) -> str:
+    """
+    Build the OIDC redirect_uri for the current request.
+
+    Priority:
+    1. ``PROXY_BASE_URL`` — always wins when non-empty (production default).
+    2. When ``OIDC_TRUST_FORWARDED_HOST=True`` and ``PROXY_BASE_URL`` is empty:
+       use ``X-Forwarded-Proto`` + ``X-Forwarded-Host`` (set by the gateway),
+       or fall back to the request's ``Host`` header and scheme.
+
+    This makes the redirect_uri match whichever address the browser used
+    (LAN IP, Tailscale IP, hostname), so Keycloak's callback lands correctly
+    regardless of access path — without hardcoding a single base URL.
+
+    Security: only enable ``OIDC_TRUST_FORWARDED_HOST`` when either:
+    - the proxy sits behind a trusted reverse proxy that overwrites Host, OR
+    - Keycloak's valid redirect URI list is scoped to trusted hosts.
+    """
+    if settings.PROXY_BASE_URL:
+        return f"{settings.PROXY_BASE_URL}/api/v1/auth/oidc/callback"
+
+    if settings.OIDC_TRUST_FORWARDED_HOST:
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host", "localhost")
+        return f"{proto}://{host}/api/v1/auth/oidc/callback"
+
+    # Fallback: PROXY_BASE_URL is empty and trust is off — use configured value.
+    return f"{settings.PROXY_BASE_URL}/api/v1/auth/oidc/callback"
+
+
 def _pkce_pair() -> tuple[str, str]:
     """Generate PKCE code_verifier + code_challenge (S256)."""
     verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
@@ -165,7 +195,7 @@ async def oidc_login(
     nonce = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
     verifier, challenge = _pkce_pair()
 
-    callback_url = f"{settings.PROXY_BASE_URL}/api/v1/auth/oidc/callback"
+    callback_url = _derive_callback_url(request)
 
     # Persist PKCE state in DB
     try:

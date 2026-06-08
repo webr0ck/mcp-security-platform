@@ -26,9 +26,11 @@
       "redirectUris": [
         "http://localhost:8000/api/v1/auth/oidc/callback",
         "http://${LAB_HOST}:8000/api/v1/auth/oidc/callback",
-        "http://${LAB_HOST}:8088/api/v1/auth/oidc/callback"
+        "http://${LAB_HOST}:8088/api/v1/auth/oidc/callback",
+        "http://*:8000/api/v1/auth/oidc/callback",
+        "http://*:8088/api/v1/auth/oidc/callback"
       ],
-      "webOrigins": ["http://localhost:8000", "http://${LAB_HOST}:8000"],
+      "webOrigins": ["http://localhost:8000", "http://${LAB_HOST}:8000", "+"],
       "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,

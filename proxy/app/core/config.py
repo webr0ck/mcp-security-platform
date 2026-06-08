@@ -148,6 +148,12 @@ class Settings(BaseSettings):
     OIDC_ROLE_CLAIM_PATH: str = "roles"
     OIDC_REDIRECT_URI: str = ""
     PROXY_BASE_URL: str = "http://localhost:8000"
+    # When True, the OIDC callback URL is derived from the incoming request's
+    # X-Forwarded-Host (gateway) or Host header instead of PROXY_BASE_URL.
+    # PROXY_BASE_URL still wins when non-empty. Set True in the lab when the
+    # proxy is reachable from multiple IPs (LAN + Tailscale). Keep False in
+    # production where PROXY_BASE_URL must be explicitly configured.
+    OIDC_TRUST_FORWARDED_HOST: bool = False
 
     # Session JWT (issued after Keycloak browser login; short-lived)
     SESSION_JWT_EXPIRE_SECONDS: int = 900      # 15 min default
