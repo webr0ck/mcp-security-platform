@@ -23,7 +23,8 @@
 
 COMPOSE         := podman-compose
 COMPOSE_DEV     := $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
-PROXY_CONTAINER := mcp-proxy
+COMPOSE_LAB     := $(COMPOSE) -f docker-compose.yml -f podman-compose.lab.yml
+PROXY_CONTAINER := proxy
 DB_CONTAINER    := mcp-db
 DB_NAME         ?= mcp_security
 DB_USER         ?= mcp_app
@@ -120,6 +121,39 @@ dev-up: dep-audit
 
 dev-down:
 	$(COMPOSE_DEV) down
+
+lab-up:
+	@echo "Starting MCP Security Platform (lab mode)..."
+	$(COMPOSE_LAB) up -d
+	@echo ""
+	@echo "Waiting for core services to become healthy (max 7m30s)..."
+	@n=0; max=90; \
+	while [ $$n -lt $$max ]; do \
+		n=$$((n+1)); \
+		kc=$$(curl -sf http://localhost:8082/health/ready      2>/dev/null && echo "ok" || echo "-"); \
+		proxy=$$(curl -sf http://localhost:8000/health/ready   2>/dev/null && echo "ok" || echo "-"); \
+		vault=$$(curl -sf "http://localhost:8201/v1/sys/health?standbyok=true" 2>/dev/null && echo "ok" || echo "-"); \
+		grafana=$$(curl -sf http://localhost:3001/api/health   2>/dev/null && echo "ok" || echo "-"); \
+		printf "\r  keycloak=%-4s  proxy=%-4s  vault=%-4s  grafana=%-4s  (%d/%d, %ds)" \
+			"$$kc" "$$proxy" "$$vault" "$$grafana" $$n $$max $$((n*5)); \
+		if [ "$$kc" = "ok" ] && [ "$$proxy" = "ok" ] && [ "$$vault" = "ok" ] && [ "$$grafana" = "ok" ]; then \
+			printf "\n\nAll services healthy.\n"; break; \
+		fi; \
+		if [ $$n -ge $$max ]; then \
+			printf "\n\nWARN: timeout — not all services healthy after $$(( max * 5 ))s.\n"; \
+			printf "Run: make health   for details\n"; break; \
+		fi; \
+		sleep 5; \
+	done
+	@echo ""
+	@echo "  Proxy:    http://localhost:8000"
+	@echo "  Gateway:  http://localhost:8088 / https://localhost:8443"
+	@echo "  Keycloak: http://localhost:8082"
+	@echo "  Vault:    http://localhost:8201"
+	@echo "  Grafana:  http://localhost:3001"
+
+lab-down:
+	$(COMPOSE_LAB) down --remove-orphans
 
 build: dep-audit
 	$(COMPOSE) build --no-cache proxy compliance-checker
