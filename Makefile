@@ -1,6 +1,6 @@
 .PHONY: help up down dev-up dev-down build logs shell proxy-shell db-shell \
         test test-unit test-integration test-security test-perf test-all test-red-team lint \
-        db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle \
+        db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle test-signed-bundle \
         assign-role compliance-run sbom-verify \
         security-check health smoke-test \
         dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
@@ -402,6 +402,9 @@ step-ca-init:
 
 sign-policy-bundle:
 	@scripts/sign_policy_bundle.sh
+
+test-signed-bundle:
+	@scripts/test_signed_bundle.sh
 
 policy-reload:
 	@echo "OPA watches /policies automatically in development (--watch flag)."

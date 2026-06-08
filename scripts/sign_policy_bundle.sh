@@ -5,6 +5,11 @@
 # that OPA in staging/production (docker-compose.opa-signed.yml) will only
 # load a bundle whose .signatures.json verifies against POLICY_SIGNING_KEY.
 #
+# OPA 1.17 flags (different from older docs):
+#   Sign:   opa build -b <rego-dir> --signing-alg HS256 --signing-key <keyfile> -o <out>
+#   Verify: opa build --bundle <bundle> --verification-key <keyfile> --signing-alg HS256 -o /dev/null
+#   Note:   --signing-key-id does not exist in OPA 1.17. --scope is not needed.
+#
 # Usage:  POLICY_SIGNING_KEY=<hmac-secret> scripts/sign_policy_bundle.sh
 #         make sign-policy-bundle
 #
@@ -15,7 +20,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGO_DIR="${REPO_ROOT}/policies/rego"
 OUT="${REPO_ROOT}/policies/bundle.tar.gz"
-KEY_ID="mcp-policy-signing-key-v1"
 
 if ! command -v opa >/dev/null 2>&1; then
   echo "FAIL: 'opa' binary not found on PATH — cannot build a signed bundle." >&2
@@ -37,14 +41,12 @@ echo "Building signed bundle from ${REGO_DIR} ..."
 opa build -b "${REGO_DIR}" \
   --signing-alg HS256 \
   --signing-key "${KEYFILE}" \
-  --signing-key-id "${KEY_ID}" \
   -o "${OUT}"
 
 echo "Verifying signature round trip ..."
-opa build -b "${OUT}" \
+opa build --bundle "${OUT}" \
   --verification-key "${KEYFILE}" \
-  --verification-key-id "${KEY_ID}" \
   --signing-alg HS256 \
   -o /dev/null
 
-echo "OK: signed bundle written to ${OUT} (keyid=${KEY_ID}, HS256, scope=write)"
+echo "OK: signed bundle written to ${OUT} (HS256)"
