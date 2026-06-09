@@ -1,6 +1,6 @@
 # ADR-003: Per-Client Enrollment Consent Gate (R-5)
 
-Status: Accepted with conditions (AppSec sign-off 2026-06-09 — C4–C8 blocking before merge; C9 non-blocking)
+Status: Accepted — conditions met (C4–C9 all closed; implemented 2026-06-09)
 Date: 2026-06-09
 Authors: System Architect
 Deciders: Core team + AppSec
@@ -110,13 +110,23 @@ Too late: by callback the user has already authenticated at Entra and a token ex
 
 Verdict: **APPROVED-WITH-CONDITIONS.** The Redis-state + CSRF-form model is the right choice for the multi-host topology and satisfies the confused-deputy "state only after consent" MUST. Binding conditions:
 
-| # | Condition | Severity |
-|---|---|---|
-| **C4** | `POST /auth/enroll/{service}/consent` MUST derive `client_id` **exclusively from the server-side Redis consent record** (keyed by the CSRF token). It MUST NOT accept `client_id` from any client-supplied param (body/query/header). This is the load-bearing binding for the R-3b composition path (browser has no session) — specify it, don't defer to build. | HIGH |
-| **C5** | CSRF-token validation at POST MUST use **atomic GET+DEL** (same as ADR-002 C1) — a non-atomic GET-then-DEL allows double-submit → two Entra redirects on one consent. | HIGH |
-| **C6** | The callback UPSERT MUST write `scopes` from the value stored in the Redis `oauth_flow:` record **at consent/mint time** (what the user actually consented to) — never re-read `tool_registry` at callback time. Document the consent→callback scope-change-during-enrollment TOCTOU as a known limitation requiring re-enrollment. | MEDIUM |
-| **C7** | `EnrollmentConsentPayload` single-use MUST NOT reuse `consume_consent_token()`/`mode_change_consent` (it would silently no-op or contaminate that table). Use **Redis GET+DEL** for the enrollment jti-burn; the signed payload is the durable audit attestation only. Keep the existing `ModeChangePayload` path behavior-identical. | HIGH |
-| **C8** | Unit test MUST assert a consent POST with invalid/expired CSRF or `client_id` mismatch emits a **synchronous `outcome=deny` / `CREDENTIAL_CONSENT_DENIED` audit before** the 4xx (INV-001), mirroring `test_invoke_tool_audits_deny_before_reraising_enrollment_error`. | MEDIUM |
-| **C9** | The migration adding `credential_store.scopes` MUST include an INV-011 comment confirming V006's existing `GRANT … TO proxy_app` already covers the new column (no new grant needed). | LOW (non-blocking) |
+| # | Condition | Severity | Status | Proof |
+|---|---|---|---|---|
+| **C4** | `POST /auth/enroll/{service}/consent` MUST derive `client_id` **exclusively from the server-side Redis consent record** (keyed by the CSRF token). It MUST NOT accept `client_id` from any client-supplied param (body/query/header). | HIGH | **CLOSED** | `test_c4_client_id_from_redis_not_body` — `oauth.py:enroll_consent()` reads `client_id` only from `json.loads(raw)` where `raw = await get_and_delete(redis, consent_key)` |
+| **C5** | CSRF-token validation at POST MUST use **atomic GET+DEL** — a non-atomic GET-then-DEL allows double-submit → two Entra redirects on one consent. | HIGH | **CLOSED** | `test_get_and_delete_uses_getdel_not_pipeline`, `test_c5_csrf_single_use_second_post_rejected` — `redis_atomic.get_and_delete()` uses `redis.getdel()` (Redis ≥6.2); `oauth.py:enroll_consent()` calls it |
+| **C6** | The callback UPSERT MUST write `scopes` from the value stored in the Redis `oauth_flow:` record **at consent/mint time**, never re-read `tool_registry` at callback time. TOCTOU documented as known limitation. | MEDIUM | **CLOSED** | `test_c6_callback_stores_scopes_from_flow_record` — `oauth.py:callback()` reads `consented_scopes = flow.get("scopes", "")` and writes it to `credential_store.scopes` |
+| **C7** | `EnrollmentConsentPayload` single-use MUST NOT reuse `consume_consent_token()`/`mode_change_consent`. Use **Redis GET+DEL**; signed payload is durable audit attestation only. Keep `ModeChangePayload` behavior-identical. | HIGH | **CLOSED** | `test_enrollment_payload_does_not_use_mode_change_consent_table` (AST-strips docstrings); `test_mode_change_*` regression guard (4 tests); `consent.py:issue_enrollment_consent_token` + `verify_enrollment_consent_token` have no DB interaction |
+| **C8** | Unit test MUST assert a consent POST with invalid/expired CSRF emits a **synchronous `outcome=deny` / `CREDENTIAL_CONSENT_DENIED` audit before** the 4xx (INV-001). | MEDIUM | **CLOSED** | `test_c8_invalid_csrf_emits_deny_audit_before_4xx` — `_emit_consent_denied_audit` mock captured and verified called before HTTP response |
+| **C9** | The migration adding `credential_store.scopes` MUST include an INV-011 comment confirming V006's existing `GRANT … TO proxy_app` covers the new column. | LOW (non-blocking) | **CLOSED** | `V024__credential_store_scopes.sql` — explicit comment cites V006 grant |
 
-No merge of R-5 code until C4–C8 are closed. **Build order enforced: R-5 (this) before R-3b (ADR-002)** — merging R-3b without R-5 green would land the link-token on a blank Entra redirect with no consent/scope gate, a *worse* posture than today's unsigned URL.
+**Build order enforced: R-5 (this) before R-3b (ADR-002)** — merging R-3b without R-5 green would land the link-token on a blank Entra redirect with no consent/scope gate, a *worse* posture than today's unsigned URL.
+
+### Implementation summary (2026-06-09)
+
+- `proxy/app/core/redis_atomic.py` — `get_and_delete()` using `redis.getdel()` (C5)
+- `proxy/app/services/consent.py` — `EnrollmentConsentPayload` + `issue_enrollment_consent_token` + `verify_enrollment_consent_token` added; `ModeChangePayload` path unchanged (C7)
+- `proxy/app/routers/oauth.py` — `GET /auth/enroll/{svc}` renders consent HTML (D1); `POST /auth/enroll/{svc}/consent` is the new gate (C4/C5/C8/D2); callback UPSERT now scope-aware (C6); `_emit_consent_denied_audit` + `_emit_consent_grant_audit` added (C8/INV-001)
+- `infra/db/migrations/V024__credential_store_scopes.sql` — adds `scopes TEXT NOT NULL DEFAULT ''` with INV-011 comment (C9)
+- `proxy/requirements.txt` — `python-multipart==0.0.32` added (required for Form data)
+- `proxy/tests/unit/test_enrollment_consent_gate.py` — 30 new tests, all green
+- `proxy/tests/unit/test_oauth_router.py` — `test_enroll_mints_nonce_and_pkce` updated to `test_enroll_renders_consent_page` (reflects new D1/D2 behavior)

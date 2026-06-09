@@ -68,12 +68,18 @@ async def test_enroll_without_identity_is_401():
 
 
 @pytest.mark.unit
-async def test_enroll_mints_nonce_and_pkce():
-    """CB-003/011: enroll stores a server-side nonce and sends an S256 challenge."""
+async def test_enroll_renders_consent_page():
+    """
+    R-5 / D1 / D2: GET /auth/enroll/{svc} now renders a consent page (200 HTML).
+    It does NOT immediately 302 to Entra — PKCE state is minted only after POST /consent.
+
+    Previously tested as 'test_enroll_mints_nonce_and_pkce' (CB-003/011), which
+    expected a 302. Updated to match the consent-gate design (ADR-003 D1/D2).
+    """
     fake_redis = _FakeRedis()
-    redis_pool = MagicMock()
-    redis_pool.client = fake_redis
-    with patch("app.core.redis_client.redis_pool", redis_pool), \
+    redis_pool_mock = MagicMock()
+    redis_pool_mock.client = fake_redis
+    with patch("app.core.redis_client.redis_pool", redis_pool_mock), \
          patch("app.routers.oauth._get_adapter", return_value=_FakeAdapter()):
         async with _client() as c:
             resp = await c.get(
@@ -81,17 +87,20 @@ async def test_enroll_mints_nonce_and_pkce():
                 headers={"X-Client-Cert-CN": "alice@corp"},
                 follow_redirects=False,
             )
-    assert resp.status_code == 302
-    loc = resp.headers["location"]
-    assert "code_challenge=" in loc and "code_challenge=None" not in loc
-    # exactly one pending-flow record was written, keyed by the nonce == state
-    assert len(fake_redis.store) == 1
-    stored_key = next(iter(fake_redis.store))
-    nonce = stored_key.split("oauth_flow:")[-1]
-    assert f"state={nonce}" in loc
-    flow = json.loads(fake_redis.store[stored_key])
-    assert flow["client_id"] == "alice@corp" and flow["service"] == "m365"
-    assert len(nonce) >= 32  # unguessable
+    # D1: must return HTML consent page, NOT a 302 redirect to Entra
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers.get("content-type", "")
+    # D2: a pending enroll_consent: record is written (keyed by CSRF token)
+    consent_keys = [k for k in fake_redis.store if k.startswith("enroll_consent:")]
+    assert len(consent_keys) == 1, (
+        f"D2: exactly one enroll_consent: record; found {consent_keys}"
+    )
+    record = json.loads(fake_redis.store[consent_keys[0]])
+    assert record["client_id"] == "alice@corp"
+    assert record["service"] == "m365"
+    # D2: NO oauth_flow: (PKCE state) written at GET time — only after POST /consent
+    pkce_keys = [k for k in fake_redis.store if k.startswith("oauth_flow:")]
+    assert not pkce_keys, f"D2: oauth_flow: must not be written at GET time; found {pkce_keys}"
 
 
 @pytest.mark.unit

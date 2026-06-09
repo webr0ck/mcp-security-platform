@@ -13,6 +13,22 @@ Token: signed JWT-like dict with:
 
 Single-use: jti burned in mode_change_consent.consumed_at on first consume.
 An admin PATCH that changes mode/cred without a valid, matching, unconsumed consent → 409.
+
+--- R-5 EXTENSION (2026-06-09) ---
+
+Added EnrollmentConsentPayload for OAuth enrollment consent gate (ADR-003).
+
+PAYLOAD SEPARATION (C7):
+  ModeChangePayload  — server_registry mode transitions; single-use jti burned
+                       in mode_change_consent DB table via consume_consent_token().
+  EnrollmentConsentPayload — OAuth enrollment consent; single-use jti burned in
+                       Redis via get_and_delete() (NOT consume_consent_token / the
+                       mode_change_consent table — which would silently no-op or
+                       contaminate that table).
+
+The signed EnrollmentConsentPayload is the DURABLE AUDIT ATTESTATION only.
+In-flow single-use enforcement is handled by the Redis enroll_consent: key
+consumed atomically at POST /auth/enroll/{svc}/consent (C5).
 """
 from __future__ import annotations
 
@@ -146,6 +162,117 @@ def verify_consent_token(
     field_names = {f.name for f in dataclass_fields(ConsentPayload)}
     kwargs = {k: payload.get(k) for k in field_names}
     return ConsentPayload(**kwargs)
+
+
+# =============================================================================
+# R-5: EnrollmentConsentPayload — OAuth enrollment durable audit attestation
+# =============================================================================
+
+@dataclass(frozen=True)
+class EnrollmentConsentPayload:
+    """
+    Durable signed attestation for an OAuth enrollment consent (R-5, ADR-003 D4).
+
+    Fields:
+      client_id    — MCP client that requested enrollment (from server-side session)
+      service      — OAuth service (e.g. "m365")
+      scopes_hash  — SHA-256 hex of the canonical (sorted, space-separated) scopes
+                     (INV-002: never raw scopes in a signed/stored token)
+      jti          — unique token id (single-use guard; burned in Redis via get_and_delete)
+      iat          — issued-at Unix timestamp
+      exp          — expiry Unix timestamp
+
+    Single-use enforcement: the in-flow CSRF/single-use check is done by the Redis
+    enroll_consent: key consumed atomically at POST /consent (C5). This payload is
+    the durable audit record only — NOT burned in mode_change_consent (C7).
+    """
+    client_id: str
+    service: str
+    scopes_hash: str
+    jti: str
+    iat: int
+    exp: int
+
+
+def _canonical_scopes(scopes: list[str]) -> str:
+    """Return a canonical (sorted, lowercased, space-separated) scope string."""
+    return " ".join(sorted(s.lower() for s in scopes if s))
+
+
+def _scopes_hash(scopes: list[str]) -> str:
+    """Return SHA-256 hex of the canonical scope string (INV-002)."""
+    return hashlib.sha256(_canonical_scopes(scopes).encode()).hexdigest()
+
+
+def issue_enrollment_consent_token(
+    client_id: str,
+    service: str,
+    scopes: list[str],
+    ttl_seconds: int = 300,  # 5 minutes — matches enroll_consent: Redis TTL
+) -> tuple[str, str]:
+    """
+    Issue a signed EnrollmentConsentPayload token.
+
+    Returns (token_str, jti).
+
+    Signs with HMAC-SHA256 over canonical JSON using PROXY_SECRET_KEY.
+    Stores scopes_hash (not raw scopes) per INV-002.
+
+    C7: single-use enforcement is Redis-side (enroll_consent: key consumed via
+    get_and_delete at POST /consent). This token is the durable audit record only.
+    See module docstring for the payload separation design.
+    """
+    jti = secrets.token_hex(16)
+    now = int(time.time())
+    payload: dict = {
+        "type": "enrollment_consent",
+        "client_id": client_id,
+        "service": service,
+        "scopes_hash": _scopes_hash(scopes),
+        "jti": jti,
+        "iat": now,
+        "exp": now + ttl_seconds,
+    }
+    payload_json = json.dumps(payload, sort_keys=True)
+    sig = hmac.new(_get_signing_key().encode(), payload_json.encode(), "sha256").hexdigest()
+    return f"{payload_json}.{sig}", jti
+
+
+def verify_enrollment_consent_token(token: str) -> EnrollmentConsentPayload:
+    """
+    Verify and decode an EnrollmentConsentPayload token.
+    Raises ConsentTokenError subclass on any failure.
+
+    C7: does NOT burn a jti in any DB table. In-flow single-use enforcement is
+    handled by the caller via Redis get_and_delete on the enroll_consent: key.
+    See module docstring for the payload separation design.
+    """
+    try:
+        payload_json, sig = token.rsplit(".", 1)
+    except ValueError:
+        raise ConsentTokenError("Malformed enrollment consent token")
+
+    expected_sig = hmac.new(
+        _get_signing_key().encode(), payload_json.encode(), "sha256"
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        raise ConsentTokenMismatchError("Enrollment consent token signature invalid")
+
+    payload = json.loads(payload_json)
+    now = int(time.time())
+    if payload.get("exp", 0) <= now:
+        raise ConsentTokenExpiredError("Enrollment consent token has expired")
+    if payload.get("type") != "enrollment_consent":
+        raise ConsentTokenMismatchError("Token type mismatch: expected enrollment_consent")
+
+    return EnrollmentConsentPayload(
+        client_id=payload["client_id"],
+        service=payload["service"],
+        scopes_hash=payload["scopes_hash"],
+        jti=payload["jti"],
+        iat=payload["iat"],
+        exp=payload["exp"],
+    )
 
 
 async def consume_consent_token(jti: str) -> bool:
