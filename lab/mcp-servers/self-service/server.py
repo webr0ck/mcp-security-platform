@@ -18,6 +18,7 @@ All mutations write to mcp_profiles + mcp_profile_events (audit trail).
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ from typing import Optional
 import asyncpg
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware.base import BaseHTTPMiddleware
 
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
@@ -38,6 +40,33 @@ DB_DSN = os.environ.get(
 )
 
 log = logging.getLogger("self-service-mcp")
+
+# ContextVars populated by _IdentityMiddleware for each request.
+# The proxy injects X-User-Sub and X-User-Role HTTP headers; tools read from these
+# vars so the proxy-verified identity is used regardless of what the client puts
+# in the MCP arguments (prevents caller_sub spoofing).
+_ctx_caller_sub: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_ctx_caller_sub", default="anonymous"
+)
+_ctx_caller_role: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_ctx_caller_role", default="agent"
+)
+
+
+class _IdentityMiddleware(BaseHTTPMiddleware):
+    """Populate identity ContextVars from proxy-injected HTTP headers."""
+
+    async def dispatch(self, request, call_next):
+        sub = request.headers.get("x-user-sub", "anonymous")
+        role = request.headers.get("x-user-role", "agent")
+        tok_sub = _ctx_caller_sub.set(sub)
+        tok_role = _ctx_caller_role.set(role)
+        try:
+            return await call_next(request)
+        finally:
+            _ctx_caller_sub.reset(tok_sub)
+            _ctx_caller_role.reset(tok_role)
+
 
 mcp = FastMCP("self-service-mcp")
 
@@ -173,18 +202,19 @@ async def _discover_mcp_functions(mcp_name: str, upstream_url: str) -> list[str]
 
 @mcp.tool()
 async def list_available_mcps(
-    caller_sub: str = "anonymous",
     include_disabled: bool = False,
 ) -> dict:
     """
     List all MCP servers available on the platform with their enabled status for this account.
 
+    Identity is resolved from the X-User-Sub header injected by the proxy.
+
     Args:
-        caller_sub: The caller's identity (proxy injects this via X-User-Sub).
         include_disabled: If true, include MCPs the caller has explicitly disabled.
 
     Returns compact JSON: {mcps: [{name, description, status, enabled_for_account}]}
     """
+    caller_sub = _ctx_caller_sub.get()
     registry = await _list_registry_mcps()
     pool = await _get_pool()
 
@@ -214,20 +244,20 @@ async def list_available_mcps(
 
 @mcp.tool()
 async def get_profile(
-    caller_sub: str = "anonymous",
     target_profile: Optional[str] = None,
-    caller_role: str = "agent",
 ) -> dict:
     """
     Get the complete permission profile for an identity.
 
-    Args:
-        caller_sub: The caller's own identity (injected by proxy).
-        target_profile: Profile to retrieve. Defaults to caller_sub. Admin required for others.
-        caller_role: The caller's role (injected by proxy via X-User-Role).
+    Identity is resolved from the X-User-Sub and X-User-Role headers injected by the proxy.
 
-    Returns: {profile_id, mcps: [{name, enabled, allowed_functions, functions_discovered}]}
+    Args:
+        target_profile: Profile to retrieve. Defaults to caller identity. Admin/auditor required for others.
+
+    Returns: {profile_id, mcps: [{name, enabled, allowed_functions}]}
     """
+    caller_sub = _ctx_caller_sub.get()
+    caller_role = _ctx_caller_role.get()
     profile_id = target_profile or caller_sub
     if profile_id != caller_sub and caller_role not in ("admin", "platform_admin", "auditor"):
         return {"error": "forbidden", "detail": "Only admin/auditor can view other profiles"}
@@ -270,21 +300,21 @@ async def get_profile(
 @mcp.tool()
 async def enable_mcp(
     mcp_name: str,
-    caller_sub: str = "anonymous",
     target_profile: Optional[str] = None,
-    caller_role: str = "agent",
 ) -> dict:
     """
     Enable an MCP server for an account. Idempotent.
 
+    Identity is resolved from the X-User-Sub and X-User-Role headers injected by the proxy.
+
     Args:
         mcp_name: Name of the MCP to enable (must exist in tool_registry).
-        caller_sub: Caller's identity (proxy-injected).
-        target_profile: Profile to modify. Defaults to caller_sub. Admin required for others.
-        caller_role: Caller's role (proxy-injected).
+        target_profile: Profile to modify. Defaults to caller identity. Admin required for others.
 
     Returns: {ok: true, profile_id, mcp_name, enabled: true}
     """
+    caller_sub = _ctx_caller_sub.get()
+    caller_role = _ctx_caller_role.get()
     profile_id = target_profile or caller_sub
     if profile_id != caller_sub and caller_role not in ("admin", "platform_admin"):
         return {"error": "forbidden", "detail": "Only admin can modify other profiles"}
@@ -317,21 +347,21 @@ async def enable_mcp(
 @mcp.tool()
 async def disable_mcp(
     mcp_name: str,
-    caller_sub: str = "anonymous",
     target_profile: Optional[str] = None,
-    caller_role: str = "agent",
 ) -> dict:
     """
     Disable an MCP server for an account.
 
+    Identity is resolved from the X-User-Sub and X-User-Role headers injected by the proxy.
+
     Args:
         mcp_name: Name of the MCP to disable.
-        caller_sub: Caller's identity (proxy-injected).
-        target_profile: Profile to modify. Defaults to caller_sub. Admin required for others.
-        caller_role: Caller's role (proxy-injected).
+        target_profile: Profile to modify. Defaults to caller identity. Admin required for others.
 
     Returns: {ok: true, profile_id, mcp_name, enabled: false}
     """
+    caller_sub = _ctx_caller_sub.get()
+    caller_role = _ctx_caller_role.get()
     profile_id = target_profile or caller_sub
     if profile_id != caller_sub and caller_role not in ("admin", "platform_admin"):
         return {"error": "forbidden", "detail": "Only admin can modify other profiles"}
@@ -362,20 +392,20 @@ async def disable_mcp(
 @mcp.tool()
 async def list_functions(
     mcp_name: str,
-    caller_sub: str = "anonymous",
 ) -> dict:
     """
     List all functions exposed by an MCP server, with enabled status for this account.
 
     Discovers functions by querying the upstream MCP server directly.
+    Identity is resolved from the X-User-Sub header injected by the proxy.
     Falls back to an empty list if the upstream is unreachable.
 
     Args:
         mcp_name: Name of the MCP server.
-        caller_sub: Caller's identity.
 
     Returns: {mcp_name, functions: [{name, enabled}], allowed_functions_policy}
     """
+    caller_sub = _ctx_caller_sub.get()
     pool = await _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -411,9 +441,7 @@ async def list_functions(
 async def enable_function(
     mcp_name: str,
     function_name: str,
-    caller_sub: str = "anonymous",
     target_profile: Optional[str] = None,
-    caller_role: str = "agent",
 ) -> dict:
     """
     Enable a specific function on an MCP server for a profile.
@@ -422,13 +450,15 @@ async def enable_function(
     this is a no-op (all functions already permitted). To restrict to a specific
     set, first call disable_function for each unwanted function.
 
+    Identity is resolved from the X-User-Sub and X-User-Role headers injected by the proxy.
+
     Args:
         mcp_name: MCP server name.
         function_name: Function to enable.
-        caller_sub: Caller's identity.
-        target_profile: Profile to modify. Defaults to caller_sub.
-        caller_role: Caller's role.
+        target_profile: Profile to modify. Defaults to caller identity. Admin required for others.
     """
+    caller_sub = _ctx_caller_sub.get()
+    caller_role = _ctx_caller_role.get()
     profile_id = target_profile or caller_sub
     if profile_id != caller_sub and caller_role not in ("admin", "platform_admin"):
         return {"error": "forbidden"}
@@ -467,9 +497,7 @@ async def enable_function(
 async def disable_function(
     mcp_name: str,
     function_name: str,
-    caller_sub: str = "anonymous",
     target_profile: Optional[str] = None,
-    caller_role: str = "agent",
 ) -> dict:
     """
     Disable a specific function on an MCP server for a profile.
@@ -478,13 +506,15 @@ async def disable_function(
     discovers all available functions and builds a restricted list excluding
     the one being disabled.
 
+    Identity is resolved from the X-User-Sub and X-User-Role headers injected by the proxy.
+
     Args:
         mcp_name: MCP server name.
         function_name: Function to disable.
-        caller_sub: Caller's identity.
-        target_profile: Profile to modify. Defaults to caller_sub.
-        caller_role: Caller's role.
+        target_profile: Profile to modify. Defaults to caller identity. Admin required for others.
     """
+    caller_sub = _ctx_caller_sub.get()
+    caller_role = _ctx_caller_role.get()
     profile_id = target_profile or caller_sub
     if profile_id != caller_sub and caller_role not in ("admin", "platform_admin"):
         return {"error": "forbidden"}
@@ -534,4 +564,5 @@ if __name__ == "__main__":
     from mcp.server.transport_security import TransportSecuritySettings
     mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     app = mcp.streamable_http_app()
+    app.add_middleware(_IdentityMiddleware)
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

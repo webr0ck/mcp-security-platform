@@ -139,8 +139,11 @@ async def wait_for_vault(max_wait: int = 60) -> None:
 
 def setup_vault_secret() -> str:
     """
-    Enable KV v2 at 'secret/' if needed, then write the broker master secret.
-    Returns the written hex value (not stored; only printed to confirm success).
+    Enable KV v2 at 'secret/' if needed. Read existing master secret if present,
+    only generate a new one on first run. Returning the same secret across runs
+    ensures credential_store blobs remain decryptable.
+
+    Returns the hex master secret value.
     """
     client = hvac.Client(url=VAULT_ADDR, token=VAULT_TOKEN)
 
@@ -163,13 +166,25 @@ def setup_vault_secret() -> str:
         else:
             raise
 
-    master_value = os.urandom(32).hex()
-
-    # BROKER_MASTER_SECRET_PATH is 'secret/data/mcp/broker-master'
-    # hvac KV v2 write uses the path WITHOUT the 'data/' prefix.
-    # Strip leading 'secret/data/' and use 'mcp/broker-master' as the kv path.
     kv_path = BROKER_MASTER_SECRET_PATH.removeprefix("secret/data/")
 
+    # Read existing secret first — only write a new one if the path is empty.
+    # Overwriting on every seeder run would invalidate all credential_store blobs
+    # that were encrypted against the previous master secret.
+    try:
+        existing = client.secrets.kv.v2.read_secret_version(
+            path=kv_path,
+            mount_point="secret",
+            raise_on_deleted_version=True,
+        )
+        master_value = existing["data"]["data"].get("master_secret", "")
+        if master_value:
+            log.info("Broker master secret already exists in Vault — reusing")
+            return master_value
+    except Exception:
+        pass  # Not found or deleted — fall through to generate a new one
+
+    master_value = os.urandom(32).hex()
     client.secrets.kv.v2.create_or_update_secret(
         path=kv_path,
         secret={"master_secret": master_value},
@@ -193,6 +208,124 @@ async def run_sql_file(conn: asyncpg.Connection, sql_file: Path) -> None:
     except Exception as exc:
         log.error("Error executing %s: %s", sql_file.name, exc)
         raise
+
+
+def _encrypt_credential(
+    plaintext: str,
+    user_sub: str,
+    master_bytes: bytes,
+    *,
+    service: str,
+    tool_id: str,
+    owner_type: str,
+) -> bytes:
+    """
+    Inline replica of proxy/app/credential_broker/approaches/approach_a.encrypt().
+    Must stay byte-for-byte compatible with the proxy's decrypt() function.
+    Format: salt(32B) || nonce(12B) || AES-256-GCM ciphertext+tag
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    _HKDF_INFO_PREFIX = b"mcp-credential-broker-kek-v2:"
+    _AAD_PREFIX = "mcp-cred-v2"
+
+    salt = os.urandom(32)
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=_HKDF_INFO_PREFIX + user_sub.encode(),
+    )
+    kek = bytearray(hkdf.derive(master_bytes))
+    try:
+        nonce = os.urandom(12)
+        aad = f"{_AAD_PREFIX}|{user_sub}|{service}|{tool_id}|{owner_type}".encode()
+        ct = AESGCM(bytes(kek)).encrypt(nonce, plaintext.encode(), aad)
+        return salt + nonce + ct
+    finally:
+        for i in range(len(kek)):
+            kek[i] = 0
+
+
+async def store_service_credential(
+    conn: asyncpg.Connection,
+    master_hex: str,
+    service_name: str,
+    tool_name: str,
+    token: str,
+) -> None:
+    """
+    Encrypt `token` and upsert it into credential_store as a service-mode row.
+    The proxy's _inject_service_credential() will decrypt it at call time.
+    """
+    row = await conn.fetchrow(
+        "SELECT tool_id FROM tool_registry WHERE name=$1 AND deleted_at IS NULL",
+        tool_name,
+    )
+    if not row:
+        log.error("Tool '%s' not found in registry — cannot store credential", tool_name)
+        return
+
+    tool_id = str(row["tool_id"])
+    master_bytes = bytes.fromhex(master_hex)
+    blob = _encrypt_credential(
+        token,
+        "__service__",
+        master_bytes,
+        service=service_name,
+        tool_id=tool_id,
+        owner_type="service",
+    )
+
+    await conn.execute(
+        """
+        INSERT INTO credential_store
+            (user_sub, service, tool_id, owner_type, credential_type, encrypted_blob)
+        VALUES ('__service__', $1, $2::uuid, 'service', 'api_key', $3)
+        ON CONFLICT (tool_id, service) WHERE owner_type = 'service' AND tool_id IS NOT NULL
+        DO UPDATE SET
+            encrypted_blob = EXCLUDED.encrypted_blob,
+            updated_at = now()
+        """,
+        service_name,
+        tool_id,
+        blob,
+    )
+    log.info(
+        "Service credential stored: tool=%s service=%s tool_id=%s",
+        tool_name, service_name, tool_id,
+    )
+
+
+def _write_env_var(env_file: str, key: str, value: str) -> None:
+    """
+    Upsert KEY=value in env_file. If the key exists (even empty), replace its line.
+    If absent, append. Only updates when the value is non-empty.
+    """
+    if not value:
+        return
+    try:
+        lines = open(env_file).readlines() if os.path.exists(env_file) else []
+    except OSError:
+        lines = []
+
+    prefix = f"{key}="
+    replaced = False
+    new_lines = []
+    for line in lines:
+        if line.startswith(prefix):
+            new_lines.append(f"{key}={value}\n")
+            replaced = True
+        else:
+            new_lines.append(line)
+    if not replaced:
+        new_lines.append(f"{key}={value}\n")
+
+    with open(env_file, "w") as f:
+        f.writelines(new_lines)
+    log.info("Updated %s: %s=<token>", env_file, key)
 
 
 async def fix_oidc_issuer_placeholder(conn: asyncpg.Connection) -> int:
@@ -585,10 +718,11 @@ async def main() -> None:
     log.info("Waiting for Vault...")
     await wait_for_vault(max_wait=60)
 
-    # 3. Write broker master secret to Vault
-    log.info("Writing broker master secret to Vault...")
+    # 3. Write broker master secret to Vault (idempotent — reads existing if present)
+    log.info("Setting up broker master secret in Vault...")
+    master_hex: Optional[str] = None
     try:
-        setup_vault_secret()
+        master_hex = setup_vault_secret()
         results["vault"] = "OK"
     except Exception as exc:
         log.error("Vault secret write failed: %s", exc)
@@ -630,12 +764,16 @@ async def main() -> None:
         log.error("Placeholder API key revocation failed: %s", exc)
         results["placeholder_key_revoke"] = f"FAILED: {exc}"
 
-    await conn.close()
-
     # 6. Create Grafana service account + token
     log.info("Creating Grafana service account and API token...")
     grafana_token = await create_grafana_token()
     results["grafana"] = "OK" if grafana_token else "FAILED or skipped"
+    if grafana_token:
+        # Grafana MCP server reads GRAFANA_SERVICE_ACCOUNT_TOKEN from env.
+        # Write the token back to .env.lab so the next 'podman-compose up' picks it up.
+        env_lab = str(Path(__file__).parent.parent.parent / ".env.lab")
+        _write_env_var(env_lab, "GRAFANA_SERVICE_ACCOUNT_TOKEN", grafana_token)
+        results["grafana_env"] = "OK (written to .env.lab)"
 
     # 7. Create NetBox API token
     log.info("Creating NetBox API token...")
@@ -645,11 +783,31 @@ async def main() -> None:
         "SKIPPED (LAB_NETBOX_ADMIN_TOKEN not set)" if not LAB_NETBOX_ADMIN_TOKEN
         else "FAILED"
     )
+    if netbox_token:
+        env_lab = str(Path(__file__).parent.parent.parent / ".env.lab")
+        _write_env_var(env_lab, "NETBOX_TOKEN", netbox_token)
+        results["netbox_env"] = "OK (written to .env.lab)"
 
     # 8. Create Gitea API token
     log.info("Creating Gitea API token...")
     gitea_token = await create_gitea_token()
     results["gitea"] = "OK" if gitea_token else "FAILED"
+    if gitea_token:
+        env_lab = str(Path(__file__).parent.parent.parent / ".env.lab")
+        _write_env_var(env_lab, "GITEA_ADMIN_TOKEN", gitea_token)
+        results["gitea_env"] = "OK (written to .env.lab)"
+        # Gitea MCP server supports header-based injection; store in credential_store.
+        if master_hex and results.get("tools_sql") == "OK":
+            try:
+                conn2 = await wait_for_postgres(max_wait=10)
+                await store_service_credential(conn2, master_hex, "gitea", "gitea-repos", gitea_token)
+                await conn2.close()
+                results["gitea_cred_store"] = "OK"
+            except Exception as exc:
+                log.error("Gitea credential_store write failed: %s", exc)
+                results["gitea_cred_store"] = f"FAILED: {exc}"
+
+    await conn.close()
 
     # 9. Keycloak hardening (idempotent — resets passwords, removes attacker users, disables ROPC)
     log.info("Hardening Keycloak realm state...")
@@ -664,24 +822,27 @@ async def main() -> None:
         icon = "OK" if status == "OK" else "!!"
         print(f"  [{icon}] {step:<20} {status}")
 
-    print("\nEnv vars to copy to .env.lab (if not already set):")
+    print("\nTokens created and written to .env.lab (restart compose to apply):")
     if grafana_token:
-        print(f"  GRAFANA_ADMIN_TOKEN=<printed above>")
+        print("  GRAFANA_SERVICE_ACCOUNT_TOKEN — written")
     else:
-        print("  GRAFANA_ADMIN_TOKEN=<not created — check logs>")
+        print("  GRAFANA_SERVICE_ACCOUNT_TOKEN — NOT created (check logs)")
     if netbox_token:
-        print("  NETBOX_ADMIN_TOKEN=<printed above>")
+        print("  NETBOX_TOKEN — written")
     elif not LAB_NETBOX_ADMIN_TOKEN:
         print(
-            "  LAB_NETBOX_ADMIN_TOKEN=<set this to an existing NetBox admin token, "
-            "then re-run seeder to generate NETBOX_ADMIN_TOKEN>"
+            "  NETBOX_TOKEN — SKIPPED (set LAB_NETBOX_ADMIN_TOKEN to an existing "
+            "NetBox admin token and re-run seeder)"
         )
     else:
-        print("  NETBOX_ADMIN_TOKEN=<not created — check logs>")
+        print("  NETBOX_TOKEN — NOT created (check logs)")
     if gitea_token:
-        print("  GITEA_ADMIN_TOKEN=<printed above>")
+        print("  GITEA_ADMIN_TOKEN — written + stored in credential_store")
     else:
-        print("  GITEA_ADMIN_TOKEN=<not created — check logs>")
+        print("  GITEA_ADMIN_TOKEN — NOT created (check logs)")
+    print()
+    print("After seeder completes: podman-compose -f podman-compose.lab.yml restart")
+    print("to reload env vars into mcp-grafana, mcp-netbox, mcp-gitea containers.")
     print("=" * 60)
 
 

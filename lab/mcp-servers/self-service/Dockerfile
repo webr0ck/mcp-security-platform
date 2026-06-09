@@ -3,7 +3,7 @@ FROM python:3.12.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "mcp[cli]>=1.0.0" uvicorn asyncpg httpx
+RUN pip install --no-cache-dir "mcp[cli]>=1.0.0" uvicorn asyncpg httpx starlette
 
 COPY server.py .
 

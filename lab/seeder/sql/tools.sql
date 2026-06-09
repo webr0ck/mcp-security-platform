@@ -8,7 +8,9 @@
 -- and V010 (injection_mode) migrations to have run.
 -- =============================================================================
 
--- ── Grafana — dynamic per-user token via GrafanaAdapter (Approach B) ──────────
+-- ── Grafana — no proxy injection; grafana/mcp-grafana reads GRAFANA_SERVICE_ACCOUNT_TOKEN env ──
+-- Third-party image: cannot read injected Authorization header. Token is set in
+-- compose env (GRAFANA_SERVICE_ACCOUNT_TOKEN) by the lab seeder.
 INSERT INTO tool_registry (
     tool_id, name, version, description, schema, upstream_url,
     status, risk_level, risk_score, risk_reasons,
@@ -21,9 +23,11 @@ INSERT INTO tool_registry (
     '{"type":"object","properties":{"query":{"type":"string"}}}'::jsonb,
     'http://lab-mcp-grafana:8000/mcp',
     'active', 'low', 10, '[]'::jsonb,
-    'lab-seeder', 'grafana', 'B', 'service', 'Authorization', 'Bearer '
+    'lab-seeder', null, null, 'none', null, null
 ),
--- ── NetBox — dynamic per-user token via NetboxAdapter (Approach B) ────────────
+-- ── NetBox — no proxy injection; netbox-mcp-server reads NETBOX_TOKEN env ────────────────────
+-- Third-party library: cannot read injected Authorization header. Token is set in
+-- compose env (NETBOX_TOKEN) by the lab seeder.
 (
     gen_random_uuid(),
     'netbox-query', '1.0.0',
@@ -31,7 +35,7 @@ INSERT INTO tool_registry (
     '{"type":"object","properties":{"resource":{"type":"string"}}}'::jsonb,
     'http://mcp-netbox:8000/mcp',
     'active', 'low', 10, '[]'::jsonb,
-    'lab-seeder', 'netbox', 'B', 'service', 'Authorization', 'Token '
+    'lab-seeder', null, null, 'none', null, null
 ),
 -- ── Dex — per-user OAuth2 token (Approach A) ──────────────────────────────────
 (
