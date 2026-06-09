@@ -234,7 +234,10 @@ async def invoke_tool(
     # -------------------------------------------------------------------------
     # Step 4: Forward to upstream MCP server
     # -------------------------------------------------------------------------
-    from app.credential_broker.dispatcher import CredentialInjectionError
+    from app.credential_broker.dispatcher import (
+        CredentialInjectionError,
+        CredentialEnrollmentRequiredError,
+    )
 
     extra_headers: dict[str, str] = {}
     credential = None
@@ -258,20 +261,29 @@ async def invoke_tool(
                 # None for non-OIDC callers → that mode fails closed downstream.
                 user_kc_token=user_kc_token,
             )
-        except CredentialInjectionError:
+        except CredentialInjectionError as _cred_exc:
             # INV-001: a credential refusal on the auth boundary (e.g. user not
             # enrolled for delegated access, missing service secret, broker down)
             # is a security-relevant DENY and MUST be audited — parity with the
             # OPA-stage deny above. Without this the only signal is a -32603 to
             # the caller and no audit trail. Emit, then re-raise so the actionable
             # message still reaches the caller.
+            #
+            # Task 4: distinguish "user not enrolled" from "broker down / secret
+            # missing" so the audit trail (and TTFF metric) can tell them apart.
+            # INV-002: injection_mode is kept as the second element; no token value
+            # is ever placed in deny_reasons.
+            if isinstance(_cred_exc, CredentialEnrollmentRequiredError):
+                _deny_primary = "enrollment_required"
+            else:
+                _deny_primary = "credential_injection_failed"
             await _emit_audit_event(
                 tool_id=str(tool_id),
                 tool_name=tool_name,
                 tool_version=tool_record.get("version"),
                 client_id=client_id,
                 outcome="deny",
-                deny_reasons=["credential_injection_failed", injection_mode],
+                deny_reasons=[_deny_primary, injection_mode],
                 request_id=request_id,
                 latency_ms=0,
                 anomaly_score=anomaly_score,
