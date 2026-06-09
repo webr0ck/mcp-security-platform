@@ -568,20 +568,20 @@ async def _emit_credential_audit(request: Request, client_id: str, service: str)
             await conn.execute(
                 text(
                     """
+                    -- audit_events has no event_type column; event semantics live in
+                    -- tool_name + the sha256 preimage + structured logs. event_ts/
+                    -- created_at default to now(). Matches invocation.py._emit_audit_event.
                     INSERT INTO audit_events (
-                        event_id, event_type, created_at,
-                        client_id, tool_name,
+                        event_id, client_id, tool_name,
                         outcome, request_id, sha256_hash, latency_ms
                     ) VALUES (
-                        :event_id, 'CREDENTIAL_ENROLLED', :ts,
-                        :client_id, :tool_name,
+                        :event_id, :client_id, :tool_name,
                         'allow', :request_id, :sha256_hash, 0
                     )
                     """
                 ),
                 {
                     "event_id": event_id,
-                    "ts": ts,
                     "client_id": client_id,
                     "tool_name": f"credential:{service}",
                     "request_id": request_id,
@@ -625,22 +625,21 @@ async def _emit_consent_grant_audit(
             await conn.execute(
                 text(
                     """
+                    -- No event_type column (see _emit_credential_audit). outcome=allow
+                    -- + tool_name=consent:{service} distinguishes the consent grant.
                     INSERT INTO audit_events (
-                        event_id, event_type, created_at,
-                        client_id, tool_name,
+                        event_id, client_id, tool_name,
                         outcome, request_id, sha256_hash, latency_ms
                     ) VALUES (
-                        :event_id, 'CREDENTIAL_CONSENT', :ts,
-                        :client_id, :tool_name,
+                        :event_id, :client_id, :tool_name,
                         'allow', :request_id, :sha256_hash, 0
                     )
                     """
                 ),
                 {
                     "event_id": event_id,
-                    "ts": ts,
                     "client_id": client_id,
-                    "tool_name": f"credential:{service}",
+                    "tool_name": f"consent:{service}",
                     "request_id": request_id,
                     "sha256_hash": sha256_hash,
                 },
@@ -683,23 +682,22 @@ async def _emit_consent_denied_audit(
             await conn.execute(
                 text(
                     """
+                    -- No event_type column (see _emit_credential_audit). The deny
+                    -- reason is carried in the sha256 preimage + structured log;
+                    -- tool_name=consent:{service}, outcome=deny.
                     INSERT INTO audit_events (
-                        event_id, event_type, created_at,
-                        client_id, tool_name,
+                        event_id, client_id, tool_name,
                         outcome, request_id, sha256_hash, latency_ms
                     ) VALUES (
-                        :event_id, :event_type, :ts,
-                        :client_id, :tool_name,
+                        :event_id, :client_id, :tool_name,
                         :outcome, :request_id, :sha256_hash, 0
                     )
                     """
                 ),
                 {
                     "event_id": event_id,
-                    "event_type": event_type,
-                    "ts": ts,
                     "client_id": client_id,
-                    "tool_name": f"credential:{service}",
+                    "tool_name": f"consent:{service}",
                     "outcome": outcome,
                     "request_id": request_id,
                     "sha256_hash": sha256_hash,
