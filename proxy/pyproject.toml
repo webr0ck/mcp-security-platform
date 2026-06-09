@@ -13,6 +13,7 @@ dependencies = [
     # Web framework
     "fastapi==0.115.12",
     "uvicorn[standard]==0.34.3",
+    "python-multipart==0.0.32",          # FastAPI Form() — R-5 consent POST (oauth.py enroll_consent)
     "pydantic==2.11.5",
     "pydantic-settings==2.9.1",
 

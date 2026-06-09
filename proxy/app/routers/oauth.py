@@ -359,9 +359,44 @@ async def enroll_consent(
 
     consent = json.loads(raw)
 
-    # C4: client_id comes ONLY from the Redis record, never from the request
-    client_id: str = consent["client_id"]
+    # C4: the enrollment binding uses the Redis-stored client_id, never a request param.
+    record_client_id: str = consent["client_id"]
     consented_scopes: str = consent.get("requested_scopes", "")
+
+    # SEC (AppSec commit-review HIGH — CSRF token not bound to session): a valid CSRF
+    # token is necessary but NOT sufficient. The POST must come from the SAME
+    # authenticated identity that initiated the GET; otherwise a leaked/redirected
+    # consent token could be redeemed by another (or unauthenticated) caller and bind
+    # the victim's credential. This is ADR-003 D2's "re-confirm client_id ==
+    # request.state.client_id". Emit a deny audit (INV-001) then 401/403.
+    # R-3b NOTE: when the signed link-token flow (ADR-002) lands, the unauthenticated
+    # fresh-browser case is satisfied by matching the link-token's bound client_id here.
+    try:
+        session_client_id = _authenticated_client_id(request)
+    except HTTPException:
+        await _emit_consent_denied_audit(
+            request=request,
+            client_id=record_client_id,
+            service=service,
+            reason="unauthenticated_consent_post",
+            outcome="deny",
+            event_type="CREDENTIAL_CONSENT_DENIED",
+        )
+        raise
+    if session_client_id != record_client_id:
+        await _emit_consent_denied_audit(
+            request=request,
+            client_id=session_client_id,
+            service=service,
+            reason="consent_session_mismatch",
+            outcome="deny",
+            event_type="CREDENTIAL_CONSENT_DENIED",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Consent record does not belong to the authenticated client.",
+        )
+    client_id: str = record_client_id
 
     # Service must match (guard against cross-service CSRF replay)
     if consent.get("service") != service:

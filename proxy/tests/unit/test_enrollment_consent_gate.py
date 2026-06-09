@@ -469,6 +469,50 @@ class TestConsentPost:
             )
 
     @pytest.mark.asyncio
+    async def test_sec_consent_session_mismatch_rejected_and_audited(self):
+        """
+        SEC (AppSec commit-review HIGH — CSRF token not bound to session): a valid
+        CSRF token presented by a DIFFERENT authenticated identity than the one that
+        initiated the GET must be rejected (403) with a synchronous deny audit, and
+        MUST NOT mint a PKCE flow. Prevents a leaked/redirected consent token from
+        binding the victim's credential to another caller's Entra account.
+        """
+        # Consent record was created for the victim.
+        csrf, record = _build_consent_store(client_id="victim@corp")
+        fake = _FakeRedis(store={f"enroll_consent:{csrf}": json.dumps(record)})
+        pool = _make_redis_pool(fake)
+        audit_calls: list[dict] = []
+
+        async def _capture_audit(*_args, **kwargs):
+            audit_calls.append(kwargs)
+
+        with patch("app.core.redis_client.redis_pool", pool), \
+             patch("app.routers.oauth._get_adapter", return_value=_FakeAdapter()), \
+             patch("app.routers.oauth._emit_consent_grant_audit", new=AsyncMock()), \
+             patch("app.routers.oauth._emit_consent_denied_audit",
+                   AsyncMock(side_effect=_capture_audit)):
+            async with _client() as c:
+                # Attacker is authenticated as themselves, redeems the victim's token.
+                resp = await c.post(
+                    "/auth/enroll/m365/consent",
+                    data={"csrf_token": csrf},
+                    headers={"X-Client-Cert-CN": "attacker@evil"},
+                    follow_redirects=False,
+                )
+
+        assert resp.status_code == 403, (
+            f"session mismatch must return 403, got {resp.status_code}"
+        )
+        assert audit_calls, "INV-001: a deny audit must be emitted before the 403"
+        kw = audit_calls[0]
+        assert kw.get("reason") == "consent_session_mismatch", (
+            f"deny audit must record the mismatch reason; got {kw}"
+        )
+        assert not [k for k in fake.store if k.startswith("oauth_flow:")], (
+            "no PKCE flow may be minted when the consent session does not match"
+        )
+
+    @pytest.mark.asyncio
     async def test_c5_csrf_single_use_second_post_rejected(self):
         """
         C5: CSRF token is single-use — second POST with the same token must be rejected.
