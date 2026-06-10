@@ -5,15 +5,22 @@ CRUD endpoints for the server_registry table.
 Platform admins register and approve MCP server endpoints.
 Approval locks the injection_mode and records the owner.
 
-GET  /api/v1/admin/servers            — list all servers (platform_admin)
-POST /api/v1/admin/servers            — register a new server (platform_admin)
-GET  /api/v1/admin/servers/{id}       — get a server (platform_admin)
-PATCH /api/v1/admin/servers/{id}      — update server metadata (platform_admin)
-DELETE /api/v1/admin/servers/{id}     — soft-delete (platform_admin; sets deleted_at, status→suspended)
-POST /api/v1/admin/servers/{id}/approve — approve a pending server (platform_admin + owner consent token)
+Admin endpoints:
+  GET  /api/v1/admin/servers            — list all servers (platform_admin)
+  POST /api/v1/admin/servers            — register a new server (platform_admin)
+  GET  /api/v1/admin/servers/{id}       — get a server (platform_admin)
+  PATCH /api/v1/admin/servers/{id}      — update server metadata (platform_admin)
+  DELETE /api/v1/admin/servers/{id}     — soft-delete (platform_admin; sets deleted_at, status→suspended)
+  POST /api/v1/admin/servers/{id}/approve — approve a pending server (platform_admin + owner consent token)
 
-POST /api/v1/servers/{id}/consent     — mint owner consent token (server_owner or platform_admin)
-GET /api/v1/servers                   — list approved servers visible to authenticated caller (any role)
+Self-service registration (Task 7):
+  POST /api/v1/servers                  — self-service registration (server_owner or platform_admin)
+
+Server approval flow (D3 dual-control):
+  POST /api/v1/servers/{id}/consent     — mint owner consent token (server_owner or platform_admin)
+
+List approved:
+  GET /api/v1/servers                   — list approved servers visible to authenticated caller (any role)
 
 Consent flow (D3 dual-control):
   1. Server owner calls POST /api/v1/servers/{id}/consent → receives a single-use consent_token (15 min TTL)
@@ -28,6 +35,7 @@ import datetime
 import hashlib
 import logging
 import re
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -44,6 +52,12 @@ from app.services.consent import (
     persist_consent_token,
     verify_approve_consent_token,
 )
+from app.services.server_onboarding import (
+    InvalidOnboardingConfig,
+    validate_mode_and_idp,
+    validate_upstream_url_ssrf,
+    validate_upstream_idp_config,
+)
 from app.services.ssrf import SSRFError, validate_server_url
 from app.credential_broker.adapters.healthcheck import get_healthcheck, HealthcheckFailed
 
@@ -58,6 +72,73 @@ def _require_platform_admin(request: Request) -> None:
     roles = getattr(request.state, "client_roles", [])
     if not any(r in _ADMIN_ROLES for r in roles):
         raise HTTPException(status_code=403, detail="platform_admin role required")
+
+
+def _require_server_owner_or_admin(request: Request) -> None:
+    """Enforce server_owner or platform_admin role."""
+    roles = getattr(request.state, "client_roles", [])
+    _allowed = {"server_owner", "platform_admin", "admin"}
+    if not any(r in _allowed for r in roles):
+        raise HTTPException(status_code=403, detail="server_owner or platform_admin role required")
+
+
+async def _emit_registration_audit(
+    server_id: str,
+    service_name: str,
+    client_id: str,
+    outcome: str,
+    request_id: str,
+) -> None:
+    """
+    Emit a synchronous audit event for server registration (INV-001).
+
+    Args:
+        server_id: UUID of the registered server
+        service_name: service_name from the registration request
+        client_id: authenticated caller's client_id
+        outcome: 'allow' or 'deny'
+        request_id: request tracking ID
+
+    Raises:
+        RuntimeError if audit emission fails (caller must convert to 500)
+    """
+    import json
+    try:
+        async with AsyncSessionLocal() as db:
+            event_id = str(uuid.uuid4())
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO audit_events (
+                        event_id, event_type, client_id, tool_name,
+                        outcome, request_id, sha256_hash, latency_ms
+                    ) VALUES (
+                        :event_id, 'SERVER_REGISTRATION', :client_id, :service_name,
+                        :outcome, :request_id, :hash, 0
+                    )
+                    """
+                ),
+                {
+                    "event_id": event_id,
+                    "client_id": client_id,
+                    "service_name": service_name,
+                    "outcome": outcome,
+                    "request_id": request_id,
+                    "hash": hashlib.sha256(json.dumps({"server_id": server_id}).encode()).hexdigest(),
+                },
+            )
+            await db.commit()
+        logger.info(
+            "server_registration_audited event_id=%s server_id=%s service_name=%s "
+            "client_id=%s outcome=%s",
+            event_id, server_id, service_name, client_id, outcome,
+        )
+    except Exception as exc:
+        logger.error(
+            "audit_emission_failed server_id=%s service_name=%s client_id=%s: %s",
+            server_id, service_name, client_id, exc,
+        )
+        raise RuntimeError(f"Audit emission failed: {exc}") from exc
 
 
 class ServerCreate(BaseModel):
@@ -80,6 +161,40 @@ class ServerUpdate(BaseModel):
     name: Optional[str] = None
     upstream_url: Optional[str] = None
     service_name: Optional[str] = None
+
+
+class ServerRegister(BaseModel):
+    """
+    Request body for POST /api/v1/servers — self-service registration by server_owner.
+
+    service_name: human-readable service name (e.g., "gitea", "m365")
+    upstream_url: HTTPS URL to the upstream MCP server
+    injection_mode: token injection mode (user, service, service_account, none, etc.)
+    upstream_idp_type: optional IdP type for OAuth flows (gateway_idp, entra, etc.)
+    upstream_idp_config: optional dict with IdP configuration (issuer, client_id, scopes)
+    adapter_name: optional adapter name for health checks (gitea, m365, etc.)
+    """
+    service_name: str
+    upstream_url: str
+    injection_mode: str = "none"
+    upstream_idp_type: Optional[str] = None
+    upstream_idp_config: Optional[dict] = None
+    adapter_name: Optional[str] = None
+
+    @field_validator("service_name")
+    @classmethod
+    def validate_service_name(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("service_name must not be empty")
+        return v.strip()
+
+    @field_validator("injection_mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        valid = {"none", "service", "user", "service_account", "oauth_user_token", "entra_user_token", "entra_client_credentials"}
+        if v not in valid:
+            raise ValueError(f"injection_mode must be one of {valid}")
+        return v
 
 
 class ConsentRequest(BaseModel):
@@ -373,6 +488,129 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
         "approved_by": approver,
         "consent_jti": consent_payload.jti,
     })
+
+
+@router.post("/api/v1/servers", status_code=201)
+async def register_server_self_service(body: ServerRegister, request: Request):
+    """
+    Self-service server registration by server_owner role (Task 7).
+
+    Roles: server_owner, platform_admin
+
+    Validates:
+      1. Caller has server_owner or platform_admin role (RBAC)
+      2. injection_mode ↔ upstream_idp_type compatibility (validate_mode_and_idp)
+      3. upstream_url is HTTPS and not private IP (validate_upstream_url_ssrf)
+      4. upstream_idp_config structure if provided (validate_upstream_idp_config)
+
+    Creates server_registry row with status='pending' awaiting admin approval.
+
+    INV-001: Audit event emitted BEFORE 201 response.
+
+    Args:
+        body: ServerRegister with service_name, upstream_url, injection_mode, etc.
+        request: FastAPI request context
+
+    Returns:
+        201 JSON: {"server_id": "<uuid>", "service_name": "...", "status": "pending"}
+
+    Raises:
+        403: Missing server_owner or platform_admin role
+        400: Invalid registration config (mode↔IdP, SSRF, IdP config)
+        500: Audit emission failed
+    """
+    # RBAC: Require server_owner or platform_admin
+    _require_server_owner_or_admin(request)
+
+    # Get request metadata
+    client_id = getattr(request.state, "client_id", "unknown")
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+    # Validation 1: Injection mode ↔ IdP type compatibility
+    try:
+        validate_mode_and_idp(
+            injection_mode=body.injection_mode,
+            upstream_idp_type=body.upstream_idp_type,
+            upstream_idp_config=body.upstream_idp_config,
+        )
+    except InvalidOnboardingConfig as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid mode/IdP config: {exc}") from exc
+
+    # Validation 2: IdP configuration structure
+    if body.upstream_idp_type:
+        try:
+            validate_upstream_idp_config(
+                upstream_idp_type=body.upstream_idp_type,
+                upstream_idp_config=body.upstream_idp_config,
+            )
+        except InvalidOnboardingConfig as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid IdP config: {exc}") from exc
+
+    # Validation 3: Upstream URL SSRF check (async)
+    try:
+        await validate_upstream_url_ssrf(body.upstream_url)
+    except InvalidOnboardingConfig as exc:
+        raise HTTPException(status_code=400, detail=f"SSRF validation failed: {exc}") from exc
+
+    # Generate server_id and emit audit BEFORE database insert (INV-001)
+    server_id = str(uuid.uuid4())
+    try:
+        await _emit_registration_audit(
+            server_id=server_id,
+            service_name=body.service_name,
+            client_id=client_id,
+            outcome="allow",
+            request_id=request_id,
+        )
+    except RuntimeError as exc:
+        logger.error(f"Audit emission failed: {exc}")
+        raise HTTPException(status_code=500, detail="Audit emission failed") from exc
+
+    # Create server_registry row with status='pending'
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            text(
+                """
+                INSERT INTO server_registry (
+                    server_id, service_name, upstream_url, injection_mode,
+                    upstream_idp_type, upstream_idp_config, adapter_name,
+                    owner_sub, status
+                ) VALUES (
+                    :server_id, :service_name, :upstream_url, :injection_mode::injection_mode_enum,
+                    :upstream_idp_type, :upstream_idp_config::jsonb, :adapter_name,
+                    :owner_sub, 'pending'
+                )
+                RETURNING server_id, service_name, status, created_at
+                """
+            ),
+            {
+                "server_id": server_id,
+                "service_name": body.service_name,
+                "upstream_url": body.upstream_url,
+                "injection_mode": body.injection_mode,
+                "upstream_idp_type": body.upstream_idp_type,
+                "upstream_idp_config": body.upstream_idp_config,
+                "adapter_name": body.adapter_name,
+                "owner_sub": client_id,
+            },
+        )
+        await db.commit()
+        row = result.fetchone()
+
+    logger.info(
+        "server_registered_pending server_id=%s service_name=%s "
+        "owner_sub=%s injection_mode=%s",
+        server_id, body.service_name, client_id, body.injection_mode,
+    )
+
+    return JSONResponse(
+        {
+            "server_id": str(row.server_id),
+            "service_name": row.service_name,
+            "status": row.status,
+        },
+        status_code=201,
+    )
 
 
 @router.get("/api/v1/servers")
