@@ -116,3 +116,35 @@ def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
         raise
     except OSError:
         pass  # DNS failure — allow (don't block registration because DNS is flaky)
+
+
+async def check_hostname_dns(hostname: str) -> list[str]:
+    """
+    Resolve hostname to IP addresses.
+
+    Phase 3 Hardening: DNS resolution failure raises ValueError (fail-closed).
+    This prevents TOCTOU and DNS rebind attacks at registration time.
+
+    Args:
+        hostname: str hostname to resolve
+
+    Returns:
+        list of IP address strings
+
+    Raises:
+        ValueError: if DNS resolution fails or returns no addresses
+        OSError: on unexpected socket errors
+    """
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = await loop.getaddrinfo(hostname, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(f"DNS resolution failed for {hostname}: {e}") from e
+    except OSError as e:
+        raise ValueError(f"Cannot resolve hostname {hostname}: {e}") from e
+
+    if not result:
+        raise ValueError(f"no address found for {hostname}")
+
+    return [r[4][0] for r in result]
