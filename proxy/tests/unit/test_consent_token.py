@@ -448,9 +448,9 @@ class TestApproveServerConsent:
         from app.routers.server_registry import ApproveBody
         return ApproveBody(consent_token=token)
 
-    def _server_row(self, url: str = "http://safe-server.internal", owner: str = _OWNER_SUB):
+    def _server_row(self, url: str = "https://safe-server.internal", owner: str = _OWNER_SUB, adapter_name = None):
         row = MagicMock()
-        row.__getitem__ = lambda self, i: [url, owner][i]
+        row.__getitem__ = lambda self, i: [url, owner, adapter_name][i]
         return row
 
     @pytest.mark.unit

@@ -45,6 +45,7 @@ from app.services.consent import (
     verify_approve_consent_token,
 )
 from app.services.ssrf import SSRFError, validate_server_url
+from app.credential_broker.adapters.healthcheck import get_healthcheck, HealthcheckFailed
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -295,7 +296,7 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     async with AsyncSessionLocal() as db:
         url_row = await db.execute(
             text(
-                "SELECT upstream_url, owner_sub FROM server_registry "
+                "SELECT upstream_url, owner_sub, adapter_name FROM server_registry "
                 "WHERE server_id = :id AND deleted_at IS NULL"
             ),
             {"id": server_id},
@@ -309,6 +310,20 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
         raise HTTPException(status_code=422, detail=f"SSRF validation failed: {exc}") from exc
 
     owner_sub = url_record[1]
+    adapter_name = url_record[2]
+
+    # Task 6: Adapter healthcheck at approval
+    # Verify the upstream server is reachable before marking as approved.
+    # If the server has an adapter_name, validate it's healthy via healthcheck.
+    if adapter_name:
+        try:
+            healthcheck_adapter = get_healthcheck(adapter_name, url_record[0])
+            await healthcheck_adapter.healthcheck()
+        except HealthcheckFailed as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Healthcheck failed: {exc}",
+            ) from exc
 
     # D3 dual-control: verify the consent token before committing the state change.
     # verify_approve_consent_token raises ConsentTokenError subclasses on any failure.
