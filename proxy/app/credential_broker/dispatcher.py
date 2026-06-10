@@ -142,6 +142,7 @@ async def dispatch_credential_injection(
 
         case InjectionMode.ENTRA_CLIENT_CREDENTIALS:
             return await _inject_entra_client_credentials(
+                tool_record=tool_record,
                 inject_header=inject_header,
                 inject_prefix=inject_prefix,
             )
@@ -318,29 +319,81 @@ async def _inject_oauth_user_token(
 
 
 async def _inject_entra_client_credentials(
+    tool_record: dict[str, Any],
     inject_header: str,
     inject_prefix: str,
 ) -> dict[str, str]:
     """
     Obtain an app-only Microsoft Graph access token via Azure AD client_credentials grant.
 
-    Reads AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET from the environment.
-    Caches the token for 50 minutes (tokens are valid for 1 hour).
-    No credential_store entry needed — credentials come from the runtime environment.
-    """
-    import os
-    import httpx
+    Reads Entra client credentials from vault-backed credential_store via credential_id
+    in the tool_record. Credentials are stored as encrypted JSON:
+      {"tenant_id": "...", "client_id": "...", "client_secret": "..."}
 
-    tenant_id = os.environ.get("AZURE_TENANT_ID") or os.environ.get("ENTRA_TENANT_ID")
-    client_id = os.environ.get("AZURE_CLIENT_ID") or os.environ.get("ENTRA_CLIENT_ID")
-    client_secret = os.environ.get("AZURE_CLIENT_SECRET") or os.environ.get("ENTRA_CLIENT_SECRET")
+    Caches the token for 50 minutes (tokens are valid for 1 hour).
+    Fail-closed: if credential_id is missing or credential_store lookup fails, raise.
+    """
+    import httpx
+    from app.services.credential_storage import retrieve_credential
+    from app.services.invocation import broker_instance
+
+    # Step 1: Get credential_id from tool_record
+    credential_id = tool_record.get("credential_id")
+    if not credential_id:
+        raise CredentialInjectionError(
+            f"entra_client_credentials: tool {tool_record.get('tool_id')} "
+            "has no credential_id; refusing to forward unauthenticated request"
+        )
+
+    # Step 2: Fetch broker's Vault client and DB pool to retrieve credential
+    if broker_instance is None:
+        raise CredentialInjectionError(
+            "entra_client_credentials: credential broker not initialized; "
+            "cannot retrieve Entra credential from vault-backed credential_store"
+        )
+
+    vault_client = broker_instance.vault_client
+    db_pool = broker_instance.db_pool
+
+    if not vault_client or not db_pool:
+        raise CredentialInjectionError(
+            "entra_client_credentials: broker has no vault_client or db_pool; "
+            "cannot retrieve credential from credential_store"
+        )
+
+    # Step 3: Retrieve encrypted credential from credential_store
+    try:
+        credential_dict = await retrieve_credential(
+            credential_id=credential_id,
+            user_sub="__service__",  # Service-owned credential
+            service="entra",
+            tool_id=tool_record.get("tool_id"),
+            owner_type="service",
+            vault_client=vault_client,
+            db_pool=db_pool,
+        )
+    except KeyError:
+        raise CredentialInjectionError(
+            f"entra_client_credentials: credential_id {credential_id} not found in credential_store; "
+            "refusing to forward unauthenticated request"
+        ) from None
+    except Exception as exc:
+        raise CredentialInjectionError(
+            f"entra_client_credentials: credential_store retrieval failed for {credential_id}: {exc}"
+        ) from exc
+
+    # Step 4: Extract tenant_id, client_id, client_secret from decrypted credential
+    tenant_id = credential_dict.get("tenant_id")
+    client_id = credential_dict.get("client_id")
+    client_secret = credential_dict.get("client_secret")
 
     if not all([tenant_id, client_id, client_secret]):
         raise CredentialInjectionError(
-            "entra_client_credentials: AZURE_TENANT_ID / AZURE_CLIENT_ID / "
-            "AZURE_CLIENT_SECRET not set in environment; refusing to forward unauthenticated request"
+            f"entra_client_credentials: credential {credential_id} missing required fields "
+            "(tenant_id, client_id, client_secret); refusing to forward unauthenticated request"
         )
 
+    # Step 5: Check cache before calling Entra
     cache_key = f"{tenant_id}:{client_id}"
     cached = _entra_token_cache.get(cache_key)
     if cached:
@@ -348,6 +401,7 @@ async def _inject_entra_client_credentials(
         if time.monotonic() < expires_at:
             return {inject_header: f"{inject_prefix} {token}".strip()}
 
+    # Step 6: Exchange credentials for access token via Entra
     token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
