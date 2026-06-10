@@ -113,10 +113,12 @@ async def lifespan(app: FastAPI):
 
     # Step 5: Initialize OPA data sync service (push grants to OPA immediately)
     from app.services.opa_data_sync import OPADataSync
+    from app.services import opa_data_sync as opa_data_sync_svc
     opa_data_sync = None
     try:
         pool = asyncpg_pool.get()
         opa_data_sync = OPADataSync(db_pool=pool)
+        opa_data_sync_svc.opa_data_sync_instance = opa_data_sync
         # Initial push of grants to OPA (fail-logged, continues on error)
         try:
             await opa_data_sync.push_grants()

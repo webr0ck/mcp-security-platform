@@ -19,6 +19,11 @@ Ownership model:
 INV-001: every mutation emits a synchronous audit event BEFORE responding.
          If the audit emit fails, return 500 — never silently skip.
 
+Task 11: Entitlement mutations trigger OPA push (fail-closed).
+  - After DB commit, call push_grants() to sync to OPA.
+  - If push_grants() fails, return 503 — never allow through.
+  - Injection: OPADataSync via Depends().
+
 Never hard-delete entitlements — soft-revoke only (revoked_at = now()).
 """
 from __future__ import annotations
@@ -29,13 +34,15 @@ import logging
 from typing import Literal, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
 from app.core.database import engine as _db_engine
+from app.services.opa_data_sync import OPADataSync
+from app.services.policy import PolicyEngineError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Entitlements"])
@@ -46,6 +53,41 @@ _OWNER_ROLES = frozenset({"server_owner", "manager"})
 _PLATFORM_ADMIN_ROLES = frozenset({"platform_admin", "admin"})
 
 _VALID_PRINCIPAL_TYPES = frozenset({"human", "agent", "kc_group"})
+
+
+# ---------------------------------------------------------------------------
+# Dependency injection
+# ---------------------------------------------------------------------------
+
+async def get_opa_data_sync_dependency() -> OPADataSync:
+    """
+    FastAPI dependency for OPADataSync.
+
+    Returns the module-level opa_data_sync_instance initialized during app startup.
+    Raises HTTPException(503) if OPADataSync is not available.
+    """
+    from app.services import opa_data_sync as opa_data_sync_svc
+
+    if opa_data_sync_svc.opa_data_sync_instance is None:
+        raise HTTPException(
+            status_code=503,
+            detail="OPA data sync service unavailable",
+        )
+    return opa_data_sync_svc.opa_data_sync_instance
+
+
+# Helper for non-FastAPI contexts (tests, direct calls)
+def _get_opa_data_sync() -> OPADataSync | None:
+    """
+    Get the OPADataSync instance from the module-level singleton.
+
+    Returns the module-level opa_data_sync_instance initialized during app startup.
+    Returns None if OPADataSync is not available (graceful degradation).
+    Used by tests and direct function calls.
+    """
+    from app.services import opa_data_sync as opa_data_sync_svc
+
+    return opa_data_sync_svc.opa_data_sync_instance
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +313,7 @@ async def grant_entitlement(
     server_id: str,
     body: EntitlementGrantBody,
     request: Request,
+    opa_data_sync: OPADataSync = Depends(get_opa_data_sync_dependency),
 ):
     """
     Grant an entitlement on a server to a principal.
@@ -284,6 +327,8 @@ async def grant_entitlement(
 
     Allowed: owner-of-{server_id}, platform_admin.
     INV-001: audit BEFORE response.
+    Task 11: After DB commit, call push_grants() to sync entitlements to OPA.
+             If push_grants() fails, return 503 (fail-closed).
     """
     await _require_server_owner(server_id, request)
 
@@ -341,6 +386,19 @@ async def grant_entitlement(
                 except RuntimeError as exc:
                     raise HTTPException(status_code=500, detail=str(exc)) from exc
                 await db.commit()
+
+                # Task 11: Push grants to OPA (fail-closed)
+                try:
+                    await opa_data_sync.push_grants()
+                except PolicyEngineError as exc:
+                    logger.error(
+                        "Failed to push grants to OPA after un-revoke",
+                        extra={"entitlement_id": ent_id, "error": str(exc)},
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"OPA sync failed: {exc}",
+                    ) from exc
             else:
                 # Already active: no DB mutation, but still audit the re-grant attempt.
                 # INV-001: audit before returning the response.
@@ -356,6 +414,19 @@ async def grant_entitlement(
                     )
                 except RuntimeError as exc:
                     raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+                # Task 11: Even for re-grant (no DB change), push to OPA to ensure sync
+                try:
+                    await opa_data_sync.push_grants()
+                except PolicyEngineError as exc:
+                    logger.error(
+                        "Failed to push grants to OPA after re-grant attempt",
+                        extra={"entitlement_id": ent_id, "error": str(exc)},
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"OPA sync failed: {exc}",
+                    ) from exc
 
             # Fetch the current row state to return
             result = await db.execute(
@@ -426,6 +497,20 @@ async def grant_entitlement(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         await db.commit()
+
+        # Task 11: Push grants to OPA (fail-closed)
+        try:
+            await opa_data_sync.push_grants()
+        except PolicyEngineError as exc:
+            logger.error(
+                "Failed to push grants to OPA after new grant",
+                extra={"entitlement_id": ent_id, "error": str(exc)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"OPA sync failed: {exc}",
+            ) from exc
+
         return JSONResponse(_serialize_row(dict(new_row)), status_code=201)
 
 
@@ -434,12 +519,15 @@ async def revoke_entitlement(
     server_id: str,
     ent_id: str,
     request: Request,
+    opa_data_sync: OPADataSync = Depends(get_opa_data_sync_dependency),
 ):
     """
     Soft-revoke an entitlement. Sets revoked_at = now(). Never hard-deletes.
 
     Allowed: owner-of-{server_id}, platform_admin.
     INV-001: audit BEFORE response.
+    Task 11: After DB commit, call push_grants() to sync revoke to OPA.
+             If push_grants() fails, return 503 (fail-closed).
     Returns 404 if the entitlement does not belong to this server or is already revoked.
     """
     await _require_server_owner(server_id, request)
@@ -486,6 +574,19 @@ async def revoke_entitlement(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         await db.commit()
+
+        # Task 11: Push grants to OPA (fail-closed)
+        try:
+            await opa_data_sync.push_grants()
+        except PolicyEngineError as exc:
+            logger.error(
+                "Failed to push grants to OPA after revoke",
+                extra={"entitlement_id": ent_id, "error": str(exc)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"OPA sync failed: {exc}",
+            ) from exc
 
     return JSONResponse(
         {

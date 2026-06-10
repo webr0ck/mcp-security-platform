@@ -206,3 +206,7 @@ class OPADataSync:
 
         self._reconcile_task = None
         logger.info("OPA reconcile loop stopped")
+
+
+# Module-level singleton — initialized by app lifespan, injected for tests.
+opa_data_sync_instance: OPADataSync | None = None

@@ -545,10 +545,14 @@ class TestINV001AuditBeforeResponse:
         async def _fake_audit(**kwargs):
             audit_called.append(kwargs["event_type"])
 
+        # Mock OPA data sync (Task 11)
+        mock_opa_sync = AsyncMock()
+        mock_opa_sync.push_grants = AsyncMock()
+
         with patch("app.routers.entitlements.AsyncSessionLocal", return_value=mock_db), \
              patch("app.routers.entitlements._require_server_owner", new=AsyncMock()), \
              patch("app.routers.entitlements._emit_entitlement_audit", side_effect=_fake_audit):
-            response = await grant_entitlement(SERVER_ID, body, req)
+            response = await grant_entitlement(SERVER_ID, body, req, opa_data_sync=mock_opa_sync)
 
         assert len(audit_called) == 1
         assert audit_called[0] == "entitlement_granted"
@@ -636,10 +640,14 @@ class TestINV001AuditBeforeResponse:
         async def _fake_audit(**kwargs):
             audit_called.append(kwargs["event_type"])
 
+        # Mock OPA data sync (Task 11)
+        mock_opa_sync = AsyncMock()
+        mock_opa_sync.push_grants = AsyncMock()
+
         with patch("app.routers.entitlements.AsyncSessionLocal", return_value=mock_db), \
              patch("app.routers.entitlements._require_server_owner", new=AsyncMock()), \
              patch("app.routers.entitlements._emit_entitlement_audit", side_effect=_fake_audit):
-            response = await revoke_entitlement(SERVER_ID, ENT_ID, req)
+            response = await revoke_entitlement(SERVER_ID, ENT_ID, req, opa_data_sync=mock_opa_sync)
 
         assert len(audit_called) == 1
         assert audit_called[0] == "entitlement_revoked"
@@ -728,10 +736,14 @@ class TestINV001AuditBeforeResponse:
         async def _fake_audit(**kwargs):
             audit_called.append(kwargs["event_type"])
 
+        # Mock OPA data sync (Task 11)
+        mock_opa_sync = AsyncMock()
+        mock_opa_sync.push_grants = AsyncMock()
+
         with patch("app.routers.entitlements.AsyncSessionLocal", return_value=mock_db), \
              patch("app.routers.entitlements._require_server_owner", new=AsyncMock()), \
              patch("app.routers.entitlements._emit_entitlement_audit", side_effect=_fake_audit):
-            response = await grant_entitlement(SERVER_ID, body, req)
+            response = await grant_entitlement(SERVER_ID, body, req, opa_data_sync=mock_opa_sync)
 
         assert len(audit_called) == 1
         assert audit_called[0] == "entitlement_granted"
@@ -795,10 +807,14 @@ class TestINV001AuditBeforeResponse:
         async def _fake_audit(**kwargs):
             audit_called.append(kwargs["event_type"])
 
+        # Mock OPA data sync (Task 11)
+        mock_opa_sync = AsyncMock()
+        mock_opa_sync.push_grants = AsyncMock()
+
         with patch("app.routers.entitlements.AsyncSessionLocal", return_value=mock_db), \
              patch("app.routers.entitlements._require_server_owner", new=AsyncMock()), \
              patch("app.routers.entitlements._emit_entitlement_audit", side_effect=_fake_audit):
-            response = await grant_entitlement(SERVER_ID, body, req)
+            response = await grant_entitlement(SERVER_ID, body, req, opa_data_sync=mock_opa_sync)
 
         assert len(audit_called) == 1
         assert audit_called[0] == "entitlement_granted"
