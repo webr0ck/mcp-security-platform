@@ -13,6 +13,7 @@ Endpoints:
   POST   /api/v1/tools/{tool_id}/audit/rerun  — Re-run audit (admin only)
   GET    /api/v1/tools/{tool_id}/sbom    — Get SBOM (admin, auditor, readonly)
   POST   /api/v1/tools/{tool_id}/invoke  — Invoke a tool (agent, admin)
+  POST   /api/v1/servers/{server_id}/discover-tools  — Discover upstream tools (admin only, Task 13)
 """
 from __future__ import annotations
 
@@ -30,6 +31,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tools")
+# Also register under /servers for discovery endpoint
+servers_router = APIRouter(prefix="/servers")
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +440,7 @@ async def get_tool(
                        t.status, t.risk_score, t.risk_level, t.risk_reasons,
                        t.source_repo, t.source_commit, t.upstream_url,
                        t.tags, t.metadata, t.registered_by, t.created_at, t.updated_at,
-                       s.sbom_id, s.signature
+                       t.server_id, s.sbom_id, s.signature
                 FROM tool_registry t
                 LEFT JOIN sbom_records s ON s.tool_id = t.tool_id
                 WHERE t.tool_id = :tool_id AND t.deleted_at IS NULL
@@ -469,6 +472,7 @@ async def get_tool(
         "registered_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "sbom_ref": str(row.sbom_id) if row.sbom_id else None,
+        "server_id": str(row.server_id) if row.server_id else None,
     }
 
     if not is_readonly:
@@ -531,10 +535,10 @@ async def update_tool(
             },
         )
 
-    # Fetch current tool
+    # Fetch current tool (with server_id for Task 13)
     try:
         result = await db.execute(
-            text("SELECT status, sbom_id FROM tool_registry t LEFT JOIN sbom_records s ON s.tool_id = t.tool_id WHERE t.tool_id = :id AND t.deleted_at IS NULL ORDER BY s.generated_at DESC LIMIT 1"),
+            text("SELECT t.status, t.server_id, s.sbom_id FROM tool_registry t LEFT JOIN sbom_records s ON s.tool_id = t.tool_id WHERE t.tool_id = :id AND t.deleted_at IS NULL ORDER BY s.generated_at DESC LIMIT 1"),
             {"id": str(tool_id)},
         )
         row = result.fetchone()
@@ -1161,3 +1165,240 @@ async def invoke_tool(
                 }
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# POST /servers/{server_id}/discover-tools (Task 13)
+# ---------------------------------------------------------------------------
+@servers_router.post("/{server_id}/discover-tools", status_code=200)
+async def discover_tools(
+    server_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """
+    Discover tools from an approved upstream MCP server.
+
+    Calls the upstream server's /tools/list endpoint, registers returned tools
+    with status='quarantined' (INV-005 default), and returns discovery results.
+
+    Required role: admin (platform_admin)
+
+    Per Task 13 specification:
+    1. Verify server exists and status='approved' (404 if not)
+    2. Call upstream {server.upstream_url}/tools/list via MCP tools/list endpoint
+    3. For each tool returned:
+       - Check if (server_id, tool_name) already exists
+       - If new: INSERT into tool_registry with status='quarantined', server_id set
+       - If exists: skip (idempotent)
+    4. Return {"discovered": N, "tools": [...]}
+
+    INV-005: New tools start quarantined. No role exception.
+    """
+    import json
+    import logging
+    from sqlalchemy import text
+    import httpx
+
+    logger = logging.getLogger(__name__)
+
+    roles: list[str] = getattr(request.state, "client_roles", [])
+    client_id: str = getattr(request.state, "client_id", "unknown")
+
+    if "admin" not in roles and "platform_admin" not in roles:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "FORBIDDEN", "message": "Requires admin role."},
+        )
+
+    # Step 1: Fetch and validate server
+    try:
+        result = await db.execute(
+            text(
+                """
+                SELECT server_id, upstream_url, service_name, status
+                FROM server_registry
+                WHERE server_id = :server_id AND deleted_at IS NULL
+                LIMIT 1
+                """
+            ),
+            {"server_id": server_id},
+        )
+        server_row = result.fetchone()
+    except Exception as exc:
+        logger.error("discover_tools query error", extra={"error": str(exc)})
+        raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Query failed."})
+
+    if server_row is None:
+        raise HTTPException(404, {"code": "NOT_FOUND", "message": f"Server '{server_id}' not found."})
+
+    if server_row.status != "approved":
+        raise HTTPException(
+            403,
+            {
+                "code": "FORBIDDEN",
+                "message": f"Server must be approved to discover tools (status={server_row.status}).",
+            },
+        )
+
+    upstream_url = server_row.upstream_url
+
+    # Step 2: Call upstream server's /tools/list endpoint
+    # Format: POST {upstream_url} with MCP tools/list JSON-RPC request
+    try:
+        async with httpx.AsyncClient() as client:
+            # Initialize session (if needed by the upstream server)
+            init_payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "mcp-security-platform",
+                        "version": "1.0.0",
+                    },
+                },
+            }
+            init_resp = await client.post(upstream_url, json=init_payload, timeout=10)
+            init_resp.raise_for_status()
+
+            # Get tools/list (session_id from init may be needed)
+            session_id = init_resp.headers.get("Mcp-Session-Id")
+            tools_payload = {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            }
+            headers = {}
+            if session_id:
+                headers["Mcp-Session-Id"] = session_id
+
+            tools_resp = await client.post(upstream_url, json=tools_payload, headers=headers, timeout=10)
+            tools_resp.raise_for_status()
+            tools_data = tools_resp.json()
+
+    except httpx.TimeoutException as exc:
+        logger.warning(
+            "discover_tools upstream timeout",
+            extra={"server_id": server_id, "upstream_url": upstream_url, "error": str(exc)},
+        )
+        raise HTTPException(
+            503,
+            {"code": "UPSTREAM_UNAVAILABLE", "message": f"Upstream server unreachable: {exc}"},
+        )
+    except Exception as exc:
+        logger.error(
+            "discover_tools upstream call failed",
+            extra={"server_id": server_id, "upstream_url": upstream_url, "error": str(exc)},
+        )
+        raise HTTPException(
+            503,
+            {"code": "UPSTREAM_ERROR", "message": f"Failed to call upstream: {exc}"},
+        )
+
+    # Extract tools from MCP response
+    tools_list = tools_data.get("result", {}).get("tools", [])
+
+    # Step 3: Register each tool
+    discovered = 0
+    registered_tools = []
+
+    for tool_data in tools_list:
+        tool_name = tool_data.get("name")
+        if not tool_name:
+            logger.warning("Skipping tool with no name from upstream")
+            continue
+
+        # Check if already registered for this server
+        try:
+            dup_result = await db.execute(
+                text(
+                    """
+                    SELECT tool_id FROM tool_registry
+                    WHERE server_id = :server_id AND name = :name
+                    LIMIT 1
+                    """
+                ),
+                {"server_id": server_id, "name": tool_name},
+            )
+            if dup_result.fetchone() is not None:
+                logger.info(
+                    "Tool already registered for server",
+                    extra={"server_id": server_id, "tool_name": tool_name},
+                )
+                continue
+        except Exception as exc:
+            logger.error("duplicate check failed", extra={"error": str(exc)})
+            continue
+
+        # Insert new tool with status='quarantined' (INV-005)
+        try:
+            tool_id = str(uuid.uuid4())
+            description = tool_data.get("description", f"{tool_name} from {server_row.service_name}")
+            input_schema = tool_data.get("inputSchema", {"type": "object", "properties": {}})
+            risk_level = tool_data.get("risk", "medium")  # advisory, not enforced
+
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO tool_registry (
+                        tool_id, name, version, description, schema,
+                        upstream_url, server_id, status, risk_level, risk_score,
+                        risk_reasons, registered_by, created_at, updated_at
+                    ) VALUES (
+                        :tool_id, :name, :version, :description, CAST(:schema AS jsonb),
+                        :upstream_url, :server_id, 'quarantined', :risk_level, 20,
+                        CAST(:risk_reasons AS jsonb), :registered_by, NOW(), NOW()
+                    )
+                    """
+                ),
+                {
+                    "tool_id": tool_id,
+                    "name": tool_name,
+                    "version": "1.0.0",  # Tools from discovery are versioned 1.0.0
+                    "description": description,
+                    "schema": json.dumps(input_schema),
+                    "upstream_url": upstream_url,
+                    "server_id": server_id,
+                    "risk_level": risk_level,
+                    "risk_reasons": json.dumps(["discovered"]),
+                    "registered_by": client_id,
+                },
+            )
+            discovered += 1
+            registered_tools.append({
+                "tool_id": tool_id,
+                "name": tool_name,
+                "status": "quarantined",
+                "server_id": server_id,
+            })
+
+            logger.info(
+                "Tool discovered and registered",
+                extra={"tool_id": tool_id, "tool_name": tool_name, "server_id": server_id},
+            )
+
+        except Exception as exc:
+            logger.error(
+                "Tool registration failed",
+                extra={"tool_name": tool_name, "server_id": server_id, "error": str(exc)},
+            )
+            continue
+
+    # Commit all registrations
+    try:
+        await db.commit()
+    except Exception as exc:
+        logger.error("discover_tools commit failed", extra={"error": str(exc)})
+        raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Tool registration failed."})
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "discovered": discovered,
+            "tools": registered_tools,
+        },
+    )

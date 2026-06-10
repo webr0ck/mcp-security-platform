@@ -226,6 +226,7 @@ if settings.ENVIRONMENT == "development":
 # ============================================================================
 app.include_router(health.router, tags=["Health"])
 app.include_router(tools.router, prefix="/api/v1", tags=["Tools"])
+app.include_router(tools.servers_router, prefix="/api/v1", tags=["Tools"])
 app.include_router(policy.router, prefix="/api/v1", tags=["Policy"])
 app.include_router(compliance.router, prefix="/api/v1", tags=["Compliance"])
 app.include_router(anomaly.router, prefix="/api/v1", tags=["Anomaly"])
