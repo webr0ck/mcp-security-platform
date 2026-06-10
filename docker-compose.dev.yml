@@ -77,6 +77,11 @@ services:
     # local docker-compose.override.yml (never commit that file).
     ports:
       - "127.0.0.1:8181:8181"
+    # INV-012: development is the only environment where bundle signing is
+    # disabled. This override replaces the signed bundle.tar.gz command from
+    # docker-compose.yml with an unsigned read-only directory mount so that
+    # Rego file changes reload immediately (--watch) without needing to
+    # re-sign on every save. NEVER use this override in staging/production.
     command:
       - "run"
       - "--server"
@@ -84,13 +89,18 @@ services:
       - "--log-format=json"
       # Debug-level OPA logging shows every policy evaluation — useful for Rego dev
       - "--log-level=debug"
+      - "--set=decision_logs.console=true"
       - "--bundle"
       - "/policies"
       # --watch: OPA automatically reloads when policy files change on disk
       # This means policy edits take effect immediately in dev without restart.
       - "--watch"
       # Bundle signing DISABLED in development (per INV-012: development is exempt)
-      # DO NOT add --set=bundles.policies.signing.* here
+      # DO NOT add --verification-key or --signing-alg here
+    volumes:
+      # Unsigned read-only directory mount for hot-reload development.
+      # Overrides the signed bundle.tar.gz mount in docker-compose.yml.
+      - ./policies/rego:/policies:ro
 
   ollama:
     # Expose Ollama for direct model testing from host

@@ -181,9 +181,18 @@ services:
       - --authorization=basic
       - --log-level=info
       - --log-format=json
-      - /policies
+      - --set=decision_logs.console=true
+      # INV-012: signed bundle is the default. Run `make sign-policy-bundle`
+      # before starting this tier. POLICY_SIGNING_KEY must be set in .env.
+      - --verification-key=${POLICY_SIGNING_KEY}
+      - --verification-key-id=mcp-policy-signing-key-v1
+      - --signing-alg=HS256
+      - --scope=write
+      - --bundle
+      - /policies/bundle.tar.gz
     volumes:
-      - ./policies/rego:/policies:ro
+      # Signed bundle mounted read-only — produced by `make sign-policy-bundle`.
+      - ./policies/bundle.tar.gz:/policies/bundle.tar.gz:ro
     networks:
       - proxy-opa-net
     secrets:

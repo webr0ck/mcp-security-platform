@@ -115,8 +115,8 @@ services:
   gateway:
     # owasp/modsecurity-crs:nginx-alpine includes Nginx 1.25 + ModSecurity 3 + OWASP CRS
     # TODO @sha256: pin to immutable digest before promoting to staging/prod.
-    # Run: docker pull owasp/modsecurity-crs:4.14.0-nginx-alpine && docker inspect --format='{{index .RepoDigests 0}}' owasp/modsecurity-crs:4.14.0-nginx-alpine
-    image: owasp/modsecurity-crs:4.14.0-nginx-alpine
+    # Run: docker pull owasp/modsecurity-crs:4.25-nginx-alpine-lts && docker inspect --format='{{index .RepoDigests 0}}' owasp/modsecurity-crs:4.25-nginx-alpine-lts
+    image: owasp/modsecurity-crs:4.25-nginx-alpine-lts
     container_name: mcp-gateway
     <<: [*restart-always, *security-hardening]
     ports:
@@ -137,6 +137,8 @@ services:
       - /tmp:size=64m,mode=1777
       - /var/cache/nginx:size=64m,mode=0755
       - /var/run:size=4m,mode=0755
+      # ModSecurity CRS image creates /etc/nginx/modsecurity.d at runtime
+      - /etc/nginx/modsecurity.d:size=16m,mode=0777
     networks:
       - gateway-net
       - step-ca-net
@@ -162,6 +164,18 @@ services:
     image: smallstep/step-ca:0.27.4
     container_name: mcp-step-ca
     <<: [*restart-always, *security-hardening]
+    # step-ca binary uses filesystem capabilities; rootless Podman requires
+    # full cap set + no-new-privileges:false to exec it on macOS/Linux VM.
+    # Safe: step-ca is only on step-ca-net (internal-only, no external exposure).
+    security_opt:
+      - no-new-privileges:false
+    cap_drop: []
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - NET_BIND_SERVICE
     volumes:
       - step-ca-data:/home/step
       - ./gateway/step-ca:/scripts:ro
@@ -239,7 +253,7 @@ services:
       redis:
         condition: service_healthy
       opa:
-        condition: service_healthy
+        condition: service_started
     env_file:
       - .env
     environment:
@@ -271,23 +285,27 @@ services:
       - "--addr=0.0.0.0:8181"
       - "--log-format=json"
       - "--log-level=info"
-      - "--bundle"
-      - "/policies"
-      # Decision logging: emits structured JSON for every policy evaluation
-      # Promtail scrapes these from stdout and ships to Loki
       - "--set=decision_logs.console=true"
-      # INV-012 / F-002 (signed-only runtime policy):
-      # This dev profile uses a read-only directory mount (no signature
-      # verification), which INV-012 permits ONLY in ENVIRONMENT=development.
-      # Staging/production MUST add the docker-compose.opa-signed.yml overlay,
-      # which replaces this command with `--verification-key` + a signed
-      # bundle.tar.gz so OPA refuses unsigned/tampered policy at load and on
-      # every refresh:
-      #   make sign-policy-bundle
-      #   docker compose -f docker-compose.yml -f docker-compose.opa-signed.yml up -d
+      # INV-012: signed-only runtime policy is now the DEFAULT (HS256 symmetric,
+      # identical to scripts/sign_policy_bundle.sh — no crypto-scheme change).
+      # OPA verifies .signatures.json at load time AND on every bundle refresh,
+      # refusing any unsigned or tampered bundle.
+      # Development uses docker-compose.dev.yml which overrides with the
+      # read-only directory mount (watch mode, no signature — permitted by INV-012
+      # for ENVIRONMENT=development only).
+      # Before starting: run `make sign-policy-bundle` to produce bundle.tar.gz.
+      - "--verification-key=${POLICY_SIGNING_KEY}"
+      - "--verification-key-id=mcp-policy-signing-key-v1"
+      - "--signing-alg=HS256"
+      - "--scope=write"
+      - "--bundle"
+      - "/policies/bundle.tar.gz"
     volumes:
-      # Policies bind-mounted read-only — git is the source of truth
-      - ./policies/rego:/policies:ro
+      # Signed bundle mounted read-only — produced by `make sign-policy-bundle`.
+      # OPA refuses to load if the bundle's .signatures.json does not verify
+      # against POLICY_SIGNING_KEY. git is the source of truth for the Rego
+      # source; bundle.tar.gz is the signed artefact derived from it.
+      - ./policies/bundle.tar.gz:/policies/bundle.tar.gz:ro
     networks:
       - internal-net      # peer/lab compatibility
       - proxy-opa-net      # F-001: pairwise channel the proxy dials
@@ -360,6 +378,12 @@ services:
     image: postgres:16-alpine
     container_name: mcp-db
     <<: [*restart-always, *security-hardening]
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
     deploy:
       resources:
         limits:
@@ -422,14 +446,24 @@ services:
             }
           }],
           "ui": false,
-          "disable_mlock": false
+          "disable_mlock": true
         }
+      # Prevents the entrypoint from calling setcap (which needs CAP_SETFCAP,
+      # unavailable in rootless Podman user namespaces)
+      VAULT_DISABLE_MLOCK: "1"
     command: vault server -config=/vault/config/local.json
     cap_add:
       - IPC_LOCK
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
     volumes:
       - vault-data:/vault/data
       - vault-tls:/vault/tls:ro
+    tmpfs:
+      - /vault/config:size=8m,mode=0755
+      - /tmp:size=16m,mode=1777
     networks:
       - vault-net
     <<: [*security-hardening, *restart-always]
@@ -448,6 +482,12 @@ services:
     image: redis:7-alpine
     container_name: mcp-redis
     <<: [*restart-always, *security-hardening]
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
     deploy:
       resources:
         limits:
@@ -518,10 +558,8 @@ services:
     volumes:
       - ./observability/loki/promtail.yml:/etc/promtail/promtail.yml:ro
       # Docker socket: required for docker_sd_configs log discovery
-      # Read-only: promtail only reads container metadata and log streams
+      # Read-only: promtail only reads container metadata and log streams via API
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Container log directories (read-only — promtail is a passive reader)
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
     tmpfs:
       - /tmp:size=32m,mode=1777
     networks:
@@ -582,6 +620,8 @@ services:
     command:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
       - "--storage.path=/alertmanager"
+    env_file:
+      - .env
     volumes:
       - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     tmpfs:
@@ -642,8 +682,8 @@ services:
     # Uses restart: on-failure so it retries if MinIO isn't ready yet.
     # Does NOT use restart: always — it should exit 0 after successful setup.
     # TODO @sha256: pin to immutable digest — keep in sync with minio/minio version.
-    # Run: docker pull minio/mc:RELEASE.2025-04-16T19-17-32Z && docker inspect --format='{{index .RepoDigests 0}}' minio/mc:RELEASE.2025-04-16T19-17-32Z
-    image: minio/mc:RELEASE.2025-04-16T19-17-32Z
+    # Run: docker pull minio/mc:RELEASE.2025-07-21T05-28-08Z && docker inspect --format='{{index .RepoDigests 0}}' minio/mc:RELEASE.2025-07-21T05-28-08Z
+    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
     container_name: mcp-minio-init
     depends_on:
       minio:
@@ -691,8 +731,7 @@ services:
 
 # Docker Secrets — secret values are injected as files, not plain env vars (INV-008)
 # step_ca_password: the provisioner password for step-ca ACME provisioner
+# File is generated at setup time from .env; gitignored via infra/secrets/*
 secrets:
   step_ca_password:
-    # Docker Compose reads the secret value from this environment variable.
-    # The actual value lives only in .env (gitignored), never in this file.
-    environment: STEP_CA_PROVISIONER_PASSWORD
+    file: ./infra/secrets/step_ca_password

@@ -27,7 +27,7 @@ The per-INV "Enforcement:" lines below describe the *intended* control. Audited 
 | INV-008 | 🟡 CI trufflehog real; **no pre-commit hook in repo**, `make security-check` skips trufflehog if absent (ROADMAP P2.5). |
 | INV-011 | 🟡 `V003`+`V009` grants real; written scope still omits `credential_store`/`role_assignments` (P1.6). |
 | INV-007 | 🟡 `verify_object_lock_startup()` in `observability/compliance-checker/checker.py` runs at the start of every compliance check and logs WARN if Object Lock is absent. **Mode decision: GOVERNANCE** (not COMPLIANCE) — accepted for this reference implementation; GOVERNANCE is not MFA-enforced WORM (a privileged key can bypass it). Production deployments requiring true WORM must switch to COMPLIANCE mode. Tested by `observability/compliance-checker/tests/test_object_lock.py`. |
-| INV-012 | 🟡 Signing mechanism delivered (`scripts/sign_policy_bundle.sh` + `docker-compose.opa-signed.yml`) and **runtime-proven by `make test-signed-bundle`** (signs, verifies with correct key, confirms rejection of tampered bundle). Not enforced in a permanently-running staging deploy (no persistent staging env). |
+| INV-012 | ✅ **Signed bundles are now the DEFAULT** (Task 1.1, 2026-06-10). `docker-compose.yml` runs OPA with `--verification-key` + `bundle.tar.gz:ro`. `make up` auto-signs. `make security-check` runs `scripts/check_signed_default.sh` (F-002 gate). Unit tests in `proxy/tests/security/test_signed_bundle.py` assert config correctness. `docker-compose.opa-signed.yml` overlay deleted — no longer needed. |
 
 ---
 
@@ -173,13 +173,22 @@ This line must never be removed or changed to `default allow = true`.
 
 ## INV-012: Policy Bundle Signing in Production
 
-**Statement:** In any environment with `ENVIRONMENT=production` or `ENVIRONMENT=staging`, OPA MUST be configured with `bundle.signing.keyid` and `bundle.signing.algorithm` set, and the policy bundle MUST be signed with `POLICY_SIGNING_KEY`. OPA must reject unsigned bundles via `bundle.signing.scope = "all_files"`.
+**Statement:** In any environment with `ENVIRONMENT=production` or `ENVIRONMENT=staging`, OPA MUST be configured with `--verification-key` and `--signing-alg=HS256`, and the policy bundle MUST be signed with `POLICY_SIGNING_KEY`. OPA must reject unsigned bundles (`--scope=write` covers every file in the bundle).
 
-**In development (`ENVIRONMENT=development`):** Bundle signing may be disabled for iteration velocity.
+**Signed bundle is now the DEFAULT** (`docker-compose.yml`). OPA verifies `.signatures.json` at load time AND on every bundle refresh, refusing any unsigned or tampered bundle. `make up` automatically calls `make sign-policy-bundle` first.
+
+**In development (`ENVIRONMENT=development`):** Bundle signing may be disabled for iteration velocity. `docker-compose.dev.yml` overrides the OPA command with an unsigned read-only directory mount and `--watch` for hot-reload. This is the ONLY permitted opt-out.
 
 **Why:** Unsigned policy bundles in production mean an attacker who can modify the bundle filesystem volume can change allow/deny rules without detection.
 
-**Enforcement (2026-05-16):** Mechanism delivered — `make sign-policy-bundle` (`scripts/sign_policy_bundle.sh`, HS256, `scope=write`) + the `docker-compose.opa-signed.yml` overlay (OPA started with `--verification-key`, refuses unsigned/tampered bundles at load and on refresh). Dev keeps the read-only directory mount (permitted above). **Pending:** prove it in a running staging deploy and add a CI gate (ROADMAP P2.8).
+**Enforcement (2026-06-10, Task 1.1):**
+- `make sign-policy-bundle` (`scripts/sign_policy_bundle.sh`, HS256) produces `policies/bundle.tar.gz`.
+- `docker-compose.yml` OPA service uses `--verification-key=${POLICY_SIGNING_KEY}`, `--signing-alg=HS256`, `--scope=write`, and mounts `bundle.tar.gz:ro`. **Signed is the default, not an overlay.**
+- `docker-compose.opa-signed.yml` overlay **deleted** (Task 1.1) — absorbed into the default. References to this file are stale.
+- `make up` depends on `sign-policy-bundle` so the bundle is always fresh before the stack starts.
+- `make security-check` runs `scripts/check_signed_default.sh` (F-002 gate) which verifies every non-dev compose tier has `--verification-key` and optionally confirms OPA loads the signed bundle.
+- Unit/structural tests in `proxy/tests/security/test_signed_bundle.py` assert the compose files are correctly configured.
+- CI gate status: **ENFORCED** — `make security-check` fails if `--verification-key` is absent from any production-tier compose.
 
 ---
 

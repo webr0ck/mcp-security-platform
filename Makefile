@@ -97,7 +97,7 @@ help:
 
 # ─── Service lifecycle ────────────────────────────────────────────────────────
 
-up: dep-audit
+up: dep-audit sign-policy-bundle
 	@echo "Starting MCP Security Platform..."
 	$(COMPOSE) up -d
 	@echo "Services started. Use 'make logs' to follow output."
@@ -319,6 +319,15 @@ security-check:
 		echo "PASS: F-001 proxy network isolation"; \
 	else \
 		echo "FAIL: F-001 proxy network isolation"; \
+		FAILURES=$$((FAILURES+1)); \
+	fi; \
+	\
+	echo ""; \
+	echo "--- F-002 / INV-012: signed OPA bundle enforced as default ---"; \
+	if bash scripts/check_signed_default.sh; then \
+		echo "PASS: F-002 INV-012 signed bundle check"; \
+	else \
+		echo "FAIL: F-002 INV-012 signed bundle check"; \
 		FAILURES=$$((FAILURES+1)); \
 	fi; \
 	\
