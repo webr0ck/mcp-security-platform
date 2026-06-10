@@ -82,7 +82,13 @@ async def evaluate_policy(input_data: dict[str, Any]) -> dict[str, Any]:
         raise OPAUnavailableError(f"OPA returned invalid JSON: {exc}") from exc
 
     # OPA result structure: {"result": {"allow": bool, "reasons": set}}
-    result = body.get("result", {})
+    # During the OPA startup race window (bundle not yet loaded), OPA may return
+    # {"result": null} or {"result": {}} (allow key absent). Both must be treated
+    # as deny per INV-003 (default allow = false) and INV-004 (fail closed).
+    # body.get("result", {}) returns None when the key is present with null value,
+    # so we normalise None → {} explicitly before extracting allow.
+    raw_result = body.get("result")
+    result: dict = raw_result if isinstance(raw_result, dict) else {}
     allow: bool = bool(result.get("allow", False))  # Default false per INV-003
     reasons: list[str] = list(result.get("reasons", []))
 

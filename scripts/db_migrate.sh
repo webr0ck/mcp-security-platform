@@ -80,6 +80,15 @@ for host_path in "${MIGRATION_FILES[@]}"; do
     # Extract version token: everything up to (but not including) the first '__'
     # e.g. "V023__tool_server_fk.sql" → "V023"
     version="${filename%%__*}"
+
+    # Guard: reject any version token that doesn't match ^V[0-9]+$ before it
+    # can be interpolated into SQL. This prevents path-traversal or injection
+    # via a malformed or unexpected filename in the migrations directory.
+    if [[ ! "${version}" =~ ^V[0-9]+$ ]]; then
+        echo "[db_migrate] ERROR: unexpected version token '${version}' in filename '${filename}' — aborting"
+        exit 1
+    fi
+
     guest_path="${MIGRATIONS_GUEST}/${filename}"
 
     # Check whether this version is already recorded

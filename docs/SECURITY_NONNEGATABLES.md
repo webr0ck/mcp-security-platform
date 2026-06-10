@@ -93,6 +93,8 @@ This line must never be removed or changed to `default allow = true`.
 
 **Enforcement:** Integration test uses a mock OPA that returns 503; asserts that the proxy returns 503 (not 200 or 403).
 
+**Pre-bundle-load race (startup window):** Between OPA start and bundle load completion, OPA may return `{"result": null}` or `{"result": {}}` (allow key absent) for policy queries. `policy.py` normalises both to `allow=False` — `None` and missing dict are treated identically to an explicit deny. This prevents the startup race from creating a silent allow window. Verified by `proxy/tests/unit/test_policy_null_result.py` (`test_opa_null_result_is_deny`, `test_opa_missing_allow_key_is_deny`).
+
 ---
 
 ## INV-005: Quarantined Tools Cannot Be Invoked
