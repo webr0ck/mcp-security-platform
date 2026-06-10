@@ -91,6 +91,7 @@ async def invoke_tool(
     tool_name = tool_record["name"]
     tool_status = tool_record["status"]
     tool_risk_level = tool_record.get("risk_level", "low")
+    tool_server_id: str = str(tool_record["server_id"]) if tool_record.get("server_id") else ""
     upstream_url = tool_record["upstream_url"]
     params = json_rpc_request.get("params", {}).get("arguments", {})
 
@@ -178,6 +179,23 @@ async def invoke_tool(
         logger.warning("mcp_profiles lookup failed for %s/%s: %s", client_id, tool_name, _exc)
 
     # -------------------------------------------------------------------------
+    # Step 2.7: Resolve owned server IDs for server_owner/manager OPA rules.
+    # Only fetched when the caller holds one of those roles (fast-path for
+    # all other roles). Fails open (empty list) so a transient DB/Redis error
+    # does not block callers that have explicit grants.
+    # -------------------------------------------------------------------------
+    # Phase 3 (V025) will add owner_max_risk_level as a DB column on
+    # server_registry. Until then, default to "medium" as documented in
+    # docs/RBAC.md §server_owner.  # TODO: read from server_registry after V025.
+    _OWNER_MAX_RISK_LEVEL_DEFAULT = "medium"
+    owned_server_ids: list[str] = []
+    owner_max_risk_level: str = _OWNER_MAX_RISK_LEVEL_DEFAULT
+
+    if any(r in {"server_owner", "manager"} for r in client_roles):
+        from app.services.entitlement import get_owned_server_ids
+        owned_server_ids = await get_owned_server_ids(client_id)
+
+    # -------------------------------------------------------------------------
     # Step 3: OPA policy evaluation (INV-003, INV-004)
     # -------------------------------------------------------------------------
     opa_input = {
@@ -187,6 +205,13 @@ async def invoke_tool(
         "tool_name": tool_name,
         "tool_status": tool_status,
         "tool_risk_level": tool_risk_level,
+        # Phase 2.1: server_owner/manager invoke enrichment.
+        # tool_server_id is "" for unlinked tools (no server_id FK).
+        # owned_server_ids is computed from server_role_grant — never
+        # sourced from the request body (trust boundary enforced here).
+        "tool_server_id": tool_server_id,
+        "owned_server_ids": owned_server_ids,
+        "owner_max_risk_level": owner_max_risk_level,
         "params": params,
         "anomaly_score": anomaly_score,
         "is_testing": is_testing,
@@ -316,6 +341,7 @@ async def invoke_tool(
     # (notes, self-service) can resolve the user without re-parsing a JWT.
     # X-User-Role carries the highest-privilege role for admin-gate checks.
     primary_role = client_roles[0] if client_roles else "user"
+
     forward_base_headers = {
         **handshake_headers,
         **extra_headers,

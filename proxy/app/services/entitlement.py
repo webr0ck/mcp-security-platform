@@ -198,6 +198,66 @@ async def check_entitlement(
         )
 
 
+async def get_owned_server_ids(principal_id: str) -> list[str]:
+    """Return server UUIDs where principal has server_owner or manager role in server_role_grant.
+
+    Used by the invocation path to populate input.owned_server_ids for OPA evaluation.
+    Redis-cached per principal with 60s TTL (same pattern as role caching in rbac.py).
+
+    Fails open (returns []) so a transient Redis or DB error does not block invocations
+    that are otherwise authorized via explicit grant. The OPA owner rules then can't fire,
+    but grant-based rules still can.
+
+    Note: principal_id here is the client_id string, not a typed (type, id) pair, because
+    the OPA input is keyed on client_id. server_role_grant.principal_type is ignored; both
+    'human' and 'agent' principals that carry a server_owner/manager role in any principal_type
+    column are included. This is intentional: the OPA rule is role-based, not type-based.
+    """
+    from app.core.redis_client import redis_pool
+    import json
+
+    cache_key = f"owned_servers:{principal_id}"
+
+    # Try Redis cache first (TTL 60s — same as RBAC role cache).
+    if redis_pool.client is not None:
+        try:
+            cached = await redis_pool.client.get(cache_key)
+            if cached is not None:
+                return json.loads(cached)
+        except Exception as _exc:
+            logger.debug("Redis owned_servers cache read failed for %s: %s", principal_id, _exc)
+
+    # DB fallback: query server_role_grant for server_owner or manager rows.
+    server_ids: list[str] = []
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                text(
+                    "SELECT server_id::TEXT FROM server_role_grant "
+                    "WHERE principal_id = :pid "
+                    "  AND role IN ('server_owner', 'manager')"
+                ),
+                {"pid": principal_id},
+            )
+            server_ids = [row[0] for row in result.fetchall()]
+    except Exception as exc:
+        logger.warning(
+            "get_owned_server_ids DB error for principal=%s: %s",
+            principal_id,
+            exc,
+        )
+        return []
+
+    # Populate cache (best-effort — do not let a cache write failure block the result).
+    if redis_pool.client is not None:
+        try:
+            await redis_pool.client.setex(cache_key, 60, json.dumps(server_ids))
+        except Exception as _exc:
+            logger.debug("Redis owned_servers cache write failed for %s: %s", principal_id, _exc)
+
+    return server_ids
+
+
 async def list_entitled_servers(
     principal_type: str,
     principal_id: str,

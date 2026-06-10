@@ -6,15 +6,20 @@
 # INV-004: If this policy fails to load, OPA returns 500 which the proxy treats as deny.
 #
 # Input schema:
-#   input.client_id        string   — resolved client identity
-#   input.client_roles     [string] — role list for this client
-#   input.tool_id          string   — UUID of the tool being invoked
-#   input.tool_name        string   — name of the tool
-#   input.tool_status      string   — "active" | "quarantined" | "deprecated"
-#   input.tool_risk_level  string   — "low" | "medium" | "high" | "critical"
-#   input.params           object   — tool invocation parameters (for pattern matching)
-#   input.anomaly_score    number   — 0.0-1.0, current invocation anomaly score
-#   input.is_testing       boolean  — true if called by admin for testing purposes
+#   input.client_id          string   — resolved client identity
+#   input.client_roles       [string] — role list for this client
+#   input.tool_id            string   — UUID of the tool being invoked
+#   input.tool_name          string   — name of the tool
+#   input.tool_status        string   — "active" | "quarantined" | "deprecated"
+#   input.tool_risk_level    string   — "low" | "medium" | "high" | "critical"
+#   input.tool_server_id     string   — UUID of the server owning this tool ("" when unlinked)
+#   input.owned_server_ids   [string] — server UUIDs where caller has server_owner/manager role
+#                                        (computed by proxy from server_role_grant, never from request body)
+#   input.owner_max_risk_level string — risk ceiling set by admin for this server's owner/manager
+#                                        (default "medium" until V025 adds the DB column)
+#   input.params             object   — tool invocation parameters (for pattern matching)
+#   input.anomaly_score      number   — 0.0-1.0, current invocation anomaly score
+#   input.is_testing         boolean  — true if called by admin for testing purposes
 
 package mcp.authz
 
@@ -137,6 +142,18 @@ client_has_invoke_permission if {
     tool_allowed_for_client("platform_internal", input.tool_name)
 }
 
+# Owners/managers may invoke tools belonging to servers they own/manage.
+# input.owned_server_ids is computed by the proxy from server_role_grant —
+# it is NEVER taken from the request body.
+# Both input.tool_server_id and input.owned_server_ids must be present and
+# non-empty; absent or empty either field means the rule cannot fire (fail-closed).
+client_has_invoke_permission if {
+    some role in input.client_roles
+    role in {"server_owner", "manager"}
+    input.tool_server_id != ""
+    input.tool_server_id in input.owned_server_ids
+}
+
 # 6.1: Platform meta-tools are authorized by ROLE, independent of per-client
 # tool grants. They have no tool_registry row and no grant object, so the
 # grant-based rules above never fire for them. Before this rule the proxy
@@ -168,6 +185,18 @@ risk_level_within_threshold if {
 # deny rules (quarantine, prompt injection) still apply via count(deny)==0.
 risk_level_within_threshold if {
     is_platform_meta_tool
+}
+
+# Owner risk ceiling: the ceiling is the value the approving admin explicitly
+# set on the server row at approval time (server_registry.owner_max_risk_level,
+# default 'medium' until V025 adds the DB column). Absent input → rule can't
+# fire → falls back to grant-based ceiling = fail-closed.
+# Both tool_server_id and owned_server_ids must be present for this to fire;
+# missing either means the principal must satisfy the grant-based risk gate.
+risk_level_within_threshold if {
+    input.tool_server_id != ""
+    input.tool_server_id in input.owned_server_ids
+    risk_level_value[input.tool_risk_level] <= risk_level_value[input.owner_max_risk_level]
 }
 
 # REMOVED 2026-06-04: internal bypass was a universal access control bypass.
