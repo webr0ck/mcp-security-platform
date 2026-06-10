@@ -115,9 +115,10 @@ services:
       - no-new-privileges:true
     # read_only skipped: Loki writes WAL and index files to loki-data volume at
     # paths that vary by config; tmpfs cannot cover them without a custom config.
-    command: -config.file=/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/loki.yml
     volumes:
       - loki-data:/loki
+      - ./observability/loki/loki.yml:/etc/loki/loki.yml:ro
     tmpfs:
       - /tmp:size=64m,mode=1777
     networks:
@@ -141,11 +142,11 @@ services:
     # read_only skipped: Promtail writes position file to track log offsets;
     # the path is config-driven and cannot be safely replaced with a tmpfs
     # without a custom promtail config override.
-    command: -config.file=/etc/promtail/config.yml
+    command: -config.file=/etc/promtail/promtail.yml
     volumes:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./observability/promtail:/etc/promtail:ro
+      - ./observability/loki/promtail.yml:/etc/promtail/promtail.yml:ro
     tmpfs:
       - /tmp:size=32m,mode=1777
     networks:
