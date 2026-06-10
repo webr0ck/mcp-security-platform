@@ -1,3 +1,4 @@
+-- no-txn
 -- =============================================================================
 -- V021__add_entra_user_token_mode.sql
 -- MCP Security Platform — add delegated per-user Entra injection mode

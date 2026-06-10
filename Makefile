@@ -406,17 +406,14 @@ _check-env:
 		exit 1; \
 	fi
 
-# Run database migrations. Flyway is not containerised here — we use psql directly.
-# In production, run Flyway via CI. For dev/setup this is sufficient.
+# Run database migrations via the idempotent migration script.
+# Applies all V*.sql files in infra/db/migrations/ in version-natural order.
+# Tracks applied versions in schema_migrations; skips already-applied ones.
+# Exits non-zero on first failure — no || true swallowing.
 db-migrate:
-	@echo "Running database migrations..."
-	$(COMPOSE) exec $(DB_CONTAINER) psql -U $(DB_USER) -d $(DB_NAME) \
-		-f /docker-entrypoint-initdb.d/V001__initial_schema.sql 2>&1 || true
-	$(COMPOSE) exec $(DB_CONTAINER) psql -U $(DB_USER) -d $(DB_NAME) \
-		-f /docker-entrypoint-initdb.d/V002__rbac_seed.sql 2>&1 || true
-	$(COMPOSE) exec $(DB_CONTAINER) psql -U $(DB_USER) -d $(DB_NAME) \
-		-f /docker-entrypoint-initdb.d/V003__db_roles.sql 2>&1 || true
-	@echo "Migrations complete."
+	@COMPOSE="$(COMPOSE)" DB_CONTAINER="$(DB_CONTAINER)" \
+		DB_USER="$(DB_USER)" DB_NAME="$(DB_NAME)" \
+		bash scripts/db_migrate.sh
 
 # Bootstrap step-ca. Only needed on first run or after volume reset.
 step-ca-init:

@@ -1,3 +1,4 @@
+-- no-txn
 -- =============================================================================
 -- V022__add_passthrough_mode.sql
 -- MCP Security Platform — Case-3 (3b) native passthrough injection mode
