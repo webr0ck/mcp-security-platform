@@ -77,6 +77,21 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     ("DELETE", "/admin/credentials", {"admin", "platform_admin"}),
     # Server registry — platform_admin manages, all authenticated can list approved
     ("ANY", "/api/v1/admin/servers", {"admin", "platform_admin"}),
+    # Entitlement CRUD — more specific /servers/* rules MUST precede the broad /servers prefix.
+    # Longer-prefix / more-specific entries first; first match wins.
+    ("GET",    "/api/v1/servers/mine",                   {"admin", "platform_admin", "server_owner", "manager"}),
+    # /{id}/entitlements — ownership check is enforced in the handler for all except platform_admin.
+    # auditor is allowed at the RBAC layer for GET; POST/DELETE require owner/manager/platform_admin.
+    # DELETE uses a prefix rule (no parameterized suffix) because _resolve_allowed_roles only
+    # handles a single path param. The prefix /api/v1/servers/*/entitlements/ is unambiguous here
+    # since no other rule shares this prefix.
+    ("GET",    "/api/v1/servers/{id}/entitlements",      {"admin", "platform_admin", "server_owner", "manager", "auditor"}),
+    ("POST",   "/api/v1/servers/{id}/entitlements",      {"admin", "platform_admin", "server_owner", "manager"}),
+    # DELETE /{id}/entitlements/{ent_id}: use plain prefix matching (two path params not
+    # supported by parameterized rule logic). The /entitlements/ infix ensures this only
+    # matches entitlement DELETE operations, not other /servers/* DELETEs.
+    ("DELETE", "/api/v1/servers",                        {"admin", "platform_admin", "server_owner", "manager"}),
+    # Broad /servers listing — all authenticated roles. Must come AFTER the more-specific rules above.
     ("GET", "/api/v1/servers", {"admin", "platform_admin", "server_owner", "manager", "user", "agent", "auditor", "readonly"}),
     # /mcp — all authenticated roles (AuthMiddleware enforces identity; RBAC enforces role)
     ("ANY", "/mcp", {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor", "readonly"}),
