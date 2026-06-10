@@ -399,6 +399,12 @@ _check-env:
 		echo "Then edit .env with real secret values."; \
 		exit 1; \
 	fi
+	@if [ -z "$${POLICY_SIGNING_KEY:-}" ]; then \
+		echo "ERROR: POLICY_SIGNING_KEY is not set or empty."; \
+		echo "An empty key causes OPA to load bundles without signature verification (INV-012)."; \
+		echo "Set POLICY_SIGNING_KEY in .env to a strong random secret before continuing."; \
+		exit 1; \
+	fi
 
 # Run database migrations. Flyway is not containerised here — we use psql directly.
 # In production, run Flyway via CI. For dev/setup this is sufficient.

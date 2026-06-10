@@ -15,6 +15,16 @@
 
 set -euo pipefail
 
+# C-1: Fail immediately if POLICY_SIGNING_KEY is empty — an empty key causes
+# OPA to load the bundle WITHOUT verification, silently bypassing INV-012.
+# This check runs BEFORE the structural grep so the gate never passes on an
+# empty key, even if --verification-key= is present in the compose file.
+if [ -z "${POLICY_SIGNING_KEY:-}" ]; then
+  echo "FAIL [F-002]: POLICY_SIGNING_KEY is not set — OPA will load the bundle without verification."
+  echo "      Set POLICY_SIGNING_KEY in .env or the environment before running the security gate."
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -54,14 +64,10 @@ fi
 
 # Functional check: sign with the repo's existing HS256 tooling, then prove OPA
 # loads the bundle with the same key (catches alg/key/path mismatches).
-# Skip if POLICY_SIGNING_KEY is absent (the signing script will error clearly).
-if [ -z "${POLICY_SIGNING_KEY:-}" ]; then
-  echo "SKIP [F-002]: POLICY_SIGNING_KEY not set — skipping functional OPA bundle-load check."
-  echo "      Set POLICY_SIGNING_KEY to enable the full functional gate."
-  echo "PASS [F-002]: structural check passed (all prod tiers enforce --verification-key)."
-  exit 0
-fi
-
+# C-2: The podman run must reproduce the exact production flag set from
+# docker-compose.yml to catch any flag/alg/key-id mismatch.
+# Flags confirmed present in OPA 0.63.0-static: --verification-key,
+# --verification-key-id, --scope, --signing-alg.
 echo ""
 echo "--- F-002 functional check: sign + OPA bundle-load verification ---"
 
@@ -73,7 +79,9 @@ podman run --rm \
   openpolicyagent/opa:0.63.0-static \
   run --server --shutdown-after=2s \
   --verification-key="${POLICY_SIGNING_KEY}" \
+  --verification-key-id=mcp-policy-signing-key-v1 \
   --signing-alg=HS256 \
+  --scope=write \
   --bundle /policies/bundle.tar.gz \
   || { echo "FAIL [F-002]: signed bundle does not verify/load."; exit 1; }
 

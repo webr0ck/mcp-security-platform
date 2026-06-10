@@ -731,7 +731,8 @@ services:
 
 # Docker Secrets — secret values are injected as files, not plain env vars (INV-008)
 # step_ca_password: the provisioner password for step-ca ACME provisioner
-# File is generated at setup time from .env; gitignored via infra/secrets/*
 secrets:
   step_ca_password:
-    file: ./infra/secrets/step_ca_password
+    # Docker Compose reads the secret value from this environment variable.
+    # The actual value lives only in .env (gitignored), never in this file.
+    environment: STEP_CA_PROVISIONER_PASSWORD
