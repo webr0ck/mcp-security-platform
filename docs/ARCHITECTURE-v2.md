@@ -207,6 +207,7 @@ A knowledge graph analysis (June 2026) of the entire codebase extracted the cred
 3. CB-007: single-round `HMAC(master, user_sub)` now fixed to HKDF (§3, service_account line 2) — **UPGRADED**
 4. CB-008: master_secret cached forever (no TTL re-fetch); add `BROKER_MASTER_SECRET_TTL_SECONDS` → **IN PROGRESS**
 5. CB-004/CB-012: no audit on refresh/revoke/delete; need audit-before-delete DB trigger — **ROADMAP P2**
+6. CS-001 (consent two-session gap): `consume_consent_token()` and server approval commit run in separate DB sessions (`proxy/app/services/consent.py`). A crash between the two commits leaves the token consumed but approval not applied — owner must re-issue the consent token. Fail-closed by design; accepted gap (Phase 2.3).
 
 **Test coverage:**
 - `test_invocation_broker.py` (13 unit tests: modes, failures, broker=None) ✅

@@ -1,9 +1,14 @@
 """
-Owner-consent token — cryptographically-bound, single-use, signed payload.
+Consent token service for server approval and mode-change operations.
 
-STATUS (2026-06): NOT ENFORCED — `verify_consent_token` currently has no non-test
-callers, so mode/credential PATCH endpoints do NOT require consent yet. The primitive
-is implemented; wiring it into server_registry / admin_credentials is roadmap.
+The approve path in routers/server_registry.py calls:
+  1. verify_approve_consent_token() — HMAC signature + expiry + server binding check
+  2. consume_consent_token() — marks jti used in mode_change_consent (row-level PG lock prevents replay)
+  3. Only then: approval db.commit()
+
+Known gap (accepted): consume and approval run in separate DB sessions. A failure between
+consume commit and approval commit leaves the token consumed but the server unapproved.
+Owner must re-mint a consent token. This is fail-closed (not fail-open).
 
 Governs: server_registry mode changes (custody_mode, injection_mode, upstream_url)
 that require owner consent per the spec (D3 flow).
