@@ -208,8 +208,13 @@ CREATE TABLE IF NOT EXISTS audit_events (
     bytes_in        INTEGER,
     bytes_out       INTEGER,
 
-    -- SHA-256 hash of the full event payload (stored in Loki).
-    -- Compliance checker verifies this hash to detect tampering (INV-001).
+    -- SHA-256 over the canonical core identity fields only (event_id, event_type,
+    -- timestamp, client_id, tool_name, tool_id, outcome, request_id, platform_version).
+    -- NOT a hash of the full payload — the canonical form is defined in
+    -- mcp_audit_logger.hasher.canonical_audit_json().
+    -- Compliance checker verifies this hash to detect transcription errors;
+    -- use hmac_signature (added in V028) for tamper-evidence (keyed HMAC).
+    -- INV-001.
     sha256_hash     CHAR(64)        NOT NULL,
 
     anomaly_score   FLOAT           CHECK (anomaly_score >= 0.0 AND anomaly_score <= 1.0),

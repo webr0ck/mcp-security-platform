@@ -603,6 +603,45 @@ async def _mcp_initialize(
     return session_id
 
 
+def _compute_hmac_signature(sha256_hash: str, event: Any) -> str | None:
+    """
+    Task 0.2 Step 3 — compute a keyed HMAC-SHA-256 over the canonical audit event.
+
+    Uses the same canonical_audit_json() from mcp_audit_logger.hasher as the
+    compliance checker, so both sides use identical serialization.
+
+    Returns None if AUDIT_LOG_HMAC_KEY is not configured (non-production environments
+    may omit the key; the checker falls back to plain hash verification).
+    """
+    try:
+        import hmac as _hmac
+        import hashlib as _hashlib
+        import os as _os
+        from mcp_audit_logger.hasher import canonical_audit_json as _canonical_audit_json
+
+        hmac_key = _os.environ.get("AUDIT_LOG_HMAC_KEY", "")
+        if not hmac_key:
+            return None
+
+        # Build the canonical dict the same way the checker will read it
+        canonical = _canonical_audit_json({
+            "event_id": str(event.event_id),
+            "event_type": event.event_type.value,
+            "timestamp": event.timestamp.isoformat(),
+            "client_id": event.client_id,
+            "tool_name": event.tool_name,
+            "tool_id": event.tool_id,
+            "outcome": event.outcome.value if event.outcome else None,
+            "original_outcome": event.outcome.value if event.outcome else None,
+            "request_id": event.request_id,
+            "platform_version": event.platform_version,
+        })
+        return _hmac.new(hmac_key.encode(), canonical.encode("utf-8"), _hashlib.sha256).hexdigest()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("HMAC signature computation failed (non-fatal): %s", exc)
+        return None
+
+
 async def _emit_audit_event(
     tool_id: str | None,
     tool_name: str,
@@ -671,11 +710,15 @@ async def _emit_audit_event(
                         INSERT INTO audit_events (
                             event_id, client_id, tool_name, tool_id,
                             outcome, latency_ms, sha256_hash,
-                            anomaly_score, opa_reasons, request_id
+                            anomaly_score, opa_reasons, request_id,
+                            event_type, event_ts, platform_version,
+                            original_outcome, hmac_signature, hmac_key_id
                         ) VALUES (
                             :event_id, :client_id, :tool_name, :tool_id,
                             :outcome, :latency_ms, :sha256_hash,
-                            :anomaly_score, CAST(:opa_reasons AS jsonb), :request_id
+                            :anomaly_score, CAST(:opa_reasons AS jsonb), :request_id,
+                            :event_type, :event_ts, :platform_version,
+                            :original_outcome, :hmac_signature, :hmac_key_id
                         )
                         """
                     ),
@@ -690,12 +733,25 @@ async def _emit_audit_event(
                         # would misrepresent the event in compliance queries.
                         # 'deny' is the conservative choice: the operation did not
                         # complete; opa_reasons records the specific failure cause.
+                        # The PRE-remap value is preserved in original_outcome so
+                        # the compliance checker can recompute the hash correctly
+                        # (the hash was computed over the original "error" outcome).
                         "outcome": "deny" if outcome == "error" else outcome,
                         "latency_ms": latency_ms,
                         "sha256_hash": sha256_hash,
                         "anomaly_score": anomaly_score,
                         "opa_reasons": __import__("json").dumps(deny_reasons),
                         "request_id": request_id,
+                        # Task 0.2 — canonical fields for hash recomputation.
+                        "event_type": event.event_type.value,
+                        "event_ts": event.timestamp,
+                        "platform_version": event.platform_version,
+                        # Preserve the original (pre-remap) outcome for hash recomputation.
+                        # For non-error outcomes original_outcome == outcome.
+                        "original_outcome": outcome,
+                        # HMAC signature for tamper-evidence (Step 3).
+                        "hmac_signature": _compute_hmac_signature(sha256_hash, event),
+                        "hmac_key_id": "default",
                     },
                 )
         except Exception as db_exc:

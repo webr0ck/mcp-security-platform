@@ -18,6 +18,7 @@ Environment variables: see .env.example [COMPLIANCE_*] section.
 from __future__ import annotations
 
 import hashlib
+import hmac as _hmac_module
 import json
 import logging
 import os
@@ -29,6 +30,16 @@ from uuid import uuid4
 import httpx
 from datetime import date
 from uuid import UUID
+
+# Task 0.2: import the single shared canonicalizer from the audit-logger library.
+# This guarantees that the verifier uses exactly the same serialization as the writer.
+# DO NOT duplicate the canonical field selection or json.dumps call here.
+try:
+    from mcp_audit_logger.hasher import canonical_audit_json as _canonical_audit_json
+    _SHARED_CANONICALIZER_AVAILABLE = True
+except ImportError:  # pragma: no cover — only missing in stripped container builds
+    _SHARED_CANONICALIZER_AVAILABLE = False
+    _canonical_audit_json = None  # type: ignore[assignment]
 
 
 class _Encoder(json.JSONEncoder):
@@ -97,28 +108,112 @@ def check_event_for_violations(event: dict[str, Any]) -> dict[str, list[str]]:
     return violations
 
 
-def verify_hash_integrity(event: dict[str, Any]) -> bool:
+def verify_hash_integrity(event: dict[str, Any]) -> "bool | str":
     """
-    Verify the SHA-256 hash of an audit event.
-    The hash is computed over the canonical fields matching AuditEvent._compute_hash().
+    Verify the SHA-256 integrity hash (and HMAC when present) of an audit event.
+
+    Returns:
+      True        — hash (and HMAC when present) verified successfully.
+      False       — verification failed (hash mismatch or HMAC mismatch).
+      "legacy"    — the event predates V028 (canonical columns are NULL);
+                    treat as unverifiable_legacy, NOT as a mismatch.
+
+    Task 0.2 fixes four canonicalization breaks:
+      Break 1 — now delegates to mcp_audit_logger.hasher.canonical_audit_json()
+                (shared canonicalizer, same separators, same field set).
+      Break 2 — event_type and timestamp are required canonical inputs; rows
+                where they are NULL are treated as legacy (see below).
+      Break 3 — platform_version is included in the canonical form via the
+                shared canonicalizer.
+      Break 4 — original_outcome (pre-remap) is used for hash recomputation;
+                canonical_audit_json() reads "original_outcome" preferentially
+                over "outcome" so error-outcome rows verify correctly.
+
+    Historical-row cutoff (Step 4):
+      Rows written before V028 lack the new canonical columns (event_type,
+      timestamp, platform_version, original_outcome are NULL/absent).  These
+      cannot be verified and are returned as "legacy" so callers can count them
+      separately without inflating the mismatch counter.
     """
+    # ------------------------------------------------------------------
+    # Legacy-row detection (Step 4)
+    # Pre-V028 rows have NULL canonical columns; cannot be verified.
+    # ------------------------------------------------------------------
+    _legacy_sentinel = None  # NULL from asyncpg or missing key
+    event_type_val = event.get("event_type", _legacy_sentinel)
+    timestamp_val = event.get("timestamp", _legacy_sentinel)
+    platform_version_val = event.get("platform_version", _legacy_sentinel)
+    original_outcome_val = event.get("original_outcome", _legacy_sentinel)
+
+    if all(v is None for v in (event_type_val, timestamp_val,
+                               platform_version_val, original_outcome_val)):
+        # All four new columns are absent/NULL → pre-migration row.
+        return "legacy"
+
     stored_hash = event.get("sha256_hash", "")
     if not stored_hash:
         return False
 
-    canonical = json.dumps({
-        "event_id": event.get("event_id", ""),
-        "event_type": event.get("event_type", ""),
-        "timestamp": event.get("timestamp", ""),
-        "client_id": event.get("client_id", ""),
-        "tool_name": event.get("tool_name", ""),
-        "tool_id": event.get("tool_id", ""),
-        "outcome": event.get("outcome", ""),
-        "request_id": event.get("request_id", ""),
-    }, sort_keys=True)
+    # ------------------------------------------------------------------
+    # Recompute the canonical hash using the SHARED canonicalizer.
+    # ------------------------------------------------------------------
+    if not _SHARED_CANONICALIZER_AVAILABLE or _canonical_audit_json is None:
+        # Fallback: should never happen in a correctly deployed container.
+        # Treat as unverifiable rather than silently passing.
+        logger.error(
+            "mcp_audit_logger not importable — cannot verify hash integrity. "
+            "Check that the shared library is installed in this container."
+        )
+        return False
 
-    computed = hashlib.sha256(canonical.encode()).hexdigest()
-    return computed == stored_hash
+    canonical = _canonical_audit_json(event)
+    computed_plain = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    # ------------------------------------------------------------------
+    # HMAC verification (Step 3) — primary tamper-evidence check.
+    # If hmac_signature is present, verify it; plain hash is secondary.
+    # ------------------------------------------------------------------
+    hmac_sig = event.get("hmac_signature")
+    if hmac_sig:
+        hmac_key_id = event.get("hmac_key_id", "default")
+        hmac_key = _get_hmac_key(hmac_key_id)
+        if hmac_key is None:
+            logger.warning(
+                "HMAC key '%s' not found — cannot verify HMAC signature for event_id=%s",
+                hmac_key_id,
+                event.get("event_id"),
+            )
+            # Fall back to plain hash check only
+            return _hmac_module.compare_digest(computed_plain, stored_hash)
+
+        expected_hmac = _hmac_module.new(
+            hmac_key.encode(), canonical.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        if not _hmac_module.compare_digest(expected_hmac, hmac_sig):
+            return False  # HMAC mismatch — tampered
+
+    # ------------------------------------------------------------------
+    # Plain SHA-256 check (transcription integrity).
+    # ------------------------------------------------------------------
+    return _hmac_module.compare_digest(computed_plain, stored_hash)
+
+
+def _get_hmac_key(key_id: str) -> str | None:
+    """
+    Return the HMAC key for the given key_id.
+
+    Key rotation design: keys are stored as environment variables named
+    AUDIT_LOG_HMAC_KEY (for key_id="default") or
+    AUDIT_LOG_HMAC_KEY__<KEY_ID> for named versions.
+
+    Retired keys remain available read-only so historical rows can still
+    be verified.  The verifier selects the key by the stored hmac_key_id.
+    """
+    if key_id == "default" or not key_id:
+        return os.environ.get("AUDIT_LOG_HMAC_KEY")
+    # Named key: AUDIT_LOG_HMAC_KEY__v2, AUDIT_LOG_HMAC_KEY__v3, etc.
+    env_var = f"AUDIT_LOG_HMAC_KEY__{key_id.upper()}"
+    return os.environ.get(env_var)
 
 
 def verify_object_lock_startup(s3_client: Any, bucket: str) -> dict[str, Any]:
@@ -259,7 +354,10 @@ async def _run_async() -> int:
         rows = await conn.fetch(
             """
             SELECT event_id, client_id, tool_name, tool_id, outcome,
-                   sha256_hash, request_id, created_at
+                   sha256_hash, request_id, created_at,
+                   event_type, event_ts::text AS timestamp,
+                   platform_version, original_outcome,
+                   hmac_signature, hmac_key_id
             FROM audit_events
             WHERE created_at >= $1 AND created_at <= $2
             ORDER BY RANDOM()
@@ -285,13 +383,20 @@ async def _run_async() -> int:
     # Check each category
     category_violations: dict[str, int] = {cat: 0 for cat, _ in COMPLIANCE_PATTERNS}
     hash_mismatches = 0
+    unverifiable_legacy = 0
 
     for event in events:
         violations = check_event_for_violations(event)
         for category in violations:
             category_violations[category] += 1
 
-        if not verify_hash_integrity(event):
+        integrity_result = verify_hash_integrity(event)
+        if integrity_result == "legacy":
+            unverifiable_legacy += 1
+            logger.debug(
+                "Skipping legacy row (pre-V028): event_id=%s", event.get("event_id")
+            )
+        elif integrity_result is not True:
             hash_mismatches += 1
             logger.warning("Hash integrity failure for event_id=%s", event.get("event_id"))
 
@@ -324,6 +429,7 @@ async def _run_async() -> int:
         "hash_integrity": {
             "events_checked": len(events),
             "hash_mismatches": hash_mismatches,
+            "unverifiable_legacy": unverifiable_legacy,
             "status": "pass" if hash_mismatches == 0 else "fail",
         },
         "object_lock": object_lock_status,
