@@ -105,6 +105,13 @@ volumes:
     driver: local
   vault-tls:
     driver: local
+  # Shared tmpfs volume for rendered alertmanager config (init container → alertmanager)
+  alertmanager-rendered:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=4m,mode=0755"
 
 services:
 
@@ -614,17 +621,40 @@ services:
       retries: 3
       start_period: 30s
 
+  alertmanager-config-renderer:
+    # Init container: renders alertmanager.yml template (${VAR} placeholders)
+    # into a shared tmpfs volume before Alertmanager starts.
+    # Uses alpine + gettext (envsubst) — NOT the prom/alertmanager busybox image,
+    # which has no envsubst binary.
+    # Image pinned by digest (alpine:3.20); update with:
+    #   podman pull alpine:3.20 && podman inspect --format='{{index .RepoDigests 0}}' alpine:3.20
+    image: docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e
+    container_name: mcp-alertmanager-renderer
+    restart: "no"
+    env_file:
+      - .env
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager-template/alertmanager.yml:ro
+      - ./observability/alertmanager/entrypoint.sh:/entrypoint.sh:ro
+      - alertmanager-rendered:/run/alertmanager
+    command: >
+      /bin/sh -c "apk add --no-cache gettext >/dev/null 2>&1 && /entrypoint.sh"
+    networks:
+      - observability-net
+
   alertmanager:
     image: prom/alertmanager:v0.27.0
     container_name: mcp-alertmanager
     <<: [*restart-always, *security-hardening]
+    depends_on:
+      alertmanager-config-renderer:
+        condition: service_completed_successfully
     command:
-      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--config.file=/run/alertmanager/alertmanager.yml"
       - "--storage.path=/alertmanager"
-    env_file:
-      - .env
     volumes:
-      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Rendered config from init container (read-only for uid 65534)
+      - alertmanager-rendered:/run/alertmanager:ro
     tmpfs:
       - /tmp:size=16m,mode=1777
       - /alertmanager:size=64m,mode=0777

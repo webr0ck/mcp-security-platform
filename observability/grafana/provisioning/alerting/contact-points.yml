@@ -1,0 +1,64 @@
+apiVersion: 1
+
+# Grafana Unified Alerting: contact points and notification policies
+# provisioned from this file at Grafana startup.
+#
+# These contact points receive alerts fired by the Grafana alert rules in
+# mcp-alerts.yml. The webhook URL is read from the GF_ALERTING_WEBHOOK_URL
+# environment variable (set in .env); it should point at the same webhook
+# endpoint as ALERT_WEBHOOK_URL (or a dedicated Grafana-specific one).
+#
+# Secrets: GF_ALERTING_WEBHOOK_URL must be set in .env; this file contains
+# only the reference, not the value (INV-008).
+#
+# Note: Grafana Unified Alerting supports env var interpolation in
+# provisioned alerting config via ${VAR} syntax natively — no init
+# container required here.
+
+contactPoints:
+  - orgId: 1
+    name: mcp-webhook-default
+    receivers:
+      - uid: mcp-webhook-default
+        type: webhook
+        settings:
+          url: ${GF_ALERTING_WEBHOOK_URL}
+          httpMethod: POST
+        disableResolveMessage: false
+
+  - orgId: 1
+    name: mcp-webhook-critical
+    receivers:
+      - uid: mcp-webhook-critical
+        type: webhook
+        settings:
+          url: ${GF_ALERTING_WEBHOOK_URL_CRITICAL:-${GF_ALERTING_WEBHOOK_URL}}
+          httpMethod: POST
+        disableResolveMessage: false
+
+policies:
+  - orgId: 1
+    receiver: mcp-webhook-default
+    group_by:
+      - alertname
+      - severity
+      - component
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      # Critical severity: faster repeat, dedicated receiver
+      - receiver: mcp-webhook-critical
+        matchers:
+          - severity = critical
+        group_wait: 10s
+        repeat_interval: 1h
+        continue: false
+
+      # Warning severity: default receiver, standard cadence
+      - receiver: mcp-webhook-default
+        matchers:
+          - severity = warning
+        group_wait: 30s
+        repeat_interval: 4h
+        continue: false

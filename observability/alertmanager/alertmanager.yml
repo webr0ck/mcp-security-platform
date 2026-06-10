@@ -1,14 +1,28 @@
 # alertmanager.yml — Prometheus Alertmanager configuration
 #
+# THIS FILE IS A TEMPLATE. It contains ${VAR} placeholders that are rendered
+# by the alertmanager-config-renderer init container at startup into
+# /run/alertmanager/alertmanager.yml before Alertmanager reads it.
+#
+# NEVER add envsubst-incompatible syntax such as ${VAR:-default} here.
+# Fallback logic (e.g. ALERT_WEBHOOK_URL_CRITICAL → ALERT_WEBHOOK_URL) is
+# handled by the renderer entrypoint.sh before substitution.
+#
 # Alertmanager receives alerts from:
 #   - Loki ruler (LogQL alert rules)
 #   - Compliance checker (HTTP POST on rule violations)
 #
-# Secrets: webhook URLs and SMTP credentials must be set via environment variables
-# in the compose env_file. This file must never contain real credentials (INV-008).
+# Secrets: webhook URLs and SMTP credentials must be set via environment
+# variables in the compose env_file. This file must never contain real
+# credentials (INV-008).
 #
-# In production, replace the placeholder webhook URL with a real Slack webhook
-# or configure SMTP. The platform fires alerts for:
+# Required env vars (set in .env):
+#   ALERT_WEBHOOK_URL                — primary receiver (all alerts)
+#   ALERT_WEBHOOK_URL_CRITICAL       — high-urgency receiver (optional;
+#                                      renderer defaults to ALERT_WEBHOOK_URL)
+#
+# In production, replace the placeholder webhook URL with a real Slack
+# webhook or configure SMTP. The platform fires alerts for:
 #   - Compliance check failures (any of 10 PII/credential categories)
 #   - High tool invocation error rates
 #   - OPA unavailability (INV-004 — fail-closed events)
@@ -60,7 +74,8 @@ receivers:
   # (Slack + PagerDuty), add a second webhook_configs entry under each receiver.
   #
   # Required env var:  ALERT_WEBHOOK_URL
-  # Optional override: ALERT_WEBHOOK_URL_CRITICAL  (defaults to ALERT_WEBHOOK_URL)
+  # Optional override: ALERT_WEBHOOK_URL_CRITICAL  (defaults to ALERT_WEBHOOK_URL;
+  #                    fallback applied by entrypoint.sh before envsubst runs)
   #
   # Examples:
   #   Slack incoming webhook:   https://hooks.slack.com/services/T.../B.../...
@@ -74,9 +89,9 @@ receivers:
 
   - name: "critical"
     webhook_configs:
-      # Use ALERT_WEBHOOK_URL_CRITICAL if set; fall back to ALERT_WEBHOOK_URL.
-      # In production, point this at a high-urgency PagerDuty/Opsgenie endpoint.
-      - url: "${ALERT_WEBHOOK_URL_CRITICAL:-${ALERT_WEBHOOK_URL}}"
+      # ALERT_WEBHOOK_URL_CRITICAL is resolved by entrypoint.sh:
+      # if not set in .env, it is exported as ALERT_WEBHOOK_URL before envsubst.
+      - url: "${ALERT_WEBHOOK_URL_CRITICAL}"
         send_resolved: true
 
   - name: "security-team"

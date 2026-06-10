@@ -66,6 +66,21 @@ class AuditFinding:
     recommendation: str | None = None
 
 
+class LLMAuditRequiredError(Exception):
+    """
+    Raised by run_audit when REQUIRE_LLM_AUDIT=true and the LLM auditor
+    (Ollama) is unavailable.
+
+    The caller (tool registration router) must convert this to HTTP 503 and
+    must NOT insert a tool_registry row — the registration is refused, not
+    degraded.
+
+    Rationale (DET-F1 / INV-005): an attacker who can DoS Ollama at
+    registration time must not downgrade the auditor to static-regex-only.
+    In production, tool registration must be unavailable rather than degraded.
+    """
+
+
 @dataclass
 class AuditResult:
     tool_id: str
@@ -78,6 +93,7 @@ class AuditResult:
     static_analysis: dict[str, Any] = field(default_factory=dict)
     llm_model: str = ""
     llm_prompt_hash: str = ""
+    llm_unavailable: bool = False  # True when Ollama was unreachable; score is 1.0×static
 
 
 def _score_to_risk_level(score: int, thresholds: tuple[int, int] | None = None) -> str:
@@ -166,7 +182,9 @@ async def run_llm_analysis(
             return analysis
     except Exception as exc:
         logger.warning(
-            "Ollama LLM analysis failed (advisory service, defaulting to 0): %s", exc
+            "Ollama LLM analysis failed: %s — will re-weight to 1.0×static score "
+            "(llm_unavailable=True). If REQUIRE_LLM_AUDIT=true, registration will be refused.",
+            exc,
         )
         return {
             "risk_score": 0,
@@ -176,6 +194,7 @@ async def run_llm_analysis(
             "summary": "LLM analysis unavailable.",
             "model": settings.OLLAMA_MODEL,
             "prompt_hash": prompt_hash,
+            "llm_unavailable": True,
         }
 
 
@@ -222,9 +241,37 @@ async def run_audit(
     llm_result = await run_llm_analysis(tool_name, description, schema_json)
 
     # Step 3: Combine scores (weighted average)
+    # DET-F1 / INV-005: when Ollama is unreachable the LLM result carries
+    # llm_unavailable=True.  Two fail-closed responses are applied:
+    #
+    #   1. REQUIRE_LLM_AUDIT=true (production posture, enforced by config
+    #      validator at startup): raise LLMAuditRequiredError immediately so
+    #      the router returns 503 and no DB row is inserted.
+    #
+    #   2. REQUIRE_LLM_AUDIT=false (dev/staging default): re-weight to
+    #      1.0 × static_score so a tool flagged description_prompt_injection
+    #      still crosses the quarantine threshold.  The audit result records
+    #      llm_unavailable=True so the degraded decision is observable in logs
+    #      and the audit trail.
+    #
+    # Without this fix, Ollama DoS reduces the combined score to 0.4×static
+    # which silently bypasses the quarantine gate for many injection patterns.
+    llm_unavailable: bool = bool(llm_result.get("llm_unavailable", False))
+
+    if llm_unavailable and settings.REQUIRE_LLM_AUDIT:
+        raise LLMAuditRequiredError(
+            "LLM audit required (REQUIRE_LLM_AUDIT=true) but Ollama is unavailable. "
+            "Tool registration refused — this is the intended fail-closed behavior. "
+            "Tool registration will remain unavailable until Ollama recovers."
+        )
+
     static_score = int(static_result.get("static_risk_score", 0))
     llm_score = int(llm_result.get("risk_score", 0))
-    combined_score = min(100, int(static_score * STATIC_WEIGHT + llm_score * LLM_WEIGHT))
+    if llm_unavailable:
+        # Re-weight: static carries full weight; LLM contributes nothing.
+        combined_score = min(100, static_score)
+    else:
+        combined_score = min(100, int(static_score * STATIC_WEIGHT + llm_score * LLM_WEIGHT))
 
     # Critical boost: if either analysis detects injection, escalate to critical minimum
     if llm_result.get("prompt_injection_detected"):
@@ -311,4 +358,5 @@ async def run_audit(
         },
         llm_model=llm_result.get("model", settings.OLLAMA_MODEL),
         llm_prompt_hash=llm_result.get("prompt_hash", ""),
+        llm_unavailable=llm_unavailable,
     )

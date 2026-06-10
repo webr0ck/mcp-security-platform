@@ -116,6 +116,15 @@ class Settings(BaseSettings):
     OLLAMA_TIMEOUT_SECONDS: int = 30
     OLLAMA_HIGH_RISK_THRESHOLD: int = Field(default=70, ge=0, le=100)
     OLLAMA_CRITICAL_RISK_THRESHOLD: int = Field(default=90, ge=0, le=100)
+    # DET-F1 / INV-005: when True, tool registration returns 503 if Ollama is
+    # unreachable rather than falling back to static-only scoring.  Must be
+    # True in production (enforced by the startup validator below).  Default
+    # False in dev/staging to allow local development without a running Ollama.
+    #
+    # Operational consequence: tool registration is unavailable during Ollama
+    # outages when this is True.  Tool *invocations* are unaffected — only
+    # registration blocks.  See docs/ARCHITECTURE-v2.md §5.2.
+    REQUIRE_LLM_AUDIT: bool = False
 
     @property
     def ollama_base_url(self) -> str:
@@ -419,6 +428,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "Production startup blocked: SESSION_COOKIE_SECURE must be True in "
                 "production. Set SESSION_COOKIE_SECURE=true in your environment."
+            )
+
+        # DET-F1 / INV-005: REQUIRE_LLM_AUDIT must be True in production.
+        # An attacker who can DoS Ollama at registration time would otherwise
+        # downgrade the auditor to static-regex-only at reduced (0.4×) weight.
+        # In production the correct fail-closed posture is to refuse registration
+        # (503) rather than accept a degraded audit decision.
+        #
+        # Operational consequence: tool registration is unavailable during Ollama
+        # outages in production.  Tool invocations are NOT affected.
+        # See docs/ARCHITECTURE-v2.md §5.2 for runbook guidance.
+        if not self.REQUIRE_LLM_AUDIT:
+            raise ValueError(
+                "Production startup blocked: REQUIRE_LLM_AUDIT must be True in "
+                "production. Set REQUIRE_LLM_AUDIT=true in your environment. "
+                "When True, tool registration returns 503 during Ollama outages "
+                "rather than accepting a degraded (static-only) audit result. "
+                "Tool invocations are not affected by this setting."
             )
 
         return self

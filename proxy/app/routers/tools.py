@@ -64,7 +64,7 @@ async def register_tool(
     from sqlalchemy import text
 
     from app.models.tool import ToolCreate
-    from app.services.auditor import run_audit as _run_audit
+    from app.services.auditor import run_audit as _run_audit, LLMAuditRequiredError
     from app.services.sbom import generate_cyclonedx_sbom, publish_to_artifactory
 
     logger = logging.getLogger(__name__)
@@ -121,15 +121,36 @@ async def register_tool(
     shadow_collision = collision_row is not None
 
     # Run auditor
+    # DET-F1 / INV-005: LLMAuditRequiredError is raised when REQUIRE_LLM_AUDIT=true
+    # and Ollama is unreachable.  We catch it here and return 503 immediately with
+    # NO row inserted into tool_registry — the registration is refused, not degraded.
     tool_id = str(uuid4())
-    audit_result = await _run_audit(
-        tool_id=tool_id,
-        tool_name=tool_in.name,
-        description=tool_in.description,
-        schema=tool_in.schema,
-        source_repo=tool_in.source_repo,
-        tags=tool_in.tags,
-    )
+    try:
+        audit_result = await _run_audit(
+            tool_id=tool_id,
+            tool_name=tool_in.name,
+            description=tool_in.description,
+            schema=tool_in.schema,
+            source_repo=tool_in.source_repo,
+            tags=tool_in.tags,
+        )
+    except LLMAuditRequiredError as exc:
+        logger.error(
+            "Tool registration refused — LLM auditor unavailable and REQUIRE_LLM_AUDIT=true: %s",
+            exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "LLM_AUDIT_UNAVAILABLE",
+                "message": (
+                    "Tool registration is temporarily unavailable: the LLM auditor "
+                    "(Ollama) is unreachable and REQUIRE_LLM_AUDIT=true. "
+                    "Retry once the LLM service recovers. "
+                    "Tool invocations are not affected."
+                ),
+            },
+        )
 
     risk_score = audit_result.risk_score
     risk_level = audit_result.risk_level

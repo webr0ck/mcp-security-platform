@@ -3,6 +3,8 @@ apiVersion: 1
 datasources:
   - name: Loki
     type: loki
+    # uid must match the datasourceUid in alerting/mcp-alerts.yml rule definitions
+    uid: loki
     access: proxy
     url: http://loki:3100
     isDefault: true

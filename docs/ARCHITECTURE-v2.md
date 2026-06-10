@@ -42,7 +42,7 @@ Full-stack security reference implementation for MCP: a hardened ingress gateway
                                          ▼
 ┌──────────────────────────────── LAYER 2: SECURITY PROXY (FastAPI) ─────────────┐
 │ Auth mw (mTLS CN / API key) ✅   RBAC mw ✅   Audit mw (sync, fail=500) ✅      │
-│ Tool Manifest Auditor: OPA-static + Ollama LLM ✅ (advisory, fails-open to 0)   │
+│ Tool Manifest Auditor: OPA-static + Ollama LLM ✅ (fail-closed: 1.0×static on outage; REQUIRE_LLM_AUDIT prod gate) │
 │ SBOM: CycloneDX 1.5 + HMAC-SHA256 ✅   SPDX 🔴(dead constant only)              │
 │ Anomaly detector: fixed-rule sliding window ✅  (learned baseline 🔴)            │
 │ Invocation: quarantine-gate(INV-005) ✅ → OPA eval ✅ → fail-closed 503 ✅       │
@@ -167,6 +167,23 @@ Authenticated user → `/auth/enroll/{service}` → server-side random nonce sto
 - `proxy/tests/unit/test_invocation_broker.py` (13 unit tests: injection modes, failure cases, broker=None)
 - `proxy/tests/unit/test_lifespan_broker.py` (broker wiring, master_secret zeroing)
 - `proxy/tests/integration/test_mcp_server_chain.py` (E2E: resolve → inject → call upstream → audit)
+
+### 5.3a Tool Manifest Auditor — fail-closed posture (DET-F1, Task 0.4)
+
+The auditor pipeline (`proxy/app/services/auditor.py`) combines a static OPA score and an LLM (Ollama) score with a weighted average. Prior to this fix the LLM weight was 0.6 and the static weight was 0.4; when Ollama was unreachable the LLM score silently fell back to 0, reducing the combined score to `0.4 × static_score`. A tool flagged `description_prompt_injection` with static score 40 would score 16 — below every quarantine threshold — allowing a targeted Ollama DoS to bypass the quarantine gate (INV-005).
+
+**Remediation applied (commit: fix(security): LLM auditor fail-closed posture):**
+
+- When Ollama is unreachable, `run_llm_analysis` now returns `llm_unavailable: True` in its result dict.
+- `run_audit` detects this flag and switches to a **1.0 × static_score** formula (no LLM contribution), ensuring the quarantine gate fires on static flags alone.
+- `AuditResult.llm_unavailable: bool` is set so every downstream consumer (log, audit event, Jira, portal) can observe the degraded decision.
+- New config setting `REQUIRE_LLM_AUDIT: bool = False` (dev/staging default). **In production this must be `true`** — the startup validator in `config.py:_reject_placeholders_in_production` blocks startup when it is false, preventing an operator from accidentally running a production node in fail-open mode.
+
+**Operational consequence (production `REQUIRE_LLM_AUDIT=true`):** tool *registration* returns HTTP 503 for the duration of any Ollama outage. **Tool invocations are not affected** — the LLM auditor only runs at registration time. Runbook: restore Ollama, then retry the registration. The Sigma rule `mcp-tool-lifecycle-event` fires on quarantine-state changes; the `mcp-quarantined-tool-access` rule fires on any blocked invocation attempt against a quarantined tool.
+
+**Dev/staging (`REQUIRE_LLM_AUDIT=false`):** registration continues with a full-weight static score; `llm_unavailable=true` is recorded in the audit trail so the degraded run is traceable. The risk score is the same value that would have been produced if static alone were used — no silent downgrade.
+
+Files: `proxy/app/services/auditor.py` (classes `LLMAuditRequiredError`, `AuditResult.llm_unavailable`, `run_audit` score logic), `proxy/app/core/config.py` (field `REQUIRE_LLM_AUDIT`, validator `_reject_placeholders_in_production`), `proxy/app/routers/tools.py` (503 path for `LLMAuditRequiredError`). Tested by: `proxy/tests/unit/test_auditor_unavailable.py` (6 unit tests, all passing).
 
 ### 5.4 SBOM / registration, 5.5 compliance, 5.6 auth — as in v1 §5.2/§5.3/§5.4, with: SPDX removed (not built), outbound Jira removed (not built), OIDC marked stub.
 
