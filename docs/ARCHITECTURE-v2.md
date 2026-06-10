@@ -14,7 +14,9 @@ Status legend: ✅ implemented & wired · 🟡 partial/overclaimed · 🔴 stub/
 
 **Phase 0 (security unblock): ✅ COMPLETE.** All CRITICAL/HIGH findings from `REVIEW-2026-05-16.md` are fixed and tested (79 unit + 9 MCP-client tests). The two CRITICALs (CB-001 broker identity collapse, CB-002 plaintext Vault key) and the HIGHs (CB-003/004/005, F-001, F-002 mechanism) are closed. **F-001 was additionally proven at runtime on the live podman lab** — a non-dialed sidecar that previously reached `proxy:8000` is now refused, with the proxy still healthy.
 
-**Not yet done** (tracked in `ROADMAP.md`): Phase 1 truth reconciliation (this doc replacing v1; killing/relabelling not-built features; fixing broken CI refs; documenting the broker in API/RBAC/SECURITY) → Phase 2 hardening (CB-008, INV-007 startup verify, pre-commit secret hook, F-002 enforced in a running staging deploy) → Phase 3 features.
+**Phase 1–3 complete (2026-06-10):** Signed OPA bundles default (INV-012), dispatcher fail-closed, JTI deny-on-error; server_owner persona + OPA authz.rego; entitlement CRUD + consent wiring; self-service server onboarding (POST /api/v1/servers); DB-driven server registry (mcps.yaml retired — dispatcher reads server_registry, 30s refresh); 4 integration modes wired (oauth_user_token, entra_client_credentials, user, service_account); OPA grants sync — role_assignments pushed via data API on mutation + 60s reconcile.
+
+**Not yet done** (tracked in `ROADMAP.md`): Phase 4 (named profiles, multi-session, IdP-group entitlements) → Phase 5 (SIEM: Sigma→Loki ruler) → Phase 6 (per-server network isolation) → Phase 7 (UI onboarding wizard).
 
 The §4.2 "secure target" items below are annotated ✅ where now implemented; the rest remain the forward plan.
 

@@ -327,7 +327,6 @@ class Settings(BaseSettings):
     # =========================================================================
     BROKER_SESSION_TTL_SECONDS: int = 28800
     BROKER_IDLE_TIMEOUT_SECONDS: int = 3600
-    MCP_REGISTRY_PATH: str = "/app/mcps.yaml"
 
     # =========================================================================
     # OAuth state signing
