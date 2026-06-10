@@ -15,6 +15,11 @@ Routes credential injection to the correct approach based on tool.injection_mode
 
 All injection modes return a dict of HTTP headers to merge into the upstream
 request, or an empty dict on failure/no-op.
+
+Task 9 (Phase 3): The tool_record received here contains injection_mode and
+credential_id populated from the DB-driven server_registry table via the
+Registry class (task_8). The dispatcher no longer reads mcps.yaml; all
+server/credential metadata comes from the database through invoke_tool().
 """
 from __future__ import annotations
 
