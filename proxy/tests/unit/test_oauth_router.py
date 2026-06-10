@@ -174,3 +174,60 @@ async def test_enroll_unknown_service_returns_404():
             follow_redirects=False,
         )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Task 12: server-scoped enrollment tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+async def test_enroll_falls_back_to_hardcoded_adapter_when_registry_unavailable():
+    """
+    Task 12: When registry_instance is None (e.g., startup failure),
+    fallback to hardcoded adapters (m365, bitbucket, dex).
+    """
+    fake_redis = _FakeRedis()
+    redis_pool_mock = MagicMock()
+    redis_pool_mock.client = fake_redis
+
+    with patch("app.services.invocation.registry_instance", None), \
+         patch("app.core.redis_client.redis_pool", redis_pool_mock), \
+         patch("app.routers.oauth._get_adapter", return_value=_FakeAdapter()):
+        async with _client() as c:
+            resp = await c.get(
+                "/auth/enroll/m365",
+                headers={"X-Client-Cert-CN": "alice@corp"},
+                follow_redirects=False,
+            )
+
+    # Should fall back to hardcoded adapter and render consent page
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers.get("content-type", "")
+
+
+@pytest.mark.unit
+async def test_enroll_registry_config_not_found_falls_back_to_hardcoded():
+    """
+    Task 12: When service is not in registry, fall back to hardcoded adapters.
+    """
+    fake_redis = _FakeRedis()
+    redis_pool_mock = MagicMock()
+    redis_pool_mock.client = fake_redis
+
+    # Mock registry to return None for this service
+    mock_registry = MagicMock()
+    mock_registry.get_config = MagicMock(return_value=None)
+
+    with patch("app.services.invocation.registry_instance", mock_registry), \
+         patch("app.core.redis_client.redis_pool", redis_pool_mock), \
+         patch("app.routers.oauth._get_adapter", return_value=_FakeAdapter()):
+        async with _client() as c:
+            resp = await c.get(
+                "/auth/enroll/m365",
+                headers={"X-Client-Cert-CN": "alice@corp"},
+                follow_redirects=False,
+            )
+
+    # Should fall back to hardcoded adapter and render consent page
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers.get("content-type", "")

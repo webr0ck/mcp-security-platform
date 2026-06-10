@@ -227,7 +227,12 @@ def _render_consent_page(
 @router.get("/enroll/{service}")
 async def enroll(service: str, request: Request) -> HTMLResponse:
     """
-    R-5 / D1 / D2: Render the server-side consent page.
+    R-5 / D1 / D2 / Task 12: Render the server-side consent page.
+
+    Task 12 enhancement: resolve {service} from server_registry first.
+    If found and upstream_idp_config is populated, extract issuer/client_id/scopes
+    from the registry. Otherwise fall back to hardcoded adapters (m365, bitbucket, dex)
+    for backward compatibility.
 
     Previous behaviour: minted PKCE + immediately 302'd to Entra (no consent).
     New behaviour:
@@ -240,18 +245,74 @@ async def enroll(service: str, request: Request) -> HTMLResponse:
     from it; otherwise from the server-side session (CB-001). Link-token verification
     is R-3b; here we use session identity only.
     """
-    adapter = _get_adapter(service)
-    if adapter is None:
-        raise HTTPException(status_code=404, detail=f"Service '{service}' not found or not OAuth")
-
     client_id = _authenticated_client_id(request)
 
-    # Resolve the requested scopes from the adapter (R-2: from tool_registry.entra_scope)
+    # Task 12: Try to resolve service from server_registry first
+    registry_config = None
+    adapter = None
+    idp_config = None
+
     try:
-        requested_scopes: list[str] = list(adapter.scopes)
-    except AttributeError:
-        settings = get_settings()
-        requested_scopes = getattr(settings, "entra_scopes_list", [])
+        from app.services.invocation import registry_instance
+        if registry_instance:
+            registry_config = registry_instance.get_config(service)
+    except Exception as exc:
+        logger.warning(
+            "registry_lookup_failed",
+            extra={"service": service, "error": str(exc)},
+        )
+
+    # Task 12: If server found in registry with upstream_idp_config, use it
+    if registry_config and registry_config.status == "approved":
+        # Query upstream_idp_config from DB (registry.ServerConfig doesn't include it)
+        try:
+            from app.core.database import engine as _db_engine
+            async with _db_engine.connect() as conn:
+                row = await conn.execute(
+                    text(
+                        "SELECT upstream_idp_config FROM server_registry "
+                        "WHERE service_name = :sname AND status = :st LIMIT 1"
+                    ),
+                    {"sname": service, "st": "approved"},
+                )
+                result = row.fetchone()
+                if result and result[0]:
+                    idp_config = result[0] if isinstance(result[0], dict) else json.loads(result[0])
+        except Exception as exc:
+            logger.warning(
+                "upstream_idp_config_lookup_failed",
+                extra={"service": service, "error": str(exc)},
+            )
+
+        # Task 12: If upstream_idp_config found, validate required fields
+        if idp_config:
+            if not idp_config.get("issuer") or not idp_config.get("client_id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Service '{service}' has no IdP configured (issuer or client_id missing)",
+                )
+            # Extract scopes from idp_config (or use default if missing)
+            requested_scopes = idp_config.get("scopes", [])
+            if isinstance(requested_scopes, str):
+                requested_scopes = [s.strip() for s in requested_scopes.split() if s.strip()]
+        else:
+            # Server found but no upstream_idp_config
+            raise HTTPException(
+                status_code=400,
+                detail=f"Service '{service}' has no IdP configured",
+            )
+    else:
+        # Fallback to hardcoded adapters for backward compatibility
+        adapter = _get_adapter(service)
+        if adapter is None:
+            raise HTTPException(status_code=404, detail=f"Service '{service}' not found or not OAuth")
+
+        # Resolve the requested scopes from the adapter (R-2: from tool_registry.entra_scope)
+        try:
+            requested_scopes: list[str] = list(adapter.scopes)
+        except AttributeError:
+            settings = get_settings()
+            requested_scopes = getattr(settings, "entra_scopes_list", [])
 
     # Look up any previously stored scopes for diff/highlight (D1)
     stored_scopes: str | None = None
