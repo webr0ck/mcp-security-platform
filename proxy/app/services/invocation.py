@@ -28,11 +28,13 @@ from uuid import uuid4
 import httpx
 
 from app.credential_broker.broker import CredentialBroker
+from app.credential_broker.registry import Registry
 
 logger = logging.getLogger(__name__)
 
-# Module-level singleton — initialized by app lifespan, injected for tests.
+# Module-level singletons — initialized by app lifespan, injected for tests.
 broker_instance: CredentialBroker | None = None
+registry_instance: Registry | None = None
 
 # Hard cap on bytes read from an upstream MCP server. Guards against a
 # malicious upstream streaming unbounded data on the SSE channel.

@@ -26,6 +26,7 @@ from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.hardening import apply_process_hardening
 from app.core.redis_client import redis_pool
+from app.core.asyncpg_pool import asyncpg_pool
 from app.credential_broker.factory import build_broker
 
 logger = logging.getLogger(__name__)
@@ -44,12 +45,16 @@ async def lifespan(app: FastAPI):
 
     Startup:
       1. Initialize Redis connection pool
-      2. Initialize credential broker (requires live Redis client)
-      3. Verify database connectivity
+      2. Initialize asyncpg connection pool
+      3. Initialize credential broker (requires live Redis client)
+      4. Initialize Registry and start 30s refresh loop
+      5. Verify database connectivity
 
     Shutdown:
-      1. Zero credential broker master secret (CB-008)
-      2. Drain Redis connection pool
+      1. Stop Registry refresh loop
+      2. Zero credential broker master secret (CB-008)
+      3. Close asyncpg pool
+      4. Drain Redis connection pool
     """
     logger.info("MCP Security Proxy starting up", extra={"version": settings.PLATFORM_VERSION})
 
@@ -69,7 +74,17 @@ async def lifespan(app: FastAPI):
     await redis_pool.initialize()
     logger.info("Redis pool initialized")
 
-    # Step 2: Initialize credential broker
+    # Step 2: Initialize asyncpg pool (needed by Registry, credential_storage, etc.)
+    try:
+        await asyncpg_pool.initialize()
+        logger.info("Asyncpg pool initialized")
+    except Exception as exc:
+        logger.warning(
+            "Asyncpg pool initialization failed — Registry refresh loop disabled",
+            extra={"error": str(exc)},
+        )
+
+    # Step 3: Initialize credential broker
     from app.services import invocation as inv_svc
     broker = build_broker(settings, redis_pool.client)
     inv_svc.broker_instance = broker
@@ -81,12 +96,32 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Credential broker initialized")
 
-    # Step 3: Verify database on startup (warn but don't crash)
+    # Step 4: Initialize Registry with asyncpg pool and start auto-refresh loop
+    from app.credential_broker.registry import Registry
+    registry = None
+    try:
+        pool = asyncpg_pool.get()
+        registry = Registry(db_pool=pool, refresh_interval_secs=30)
+        inv_svc.registry_instance = registry
+        await registry.start_refresh_loop()
+        logger.info("Registry initialized with 30s auto-refresh")
+    except Exception as exc:
+        logger.warning(
+            "Registry initialization failed — server discovery will be unavailable",
+            extra={"error": str(exc)},
+        )
+
+    # Step 5: Verify database on startup (warn but don't crash)
     db_ok = await check_database_health()
     if not db_ok:
         logger.warning("Database not reachable at startup — health endpoint will report degraded")
 
     yield
+
+    # Shutdown — stop registry refresh loop first
+    if registry is not None:
+        await registry.stop_refresh_loop()
+        logger.info("Registry refresh loop stopped")
 
     # Shutdown — zero broker master secret before releasing Redis
     if broker is not None:
@@ -97,6 +132,9 @@ async def lifespan(app: FastAPI):
     logger.info("MCP Security Proxy shutting down")
     await redis_pool.close()
     logger.info("Redis pool closed")
+
+    await asyncpg_pool.close()
+    logger.info("Asyncpg pool closed")
 
 
 app = FastAPI(
