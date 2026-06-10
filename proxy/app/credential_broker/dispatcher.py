@@ -79,9 +79,10 @@ async def dispatch_credential_injection(
     try:
         mode = InjectionMode(mode_str)
     except ValueError:
-        logger.warning("Unknown injection_mode '%s' for tool %s; skipping injection",
-                       mode_str, tool_record.get("tool_id"))
-        return {}
+        raise CredentialInjectionError(
+            f"unsupported injection_mode '{mode_str}' for tool {tool_record.get('tool_id')}; "
+            "refusing to forward an unauthenticated upstream call (fail-closed)."
+        )
 
     # Fail-closed: if broker is not initialized and injection is required, abort (FIND-002 fix)
     # broker_instance lives on app.services.invocation (set by lifespan). The import is
@@ -153,7 +154,9 @@ async def dispatch_credential_injection(
                 inject_prefix=inject_prefix,
             )
 
-    return {}
+    raise CredentialInjectionError(
+        f"injection_mode '{mode.value}' has no handler for tool {tool_record.get('tool_id')} (fail-closed)."
+    )
 
 
 # ---------------------------------------------------------------------------
