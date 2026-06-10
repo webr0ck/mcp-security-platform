@@ -3,12 +3,21 @@
 One-shot migration: import existing mcps.yaml servers into server_registry (V026+).
 Idempotent: re-run skips servers already imported (matched by name).
 
+DESIGN NOTES:
+  - Fail-fast: first INSERT error aborts the import (returned as exit code 1).
+    This is intentional — partial imports with undetected failures are unsafe.
+    Use --dry-run to validate before running live.
+  - Connection: uses bare asyncpg.connect (no pooling) because this is a one-off
+    migration tool intended to run once per deployment. Not suitable for
+    high-concurrency scenarios.
+
 Usage:
-  python scripts/import_mcps_yaml.py --yaml mcps.yaml --db-url postgresql://...
+  python scripts/import_mcps_yaml.py --yaml mcps.yaml --db-url postgresql://... [--imported-by admin]
 
 Example:
   python scripts/import_mcps_yaml.py --yaml mcps.yaml \
-    --db-url "postgresql://mcp_app:password@localhost/mcp_gateway"
+    --db-url "postgresql://mcp_app:password@localhost/mcp_gateway" \
+    --imported-by "deployment-v1.0"
 """
 import yaml
 import argparse
@@ -25,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def import_mcps_yaml(yaml_path: str, db_url: str, dry_run: bool = False):
+async def import_mcps_yaml(yaml_path: str, db_url: str, dry_run: bool = False, imported_by: str = "system-import"):
     """
     Load mcps.yaml servers. For each:
     - If name already exists in server_registry: skip (idempotent)
@@ -35,6 +44,7 @@ async def import_mcps_yaml(yaml_path: str, db_url: str, dry_run: bool = False):
         yaml_path: Path to mcps.yaml file
         db_url: PostgreSQL connection URL
         dry_run: If True, log actions but don't commit to DB
+        imported_by: Identity to record in approved_by for audit trail
 
     Returns:
         0 on success, 1 on error
@@ -58,10 +68,13 @@ async def import_mcps_yaml(yaml_path: str, db_url: str, dry_run: bool = False):
     try:
         imported_count = 0
         skipped_count = 0
+        skipped_reasons = []  # Track reasons for skipped servers
 
         for service_name, server_config in servers.items():
             if not service_name:
                 logger.warning(f"Skipping server with no name: {server_config}")
+                skipped_reasons.append(("(unnamed)", "missing name"))
+                skipped_count += 1
                 continue
 
             # Check if already imported
@@ -71,6 +84,7 @@ async def import_mcps_yaml(yaml_path: str, db_url: str, dry_run: bool = False):
             )
             if existing:
                 logger.info(f"  {service_name}: already imported (id={existing}), skipping")
+                skipped_reasons.append((service_name, "already imported"))
                 skipped_count += 1
                 continue
 
@@ -78,6 +92,8 @@ async def import_mcps_yaml(yaml_path: str, db_url: str, dry_run: bool = False):
             upstream_url = server_config.get("url")
             if not upstream_url:
                 logger.warning(f"  {service_name}: missing 'url', skipping")
+                skipped_reasons.append((service_name, "missing 'url'"))
+                skipped_count += 1
                 continue
 
             enabled = server_config.get("enabled", True)
@@ -106,18 +122,20 @@ async def import_mcps_yaml(yaml_path: str, db_url: str, dry_run: bool = False):
                        approved_at, approved_by)
                     VALUES
                       ($1, $2, $3, 'approved', 'legacy-import', 'none',
-                       $4, NULL, NULL, NULL, 'medium', now(), 'system-import')
+                       $4, NULL, NULL, NULL, 'medium', now(), $5)
                     """,
                     service_name,  # name (unique)
                     service_name,  # service_name (optional duplicate, for backward compat)
                     upstream_url,
                     adapter_name,
+                    imported_by,  # approved_by (audit trail identity)
                 )
                 logger.info(f"  {service_name}: imported as approved legacy server")
                 imported_count += 1
             except asyncpg.UniqueViolationError:
                 # Race condition: another import process inserted it
                 logger.info(f"  {service_name}: duplicate insert detected, skipping")
+                skipped_reasons.append((service_name, "duplicate insert (race condition)"))
                 skipped_count += 1
             except Exception as e:
                 logger.error(f"  {service_name}: INSERT failed: {e}")
@@ -127,6 +145,10 @@ async def import_mcps_yaml(yaml_path: str, db_url: str, dry_run: bool = False):
         logger.info(f"  Imported: {imported_count}")
         logger.info(f"  Skipped:  {skipped_count}")
         logger.info(f"  Total:    {len(servers)}")
+        if skipped_reasons:
+            logger.info(f"\nSkipped servers:")
+            for name, reason in skipped_reasons:
+                logger.info(f"  - {name}: {reason}")
         return 0
 
     finally:
@@ -152,7 +174,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Log what would be imported without modifying DB"
     )
+    parser.add_argument(
+        "--imported-by",
+        default="system-import",
+        help="Identity to record as importer in audit trail (default: system-import)"
+    )
     args = parser.parse_args()
 
-    exit_code = asyncio.run(import_mcps_yaml(args.yaml, args.db_url, args.dry_run))
+    exit_code = asyncio.run(import_mcps_yaml(args.yaml, args.db_url, args.dry_run, args.imported_by))
     sys.exit(exit_code)
