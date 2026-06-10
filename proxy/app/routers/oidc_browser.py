@@ -673,7 +673,7 @@ async def token_refresh(
     if not _raw_rt_blob:
         return JSONResponse(status_code=400, content={"error": "no_refresh_token_stored"})
     try:
-        from app.credential_broker.approaches.approach_a import decrypt as _dec
+        from app.credential_broker.approaches.approach_a import decrypt as _dec, encrypt as _enc
         from app.credential_broker.kms import load_master_secret_standalone
         _master_rt = await load_master_secret_standalone()
         # subject comes from the row; fall back to JWT claims if missing.
@@ -682,8 +682,34 @@ async def token_refresh(
             base64.b64decode(_raw_rt_blob), _rt_subject, _master_rt, service="oidc_session"
         )
     except Exception as dec_exc:
-        logger.error("Failed to decrypt KC refresh token for session %s: %s", row.session_id, dec_exc)
-        return JSONResponse(status_code=500, content={"error": "token_decryption_failed"})
+        # AUTH-007 / Task 0.1 Step 6: try-decrypt-else-revoke.
+        # A row with a plaintext (pre-fix) token will fail AES-GCM decryption.
+        # Revoke the session immediately and force re-login — never 500 on this path.
+        logger.warning(
+            "KC refresh token decryption failed for session %s (possible pre-fix plaintext row):"
+            " %s — revoking session and forcing re-login.",
+            row.session_id, dec_exc,
+        )
+        try:
+            _revoke_ts = datetime.now(timezone.utc)
+            async with AsyncSessionLocal() as _revoke_db:
+                await _revoke_db.execute(
+                    text(
+                        "UPDATE oidc_sessions SET revoked_at = :revoked_at"
+                        " WHERE session_id = :sid"
+                    ),
+                    {"revoked_at": _revoke_ts, "sid": row.session_id},
+                )
+                await _revoke_db.commit()
+        except Exception as revoke_exc:
+            logger.error(
+                "Failed to revoke session %s after decryption failure: %s",
+                row.session_id, revoke_exc,
+            )
+        return JSONResponse(
+            status_code=401,
+            content={"error": "session_revoked_relogin_required"},
+        )
 
     # Exchange refresh token at KC
     discovery = await _discover()
@@ -717,7 +743,35 @@ async def token_refresh(
 
     new_jwt = _issue_session_jwt(subject, client_id, roles, new_jti)
 
-    # Update DB: rotate jti + refresh token, store new KC access token
+    # AUTH-007 / Task 0.1 Step 3: encrypt new tokens before persisting —
+    # identical pattern to the callback path (oidc_browser.py:438-451).
+    # _enc and _master_rt are already in scope from the decrypt block above.
+    try:
+        _enc_new_at = base64.b64encode(
+            _enc(new_access_token, _rt_subject, _master_rt, service="oidc_session")
+        ).decode("ascii")
+        _enc_new_rt = base64.b64encode(
+            _enc(new_refresh_token, _rt_subject, _master_rt, service="oidc_session")
+        ).decode("ascii")
+    except Exception as enc_exc:
+        logger.error(
+            "Failed to encrypt new KC tokens for session %s: %s",
+            row.session_id, enc_exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Session token encryption failed — please retry.",
+        ) from enc_exc
+
+    # Task 0.1 Step 4: set expires_at from the new token's lifetime instead of NULL.
+    # Falls back to SESSION_JWT_EXPIRE_SECONDS when KC doesn't return expires_in.
+    _kc_expires_in: int = token_data.get("expires_in", settings.SESSION_JWT_EXPIRE_SECONDS)
+    _new_expires_at = datetime.fromtimestamp(
+        time.time() + _kc_expires_in, tz=timezone.utc
+    )
+
+    # Update DB: rotate jti + refresh token, store new KC access token.
+    # Task 0.1 Step 4: raise on failure (caller retains old session; 503).
     try:
         async with AsyncSessionLocal() as db:
             await db.execute(
@@ -726,19 +780,27 @@ async def token_refresh(
                         kc_access_token  = :at,
                         kc_refresh_token = :rt,
                         session_jwt_jti  = :new_jti,
-                        expires_at       = NULL
+                        expires_at       = :exp
                     WHERE session_id = :sid
                 """),
                 {
-                    "at": new_access_token,
-                    "rt": new_refresh_token,
+                    "at": _enc_new_at,
+                    "rt": _enc_new_rt,
                     "new_jti": uuid.UUID(new_jti),
+                    "exp": _new_expires_at,
                     "sid": row.session_id,
                 },
             )
             await db.commit()
     except Exception as exc:
-        logger.warning("Failed to update session after refresh: %s", exc)
+        logger.error(
+            "Failed to update session after refresh for session %s: %s",
+            row.session_id, exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Session refresh failed — please retry.",
+        ) from exc
 
     response = JSONResponse(content={
         "session_token": new_jwt,
