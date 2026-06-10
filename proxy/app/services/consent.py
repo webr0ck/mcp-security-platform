@@ -275,10 +275,61 @@ def verify_enrollment_consent_token(token: str) -> EnrollmentConsentPayload:
     )
 
 
+async def persist_consent_token(
+    jti: str,
+    server_id: str,
+    old_mode: str,
+    new_mode: str,
+    owner_sub: str,
+    payload_hash: str,
+    expires_at: "datetime",
+    old_cred_ref: str | None = None,
+    new_cred_ref: str | None = None,
+) -> None:
+    """
+    Persist a consent token record to mode_change_consent.
+
+    Must be called after issue_consent_token() or issue_approve_consent_token()
+    to enable replay-prevention via consume_consent_token().
+    Without persisting, consume_consent_token() will silently no-op (rowcount=0)
+    and replay is possible for the full TTL window.
+    """
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text("""
+                INSERT INTO mode_change_consent
+                    (jti, server_id, old_mode, new_mode, old_cred_ref, new_cred_ref,
+                     owner_sub, payload_hash, expires_at)
+                VALUES
+                    (:jti, :server_id, :old_mode, :new_mode, :old_cred_ref, :new_cred_ref,
+                     :owner_sub, :payload_hash, :expires_at)
+                ON CONFLICT (jti) DO NOTHING
+            """),
+            {
+                "jti": jti,
+                "server_id": server_id,
+                "old_mode": old_mode,
+                "new_mode": new_mode,
+                "old_cred_ref": old_cred_ref,
+                "new_cred_ref": new_cred_ref,
+                "owner_sub": owner_sub,
+                "payload_hash": payload_hash,
+                "expires_at": expires_at,
+            },
+        )
+        await db.commit()
+
+
 async def consume_consent_token(jti: str) -> bool:
     """
     Mark a consent token as consumed. Returns True if consumed, False if already consumed.
     Idempotent: calling twice returns False on second call.
+
+    IMPORTANT: Returns False if the jti was never persisted (not found). Callers must
+    treat False as replay/invalid and raise a 409, never silently allow-through.
     """
     from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
@@ -295,3 +346,57 @@ async def consume_consent_token(jti: str) -> bool:
         )
         await db.commit()
         return result.rowcount > 0
+
+
+# =============================================================================
+# Approve-action consent tokens — server approval dual-control (D3)
+# =============================================================================
+
+# Sentinel values used in mode_change_consent for approval-action tokens.
+# These are not valid injection_mode_enum values, so they cannot collide with
+# real mode-transition tokens stored in the same table.
+_APPROVE_OLD_MODE = "__approve_pending__"
+_APPROVE_NEW_MODE = "__approve_approved__"
+
+
+def issue_approve_consent_token(
+    server_id: str,
+    owner_sub: str,
+    ttl_seconds: int = 900,  # 15 minutes per spec
+) -> tuple[str, str]:
+    """
+    Issue a signed consent token for the 'approve' action (pending→approved).
+
+    Returns (token_str, jti).
+
+    Callers MUST also call persist_consent_token() with the returned jti
+    to enable replay-prevention. Verify+consume at approval time with
+    verify_approve_consent_token() + consume_consent_token().
+    """
+    return issue_consent_token(
+        server_id=server_id,
+        old_mode=_APPROVE_OLD_MODE,
+        new_mode=_APPROVE_NEW_MODE,
+        owner_sub=owner_sub,
+        ttl_seconds=ttl_seconds,
+    )
+
+
+def verify_approve_consent_token(
+    token: str,
+    expected_server_id: str,
+    expected_owner_sub: str,
+) -> "ConsentPayload":
+    """
+    Verify a consent token issued for the 'approve' action.
+
+    Raises ConsentTokenError subclass on any failure.
+    Does NOT consume the token — call consume_consent_token(payload.jti) after.
+    """
+    return verify_consent_token(
+        token=token,
+        expected_server_id=expected_server_id,
+        expected_new_mode=_APPROVE_NEW_MODE,
+        expected_owner_sub=expected_owner_sub,
+        expected_old_mode=_APPROVE_OLD_MODE,
+    )

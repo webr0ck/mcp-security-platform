@@ -10,13 +10,22 @@ POST /api/v1/admin/servers            — register a new server (platform_admin)
 GET  /api/v1/admin/servers/{id}       — get a server (platform_admin)
 PATCH /api/v1/admin/servers/{id}      — update server metadata (platform_admin)
 DELETE /api/v1/admin/servers/{id}     — soft-delete (platform_admin; sets deleted_at, status→suspended)
-POST /api/v1/admin/servers/{id}/approve — approve a pending server (platform_admin)
+POST /api/v1/admin/servers/{id}/approve — approve a pending server (platform_admin + owner consent token)
 
+POST /api/v1/servers/{id}/consent     — mint owner consent token (server_owner or platform_admin)
 GET /api/v1/servers                   — list approved servers visible to authenticated caller (any role)
+
+Consent flow (D3 dual-control):
+  1. Server owner calls POST /api/v1/servers/{id}/consent → receives a single-use consent_token (15 min TTL)
+  2. Platform admin calls POST /api/v1/admin/servers/{id}/approve with {"consent_token": "<token>"}
+     The handler: verifies HMAC signature + server binding, consumes the token (marks jti used),
+     then commits the approval — all in a single transaction.
+  Without both steps, the approve handler returns 409 owner_consent_required.
 """
 from __future__ import annotations
 
 import datetime
+import hashlib
 import logging
 import re
 from typing import Optional
@@ -27,6 +36,14 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
+from app.services.consent import (
+    ConsentTokenAlreadyConsumedError,
+    ConsentTokenError,
+    consume_consent_token,
+    issue_approve_consent_token,
+    persist_consent_token,
+    verify_approve_consent_token,
+)
 from app.services.ssrf import SSRFError, validate_server_url
 
 logger = logging.getLogger(__name__)
@@ -62,6 +79,23 @@ class ServerUpdate(BaseModel):
     name: Optional[str] = None
     upstream_url: Optional[str] = None
     service_name: Optional[str] = None
+
+
+class ConsentRequest(BaseModel):
+    """Request body for POST /api/v1/servers/{id}/consent — mint a single-use approval token."""
+    action: str = "approve"
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        if v not in {"approve"}:
+            raise ValueError("action must be 'approve'")
+        return v
+
+
+class ApproveBody(BaseModel):
+    """Request body for POST /api/v1/admin/servers/{id}/approve — requires owner consent token."""
+    consent_token: str
 
 
 def _serialize(d: dict) -> dict:
@@ -182,15 +216,88 @@ async def delete_server(server_id: str, request: Request):
         await db.commit()
 
 
+@router.post("/api/v1/servers/{server_id}/consent", status_code=201)
+async def mint_consent_token(server_id: str, body: ConsentRequest, request: Request):
+    """
+    Mint a single-use consent token for the 'approve' action (D3 dual-control).
+
+    The server owner calls this endpoint to produce a token, which the platform admin
+    then passes to POST /api/v1/admin/servers/{id}/approve as {"consent_token": "<token>"}.
+
+    Roles: server_owner or platform_admin.
+    The owner_sub bound into the token is the authenticated caller's client_id.
+    """
+    caller_roles = getattr(request.state, "client_roles", [])
+    _allowed = {"server_owner", "platform_admin", "admin"}
+    if not any(r in _allowed for r in caller_roles):
+        raise HTTPException(status_code=403, detail="server_owner or platform_admin role required")
+
+    owner_sub = getattr(request.state, "client_id", "unknown")
+
+    # Verify the server exists and hasn't been deleted
+    async with AsyncSessionLocal() as db:
+        row = await db.execute(
+            text("SELECT server_id, status FROM server_registry WHERE server_id = :id AND deleted_at IS NULL"),
+            {"id": server_id},
+        )
+        record = row.fetchone()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Server not found")
+    if record.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Server is not pending approval (status={record.status})")
+
+    token_str, jti = issue_approve_consent_token(
+        server_id=server_id,
+        owner_sub=owner_sub,
+        ttl_seconds=900,  # 15 minutes
+    )
+
+    # Persist the jti so consume_consent_token() can mark it used on first verification.
+    # Without this, consume_consent_token() silently no-ops and replay is possible.
+    payload_hash = hashlib.sha256(token_str.encode()).hexdigest()
+    expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=900)
+    await persist_consent_token(
+        jti=jti,
+        server_id=server_id,
+        old_mode="__approve_pending__",
+        new_mode="__approve_approved__",
+        owner_sub=owner_sub,
+        payload_hash=payload_hash,
+        expires_at=expires_at,
+    )
+
+    logger.info(
+        "consent_token_issued server_id=%s jti=%s owner_sub=%s action=approve",
+        server_id, jti, owner_sub,
+    )
+    return JSONResponse(
+        {"consent_token": token_str, "jti": jti, "expires_in_seconds": 900},
+        status_code=201,
+    )
+
+
 @router.post("/api/v1/admin/servers/{server_id}/approve")
-async def approve_server(server_id: str, request: Request):
+async def approve_server(server_id: str, body: ApproveBody, request: Request):
+    """
+    Approve a pending server (D3 dual-control).
+
+    Requires a valid, single-use consent token minted by the server owner via
+    POST /api/v1/servers/{id}/consent.
+
+    The token is verified AND consumed atomically before the state change commits.
+    If consume_consent_token returns False (already consumed or never persisted),
+    the request is rejected with 409 — this prevents replay within the 15-minute window.
+    """
     _require_platform_admin(request)
     approver = getattr(request.state, "client_id", "unknown")
 
     # D1 SSRF allowlist: validate the upstream URL before approval
     async with AsyncSessionLocal() as db:
         url_row = await db.execute(
-            text("SELECT upstream_url FROM server_registry WHERE server_id = :id AND deleted_at IS NULL"),
+            text(
+                "SELECT upstream_url, owner_sub FROM server_registry "
+                "WHERE server_id = :id AND deleted_at IS NULL"
+            ),
             {"id": server_id},
         )
         url_record = url_row.fetchone()
@@ -201,22 +308,56 @@ async def approve_server(server_id: str, request: Request):
     except SSRFError as exc:
         raise HTTPException(status_code=422, detail=f"SSRF validation failed: {exc}") from exc
 
+    owner_sub = url_record[1]
+
+    # D3 dual-control: verify the consent token before committing the state change.
+    # verify_approve_consent_token raises ConsentTokenError subclasses on any failure.
+    try:
+        consent_payload = verify_approve_consent_token(
+            token=body.consent_token,
+            expected_server_id=server_id,
+            expected_owner_sub=owner_sub,
+        )
+    except ConsentTokenError as exc:
+        raise HTTPException(status_code=409, detail=f"owner_consent_required: {exc}") from exc
+
+    # consume_consent_token returns False if already consumed (replay) or never persisted.
+    # Treat False as a hard reject — never allow-through on ambiguous consent state.
+    consumed = await consume_consent_token(consent_payload.jti)
+    if not consumed:
+        raise HTTPException(
+            status_code=409,
+            detail="owner_consent_required: consent token already used or invalid",
+        )
+
+    # Both verify and consume succeeded — commit the approval.
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             text(
                 "UPDATE server_registry "
                 "SET status = 'approved', mode_locked_at_approval = TRUE, "
-                "    approved_at = now(), approved_by = :approver, url_allowlist_checked = TRUE "
+                "    approved_at = now(), approved_by = :approver, url_allowlist_checked = TRUE, "
+                "    consent_jti = :consent_jti "
                 "WHERE server_id = :id AND deleted_at IS NULL AND status = 'pending' "
                 "RETURNING server_id"
             ),
-            {"id": server_id, "approver": approver},
+            {"id": server_id, "approver": approver, "consent_jti": consent_payload.jti},
         )
         await db.commit()
         rows_updated = result.rowcount
     if rows_updated == 0:
         raise HTTPException(status_code=404, detail="Server not found or not in pending state")
-    return JSONResponse({"server_id": server_id, "status": "approved"})
+
+    logger.info(
+        "server_approved server_id=%s approver=%s consent_jti=%s",
+        server_id, approver, consent_payload.jti,
+    )
+    return JSONResponse({
+        "server_id": server_id,
+        "status": "approved",
+        "approved_by": approver,
+        "consent_jti": consent_payload.jti,
+    })
 
 
 @router.get("/api/v1/servers")

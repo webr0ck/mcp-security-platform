@@ -77,6 +77,9 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     ("DELETE", "/admin/credentials", {"admin", "platform_admin"}),
     # Server registry — platform_admin manages, all authenticated can list approved
     ("ANY", "/api/v1/admin/servers", {"admin", "platform_admin"}),
+    # Consent token minting — server_owner or platform_admin (D3 dual-control).
+    # Must appear BEFORE the broad /api/v1/servers prefix rule (longer-prefix wins).
+    ("POST", "/api/v1/servers/{id}/consent", {"admin", "platform_admin", "server_owner"}),
     # Entitlement CRUD — more specific /servers/* rules MUST precede the broad /servers prefix.
     # Longer-prefix / more-specific entries first; first match wins.
     ("GET",    "/api/v1/servers/mine",                   {"admin", "platform_admin", "server_owner", "manager"}),
