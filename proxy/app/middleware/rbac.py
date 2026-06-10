@@ -93,10 +93,6 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     # Self-service registration — server_owner or platform_admin (Task 7).
     # Plain prefix rule — comes AFTER all parameterized /servers/* rules above.
     ("POST", "/api/v1/servers", {"admin", "platform_admin", "server_owner"}),
-    # DELETE /{id}/entitlements/{ent_id}: use plain prefix matching (two path params not
-    # supported by parameterized rule logic). The /entitlements/ infix ensures this only
-    # matches entitlement DELETE operations, not other /servers/* DELETEs.
-    ("DELETE", "/api/v1/servers",                        {"admin", "platform_admin", "server_owner", "manager"}),
     # Broad /servers listing — all authenticated roles. Must come AFTER the more-specific rules above.
     ("GET", "/api/v1/servers", {"admin", "platform_admin", "server_owner", "manager", "user", "agent", "auditor", "readonly"}),
     # /mcp — all authenticated roles (AuthMiddleware enforces identity; RBAC enforces role)

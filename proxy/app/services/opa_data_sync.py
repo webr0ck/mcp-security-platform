@@ -141,20 +141,22 @@ class OPADataSync:
             # Build OPA data structure
             grants_data = build_grants_data([dict(row) for row in grant_rows])
 
-            # Push to OPA
-            await OPAClient.put_data(path="/mcp/grants", data=grants_data)
+            # Push to OPA via the injected client instance (supports mock injection in tests)
+            await self.opa_client.put_data(path="/mcp/grants", data=grants_data)
 
             logger.info(
                 "OPA grants pushed successfully",
                 extra={"grant_count": len(grant_rows)},
             )
 
+        except PolicyEngineError:
+            raise
         except Exception as exc:
             logger.error(
                 "Failed to push grants to OPA — failing closed",
                 extra={"error": str(exc), "error_type": type(exc).__name__},
             )
-            raise
+            raise PolicyEngineError(f"OPA grants push failed: {exc}") from exc
 
     async def start_reconcile_loop(self) -> None:
         """

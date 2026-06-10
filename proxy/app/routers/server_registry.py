@@ -151,7 +151,7 @@ class ServerCreate(BaseModel):
     @field_validator("injection_mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        valid = {"none", "service", "user", "service_account", "oauth_user_token"}
+        valid = {"none", "service", "user", "service_account", "oauth_user_token", "entra_user_token", "entra_client_credentials"}
         if v not in valid:
             raise ValueError(f"injection_mode must be one of {valid}")
         return v
@@ -290,11 +290,11 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
     updates = {k: v for k, v in updates.items() if k in _PATCH_ALLOWED}
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    # SSRF guard: validate upstream_url changes the same way approve_server does (C4 fix).
+    # SSRF guard: fail-closed DNS — DNS failure rejects the URL (same as registration).
     if "upstream_url" in updates:
         try:
-            validate_server_url(updates["upstream_url"])
-        except SSRFError as exc:
+            await validate_upstream_url_ssrf(updates["upstream_url"])
+        except (SSRFError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=f"upstream_url blocked by SSRF policy: {exc}") from exc
 
     # Column names are interpolated — frozenset above is the ONLY guard.
@@ -420,8 +420,8 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     if url_record is None:
         raise HTTPException(status_code=404, detail="Server not found")
     try:
-        validate_server_url(url_record[0])
-    except SSRFError as exc:
+        await validate_upstream_url_ssrf(url_record[0])
+    except (SSRFError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=f"SSRF validation failed: {exc}") from exc
 
     owner_sub = url_record[1]

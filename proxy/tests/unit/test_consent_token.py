@@ -466,7 +466,7 @@ class TestApproveServerConsent:
         mock_db = _make_mock_db(fetchone_return=self._server_row())
 
         with patch("app.routers.server_registry.AsyncSessionLocal", return_value=mock_db), \
-             patch("app.routers.server_registry.validate_server_url"), \
+             patch("app.routers.server_registry.validate_upstream_url_ssrf", new_callable=AsyncMock), \
              patch("app.routers.server_registry.verify_approve_consent_token",
                    side_effect=ConsentTokenExpiredError("expired")):
             with pytest.raises(HTTPException) as exc_info:
@@ -488,7 +488,7 @@ class TestApproveServerConsent:
         mock_db = _make_mock_db(fetchone_return=self._server_row())
 
         with patch("app.routers.server_registry.AsyncSessionLocal", return_value=mock_db), \
-             patch("app.routers.server_registry.validate_server_url"), \
+             patch("app.routers.server_registry.validate_upstream_url_ssrf", new_callable=AsyncMock), \
              patch("app.routers.server_registry.verify_approve_consent_token",
                    side_effect=ConsentTokenMismatchError("server_id mismatch")):
             with pytest.raises(HTTPException) as exc_info:
@@ -552,7 +552,7 @@ class TestApproveServerConsent:
             # First call: consume returns True → approval succeeds
             with patch("app.routers.server_registry.AsyncSessionLocal",
                        return_value=_make_two_execute_db(second_rowcount=1)), \
-                 patch("app.routers.server_registry.validate_server_url"), \
+                 patch("app.routers.server_registry.validate_upstream_url_ssrf", new_callable=AsyncMock), \
                  patch("app.routers.server_registry.consume_consent_token",
                        new_callable=AsyncMock, return_value=True):
                 response = await approve_server(_SERVER_ID, body, req)
@@ -561,7 +561,7 @@ class TestApproveServerConsent:
             # Second call (replay): consume returns False → 409
             with patch("app.routers.server_registry.AsyncSessionLocal",
                        return_value=_make_two_execute_db(second_rowcount=0)), \
-                 patch("app.routers.server_registry.validate_server_url"), \
+                 patch("app.routers.server_registry.validate_upstream_url_ssrf", new_callable=AsyncMock), \
                  patch("app.routers.server_registry.consume_consent_token",
                        new_callable=AsyncMock, return_value=False):
                 with pytest.raises(HTTPException) as exc_info:
@@ -602,7 +602,7 @@ class TestApproveServerConsent:
 
         with patch("app.services.consent._get_signing_key", return_value=_FAKE_SECRET), \
              patch("app.routers.server_registry.AsyncSessionLocal", return_value=mock_db), \
-             patch("app.routers.server_registry.validate_server_url"), \
+             patch("app.routers.server_registry.validate_upstream_url_ssrf", new_callable=AsyncMock), \
              patch("app.routers.server_registry.consume_consent_token",
                    new_callable=AsyncMock, return_value=True):
             response = await approve_server(_SERVER_ID, body, req)

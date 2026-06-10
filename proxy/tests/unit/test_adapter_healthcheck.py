@@ -171,7 +171,8 @@ class TestApprovalFlowHealthcheck:
         mock_consent_payload = MagicMock()
         mock_consent_payload.jti = "jti-123"
 
-        with patch("app.routers.server_registry.AsyncSessionLocal") as mock_session_factory:
+        with patch("app.routers.server_registry.AsyncSessionLocal") as mock_session_factory, \
+             patch("app.routers.server_registry.validate_upstream_url_ssrf", new_callable=AsyncMock) as mock_ssrf:
             mock_session_factory.return_value.__aenter__.return_value = mock_db
 
             with patch("app.routers.server_registry.verify_approve_consent_token") as mock_verify:
@@ -227,7 +228,8 @@ class TestApprovalFlowHealthcheck:
         mock_consent_payload = MagicMock()
         mock_consent_payload.jti = "jti-123"
 
-        with patch("app.routers.server_registry.AsyncSessionLocal") as mock_session_factory:
+        with patch("app.routers.server_registry.AsyncSessionLocal") as mock_session_factory, \
+             patch("app.routers.server_registry.validate_upstream_url_ssrf", new_callable=AsyncMock):
             mock_session_factory.return_value.__aenter__.return_value = mock_db
 
             with patch("app.routers.server_registry.verify_approve_consent_token") as mock_verify:
