@@ -77,24 +77,22 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     ("DELETE", "/admin/credentials", {"admin", "platform_admin"}),
     # Server registry — platform_admin manages, all authenticated can list approved
     ("ANY", "/api/v1/admin/servers", {"admin", "platform_admin"}),
-    # Self-service registration — server_owner or platform_admin (Task 7).
-    # Must appear BEFORE the broad /api/v1/servers prefix rule (longer-prefix wins).
-    ("POST", "/api/v1/servers", {"admin", "platform_admin", "server_owner"}),
+    # Parameterized /servers/* rules MUST precede plain /api/v1/servers prefix rules.
+    # Plain prefix rules match any path starting with /api/v1/servers/ (too greedy),
+    # so all parameterized and longer-match rules come first.
     # Consent token minting — server_owner or platform_admin (D3 dual-control).
-    # Must appear BEFORE the broad /api/v1/servers prefix rule (longer-prefix wins).
     ("POST", "/api/v1/servers/{id}/consent", {"admin", "platform_admin", "server_owner"}),
-    # Entitlement CRUD — more specific /servers/* rules MUST precede the broad /servers prefix.
-    # Longer-prefix / more-specific entries first; first match wins.
+    # Entitlement CRUD — ownership check also enforced in handler (_require_server_owner).
     ("GET",    "/api/v1/servers/mine",                   {"admin", "platform_admin", "server_owner", "manager"}),
-    # /{id}/entitlements — ownership check enforced in the handler (_require_server_owner).
-    # auditor is NOT included: the handler rejects any principal that lacks server_owner/manager/
-    # platform_admin, so allowing auditor at the RBAC layer only produces a misleading 403 from
-    # the handler rather than a clean 403 from the RBAC layer. Keep RBAC and handler aligned.
-    # DELETE uses a prefix rule (no parameterized suffix) because _resolve_allowed_roles only
-    # handles a single path param. The prefix /api/v1/servers/*/entitlements/ is unambiguous here
-    # since no other rule shares this prefix.
     ("GET",    "/api/v1/servers/{id}/entitlements",      {"admin", "platform_admin", "server_owner", "manager"}),
     ("POST",   "/api/v1/servers/{id}/entitlements",      {"admin", "platform_admin", "server_owner", "manager"}),
+    # DELETE /{id}/entitlements/{ent_id}: use plain prefix matching (two path params not
+    # supported by parameterized rule logic). The /entitlements/ infix ensures this only
+    # matches entitlement DELETE operations, not other /servers/* DELETEs.
+    ("DELETE", "/api/v1/servers",                        {"admin", "platform_admin", "server_owner", "manager"}),
+    # Self-service registration — server_owner or platform_admin (Task 7).
+    # Plain prefix rule — comes AFTER all parameterized /servers/* rules above.
+    ("POST", "/api/v1/servers", {"admin", "platform_admin", "server_owner"}),
     # DELETE /{id}/entitlements/{ent_id}: use plain prefix matching (two path params not
     # supported by parameterized rule logic). The /entitlements/ infix ensures this only
     # matches entitlement DELETE operations, not other /servers/* DELETEs.

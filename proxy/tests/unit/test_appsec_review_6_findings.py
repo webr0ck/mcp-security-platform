@@ -29,7 +29,8 @@ def test_server_role_grant_no_revoked_at_column_in_schema():
     The column exists only on the entitlement table; server_role_grant
     revocation is by DELETE. This guards against a future migration that
     adds the column without updating the Step-3 and list_entitled_servers queries."""
-    sql = Path("infra/db/migrations/V015__server_role_grant_entitlement.sql").read_text()
+    _REPO_ROOT = Path(__file__).parent.parent.parent.parent
+    sql = (_REPO_ROOT / "infra/db/migrations/V015__server_role_grant_entitlement.sql").read_text()
     # Isolate the server_role_grant CREATE TABLE block (ends before 'CREATE TABLE entitlement')
     srg_block = sql.split("CREATE TABLE IF NOT EXISTS entitlement")[0]
     assert "server_role_grant" in srg_block, "V015 must define server_role_grant"
@@ -85,7 +86,8 @@ def test_dispatcher_stale_kc_token_comment_removed():
 def test_mcp_server_tools_has_sync_comment():
     """_TOOLS in mcp_server.py must have a comment pointing to the Rego
     platform_meta_tool_roles map so developers know to update both."""
-    src = Path("proxy/app/routers/mcp_server.py").read_text()
+    src = Path(__file__).parent.parent.parent / "app/routers/mcp_server.py"
+    src = src.read_text()
     assert "platform_meta_tool_roles" in src or "authz.rego" in src, (
         "_TOOLS definition in mcp_server.py must reference platform_meta_tool_roles "
         "in authz.rego so developers updating one remember to update the other."
