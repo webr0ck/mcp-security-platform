@@ -383,9 +383,12 @@ class TestEntitlementRBACMatrix:
         assert _rbac_allowed("GET", self.LIST_PATH, "manager")
 
     @pytest.mark.unit
-    def test_list_auditor_allowed(self):
-        # auditor is READ-only — allowed at RBAC layer; ownership check still applies
-        assert _rbac_allowed("GET", self.LIST_PATH, "auditor")
+    def test_list_auditor_denied(self):
+        # auditor is rejected at the RBAC layer for GET /{id}/entitlements.
+        # The handler's _require_server_owner check also rejects auditors (they have
+        # no server_owner/manager grant). Keeping RBAC and handler aligned avoids a
+        # misleading double-rejection where RBAC passes but the handler returns 403.
+        assert not _rbac_allowed("GET", self.LIST_PATH, "auditor")
 
     @pytest.mark.unit
     def test_list_platform_admin_allowed(self):

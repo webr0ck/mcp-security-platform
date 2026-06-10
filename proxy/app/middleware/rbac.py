@@ -80,12 +80,14 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     # Entitlement CRUD — more specific /servers/* rules MUST precede the broad /servers prefix.
     # Longer-prefix / more-specific entries first; first match wins.
     ("GET",    "/api/v1/servers/mine",                   {"admin", "platform_admin", "server_owner", "manager"}),
-    # /{id}/entitlements — ownership check is enforced in the handler for all except platform_admin.
-    # auditor is allowed at the RBAC layer for GET; POST/DELETE require owner/manager/platform_admin.
+    # /{id}/entitlements — ownership check enforced in the handler (_require_server_owner).
+    # auditor is NOT included: the handler rejects any principal that lacks server_owner/manager/
+    # platform_admin, so allowing auditor at the RBAC layer only produces a misleading 403 from
+    # the handler rather than a clean 403 from the RBAC layer. Keep RBAC and handler aligned.
     # DELETE uses a prefix rule (no parameterized suffix) because _resolve_allowed_roles only
     # handles a single path param. The prefix /api/v1/servers/*/entitlements/ is unambiguous here
     # since no other rule shares this prefix.
-    ("GET",    "/api/v1/servers/{id}/entitlements",      {"admin", "platform_admin", "server_owner", "manager", "auditor"}),
+    ("GET",    "/api/v1/servers/{id}/entitlements",      {"admin", "platform_admin", "server_owner", "manager"}),
     ("POST",   "/api/v1/servers/{id}/entitlements",      {"admin", "platform_admin", "server_owner", "manager"}),
     # DELETE /{id}/entitlements/{ent_id}: use plain prefix matching (two path params not
     # supported by parameterized rule logic). The /entitlements/ infix ensures this only

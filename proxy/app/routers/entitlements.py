@@ -326,22 +326,36 @@ async def grant_entitlement(
                     ),
                     {"eid": ent_id},
                 )
+                # INV-001: emit audit BEFORE committing so that if audit fails
+                # the UPDATE is not yet durable and rolls back automatically.
+                try:
+                    await _emit_entitlement_audit(
+                        event_type="entitlement_granted",
+                        server_id=server_id,
+                        entitlement_id=ent_id,
+                        principal_id=body.principal_id,
+                        principal_type=body.principal_type,
+                        actor=actor,
+                        request_id=request_id,
+                    )
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=500, detail=str(exc)) from exc
                 await db.commit()
-
-            # Emit audit for both re-grant (is_revoked) and no-op (already active)
-            # INV-001: audit before returning the response
-            try:
-                await _emit_entitlement_audit(
-                    event_type="entitlement_granted",
-                    server_id=server_id,
-                    entitlement_id=ent_id,
-                    principal_id=body.principal_id,
-                    principal_type=body.principal_type,
-                    actor=actor,
-                    request_id=request_id,
-                )
-            except RuntimeError as exc:
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            else:
+                # Already active: no DB mutation, but still audit the re-grant attempt.
+                # INV-001: audit before returning the response.
+                try:
+                    await _emit_entitlement_audit(
+                        event_type="entitlement_granted",
+                        server_id=server_id,
+                        entitlement_id=ent_id,
+                        principal_id=body.principal_id,
+                        principal_type=body.principal_type,
+                        actor=actor,
+                        request_id=request_id,
+                    )
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=500, detail=str(exc)) from exc
 
             # Fetch the current row state to return
             result = await db.execute(
@@ -393,11 +407,11 @@ async def grant_entitlement(
                 "granted_by": actor,
             },
         )
-        await db.commit()
         new_row = result.mappings().fetchone()
         ent_id = str(new_row["ent_id"])
 
-        # INV-001: audit before returning
+        # INV-001: emit audit BEFORE committing so that if audit fails the
+        # INSERT is not yet durable and rolls back automatically.
         try:
             await _emit_entitlement_audit(
                 event_type="entitlement_granted",
@@ -411,6 +425,7 @@ async def grant_entitlement(
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+        await db.commit()
         return JSONResponse(_serialize_row(dict(new_row)), status_code=201)
 
 
@@ -447,28 +462,30 @@ async def revoke_entitlement(
             ),
             {"eid": ent_id, "sid": server_id},
         )
-        await db.commit()
         updated = result.fetchone()
 
-    if updated is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Entitlement not found, already revoked, or does not belong to this server",
-        )
+        if updated is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Entitlement not found, already revoked, or does not belong to this server",
+            )
 
-    # INV-001: emit audit before returning
-    try:
-        await _emit_entitlement_audit(
-            event_type="entitlement_revoked",
-            server_id=server_id,
-            entitlement_id=str(updated.entitlement_id),
-            principal_id=str(updated.principal_id),
-            principal_type=str(updated.principal_type),
-            actor=actor,
-            request_id=request_id,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        # INV-001: emit audit BEFORE committing so that if audit fails the
+        # UPDATE is not yet durable and rolls back automatically.
+        try:
+            await _emit_entitlement_audit(
+                event_type="entitlement_revoked",
+                server_id=server_id,
+                entitlement_id=str(updated.entitlement_id),
+                principal_id=str(updated.principal_id),
+                principal_type=str(updated.principal_type),
+                actor=actor,
+                request_id=request_id,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        await db.commit()
 
     return JSONResponse(
         {
