@@ -555,6 +555,31 @@ async def oidc_logout(
             except Exception as exc:
                 logger.warning("Failed to revoke OIDC session in DB: %s", exc)
 
+            # Write Redis fast-path revocation marker (revoked_jti:{jti}).
+            # TTL is bounded to the JWT's remaining validity so the key is
+            # self-expiring: after the JWT would have expired anyway the key
+            # is no longer needed.  This means even if postgres is down after
+            # logout, the Redis fast-path in _is_session_jti_revoked will
+            # immediately deny the revoked token (F-C fix).
+            if jti:
+                try:
+                    import math
+                    from app.core.redis_client import redis_pool
+                    exp = claims.get("exp", 0)
+                    remaining_ttl = max(math.ceil(exp - time.time()), 1)
+                    redis = redis_pool.client
+                    await redis.setex(f"revoked_jti:{jti}", remaining_ttl, "1")
+                    logger.debug(
+                        "JTI revocation: Redis marker written",
+                        extra={"jti_prefix": jti[:8] if len(jti) >= 8 else jti, "ttl": remaining_ttl},
+                    )
+                except Exception as exc:
+                    # Best-effort: log but do not block logout.
+                    # The DB revocation is already committed; Redis is a fast-path
+                    # optimisation.  A Redis failure here is logged so ops can
+                    # investigate degraded fast-path availability.
+                    logger.warning("Failed to write Redis JTI revocation marker: %s", exc)
+
     response = JSONResponse(content={"message": "Logged out."})
     response.delete_cookie(settings.SESSION_COOKIE_NAME)
     return response

@@ -202,4 +202,32 @@ This line must never be removed or changed to `default allow = true`.
 
 ---
 
+## INV-014: Session JTI Revocation Must Deny on Error (Fail-Closed)
+
+**Statement:** The session-JWT JTI revocation check (`_is_session_jti_revoked` in `proxy/app/middleware/auth.py`) MUST return DENY (True) on any error from either the Redis fast-path or the PostgreSQL fallback. There is no circumstance under which a Redis or DB error should allow a request through.
+
+**Prior bug (F-C, fixed 2026-06-10):** `auth.py:343` had `return False` in the except block, meaning a DB connection blip caused revoked session tokens to pass JTI verification. This is a session-fixation / credential-persistence vulnerability.
+
+**Fixed behaviour (two-tier lookup):**
+1. **Redis fast-path** (`revoked_jti:{jti}` key): checked first; O(1). Set at logout time via `SETEX revoked_jti:{jti} <remaining_jwt_ttl> 1` (TTL bounded to JWT `exp`). Cache hit → DENY immediately (DB not consulted).
+2. **DB authoritative fallback** (`oidc_sessions` table): checked when Redis misses. Row absent → DENY (forged/never-issued token). `revoked_at IS NOT NULL` → DENY. Active row → ALLOW.
+3. **Any exception in either path → DENY** (fail-closed). If both Redis and DB are down, all session-JWT authentication is blocked. This is an accepted availability cost — a degraded auth store is not a safe state to allow through.
+
+**Redis marker at logout:** `proxy/app/routers/oidc_browser.py::oidc_logout` writes the Redis marker before returning the logout response (best-effort — DB revocation is the authoritative record; Redis is the fast-path performance and fail-resistant optimisation). If Redis is unavailable at logout time, the warning is logged; the DB revocation still applies.
+
+**Accepted availability trade-off:** A total Redis+DB outage blocks session-JWT auth for the duration of the outage. This is a documented and accepted trade-off: security (no revoked token ever passes on error) over availability (brief auth outage during infra failure). mTLS and API-key auth paths are unaffected by this check.
+
+**Why:** JTI revocation that fails open is functionally equivalent to no revocation at all — a user who calls logout retains access if the DB experiences even a transient blip. Session-scoped auth requires hard revocation guarantees.
+
+**Enforcement:** `proxy/tests/unit/test_jti_revocation.py` — 9 unit tests covering:
+- Both-error path → deny
+- Redis-only error → DB fallback (active / revoked / missing row)
+- Redis hit → deny without DB call (short-circuit)
+- Redis miss → DB fallback (active → allow, missing → deny, revoked → deny)
+- DB-only error (Redis miss) → deny
+
+Integration test in same file (`@pytest.mark.integration`) covers the postgres-down scenario end-to-end (skipped unless `INTEGRATION_TEST=1`).
+
+---
+
 *End of Security Non-Negotiables*

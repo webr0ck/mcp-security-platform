@@ -311,37 +311,123 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)  # type: ignore[misc]
 
 
+async def _redis_jti_lookup(jti: str) -> str | None:
+    """
+    Check whether a revoked-JTI marker exists in Redis.
+
+    Returns the stored value (truthy string) if the key `revoked_jti:{jti}` is
+    present, or None if the key is absent.
+
+    Raises on any Redis connectivity or command error so the caller can decide
+    how to handle it (fail-closed by default in _is_session_jti_revoked).
+
+    Extracted as a separate function so tests can monkeypatch it cleanly.
+    """
+    from app.core.redis_client import redis_pool
+    redis = redis_pool.client
+    return await redis.get(f"revoked_jti:{jti}")
+
+
+async def _db_jti_lookup(jti: str):
+    """
+    Look up a session JTI in the oidc_sessions table.
+
+    Returns a SimpleNamespace-like row with a `revoked_at` attribute, or None
+    if no row exists for the given JTI.
+
+    Raises on any DB connectivity or query error so the caller can decide how
+    to handle it (fail-closed by default in _is_session_jti_revoked).
+
+    Extracted as a separate function so tests can monkeypatch it cleanly.
+    """
+    from types import SimpleNamespace
+    from app.core.database import AsyncSessionLocal
+    from sqlalchemy import text as sa_text
+    async with AsyncSessionLocal() as db:
+        row = await db.execute(
+            sa_text(
+                "SELECT revoked_at FROM oidc_sessions WHERE session_jwt_jti = :jti LIMIT 1"
+            ),
+            {"jti": jti},
+        )
+        record = row.fetchone()
+        if record is None:
+            return None
+        return SimpleNamespace(revoked_at=record[0])
+
+
 async def _is_session_jti_revoked(jti: str) -> bool:
     """
-    Return True if the given session JWT JTI is unknown (never legitimately issued)
-    OR has been revoked (revoked_at IS NOT NULL).
+    Return True (DENY) if the given session JWT JTI is:
+      - present in the Redis `revoked_jti:{jti}` fast-path cache (written at logout), OR
+      - not found in the oidc_sessions table (never legitimately issued → forged), OR
+      - found in oidc_sessions with revoked_at IS NOT NULL (explicitly revoked), OR
+      - triggers ANY exception in either Redis or DB lookup (fail-closed).
 
-    Security invariant: a JTI that has no row in oidc_sessions was never issued by
-    this proxy — it is either forged or crafted with a leaked PROXY_SECRET_KEY.
-    Such tokens are DENIED (True returned) rather than allowed through.
+    Return False (ALLOW) only when:
+      - Redis cache misses (key absent), AND
+      - oidc_sessions row exists with revoked_at IS NULL (active session).
 
-    Fail-open only on DB errors: if the DB is temporarily unavailable we log a
-    warning and return False to avoid hard-blocking all authenticated requests.
+    Security invariant (F-C): this function MUST NEVER return False on error.
+    A total Redis+DB outage blocks all session-JWT authentication — this is the
+    accepted availability cost in exchange for the security guarantee.
+
+    Two-tier lookup:
+      1. Redis fast-path: O(1) sub-millisecond; populated at logout.
+         Error → fall through to DB (not silently deny, as DB may be healthy).
+      2. DB authoritative fallback: source of truth for sessions not yet in Redis.
+         Error → deny (fail-closed).
+
+    Both-error path: if Redis errors AND DB errors → deny.
     """
+    # -----------------------------------------------------------------------
+    # Tier 1: Redis fast-path (revoked_jti:{jti} key written at logout time)
+    # -----------------------------------------------------------------------
+    redis_errored = False
     try:
-        from app.core.database import AsyncSessionLocal
-        from sqlalchemy import text as sa_text
-        async with AsyncSessionLocal() as db:
-            row = await db.execute(
-                sa_text(
-                    "SELECT revoked_at FROM oidc_sessions WHERE session_jwt_jti = :jti LIMIT 1"
-                ),
-                {"jti": jti},
+        cached = await _redis_jti_lookup(jti)
+        if cached is not None:
+            # Key exists → token was explicitly revoked; deny immediately.
+            logger.debug(
+                "JTI revocation: Redis cache hit — denying revoked JTI",
+                extra={"jti_prefix": jti[:8] if len(jti) >= 8 else jti},
             )
-            record = row.fetchone()
-            if record is None:
-                # JTI was never registered — token was never legitimately issued.
-                logger.warning("Session JTI %s not found in oidc_sessions — possible forged token; denying", jti)
-                return True  # DENY: unknown = forged
-            return record[0] is not None  # True if revoked_at is set
+            return True  # DENY: Redis fast-path hit
+        # Key absent — Redis is reachable but JTI not yet cached; fall through to DB.
     except Exception as exc:
-        logger.warning("JTI revocation check failed (fail-open): %s", exc)
-        return False
+        redis_errored = True
+        logger.warning(
+            "JTI revocation: Redis lookup failed — falling through to DB (fail-closed on DB error): %s",
+            exc,
+        )
+
+    # -----------------------------------------------------------------------
+    # Tier 2: DB authoritative fallback
+    # -----------------------------------------------------------------------
+    try:
+        row = await _db_jti_lookup(jti)
+        if row is None:
+            # JTI was never registered — token was never legitimately issued.
+            logger.warning(
+                "JTI revocation: JTI not found in oidc_sessions — possible forged token; denying",
+                extra={"jti_prefix": jti[:8] if len(jti) >= 8 else jti},
+            )
+            return True  # DENY: unknown JTI = forged / replay
+        revoked = row.revoked_at is not None
+        if revoked:
+            logger.debug(
+                "JTI revocation: DB row has revoked_at set — denying",
+                extra={"jti_prefix": jti[:8] if len(jti) >= 8 else jti},
+            )
+        return revoked  # True if revoked, False if active
+    except Exception as exc:
+        # DB error: fail-closed regardless of whether Redis also errored.
+        logger.warning(
+            "JTI revocation: DB lookup failed — denying (fail-closed): %s",
+            exc,
+            extra={"redis_also_errored": redis_errored},
+        )
+        return True  # DENY: fail-closed
 
 
 _jwks_cache: dict[str, Any] = {}   # {"keys": [...], "fetched_at": float, "jwks_uri": str}
