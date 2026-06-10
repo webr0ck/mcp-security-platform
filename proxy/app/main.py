@@ -111,14 +111,42 @@ async def lifespan(app: FastAPI):
             extra={"error": str(exc)},
         )
 
-    # Step 5: Verify database on startup (warn but don't crash)
+    # Step 5: Initialize OPA data sync service (push grants to OPA immediately)
+    from app.services.opa_data_sync import OPADataSync
+    opa_data_sync = None
+    try:
+        pool = asyncpg_pool.get()
+        opa_data_sync = OPADataSync(db_pool=pool)
+        # Initial push of grants to OPA (fail-logged, continues on error)
+        try:
+            await opa_data_sync.push_grants()
+        except Exception as exc:
+            logger.warning(
+                "Initial OPA grants push failed — OPA will deny until first reconcile",
+                extra={"error": str(exc)},
+            )
+        # Start background reconciliation loop (60s interval)
+        await opa_data_sync.start_reconcile_loop()
+        logger.info("OPA data sync service initialized")
+    except Exception as exc:
+        logger.warning(
+            "OPA data sync initialization failed — grants will not be synced",
+            extra={"error": str(exc)},
+        )
+
+    # Step 6: Verify database on startup (warn but don't crash)
     db_ok = await check_database_health()
     if not db_ok:
         logger.warning("Database not reachable at startup — health endpoint will report degraded")
 
     yield
 
-    # Shutdown — stop registry refresh loop first
+    # Shutdown — stop OPA data sync reconcile loop first
+    if opa_data_sync is not None:
+        await opa_data_sync.stop_reconcile_loop()
+        logger.info("OPA data sync reconcile loop stopped")
+
+    # Shutdown — stop registry refresh loop
     if registry is not None:
         await registry.stop_refresh_loop()
         logger.info("Registry refresh loop stopped")
