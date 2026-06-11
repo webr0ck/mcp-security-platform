@@ -41,6 +41,7 @@ Analyze the following tool for security risks. Focus on:
 
 Tool Name: {tool_name}
 Tool Description: {description}
+Parameter Descriptions: {param_descriptions_json}
 Tool Parameters Schema: {schema_json}
 
 Respond in JSON with this exact structure:
@@ -142,9 +143,18 @@ async def run_llm_analysis(
     tool_name: str,
     description: str,
     schema_json: str,
+    param_descriptions_json: str = "{}",
 ) -> dict[str, Any]:
     """
     POST the tool schema to Ollama for LLM-assisted semantic risk scoring.
+
+    Args:
+        tool_name: Tool identifier name.
+        description: Top-level tool description text.
+        schema_json: Full JSON Schema as a JSON string.
+        param_descriptions_json: JSON object mapping param names to their
+            description strings, extracted from schema.properties[*].description.
+            Passed separately so the LLM sees them prominently — DET-F8.
 
     Returns:
         {"risk_score": int, "prompt_injection_detected": bool, ...}
@@ -156,6 +166,7 @@ async def run_llm_analysis(
     prompt = RISK_SCORING_PROMPT_TEMPLATE.format(
         tool_name=tool_name,
         description=description,
+        param_descriptions_json=param_descriptions_json,
         schema_json=schema_json,
     )
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
@@ -227,6 +238,18 @@ async def run_audit(
 
     schema_json = json.dumps(schema, sort_keys=True)
 
+    # DET-F8: extract per-parameter descriptions so the LLM sees them prominently.
+    # schema.properties[*].description may contain injected instructions that are
+    # hidden from the top-level description scan.  Missing descriptions default to
+    # an empty string; params without a description key are omitted.
+    properties: dict[str, Any] = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    param_descriptions: dict[str, str] = {
+        param_name: str(param_def.get("description", ""))
+        for param_name, param_def in properties.items()
+        if isinstance(param_def, dict) and param_def.get("description")
+    }
+    param_descriptions_json = json.dumps(param_descriptions, sort_keys=True)
+
     # Step 1: Static analysis via OPA Rego
     static_input = {
         "tool_name": tool_name,
@@ -238,7 +261,11 @@ async def run_audit(
     static_result = await run_static_analysis(static_input)
 
     # Step 2: LLM semantic analysis via Ollama
-    llm_result = await run_llm_analysis(tool_name, description, schema_json)
+    # param_descriptions_json is passed separately (DET-F8) so the LLM sees
+    # per-parameter descriptions prominently rather than buried in schema_json.
+    llm_result = await run_llm_analysis(
+        tool_name, description, schema_json, param_descriptions_json
+    )
 
     # Step 3: Combine scores (weighted average)
     # DET-F1 / INV-005: when Ollama is unreachable the LLM result carries

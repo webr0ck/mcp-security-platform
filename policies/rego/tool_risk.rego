@@ -47,6 +47,28 @@ _risk_flag contains "description_prompt_injection" if {
     contains(lower(input.description), phrase)
 }
 
+# DET-F8: scan per-parameter descriptions for the same injection phrases.
+# A tool with a benign top-level description but a poisoned param description
+# must score at least as high as an equivalent top-level injection.
+# Note: Task 1.4 will centralise these phrases into data.json; kept inline here
+# until that task lands to avoid cross-task file conflicts.
+_risk_flag contains "param_description_injection" if {
+    injection_phrases := [
+        "ignore previous",
+        "ignore all prior",
+        "you are now",
+        "act as",
+        "jailbreak",
+        "disregard",
+        "do not follow",
+        "override instructions",
+        "system:",
+    ]
+    some _param_name, param_def in input.schema.properties
+    some phrase in injection_phrases
+    contains(lower(param_def.description), phrase)
+}
+
 _risk_flag contains "excessive_permissions_tag" if {
     "admin" in input.tags
 }
@@ -116,14 +138,15 @@ risk_flags := _risk_flag
 
 # Points per flag category
 _flag_weights := {
-    "filesystem_unrestricted":   25,
+    "filesystem_unrestricted":      25,
     "description_prompt_injection": 40,
-    "excessive_permissions_tag": 30,
-    "network_unrestricted":      20,
-    "no_source_repo":            10,
-    "shell_execution":           35,
-    "credential_parameter":      30,
-    "code_execution":            35,
+    "param_description_injection":  40,
+    "excessive_permissions_tag":    30,
+    "network_unrestricted":         20,
+    "no_source_repo":               10,
+    "shell_execution":              35,
+    "credential_parameter":         30,
+    "code_execution":               35,
 }
 
 static_risk_score := score if {

@@ -8,11 +8,14 @@ Pydantic Settings v2 is used for typed config with automatic env var loading.
 """
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 # Strings that we know are dev-only placeholders. If any of these reach a
@@ -430,6 +433,22 @@ class Settings(BaseSettings):
                 "production. Set SESSION_COOKIE_SECURE=true in your environment."
             )
 
+        # AUTH-F7: emit a loud ERROR log when GATEWAY_SHARED_SECRET is empty in
+        # production.  An empty secret means the proxy accepts any X-Client-Cert-CN
+        # header without validating it came from the trusted Nginx gateway, so mTLS
+        # CN authentication is silently disabled.  We do NOT block startup (the
+        # proxy can still operate with API-key-only auth) but the misconfiguration
+        # must never be silent.
+        if not self.GATEWAY_SHARED_SECRET.strip():
+            logger.error(
+                "SECURITY WARNING: GATEWAY_SHARED_SECRET is empty in production. "
+                "The X-Client-Cert-CN mTLS CN authentication path is disabled — "
+                "any caller can supply an arbitrary CN header and it will be ignored "
+                "rather than validated against the gateway. "
+                "Set GATEWAY_SHARED_SECRET to the same value configured in Nginx "
+                "proxy_set_header X-Gateway-Secret."
+            )
+
         # DET-F1 / INV-005: REQUIRE_LLM_AUDIT must be True in production.
         # An attacker who can DoS Ollama at registration time would otherwise
         # downgrade the auditor to static-regex-only at reduced (0.4×) weight.
@@ -446,6 +465,40 @@ class Settings(BaseSettings):
                 "When True, tool registration returns 503 during Ollama outages "
                 "rather than accepting a degraded (static-only) audit result. "
                 "Tool invocations are not affected by this setting."
+            )
+
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_staging_parity(self) -> "Settings":
+        """
+        AUTH-F5 / Task 1.8: staging must enforce the same OIDC audience and
+        session-cookie security constraints as production.  Development is
+        intentionally excluded to allow local testing without HTTPS or a real
+        Keycloak audience.
+
+        The "require when OIDC_ENABLED=true outside development" rule applies
+        to both OIDC_AUDIENCE and SESSION_COOKIE_SECURE — both are audience/
+        transport-integrity controls that are meaningless to skip in staging
+        (staging is where pre-production validation happens and must mirror
+        the production threat model).
+        """
+        if self.ENVIRONMENT != "staging":
+            return self
+
+        # OIDC_AUDIENCE in staging — same rationale as production.
+        if self.OIDC_ENABLED and not self.OIDC_AUDIENCE.strip():
+            raise ValueError(
+                "Staging startup blocked: OIDC_ENABLED=true but OIDC_AUDIENCE is "
+                "empty. Staging must enforce the same audience constraint as "
+                "production. Set OIDC_AUDIENCE to the expected token audience."
+            )
+
+        # SESSION_COOKIE_SECURE in staging — staging must use HTTPS.
+        if not self.SESSION_COOKIE_SECURE:
+            raise ValueError(
+                "Staging startup blocked: SESSION_COOKIE_SECURE must be True in "
+                "staging. Set SESSION_COOKIE_SECURE=true in your environment."
             )
 
         return self
@@ -468,6 +521,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT == "production"
+
+    @property
+    def is_staging(self) -> bool:
+        return self.ENVIRONMENT == "staging"
 
     @property
     def opa_policy_path(self) -> str:

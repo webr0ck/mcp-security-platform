@@ -17,13 +17,23 @@ def test_http_vault_allowed_in_development():
 
 # Use 'staging': it triggers the TLS validator but NOT the production-only
 # placeholder-rejection validator, so this test isolates CB-002 cleanly.
+# Task 1.8: SESSION_COOKIE_SECURE=True is now also required in staging
+# (enforce parity with production); supply it so these tests isolate CB-002.
 @pytest.mark.unit
 def test_http_vault_rejected_outside_development():
     with pytest.raises(ValueError, match="VAULT_ADDR must use https"):
-        _settings(ENVIRONMENT="staging", VAULT_ADDR="http://vault:8200")
+        _settings(
+            ENVIRONMENT="staging",
+            VAULT_ADDR="http://vault:8200",
+            SESSION_COOKIE_SECURE=True,
+        )
 
 
 @pytest.mark.unit
 def test_https_vault_accepted_outside_development():
-    s = _settings(ENVIRONMENT="staging", VAULT_ADDR="https://vault:8200")
+    s = _settings(
+        ENVIRONMENT="staging",
+        VAULT_ADDR="https://vault:8200",
+        SESSION_COOKIE_SECURE=True,
+    )
     assert s.VAULT_ADDR.startswith("https://")
