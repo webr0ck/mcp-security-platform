@@ -985,10 +985,12 @@ def _compute_hmac_signature(sha256_hash: str, event: Any) -> str | None:
     try:
         import hmac as _hmac
         import hashlib as _hashlib
-        import os as _os
         from mcp_audit_logger.hasher import canonical_audit_json as _canonical_audit_json
+        from app.core.config import settings as _settings
 
-        hmac_key = _os.environ.get("AUDIT_LOG_HMAC_KEY", "")
+        # Use settings (not os.environ) so secrets injected via Vault agent,
+        # AWS Secrets Manager, or K8s CSI are resolved correctly (IV-002).
+        hmac_key = _settings.AUDIT_LOG_HMAC_KEY or ""
         if not hmac_key:
             return None
 

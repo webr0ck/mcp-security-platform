@@ -127,6 +127,20 @@ async def upsert_grant(body: ClientGrantCreate, request: Request) -> dict[str, A
     pool = await _get_db_pool()
     caller = getattr(request.state, "client_id", "unknown-admin")
 
+    # Fail-closed: refuse to commit if OPA sync is unavailable.
+    # A grant acknowledged with 200 but never pushed to OPA gives false confidence
+    # — the client's access state would diverge from what the admin intended (FO-002).
+    sync = opa_data_sync_svc.opa_data_sync_instance
+    if sync is None:
+        logger.error(
+            "OPA data sync not initialized — refusing grant upsert (fail-closed)",
+            extra={"client_id": body.client_id},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="OPA data sync service not initialized — grant not saved",
+        )
+
     # Upsert: insert or update if client_id already exists
     result = await pool.fetchrow(
         """
@@ -150,24 +164,17 @@ async def upsert_grant(body: ClientGrantCreate, request: Request) -> dict[str, A
     was_insert = result["is_insert"] if result else True
 
     # Sync to OPA immediately (fail-closed)
-    sync = opa_data_sync_svc.opa_data_sync_instance
-    if sync is None:
-        logger.warning(
-            "OPA data sync not initialized — grant saved to DB but OPA not synced",
-            extra={"client_id": body.client_id},
+    try:
+        await sync.push_grants()
+    except PolicyEngineError as exc:
+        logger.error(
+            "OPA sync failed after grant upsert — returning 503",
+            extra={"client_id": body.client_id, "error": str(exc)},
         )
-    else:
-        try:
-            await sync.push_grants()
-        except PolicyEngineError as exc:
-            logger.error(
-                "OPA sync failed after grant upsert — returning 503",
-                extra={"client_id": body.client_id, "error": str(exc)},
-            )
-            raise HTTPException(
-                status_code=503,
-                detail="Grant saved but OPA sync failed — retry after OPA recovers",
-            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Grant saved but OPA sync failed — retry after OPA recovers",
+        ) from exc
 
     logger.info(
         "Client grant upserted",
@@ -198,6 +205,20 @@ async def delete_grant(client_id: str, request: Request) -> dict[str, Any]:
     _require_admin(request)
     pool = await _get_db_pool()
 
+    # Fail-closed: refuse to commit if OPA sync is unavailable.
+    # A revocation acknowledged with 200 but never pushed to OPA gives false confidence
+    # — the revoked client would retain access (FO-002).
+    sync = opa_data_sync_svc.opa_data_sync_instance
+    if sync is None:
+        logger.error(
+            "OPA data sync not initialized — refusing grant delete (fail-closed)",
+            extra={"client_id": client_id},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="OPA data sync service not initialized — grant not deleted",
+        )
+
     result = await pool.execute(
         "DELETE FROM client_grants WHERE client_id = $1",
         client_id,
@@ -209,24 +230,17 @@ async def delete_grant(client_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Grant for '{client_id}' not found")
 
     # Sync to OPA immediately (fail-closed)
-    sync = opa_data_sync_svc.opa_data_sync_instance
-    if sync is None:
-        logger.warning(
-            "OPA data sync not initialized — grant deleted from DB but OPA not synced",
-            extra={"client_id": client_id},
+    try:
+        await sync.push_grants()
+    except PolicyEngineError as exc:
+        logger.error(
+            "OPA sync failed after grant delete — returning 503",
+            extra={"client_id": client_id, "error": str(exc)},
         )
-    else:
-        try:
-            await sync.push_grants()
-        except PolicyEngineError as exc:
-            logger.error(
-                "OPA sync failed after grant delete — returning 503",
-                extra={"client_id": client_id, "error": str(exc)},
-            )
-            raise HTTPException(
-                status_code=503,
-                detail="Grant deleted but OPA sync failed — retry after OPA recovers",
-            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Grant deleted but OPA sync failed — retry after OPA recovers",
+        ) from exc
 
     logger.info("Client grant deleted", extra={"client_id": client_id})
     return {"client_id": client_id, "status": "deleted"}
