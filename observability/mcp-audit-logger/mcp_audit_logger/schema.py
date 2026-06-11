@@ -86,13 +86,34 @@ class AuditEvent:
     # but the redaction pass runs unconditionally over all string fields).
     source_ip: str | None = None
 
-    # Hash-chain field — SHA-256 of the immediately preceding event in this stream.
-    # Set to None for the first event in a session/stream (chain anchor).
-    # Callers (MCPAuditLogger or the proxy router) must pass the hash returned by
-    # the previous emit() call. When None, the chain is anchored at this event.
-    # This links events into a tamper-evident sequence: altering any event breaks
-    # the chain from that point forward (INV-001, INV-007).
-    prev_hash: str | None = None
+    # Task 1.2 — "who" enrichment fields (LOG-F04).
+    # Populated by the proxy from request.state at invocation time.
+    # Never populated for internal synthetic events or auth-failure (401/403) rows
+    # where the identity has not been fully resolved.
+    #
+    # principal_type: 'human' | 'agent' | 'service' — the category of the caller.
+    #   Derived from request.state.principal_type (set by auth middleware).
+    #   None for unauthenticated / auth-failure events.
+    principal_type: str | None = None
+
+    # roles: copy of the caller's roles list at invocation time.
+    #   Snapshot of request.state.client_roles (list[str]) for the audit record.
+    #   Stored as a list so the audit consumer can filter without parsing JSON.
+    #   INV-002: roles values must not carry bearer-token payloads; they are
+    #   role-name strings (e.g. ['agent', 'auditor']).
+    roles: list[str] = field(default_factory=list)
+
+    # session_jti: OIDC session JWT ID from request.state.session_jti.
+    #   Present only for session-JWT callers (OIDC browser flow); None for
+    #   mTLS / API-key callers that have no OIDC session.
+    #   Used to correlate audit events with session revocation records (INV-014).
+    session_jti: str | None = None
+
+    # NOTE: prev_hash was deleted in Task 1.2 (plan decision: delete, not wire).
+    # Hash-chain / sequence tamper evidence is P5 scope; per-event HMAC (Task 0.2)
+    # is the tamper-evidence mechanism for this build. Callers that previously
+    # passed prev_hash= will see a TypeError — update call sites to remove the
+    # argument.
 
     # Computed — set automatically in __post_init__
     sha256_hash: str = field(default="", init=False)
@@ -144,4 +165,9 @@ class AuditEvent:
             "is_testing": self.is_testing,
             "platform_version": self.platform_version,
             "sha256_hash": self.sha256_hash,
+            # Task 1.2 — "who" enrichment fields (LOG-F04).
+            "source_ip": self.source_ip,
+            "principal_type": self.principal_type,
+            "roles": self.roles,
+            "session_jti": self.session_jti,
         }
