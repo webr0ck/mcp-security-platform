@@ -32,6 +32,11 @@ networks:
   mcp-servers-net:
     driver: bridge
     internal: true
+  # Dedicated pairwise net for mcp-notes ↔ redis.  Keeps the MCP server off
+  # proxy-redis-net (F-001 / ISO-F1.3) while still allowing Redis access.
+  poc-mcp-notes-redis-net:
+    driver: bridge
+    internal: true
 
 volumes:
   wazuh-manager-data:
@@ -197,7 +202,9 @@ services:
       REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/3"
     networks:
       - mcp-servers-net
-      - proxy-redis-net
+      # Use a dedicated pairwise net rather than the platform proxy-redis-net
+      # (F-001 / ISO-F1.3: MCP servers must not share platform backend networks)
+      - poc-mcp-notes-redis-net
     depends_on:
       redis:
         condition: service_healthy
@@ -230,6 +237,15 @@ services:
     logging: *default-logging
 
   # ── POC seeder: inserts alice/bob/carol + registers servers ───────────────
+  # ── Redis: extend with the mcp-notes pairwise net (overlay) ─────────────────
+  # Adds poc-mcp-notes-redis-net so that mcp-notes can reach redis without
+  # joining the platform proxy-redis-net (F-001 / ISO-F1.3).
+  redis:
+    networks:
+      - internal-net
+      - proxy-redis-net
+      - poc-mcp-notes-redis-net
+
   poc-seeder:
     image: postgres:16-alpine
     container_name: poc-seeder

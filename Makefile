@@ -1,7 +1,7 @@
 .PHONY: help up down dev-up dev-down build logs shell proxy-shell db-shell \
         test test-unit test-integration test-security test-perf test-all test-red-team lint \
         db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle test-signed-bundle \
-        assign-role compliance-run sbom-verify \
+        assign-role compliance-run sbom-verify onboard-server \
         security-check health smoke-test \
         dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
         lab-init lab-init-force lab-up lab-down lab-down-volumes \
@@ -86,6 +86,12 @@ help:
 	@echo "  make assign-role CLIENT_ID=x ROLE=agent   Assign RBAC role to a client"
 	@echo "  make compliance-run    Trigger on-demand compliance check"
 	@echo "  make sbom-verify TOOL_ID=<uuid>           Verify SBOM signature"
+	@echo ""
+	@echo "Onboarding:"
+	@echo "  make onboard-server URL=... MODE=... NAME=...   Guided MCP server onboarding"
+	@echo "    Required: URL=<upstream-https-url> MODE=<injection-mode> NAME=<service-name>"
+	@echo "    Optional: BASE_URL=http://localhost:8000  GRANT=<principal-id>"
+	@echo "    Tokens:   OWNER_TOKEN / ADMIN_TOKEN env vars (prompted if absent)"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean             Destroy volumes and remove build artifacts"
@@ -479,6 +485,51 @@ ifndef TOOL_ID
 	$(error TOOL_ID is required. Usage: make sbom-verify TOOL_ID=<uuid>)
 endif
 	$(COMPOSE) exec $(PROXY_CONTAINER) python -m app.cli.sbom_verify --tool-id $(TOOL_ID)
+
+# ─── Operator onboarding ──────────────────────────────────────────────────────
+# Guided CLI that walks through the full D3 dual-control onboarding workflow:
+#   register → consent → approve → discover → activate → grant
+#
+# Required variables:
+#   URL   — upstream HTTPS URL of the MCP server
+#   MODE  — injection mode: none | service | user | service_account |
+#            oauth_user_token | entra_user_token | entra_client_credentials
+#   NAME  — human-readable service name (e.g. "gitea", "my-mcp-server")
+#
+# Optional variables:
+#   BASE_URL     — proxy base URL (default: http://localhost:8000 or $$PROXY_BASE_URL)
+#   GRANT        — principal_id to grant entitlement to after onboarding
+#   GRANT_TYPE   — principal_type for the grant: agent | human | kc_group (default: agent)
+#   ACTIVATE_ALL — set to 1 to activate all discovered tools (default: none activated)
+#
+# Tokens:
+#   OWNER_TOKEN / ADMIN_TOKEN env vars are read automatically.
+#   If not set, the script will prompt (input hidden — never echoed).
+#
+# Two-identity dual control:
+#   Steps 1–2 and 6 use the server_owner credential (OWNER_TOKEN).
+#   Steps 3–5 use the platform_admin credential (ADMIN_TOKEN).
+#   Both identities must be distinct in production (single-person approval is blocked
+#   by the D3 consent-token flow requiring two separate authenticated actions).
+
+onboard-server: ## Onboard a new MCP server (URL=... MODE=... NAME=...)
+ifndef URL
+	$(error URL is required. Usage: make onboard-server URL=https://... MODE=none NAME=my-service)
+endif
+ifndef MODE
+	$(error MODE is required. Usage: make onboard-server URL=https://... MODE=none NAME=my-service)
+endif
+ifndef NAME
+	$(error NAME is required. Usage: make onboard-server URL=https://... MODE=none NAME=my-service)
+endif
+	@python3 scripts/onboard_server.py \
+		--url "$(URL)" \
+		--mode "$(MODE)" \
+		--service-name "$(NAME)" \
+		$(if $(BASE_URL),--base-url "$(BASE_URL)") \
+		$(if $(GRANT),--grant-principal "$(GRANT)") \
+		$(if $(GRANT_TYPE),--grant-principal-type "$(GRANT_TYPE)") \
+		$(if $(filter 1,$(ACTIVATE_ALL)),--activate-all)
 
 # ─── Cleanup ──────────────────────────────────────────────────────────────────
 
