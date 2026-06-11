@@ -60,6 +60,7 @@ def _tool_row(
         injection_mode="none", service_name=None,
         inject_header="Authorization", inject_prefix="Bearer",
         kc_client_id=None, kc_token_audience=None,
+        server_id=None,
     )
 
 

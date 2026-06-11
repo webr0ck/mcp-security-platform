@@ -291,6 +291,7 @@ async def test_device_flow_credential_enrolled_allows_subsequent_invoke():
                     injection_mode="none", service_name=None,
                     inject_header="Authorization", inject_prefix="Bearer",
                     kc_client_id=None, kc_token_audience=None,
+                    server_id=None,
                 )
 
         class _FakeDB:
