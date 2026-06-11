@@ -29,6 +29,28 @@ import rego.v1
 default allow := false
 
 # =============================================================================
+# GRANTS DATA PATH NOTE (Task 4.4b — SELF-F6)
+# =============================================================================
+# Client grants are read from data.mcp_grants (pushed by proxy OPADataSync
+# via PUT /v1/data/mcp_grants on startup and every 60s).
+#
+# This path is intentionally OUTSIDE the "mcp" bundle root (see .manifest)
+# so the proxy can push grants via the OPA data API without conflict.
+# Previously grants lived at data.mcp.grants (bundle-owned); this was
+# impossible to update at runtime without a full bundle re-sign + deploy.
+#
+# data.mcp_grants structure:
+#   {
+#     "alice@corp": {
+#       "allowed_tools": ["ping", "echo_args", ...],
+#       "allowed_tags": ["lab", "testing"],
+#       "max_risk_level": "medium"
+#     },
+#     ...
+#   }
+# =============================================================================
+
+# =============================================================================
 # ALLOW rules
 # All conditions must be satisfied. An explicit deny overrides any allow.
 # =============================================================================
@@ -57,11 +79,11 @@ allow if {
 # Admins are only permitted to test tools explicitly listed in their grant or
 # implied by an allowed tag — never tools outside the inventory.
 admin_has_test_permission if {
-    input.tool_name in data.mcp.grants[input.client_id].allowed_tools
+    input.tool_name in data.mcp_grants[input.client_id].allowed_tools
 }
 
 admin_has_test_permission if {
-    some tag in data.mcp.grants[input.client_id].allowed_tags
+    some tag in data.mcp_grants[input.client_id].allowed_tags
     tag in data.mcp.tools[input.tool_name].tags
 }
 
@@ -116,7 +138,7 @@ client_has_invoke_permission if {
 client_has_invoke_permission if {
     some role in input.client_roles
     role in {"agent", "user"}
-    some tag in data.mcp.grants[input.client_id].allowed_tags
+    some tag in data.mcp_grants[input.client_id].allowed_tags
     tag in data.mcp.tools[input.tool_name].tags
 }
 
@@ -175,7 +197,7 @@ risk_level_value := {
 }
 
 risk_level_within_threshold if {
-    client_max := data.mcp.grants[input.client_id].max_risk_level
+    client_max := data.mcp_grants[input.client_id].max_risk_level
     risk_level_value[input.tool_risk_level] <= risk_level_value[client_max]
 }
 
@@ -212,7 +234,7 @@ anomaly_threshold_exceeded if {
 }
 
 tool_allowed_for_client(client_id, tool_name) if {
-    tool_name in data.mcp.grants[client_id].allowed_tools
+    tool_name in data.mcp_grants[client_id].allowed_tools
 }
 
 # =============================================================================

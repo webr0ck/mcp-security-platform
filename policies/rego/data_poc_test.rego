@@ -15,7 +15,7 @@ test_alice_can_echo if {
         "params": {},
         "anomaly_score": 0.0,
         "is_testing": false,
-    } with data.mcp.grants as {
+    } with data.mcp_grants as {
         "alice": {
             "allowed_tools": ["ping", "echo_args", "whoami"],
             "allowed_tags": [],
@@ -38,7 +38,7 @@ test_alice_cannot_notes if {
         "params": {},
         "anomaly_score": 0.0,
         "is_testing": false,
-    } with data.mcp.grants as {
+    } with data.mcp_grants as {
         "alice": {
             "allowed_tools": ["ping", "echo_args", "whoami"],
             "allowed_tags": [],
@@ -61,7 +61,7 @@ test_alice_blocked_by_risk_level if {
         "params": {},
         "anomaly_score": 0.0,
         "is_testing": false,
-    } with data.mcp.grants as {
+    } with data.mcp_grants as {
         "alice": {
             "allowed_tools": ["ping", "echo_args", "whoami", "notes_write"],
             "allowed_tags": [],
@@ -84,7 +84,7 @@ test_bob_can_notes if {
         "params": {},
         "anomaly_score": 0.0,
         "is_testing": false,
-    } with data.mcp.grants as {
+    } with data.mcp_grants as {
         "bob": {
             "allowed_tools": ["ping", "echo_args", "whoami", "notes_read", "notes_write", "notes_delete"],
             "allowed_tags": [],
@@ -107,7 +107,7 @@ test_carol_can_search if {
         "params": {},
         "anomaly_score": 0.0,
         "is_testing": false,
-    } with data.mcp.grants as {
+    } with data.mcp_grants as {
         "carol": {
             "allowed_tools": ["ping", "echo_args", "whoami", "notes_read", "notes_write", "notes_delete", "search", "fetch_url", "summarize"],
             "allowed_tags": [],
@@ -130,7 +130,7 @@ test_quarantined_tool_denied if {
         "params": {},
         "anomaly_score": 0.0,
         "is_testing": false,
-    } with data.mcp.grants as {
+    } with data.mcp_grants as {
         "carol": {
             "allowed_tools": ["search"],
             "allowed_tags": [],

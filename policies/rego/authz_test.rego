@@ -89,7 +89,7 @@ test_owner_invoke_above_ceiling_deny if {
 }
 
 # owner_max_risk_level absent from input → owner risk rule can't fire → deny (fail-closed)
-# No data.mcp.grants entry either, so grant-based risk gate also can't fire.
+# No data.mcp_grants entry either, so grant-based risk gate also can't fire.
 test_owner_missing_max_risk_level_deny if {
 	not allow with input as {
 		"client_id": "owner-1",
@@ -103,7 +103,7 @@ test_owner_missing_max_risk_level_deny if {
 		"params": {},
 		"anomaly_score": 0.0,
 		"is_testing": false,
-		# Note: no owner_max_risk_level, no data.mcp.grants entry → deny
+		# Note: no owner_max_risk_level, no data.mcp_grants entry → deny
 	}
 }
 
@@ -158,7 +158,7 @@ test_owner_unlinked_tool_no_grant_deny if {
 		"params": {},
 		"anomaly_score": 0.0,
 		"is_testing": false,
-		# No data.mcp.grants entry → deny
+		# No data.mcp_grants entry → deny
 	}
 }
 
@@ -178,7 +178,7 @@ test_owner_explicit_grant_also_works if {
 		"params": {},
 		"anomaly_score": 0.0,
 		"is_testing": false,
-	} with data.mcp.grants as {
+	} with data.mcp_grants as {
 		"owner-1": {
 			"allowed_tools": ["my_tool"],
 			"allowed_tags": [],

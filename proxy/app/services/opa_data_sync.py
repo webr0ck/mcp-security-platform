@@ -1,42 +1,39 @@
 """
 MCP Security Platform — OPA Data Sync Service
 
-Fetches grants from the database and pushes them to OPA's data API.
+Fetches grants from the client_grants table and pushes them to OPA's data API
+at PUT /v1/data/mcp_grants (NOT owned by the signed bundle — see .manifest).
 Runs a background 60s reconciliation loop to keep OPA grants in sync with DB.
 
-Design:
-  - Startup: fetch grants from DB, push to OPA immediately (fail-logged)
+Design (Task 4.4b — SELF-F6):
+  - Startup: fetch grants from client_grants, push to OPA immediately (fail-logged)
   - Mutation: before DB commit, call push_grants() (fail-closed, rolls back on error)
   - Reconcile: every 60s, fetch and push again (fail-logged, continues on error)
   - Idempotent: pushing the same grant dict multiple times is safe
 
 OPA Data API:
-  - PUT /v1/data/mcp/grants with JSON body: {"mcp": {"grants": {...}}}
+  - PUT /v1/data/mcp_grants with JSON body:
+    {
+      "alice@corp": {
+        "allowed_tools": ["ping", "echo_args", ...],
+        "allowed_tags": ["lab", "testing"],
+        "max_risk_level": "medium"
+      },
+      ...
+    }
+  - Path "mcp_grants" is NOT owned by the signed bundle (see policies/rego/.manifest),
+    so data-API writes succeed without bundle conflict (INV-012 preserved).
   - Pairwise network only (opa-net between proxy and OPA)
-  - Never exposed to the internet
 
 Schema:
-  role_assignments table must have:
-    - principal_id (TEXT): "alice@corp", "agent-001", "kc_group:admins", etc.
-    - principal_type (TEXT): "human", "agent", "kc_group"
-    - allowed_tools (JSON array or TEXT[]): ["read", "write", "delete"]
-    - allowed_tags (JSON array or TEXT[]): ["safe", "internal"]
-    - max_risk_level (TEXT): "low", "medium", "high", "critical"
-
-Output structure for OPA:
-  {
-    "mcp": {
-      "grants": {
-        "alice@corp": {
-          "principal_type": "human",
-          "allowed_tools": ["read", "write"],
-          "allowed_tags": ["safe"],
-          "max_risk_level": "high"
-        },
-        ...
-      }
-    }
-  }
+  client_grants table (V034):
+    - client_id      TEXT: "alice@corp", "agent-001", etc.
+    - allowed_tools  JSONB: ["ping", "echo_args", ...]
+    - allowed_tags   JSONB: ["lab", "testing"]
+    - max_risk_level TEXT: "low" | "medium" | "high" | "critical"
+    - granted_by     TEXT: identity of the admin who created this grant
+    - created_at     TIMESTAMPTZ
+    - updated_at     TIMESTAMPTZ
 """
 from __future__ import annotations
 
@@ -50,21 +47,37 @@ from app.services.policy import OPAClient, PolicyEngineError
 
 logger = logging.getLogger(__name__)
 
+# OPA data path for grants (NOT owned by the signed bundle — see .manifest)
+# authz.rego reads data.mcp_grants[client_id] after Task 4.4b migration.
+_OPA_GRANTS_PATH = "/mcp_grants"
+
 
 def build_grants_data(grant_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """
-    Convert role_assignments rows to OPA data structure.
+    Convert client_grants rows to OPA data structure.
+
+    The structure pushed to OPA is a flat dict keyed by client_id:
+      {
+        "alice@corp": {
+          "allowed_tools": [...],
+          "allowed_tags": [...],
+          "max_risk_level": "medium"
+        },
+        ...
+      }
+
+    This is pushed to PUT /v1/data/mcp_grants, making it readable in Rego as
+    data.mcp_grants["alice@corp"].allowed_tools etc.
 
     Args:
-        grant_rows: List of dicts from role_assignments query, each containing:
-            - principal_id (str)
-            - principal_type (str)
+        grant_rows: List of dicts from client_grants query, each containing:
+            - client_id     (str)
             - allowed_tools (list[str])
-            - allowed_tags (list[str])
+            - allowed_tags  (list[str])
             - max_risk_level (str)
 
     Returns:
-        OPA data structure: {"mcp": {"grants": {principal_id -> grant_obj}}}
+        Flat dict: {client_id -> {allowed_tools, allowed_tags, max_risk_level}}
 
     Raises:
         KeyError: if any row is missing required fields (fail-closed)
@@ -72,20 +85,23 @@ def build_grants_data(grant_rows: list[dict[str, Any]]) -> dict[str, Any]:
     grants: dict[str, Any] = {}
 
     for row in grant_rows:
-        principal_id = row["principal_id"]
-        grants[principal_id] = {
-            "principal_type": row["principal_type"],
-            "allowed_tools": row["allowed_tools"],
-            "allowed_tags": row["allowed_tags"],
+        client_id = row["client_id"]
+        grants[client_id] = {
+            "allowed_tools": list(row["allowed_tools"]),
+            "allowed_tags": list(row["allowed_tags"]),
             "max_risk_level": row["max_risk_level"],
         }
 
-    return {"mcp": {"grants": grants}}
+    return grants
 
 
 class OPADataSync:
     """
-    Synchronizes grants from the database to OPA's data API.
+    Synchronizes grants from the client_grants table to OPA's data API.
+
+    Task 4.4b: Grants are pushed to PUT /v1/data/mcp_grants — a path NOT owned
+    by the signed bundle (see policies/rego/.manifest: roots=["mcp"]). This allows
+    runtime grant updates without bundle re-sign + deploy (SELF-F6 fix).
 
     Provides:
       - push_grants(): fetch from DB, push to OPA (fail-closed)
@@ -107,46 +123,43 @@ class OPADataSync:
 
     async def push_grants(self) -> None:
         """
-        Fetch grants from the database and push to OPA.
+        Fetch grants from client_grants and push to OPA at /v1/data/mcp_grants.
 
-        Executes a SELECT query against role_assignments, builds the OPA
-        data structure, and calls opa_client.put_data().
+        Executes a SELECT query against client_grants, builds the OPA data
+        structure, and calls opa_client.put_data(_OPA_GRANTS_PATH, data).
 
         Raises:
-            Exception: on DB query failure (fail-closed)
-            PolicyEngineError: on OPA push failure (fail-closed)
+            PolicyEngineError: on DB query failure or OPA push failure (fail-closed)
 
         Called by:
           - Startup: in lifespan initialization
           - Mutation: before DB commit in grant/revoke transactions
           - Reconcile: periodically (60s loop)
+          - Admin endpoint: POST /api/v1/admin/sync-grants
         """
         try:
-            # Fetch grants from role_assignments table
-            # Query returns rows with: principal_id, principal_type, allowed_tools,
-            # allowed_tags, max_risk_level
+            # Fetch grants from client_grants table (V034)
             query = """
             SELECT
-                principal_id,
-                principal_type,
+                client_id,
                 allowed_tools,
                 allowed_tags,
                 max_risk_level
-            FROM role_assignments
-            WHERE expires_at IS NULL OR expires_at > NOW()
-            ORDER BY principal_id
+            FROM client_grants
+            ORDER BY client_id
             """
             grant_rows = await self.db_pool.fetch(query)
 
-            # Build OPA data structure
+            # Build flat OPA data structure keyed by client_id
             grants_data = build_grants_data([dict(row) for row in grant_rows])
 
             # Push to OPA via the injected client instance (supports mock injection in tests)
-            await self.opa_client.put_data(path="/mcp/grants", data=grants_data)
+            # Path: /mcp_grants (not owned by bundle — see .manifest)
+            await self.opa_client.put_data(path=_OPA_GRANTS_PATH, data=grants_data)
 
             logger.info(
                 "OPA grants pushed successfully",
-                extra={"grant_count": len(grant_rows)},
+                extra={"grant_count": len(grant_rows), "opa_path": _OPA_GRANTS_PATH},
             )
 
         except PolicyEngineError:

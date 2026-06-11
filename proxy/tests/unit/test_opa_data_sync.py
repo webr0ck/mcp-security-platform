@@ -1,16 +1,21 @@
 """
-Unit Tests — OPA Data Sync Service (Grants Sync + 60s Reconcile)
+Unit Tests — OPA Data Sync Service (Task 4.4b — SELF-F6)
 
-Tests the OPADataSync service that fetches grants from the database
-and pushes them to OPA's data API, with a background 60s reconcile loop.
+Tests the OPADataSync service that fetches grants from the client_grants table
+and pushes them to OPA's data API at /mcp_grants (NOT owned by the signed bundle).
 
 Requirements:
-  - build_grants_data() converts role_assignments rows to OPA data structure
-  - OPADataSync.push_grants() fetches from DB, calls OPA PUT /v1/data/mcp/grants
+  - build_grants_data() converts client_grants rows to flat OPA data structure
+  - OPADataSync.push_grants() fetches from DB, calls OPA PUT /v1/data/mcp_grants
   - OPADataSync.start_reconcile_loop() starts a background task that runs every 60s
   - OPADataSync.stop_reconcile_loop() stops the background task
   - OPAClient.put_data() sends PUT request to OPA data API
   - Fail-closed: if push_grants() raises, it propagates (caller handles rollback)
+
+Data path change (Task 4.4b):
+  - Old: PUT /v1/data/mcp/grants (bundle-owned — REJECTED by signed OPA)
+  - New: PUT /v1/data/mcp_grants (NOT bundle-owned — ACCEPTED by signed OPA)
+  - authz.rego reads data.mcp_grants[client_id].allowed_tools (updated)
 
 Run:
   pytest proxy/tests/unit/test_opa_data_sync.py -v
@@ -19,12 +24,11 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.opa_data_sync import OPADataSync, build_grants_data
+from app.services.opa_data_sync import OPADataSync, build_grants_data, _OPA_GRANTS_PATH
 from app.services.policy import PolicyEngineError
 
 
@@ -41,25 +45,22 @@ def mock_db_pool() -> AsyncMock:
 
 @pytest.fixture
 def sample_grant_rows() -> list[dict[str, Any]]:
-    """Sample rows as returned from role_assignments table."""
+    """Sample rows as returned from client_grants table (Task 4.4b schema)."""
     return [
         {
-            "principal_id": "alice@corp",
-            "principal_type": "human",
+            "client_id": "alice@corp",
             "allowed_tools": ["read", "write", "delete"],
             "allowed_tags": ["safe", "testing"],
             "max_risk_level": "high",
         },
         {
-            "principal_id": "bob@corp",
-            "principal_type": "human",
+            "client_id": "bob@corp",
             "allowed_tools": ["read"],
             "allowed_tags": ["safe"],
             "max_risk_level": "low",
         },
         {
-            "principal_id": "agent-001",
-            "principal_type": "agent",
+            "client_id": "agent-001",
             "allowed_tools": ["invoke", "monitor"],
             "allowed_tags": ["internal"],
             "max_risk_level": "medium",
@@ -68,52 +69,80 @@ def sample_grant_rows() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Tests for _OPA_GRANTS_PATH constant
+# ---------------------------------------------------------------------------
+
+
+def test_opa_grants_path_is_mcp_grants():
+    """
+    INV-012 carve-out: grants must be pushed to /mcp_grants (not /mcp/grants).
+
+    The signed bundle owns the "mcp" root (see policies/rego/.manifest).
+    Pushing to /mcp/grants would be REJECTED by OPA because the bundle owns
+    that path. The path /mcp_grants is not bundle-owned, so the data-API
+    write succeeds.
+    """
+    assert _OPA_GRANTS_PATH == "/mcp_grants", (
+        f"Expected /mcp_grants (bundle-roots carve-out), got {_OPA_GRANTS_PATH!r}. "
+        "Pushing to /mcp/grants would be rejected by a signed OPA bundle (INV-012)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tests for build_grants_data()
 # ---------------------------------------------------------------------------
 
 
 def test_build_grants_data_empty():
-    """build_grants_data() handles empty row list."""
+    """build_grants_data() handles empty row list — returns empty flat dict."""
     result = build_grants_data([])
-    assert result == {"mcp": {"grants": {}}}
+    assert result == {}
 
 
 def test_build_grants_data_single_grant(sample_grant_rows):
-    """build_grants_data() converts a single grant row."""
+    """build_grants_data() converts a single client_grants row to flat dict."""
     result = build_grants_data([sample_grant_rows[0]])
     assert result == {
-        "mcp": {
-            "grants": {
-                "alice@corp": {
-                    "principal_type": "human",
-                    "allowed_tools": ["read", "write", "delete"],
-                    "allowed_tags": ["safe", "testing"],
-                    "max_risk_level": "high",
-                }
-            }
+        "alice@corp": {
+            "allowed_tools": ["read", "write", "delete"],
+            "allowed_tags": ["safe", "testing"],
+            "max_risk_level": "high",
         }
     }
 
 
 def test_build_grants_data_multiple_grants(sample_grant_rows):
-    """build_grants_data() converts multiple grant rows."""
+    """build_grants_data() converts multiple client_grants rows."""
     result = build_grants_data(sample_grant_rows)
-    assert result["mcp"]["grants"]["alice@corp"]["principal_type"] == "human"
-    assert result["mcp"]["grants"]["bob@corp"]["max_risk_level"] == "low"
-    assert result["mcp"]["grants"]["agent-001"]["allowed_tools"] == ["invoke", "monitor"]
-    assert len(result["mcp"]["grants"]) == 3
+    assert result["alice@corp"]["allowed_tools"] == ["read", "write", "delete"]
+    assert result["bob@corp"]["max_risk_level"] == "low"
+    assert result["agent-001"]["allowed_tags"] == ["internal"]
+    assert len(result) == 3
+
+
+def test_build_grants_data_no_mcp_wrapper():
+    """
+    Task 4.4b: build_grants_data() returns a flat dict (not wrapped in {"mcp": {"grants": ...}}).
+
+    OPA receives this at PUT /v1/data/mcp_grants, making data.mcp_grants["alice@corp"]
+    readable in Rego. The old format was {"mcp": {"grants": {...}}} pushed to /mcp/grants.
+    """
+    result = build_grants_data([{"client_id": "test", "allowed_tools": [], "allowed_tags": [], "max_risk_level": "low"}])
+    # Must NOT be nested under mcp/grants wrapper
+    assert "mcp" not in result, (
+        "build_grants_data() must return a flat dict for /mcp_grants, not wrapped in {'mcp': ...}"
+    )
+    assert "test" in result
 
 
 def test_build_grants_data_preserves_order(sample_grant_rows):
     """build_grants_data() preserves all fields exactly as provided."""
     result = build_grants_data(sample_grant_rows)
-    grants = result["mcp"]["grants"]
-    for i, row in enumerate(sample_grant_rows):
-        principal_id = row["principal_id"]
-        assert grants[principal_id]["principal_type"] == row["principal_type"]
-        assert grants[principal_id]["allowed_tools"] == row["allowed_tools"]
-        assert grants[principal_id]["allowed_tags"] == row["allowed_tags"]
-        assert grants[principal_id]["max_risk_level"] == row["max_risk_level"]
+    for row in sample_grant_rows:
+        client_id = row["client_id"]
+        assert result[client_id]["allowed_tools"] == row["allowed_tools"]
+        assert result[client_id]["allowed_tags"] == row["allowed_tags"]
+        assert result[client_id]["max_risk_level"] == row["max_risk_level"]
 
 
 # ---------------------------------------------------------------------------
@@ -131,43 +160,52 @@ async def test_opa_data_sync_init(mock_db_pool):
 
 
 @pytest.mark.asyncio
-async def test_push_grants_fetches_from_db(mock_db_pool, sample_grant_rows):
-    """push_grants() executes SELECT query on role_assignments."""
+async def test_push_grants_fetches_from_client_grants(mock_db_pool, sample_grant_rows):
+    """push_grants() executes SELECT query on client_grants table (Task 4.4b)."""
     mock_db_pool.fetch.return_value = sample_grant_rows
 
     sync = OPADataSync(db_pool=mock_db_pool)
 
-    # Mock OPAClient.put_data to avoid settings config
     with patch("app.services.opa_data_sync.OPAClient.put_data", new_callable=AsyncMock):
         await sync.push_grants()
 
-    # Verify DB query
+    # Verify DB query names client_grants (not role_assignments)
     mock_db_pool.fetch.assert_called_once()
     call_args = mock_db_pool.fetch.call_args[0]
-    assert "role_assignments" in str(call_args[0])
+    query = str(call_args[0])
+    assert "client_grants" in query, (
+        f"push_grants() must query client_grants table, not role_assignments. Query: {query}"
+    )
 
 
 @pytest.mark.asyncio
-async def test_push_grants_calls_opa_put_data(mock_db_pool, sample_grant_rows):
-    """push_grants() calls OPA client put_data() with grants structure."""
+async def test_push_grants_calls_opa_put_at_mcp_grants(mock_db_pool, sample_grant_rows):
+    """
+    push_grants() calls OPA client put_data() at /mcp_grants (not /mcp/grants).
+
+    This is the key INV-012 bundle-roots carve-out assertion: the data-API
+    path must be /mcp_grants (bundle-unowned), not /mcp/grants (bundle-owned,
+    would be rejected by signed OPA).
+    """
     mock_db_pool.fetch.return_value = sample_grant_rows
 
     sync = OPADataSync(db_pool=mock_db_pool)
 
-    # Mock OPAClient.put_data to capture calls
     with patch("app.services.opa_data_sync.OPAClient.put_data", new_callable=AsyncMock) as mock_put:
         await sync.push_grants()
 
-        # Verify OPA call
         mock_put.assert_called_once()
-        call_args = mock_put.call_args
-        path = call_args[1]["path"] if "path" in call_args[1] else call_args[0][0]
-        data = call_args[1]["data"] if "data" in call_args[1] else call_args[0][1]
+        call_kwargs = mock_put.call_args[1]
+        path = call_kwargs.get("path") or mock_put.call_args[0][0]
+        data = call_kwargs.get("data") or mock_put.call_args[0][1]
 
-        assert path == "/mcp/grants"
-        assert "mcp" in data
-        assert "grants" in data["mcp"]
-        assert "alice@corp" in data["mcp"]["grants"]
+        assert path == "/mcp_grants", (
+            f"Expected OPA path /mcp_grants (bundle-roots carve-out), got {path!r}. "
+            "Pushing to /mcp/grants would be rejected by signed OPA (INV-012)."
+        )
+        # Data must be a flat dict by client_id (not wrapped in {"mcp": {"grants": ...}})
+        assert "alice@corp" in data, "grants data must be keyed by client_id"
+        assert "mcp" not in data, "grants data must NOT be wrapped in {'mcp': ...}"
 
 
 @pytest.mark.asyncio
@@ -177,7 +215,6 @@ async def test_push_grants_raises_on_opa_failure(mock_db_pool, sample_grant_rows
 
     sync = OPADataSync(db_pool=mock_db_pool)
 
-    # Mock OPAClient.put_data to raise error
     with patch(
         "app.services.opa_data_sync.OPAClient.put_data",
         new_callable=AsyncMock,
@@ -200,7 +237,7 @@ async def test_push_grants_raises_on_db_failure(mock_db_pool):
 
 @pytest.mark.asyncio
 async def test_push_grants_handles_empty_result(mock_db_pool):
-    """push_grants() handles empty grant list gracefully."""
+    """push_grants() handles empty grant list — calls OPA with empty dict."""
     mock_db_pool.fetch.return_value = []
 
     sync = OPADataSync(db_pool=mock_db_pool)
@@ -208,11 +245,12 @@ async def test_push_grants_handles_empty_result(mock_db_pool):
     with patch("app.services.opa_data_sync.OPAClient.put_data", new_callable=AsyncMock) as mock_put:
         await sync.push_grants()
 
-        # Should still call OPA with empty grants structure
         mock_put.assert_called_once()
-        call_args = mock_put.call_args
-        data = call_args[1]["data"] if "data" in call_args[1] else call_args[0][1]
-        assert data == {"mcp": {"grants": {}}}
+        call = mock_put.call_args
+        data = call.kwargs.get("data") if call.kwargs else None
+        if data is None and call.args and len(call.args) > 1:
+            data = call.args[1]
+        assert data == {}, "Empty client_grants should push empty dict to OPA"
 
 
 @pytest.mark.asyncio
@@ -239,9 +277,6 @@ async def test_reconcile_loop_runs_every_60s(mock_db_pool, sample_grant_rows):
 
     sync = OPADataSync(db_pool=mock_db_pool)
 
-    # Simple approach: just verify the loop starts and can be stopped.
-    # The actual 60s timing is tested in integration if needed.
-    # Here we test the loop structure is correct.
     with patch("app.services.opa_data_sync.OPAClient.put_data", new_callable=AsyncMock):
         await sync.start_reconcile_loop()
 
@@ -263,30 +298,20 @@ async def test_reconcile_loop_handles_push_failures(mock_db_pool):
 
     sync = OPADataSync(db_pool=mock_db_pool)
 
-    # Make asyncio.sleep return immediately
     async def fast_sleep(duration):
         return None
-
-    # Track if an error is logged in the except handler
-    error_logged = []
 
     async def failing_put_data(path, data):
         raise PolicyEngineError("Temporary failure")
 
     with patch("app.services.opa_data_sync.asyncio.sleep", side_effect=fast_sleep):
         with patch("app.services.opa_data_sync.OPAClient.put_data", side_effect=failing_put_data):
-            # The reconcile loop should start and hit the error handler
-            # We can't easily capture the logger, so we just test that the loop
-            # doesn't raise and continues running
             try:
                 await sync.start_reconcile_loop()
-                # Give it time to enter the loop and hit the error once
                 await asyncio.sleep(0.005)
                 await sync.stop_reconcile_loop()
-                # If we get here without an exception, the error handling worked
                 assert True
             except PolicyEngineError:
-                # The error should be caught and logged, not re-raised
                 pytest.fail("Reconcile loop should not re-raise OPA errors")
 
 
@@ -305,7 +330,6 @@ async def test_stop_reconcile_loop_cancels_task(mock_db_pool, sample_grant_rows)
 
         await sync.stop_reconcile_loop()
 
-        # Task should be None or done
         assert sync._reconcile_task is None or sync._reconcile_task.done()
 
 
@@ -328,7 +352,7 @@ async def test_stop_reconcile_loop_idempotent(mock_db_pool):
 async def test_startup_and_mutation_pattern(mock_db_pool, sample_grant_rows):
     """
     Simulates startup (push_grants) followed by mutation (call push_grants again).
-    Both should succeed independently.
+    Both should succeed independently. Both must use /mcp_grants path.
     """
     mock_db_pool.fetch.return_value = sample_grant_rows
 
@@ -344,6 +368,13 @@ async def test_startup_and_mutation_pattern(mock_db_pool, sample_grant_rows):
         assert mock_put.call_count == 2
 
         # Both calls should be identical (idempotent data)
-        call1_data = mock_put.call_args_list[0][1]["data"]
-        call2_data = mock_put.call_args_list[1][1]["data"]
-        assert call1_data == call2_data
+        call1_kwargs = mock_put.call_args_list[0][1]
+        call2_kwargs = mock_put.call_args_list[1][1]
+        data1 = call1_kwargs.get("data") or mock_put.call_args_list[0][0][1]
+        data2 = call2_kwargs.get("data") or mock_put.call_args_list[1][0][1]
+        assert data1 == data2
+
+        # Both calls must use /mcp_grants path
+        for i, call in enumerate(mock_put.call_args_list):
+            path = call[1].get("path") or call[0][0]
+            assert path == "/mcp_grants", f"Call {i+1}: expected /mcp_grants, got {path!r}"

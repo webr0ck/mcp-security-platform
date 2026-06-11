@@ -1,0 +1,7 @@
+{
+  "roots": ["mcp"],
+  "metadata": {
+    "description": "MCP Security Platform — OPA policy bundle manifest",
+    "note": "Bundle owns the 'mcp' root (authz, tool_risk, anomaly, injection_phrases, tools). Grants live at data.mcp_grants (Task 4.4b) — that path is NOT owned by this bundle so the proxy can push grants via OPA data API (PUT /v1/data/mcp_grants) without bundle conflict. INV-012: signed bundles remain the default."
+  }
+}

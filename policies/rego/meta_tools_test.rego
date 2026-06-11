@@ -180,7 +180,7 @@ test_registry_tool_named_like_meta_risk_gate_applies if {
 		"anomaly_score": 0.0,
 		"is_testing": false,
 		# no is_platform_meta marker — registry path
-	} with data.mcp.grants as {
+	} with data.mcp_grants as {
 		"agent-1": {
 			"allowed_tools": ["platform_info"],
 			"allowed_tags": [],

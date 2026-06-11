@@ -37,7 +37,13 @@ KEYFILE="$(mktemp)"
 trap 'rm -f "${KEYFILE}"' EXIT
 printf '%s' "${POLICY_SIGNING_KEY}" > "${KEYFILE}"
 
-echo "Building signed bundle from ${REGO_DIR} ..."
+# Task 4.4b (SELF-F6): The policies/rego/.manifest file specifies:
+#   "roots": ["mcp"]
+# This means the bundle claims ownership of the "mcp" data/policy tree only.
+# The "mcp_grants" path is NOT owned by the bundle, allowing the proxy to push
+# grants via OPA data API (PUT /v1/data/mcp_grants) without bundle conflict.
+# The .manifest file is automatically included by opa build -b <dir>.
+echo "Building signed bundle from ${REGO_DIR} (roots: [\"mcp\"], grants at mcp_grants) ..."
 opa build -b "${REGO_DIR}" \
   --signing-alg HS256 \
   --signing-key "${KEYFILE}" \
