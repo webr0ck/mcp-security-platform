@@ -601,6 +601,58 @@ async def create_gitea_token() -> Optional[str]:
     return token_sha1
 
 
+async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
+    """
+    Generate (or retrieve) a service API key for lab-mcp-self-service.
+
+    The key is stored in the proxy's api_keys table under client_id
+    'lab-self-service' with role 'agent'. The seeder generates a random
+    hex key, hashes it via the same hash_api_key path used by the proxy,
+    and writes the raw key to .env.lab as SELF_SERVICE_API_KEY.
+
+    Idempotent: if a non-revoked key for 'lab-self-service' already exists,
+    returns a new one (re-generation is safe — old key is revoked).
+
+    Returns the raw (unhashed) key, or None on failure.
+    """
+    import hashlib
+    import secrets
+
+    raw_key = secrets.token_hex(32)
+    # Hash using the same algorithm as proxy/app/core/security.py:hash_api_key
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    try:
+        # Revoke any existing non-revoked keys for this client_id
+        await conn.execute(
+            """
+            UPDATE api_keys SET revoked_at = NOW()
+            WHERE client_id = 'lab-self-service' AND revoked_at IS NULL
+            """,
+        )
+        # Insert new key
+        await conn.execute(
+            """
+            INSERT INTO api_keys (client_id, key_hash, created_at)
+            VALUES ('lab-self-service', $1, NOW())
+            """,
+            key_hash,
+        )
+        # Ensure role_assignments row exists for 'lab-self-service' with role 'agent'
+        await conn.execute(
+            """
+            INSERT INTO role_assignments (client_id, role, assigned_by)
+            VALUES ('lab-self-service', 'agent', 'seeder')
+            ON CONFLICT (client_id, role) DO NOTHING
+            """,
+        )
+        log.info("lab-self-service API key seeded (client_id=lab-self-service role=agent)")
+        return raw_key
+    except Exception as exc:
+        log.error("lab-self-service API key seeding failed: %s", exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Keycloak hardening — runs on every seeder invocation (idempotent)
 # ---------------------------------------------------------------------------
@@ -788,7 +840,18 @@ async def main() -> None:
         _write_env_var(env_lab, "NETBOX_TOKEN", netbox_token)
         results["netbox_env"] = "OK (written to .env.lab)"
 
-    # 8. Create Gitea API token
+    # 8. Seed self-service MCP API key (Task 2.2b / Task 2.5)
+    log.info("Seeding lab-self-service API key...")
+    conn3 = await wait_for_postgres(max_wait=10)
+    self_service_key = await seed_self_service_api_key(conn3)
+    await conn3.close()
+    results["self_service_key"] = "OK" if self_service_key else "FAILED"
+    if self_service_key:
+        env_lab = str(Path(__file__).parent.parent.parent / ".env.lab")
+        _write_env_var(env_lab, "SELF_SERVICE_API_KEY", self_service_key)
+        results["self_service_env"] = "OK (written to .env.lab)"
+
+    # 9. Create Gitea API token
     log.info("Creating Gitea API token...")
     gitea_token = await create_gitea_token()
     results["gitea"] = "OK" if gitea_token else "FAILED"

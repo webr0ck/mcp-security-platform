@@ -58,7 +58,12 @@ PROXY_PROFILE_API_URL = os.environ.get(
 
 # Service API key for authenticating to the proxy profile API.
 # Seeded by lab/seeder/seed.py into api_keys table as service "lab-self-service".
-SELF_SERVICE_API_KEY = os.environ.get("SELF_SERVICE_API_KEY", "lab-self-service-key")
+# Must be set — no default. Compose fail-fast enforces this at startup.
+SELF_SERVICE_API_KEY = os.environ.get("SELF_SERVICE_API_KEY", "")
+if not SELF_SERVICE_API_KEY:
+    import sys
+    print("FATAL: SELF_SERVICE_API_KEY is not set. Run the lab seeder first.", file=sys.stderr)
+    sys.exit(1)
 
 log = logging.getLogger("self-service-mcp")
 
