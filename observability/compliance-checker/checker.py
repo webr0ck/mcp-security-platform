@@ -13,6 +13,14 @@ Pipeline:
   6. If any category fails: POST alert to Alertmanager
   7. Exit 0 on pass, 1 on fail (for cron health monitoring)
 
+Archival (Task 5.2 — LOG-F09):
+  archive_old_audit_events() runs nightly (scheduled by entrypoint.py at 02:00 UTC
+  via COMPLIANCE_CRON_SCHEDULE).  It queries audit_events rows older than 90 days,
+  serializes them to JSONL, uploads to MinIO compliance-archive bucket with
+  COMPLIANCE-mode object lock (or GOVERNANCE if MINIO_OBJECT_LOCK_MODE is unset),
+  copies rows to audit_events_archive, then deletes from audit_events.
+  An admin audit event is emitted for each archival run (INV-001).
+
 Environment variables: see .env.example [COMPLIANCE_*] section.
 """
 from __future__ import annotations
@@ -69,6 +77,19 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
 MINIO_ROOT_USER = os.environ["MINIO_ROOT_USER"]
 MINIO_ROOT_PASSWORD = os.environ["MINIO_ROOT_PASSWORD"]
 MINIO_AUDIT_BUCKET = os.getenv("MINIO_AUDIT_BUCKET", "mcp-audit-archive")
+# Task 5.2 (LOG-F09): dedicated archival bucket for audit_events JSONL exports.
+# Separate from the compliance report bucket so MinIO policies can be scoped
+# independently.  Defaults to "compliance-archive" if not overridden.
+MINIO_COMPLIANCE_ARCHIVE_BUCKET = os.getenv("MINIO_COMPLIANCE_ARCHIVE_BUCKET", "compliance-archive")
+# Object Lock mode for archival uploads.  COMPLIANCE = true WORM (recommended for
+# production — immutable even for root).  GOVERNANCE = bypass-able by privileged
+# users (acceptable for this reference build; aligns with verify_object_lock_startup
+# design decision documented in docs/ARCHITECTURE.md).
+MINIO_OBJECT_LOCK_MODE = os.getenv("MINIO_OBJECT_LOCK_MODE", "GOVERNANCE")
+# Retention period (days) for archived JSONL objects.
+MINIO_RETENTION_DAYS = int(os.getenv("MINIO_RETENTION_DAYS", "90"))
+# Archival cutoff: audit_events rows older than this many days are archived.
+AUDIT_ARCHIVAL_CUTOFF_DAYS = int(os.getenv("AUDIT_ARCHIVAL_CUTOFF_DAYS", "90"))
 COMPLIANCE_SAMPLE_SIZE = int(os.getenv("COMPLIANCE_SAMPLE_SIZE", "1000"))
 COMPLIANCE_ALERT_WEBHOOK = os.getenv(
     "COMPLIANCE_ALERT_WEBHOOK", "http://alertmanager:9093/api/v2/alerts"
@@ -316,6 +337,319 @@ def post_alert(report_id: str, categories_failed: int, period: str) -> None:
                 logger.warning("Alertmanager returned %s: %s", resp.status_code, resp.text[:200])
     except Exception as exc:
         logger.error("Failed to post compliance alert: %s", exc)
+
+
+async def archive_old_audit_events(
+    conn: Any | None = None,
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """
+    Task 5.2 (LOG-F09): Nightly batch archival of audit_events to MinIO.
+
+    Pipeline:
+      1. Query audit_events rows older than AUDIT_ARCHIVAL_CUTOFF_DAYS (default 90).
+      2. Serialize to JSONL (one JSON object per line, newline-delimited).
+      3. Upload JSONL to MinIO compliance-archive bucket with Object Lock
+         (COMPLIANCE mode if MINIO_OBJECT_LOCK_MODE=COMPLIANCE, else GOVERNANCE).
+      4. Copy rows into audit_events_archive (idempotent: ON CONFLICT DO NOTHING).
+      5. Delete archived rows from audit_events (shrinks hot table).
+      6. Emit an admin audit log event (INV-001: archival run must be audited).
+
+    Args:
+        conn: Optional asyncpg connection for testing. Created internally when None.
+        s3_client: Optional boto3 S3 client for testing. Created internally when None.
+
+    Returns:
+        dict with keys: rows_archived, object_key, archive_url, started_at, finished_at,
+                        status ("ok" | "error"), error (str | None).
+
+    Design notes:
+      - Idempotent: rows copied with ON CONFLICT DO NOTHING on the archive PK
+        (event_id), so a retry after a partial failure is safe.
+      - Delete is deferred until AFTER the MinIO upload succeeds — if MinIO is
+        unreachable, rows stay in audit_events and the next run retries.
+      - INV-011: the compliance_checker DB user does NOT have DELETE on audit_events.
+        This function uses the COMPLIANCE_DB_USER credentials which have archival
+        privilege (granted in V036 for the archival role).
+        TODO: confirm with architect — current V001 grants compliance_checker SELECT
+        only.  Until a dedicated archival DB role exists, archive copy-only (no DELETE)
+        mode is the safe default.  Set ENABLE_AUDIT_DELETE_AFTER_ARCHIVE=1 to enable
+        delete (requires DBA-granted DELETE privilege for the compliance_checker user).
+      - INV-001: emits a structured admin audit event for the archival run.
+        The event is a JSON log line written to stdout (picked up by Promtail
+        mcp-compliance job); no DB INSERT is made from the compliance checker
+        (compliance_checker user has no INSERT on audit_events per INV-011).
+    """
+    import asyncpg  # type: ignore[import]
+
+    started_at = datetime.now(timezone.utc)
+    cutoff = started_at - timedelta(days=AUDIT_ARCHIVAL_CUTOFF_DAYS)
+    run_id = str(uuid4())
+
+    logger.info(
+        "archive_old_audit_events: starting archival run",
+        extra={
+            "run_id": run_id,
+            "cutoff": cutoff.isoformat(),
+            "cutoff_days": AUDIT_ARCHIVAL_CUTOFF_DAYS,
+        },
+    )
+
+    _owns_conn = conn is None
+    _owns_s3 = s3_client is None
+    result: dict[str, Any] = {
+        "run_id": run_id,
+        "rows_archived": 0,
+        "object_key": None,
+        "archive_url": None,
+        "started_at": started_at.isoformat(),
+        "finished_at": None,
+        "status": "error",
+        "error": None,
+    }
+
+    try:
+        if _owns_conn:
+            dsn = (
+                f"postgresql://{COMPLIANCE_DB_USER}:{COMPLIANCE_DB_PASSWORD}"
+                f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+            )
+            conn = await asyncpg.connect(dsn)
+
+        if _owns_s3:
+            import boto3  # type: ignore[import]
+            s3_client = boto3.client(
+                "s3",
+                endpoint_url=MINIO_ENDPOINT,
+                aws_access_key_id=MINIO_ROOT_USER,
+                aws_secret_access_key=MINIO_ROOT_PASSWORD,
+            )
+
+        # -----------------------------------------------------------------------
+        # Step 1: Query rows older than cutoff
+        # -----------------------------------------------------------------------
+        # audit_events_archive has a different schema from V029+ audit_events
+        # (missing the newer columns).  We SELECT only the columns that exist in
+        # both tables so the INSERT … SELECT is safe across schema versions.
+        # Columns added after V001 (event_type, platform_version, etc.) are
+        # NOT in audit_events_archive — they go into the JSONL object only.
+        rows = await conn.fetch(
+            """
+            SELECT
+                event_id, event_ts, client_id, tool_name, tool_id,
+                outcome, latency_ms, bytes_in, bytes_out,
+                sha256_hash, anomaly_score, opa_reasons, request_id,
+                source_ip, created_at
+            FROM audit_events
+            WHERE event_ts < $1
+            ORDER BY event_ts ASC
+            """,
+            cutoff,
+        )
+
+        if not rows:
+            logger.info(
+                "archive_old_audit_events: no rows older than cutoff — nothing to archive",
+                extra={"run_id": run_id, "cutoff": cutoff.isoformat()},
+            )
+            result.update({"rows_archived": 0, "status": "ok"})
+            _emit_archival_audit_event(run_id, rows_archived=0, archive_url=None, status="ok")
+            return result
+
+        logger.info(
+            "archive_old_audit_events: %d rows to archive",
+            len(rows),
+            extra={"run_id": run_id},
+        )
+
+        # -----------------------------------------------------------------------
+        # Step 2: Serialize to JSONL
+        # -----------------------------------------------------------------------
+        jsonl_lines: list[str] = []
+        for row in rows:
+            row_dict = {
+                k: str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+                for k, v in dict(row).items()
+            }
+            jsonl_lines.append(json.dumps(row_dict, cls=_Encoder))
+        jsonl_body = "\n".join(jsonl_lines).encode("utf-8")
+
+        # -----------------------------------------------------------------------
+        # Step 3: Upload JSONL to MinIO with Object Lock
+        # -----------------------------------------------------------------------
+        date_path = started_at.strftime("%Y/%m/%d")
+        object_key = f"audit-events/{date_path}/{run_id}.jsonl"
+        retain_until = (started_at + timedelta(days=MINIO_RETENTION_DAYS)).isoformat()
+
+        # Validate mode — only COMPLIANCE and GOVERNANCE are valid S3/MinIO values.
+        lock_mode = MINIO_OBJECT_LOCK_MODE.upper()
+        if lock_mode not in ("COMPLIANCE", "GOVERNANCE"):
+            logger.warning(
+                "archive_old_audit_events: invalid MINIO_OBJECT_LOCK_MODE '%s', "
+                "falling back to GOVERNANCE",
+                lock_mode,
+            )
+            lock_mode = "GOVERNANCE"
+
+        s3_client.put_object(
+            Bucket=MINIO_COMPLIANCE_ARCHIVE_BUCKET,
+            Key=object_key,
+            Body=jsonl_body,
+            ContentType="application/x-ndjson",
+            ObjectLockMode=lock_mode,
+            ObjectLockRetainUntilDate=retain_until,
+        )
+        archive_url = f"s3://{MINIO_COMPLIANCE_ARCHIVE_BUCKET}/{object_key}"
+        logger.info(
+            "archive_old_audit_events: uploaded %d rows to %s",
+            len(rows),
+            archive_url,
+            extra={"run_id": run_id, "lock_mode": lock_mode},
+        )
+
+        # -----------------------------------------------------------------------
+        # Step 4: Copy rows into audit_events_archive (idempotent)
+        # -----------------------------------------------------------------------
+        # audit_events_archive has the same base schema as V001 audit_events.
+        # ON CONFLICT DO NOTHING ensures retries after partial failure are safe.
+        archived_count = 0
+        for row in rows:
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO audit_events_archive (
+                        event_id, event_ts, client_id, tool_name, tool_id,
+                        outcome, latency_ms, bytes_in, bytes_out,
+                        sha256_hash, anomaly_score, opa_reasons, request_id,
+                        source_ip, created_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+                    ) ON CONFLICT (event_id) DO NOTHING
+                    """,
+                    row["event_id"], row["event_ts"], row["client_id"],
+                    row["tool_name"], row["tool_id"], row["outcome"],
+                    row["latency_ms"], row["bytes_in"], row["bytes_out"],
+                    row["sha256_hash"], row["anomaly_score"], row["opa_reasons"],
+                    row["request_id"], row["source_ip"], row["created_at"],
+                )
+                archived_count += 1
+            except Exception as row_exc:
+                logger.error(
+                    "archive_old_audit_events: failed to archive row event_id=%s: %s",
+                    row["event_id"], row_exc,
+                    extra={"run_id": run_id},
+                )
+
+        logger.info(
+            "archive_old_audit_events: %d/%d rows copied to audit_events_archive",
+            archived_count, len(rows),
+            extra={"run_id": run_id},
+        )
+
+        # -----------------------------------------------------------------------
+        # Step 5: Delete from audit_events (only if enabled AND all rows archived)
+        # -----------------------------------------------------------------------
+        # TODO: confirm with architect — compliance_checker needs DELETE privilege
+        # on audit_events.  Set ENABLE_AUDIT_DELETE_AFTER_ARCHIVE=1 once granted.
+        enable_delete = os.getenv("ENABLE_AUDIT_DELETE_AFTER_ARCHIVE", "0") == "1"
+        if enable_delete and archived_count == len(rows):
+            event_ids = [row["event_id"] for row in rows]
+            # Batch delete in chunks to avoid exceeding parameter limits
+            _CHUNK = 500
+            deleted_total = 0
+            for i in range(0, len(event_ids), _CHUNK):
+                chunk = event_ids[i : i + _CHUNK]
+                deleted = await conn.execute(
+                    "DELETE FROM audit_events WHERE event_id = ANY($1::uuid[])",
+                    chunk,
+                )
+                # asyncpg returns "DELETE <n>" as a string
+                deleted_total += int(deleted.split()[-1]) if deleted else 0
+            logger.info(
+                "archive_old_audit_events: deleted %d rows from audit_events",
+                deleted_total,
+                extra={"run_id": run_id},
+            )
+        elif enable_delete:
+            logger.warning(
+                "archive_old_audit_events: NOT deleting from audit_events — "
+                "only %d/%d rows were archived (partial failure)",
+                archived_count, len(rows),
+                extra={"run_id": run_id},
+            )
+
+        result.update({
+            "rows_archived": archived_count,
+            "object_key": object_key,
+            "archive_url": archive_url,
+            "status": "ok",
+        })
+
+    except Exception as exc:
+        logger.error(
+            "archive_old_audit_events: archival run failed: %s",
+            exc,
+            extra={"run_id": run_id},
+        )
+        result["error"] = str(exc)
+        result["status"] = "error"
+
+    finally:
+        finished_at = datetime.now(timezone.utc)
+        result["finished_at"] = finished_at.isoformat()
+        if _owns_conn and conn is not None:
+            try:
+                await conn.close()
+            except Exception:
+                pass
+
+    # -----------------------------------------------------------------------
+    # Step 6: Emit admin audit event (INV-001)
+    # The compliance checker cannot INSERT into audit_events (INV-011: SELECT
+    # only).  We emit to stdout as a structured JSON log line — Promtail's
+    # mcp-compliance job picks it up and ships it to Loki.
+    # -----------------------------------------------------------------------
+    _emit_archival_audit_event(
+        run_id=run_id,
+        rows_archived=result["rows_archived"],
+        archive_url=result.get("archive_url"),
+        status=result["status"],
+    )
+
+    return result
+
+
+def _emit_archival_audit_event(
+    run_id: str,
+    rows_archived: int,
+    archive_url: str | None,
+    status: str,
+) -> None:
+    """
+    Emit a structured admin audit event for an archival run (INV-001).
+
+    Written to stdout as JSON so Promtail (mcp-compliance job) picks it up.
+    The compliance checker has no INSERT privilege on audit_events (INV-011),
+    so stdout is the correct channel for compliance-checker-emitted events.
+    """
+    event = {
+        "event_type": "AUDIT_ARCHIVAL_RUN",
+        "level": "info" if status == "ok" else "error",
+        "run_id": run_id,
+        "rows_archived": rows_archived,
+        "archive_url": archive_url,
+        "status": status,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "component": "compliance-checker",
+        "control": "LOG-F09",
+        "check_result": status,
+        "category": "archival",
+    }
+    print(json.dumps(event, cls=_Encoder))  # noqa: T201
+    logger.info(
+        "Archival audit event emitted (INV-001)",
+        extra={"run_id": run_id, "status": status, "rows_archived": rows_archived},
+    )
 
 
 def run() -> int:

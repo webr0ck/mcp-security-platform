@@ -4,7 +4,11 @@
 # environment variable LOKI_STORAGE_BACKEND=s3 and configure the s3 block.
 #
 # Retention: 90 days in Loki (matches MINIO_RETENTION_DAYS for compliance).
-# WORM archival to MinIO is the authoritative long-term store (INV-007).
+# WORM archival to MinIO: compliance reports go to mcp-audit-archive (INV-007);
+# audit_events JSONL archival goes to compliance-archive bucket via
+# archive_old_audit_events() in compliance-checker/checker.py (Task 5.2, LOG-F09).
+# Both use Object Lock (GOVERNANCE by default; COMPLIANCE for production).
+# Loki retention is a soft deletion; MinIO Object Lock is the immutable record.
 #
 # Auth: disabled — Grafana handles auth. Loki is on internal-only network.
 # This is safe because observability-net has internal: true in docker-compose.yml.

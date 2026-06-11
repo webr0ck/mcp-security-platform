@@ -176,10 +176,14 @@ CREATE INDEX IF NOT EXISTS idx_sbom_records_generated_at
 --          needed for compliance queries, anomaly correlation, and hash integrity
 --          verification (SHA-256 per event per INV-001).
 -- Writer:  proxy_app only (INV-011)
--- Retention: 90 days active; then archived to audit_events_archive (V005).
---            Archive is permanent. No physical deletion from either table.
+-- Retention: 90 days active; then batch-archived by compliance-checker
+--            archive_old_audit_events() (Task 5.2, LOG-F09).  Archival uploads
+--            JSONL to MinIO compliance-archive bucket (Object Lock) and copies
+--            rows to audit_events_archive.  Deletion from this table requires
+--            ENABLE_AUDIT_DELETE_AFTER_ARCHIVE=1 and a DBA-granted DELETE
+--            privilege for the compliance_checker DB user (INV-011).
 -- Append-only enforcement: proxy_app has INSERT only (no UPDATE, no DELETE).
---          compliance_checker_app has SELECT only. See V003.
+--          compliance_checker has SELECT only. See V028 for per-role grants.
 -- =============================================================================
 -- DEVIATION RN-003: Architect stub used `timestamp` as a column name.
 -- Renamed to `event_ts` to avoid colliding with the PostgreSQL reserved word
