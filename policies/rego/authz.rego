@@ -288,5 +288,40 @@ deny contains "function_not_allowed_for_profile" if {
     input.tool_function_name != null
 }
 
+# =============================================================================
+# ANOMALY STRUCTURAL DENY RULES (Task 1.7 — DET-F3)
+# =============================================================================
+# Import structural deny reasons from mcp.anomaly and merge them into authz
+# deny set via a single combined OPA query. The proxy populates input.recent_calls
+# from the Redis sliding window before calling this policy.
+#
+# Failure semantics (enforced in invocation.py, not here):
+#   - If recent_calls cannot be populated (Redis failure), the proxy raises
+#     OPAUnavailableError → 503. Sending an empty recent_calls list would
+#     silently bypass structural rules — that is the same class as INV-004.
+#   - input.recent_calls absent or empty → anomaly structural rules simply
+#     evaluate to false (no deny). This is the correct "no history" case.
+#
+# The anomaly score threshold rule (anomaly_threshold_exceeded) continues to
+# operate on input.anomaly_score for backward compatibility.
+
+deny contains reason if {
+    # Pass recent_calls and window_seconds through to the anomaly evaluator
+    # by using a virtual document computed from input in this package context.
+    some reason in _anomaly_structural_deny_reasons
+}
+
+# Evaluate mcp.anomaly.structural_deny_reasons with the current input.
+# We must pass a scoped input — anomaly.rego reads input.recent_calls directly,
+# so we evaluate the anomaly package rules with the SAME input object.
+# Rego partial evaluation: compute the set using a comprehension over the
+# anomaly package's incremental rule.
+_anomaly_structural_deny_reasons := reasons if {
+    reasons := data.mcp.anomaly.structural_deny_reasons with input as {
+        "recent_calls": input.recent_calls,
+        "window_seconds": 300,
+    }
+} else := set()
+
 # Expose deny reasons for audit logging and API response
 reasons := deny

@@ -100,3 +100,33 @@ async def push_anomaly_invocation(client_id: str, tool_name: str) -> list[str]:
     # results[2] is the current window members (tool_name:timestamp strings)
     members: list[str] = results[2] if results[2] else []
     return [m.split(":")[0] for m in members]
+
+
+async def get_anomaly_window_with_timestamps(client_id: str) -> list[dict]:
+    """
+    Read the per-client anomaly sliding window from Redis WITHOUT pushing a
+    new entry. Returns recent_calls in the format anomaly.rego expects:
+      [{tool_name: str, timestamp: float}, ...]
+
+    Used by Task 1.7 to populate input.recent_calls for the OPA authz query.
+    This is a READ-ONLY operation — the push happens in push_anomaly_invocation
+    (called by anomaly.detect), which runs before OPA evaluation in invocation.py.
+
+    Raises on Redis failure — callers must treat a failure as 503 (INV-004 parity).
+    """
+    redis = redis_pool.client
+    key = f"anomaly:window:{client_id}"
+    now = _time.time()
+    cutoff = now - _ANOMALY_WINDOW_SECONDS
+
+    # Remove stale entries and read current window with scores (timestamps).
+    pipe = redis.pipeline()
+    pipe.zremrangebyscore(key, "-inf", cutoff)
+    pipe.zrange(key, 0, -1, withscores=True)
+    results = await pipe.execute()
+
+    members_with_scores: list[tuple[str, float]] = results[1] if results[1] else []
+    return [
+        {"tool_name": member.split(":")[0], "timestamp": score}
+        for member, score in members_with_scores
+    ]

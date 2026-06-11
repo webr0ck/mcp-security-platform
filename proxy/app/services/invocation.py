@@ -49,6 +49,25 @@ _SKIP_AUDIT_DB_WRITE: bool = False
 _MAX_UPSTREAM_BODY_BYTES = 4 * 1024 * 1024  # 4 MiB
 
 
+async def _get_recent_calls_for_opa(client_id: str) -> list[dict]:
+    """
+    Read the per-client Redis anomaly window and return it in the format
+    anomaly.rego expects: [{tool_name: str, timestamp: float}, ...]
+
+    Task 1.7 (DET-F3): populates input.recent_calls for the single combined
+    OPA/authz query so anomaly.rego's structural_deny_reasons are evaluated
+    within the same authz decision.
+
+    FAIL-CLOSED: raises on Redis failure.  The caller (invoke_tool Step 2.8)
+    must convert any exception to OPAUnavailableError → 503. An empty
+    recent_calls list is the correct "no prior history" case; a missing or
+    unpopulatable list would silently bypass structural deny rules, which is
+    the same vulnerability class as INV-004.
+    """
+    from app.core.redis_client import get_anomaly_window_with_timestamps
+    return await get_anomaly_window_with_timestamps(client_id)
+
+
 async def invoke_tool(
     tool_record: dict[str, Any],
     json_rpc_request: dict[str, Any],
@@ -173,6 +192,34 @@ async def invoke_tool(
             )
 
     # -------------------------------------------------------------------------
+    # Step 2.3: Fetch recent_calls for OPA anomaly structural evaluation.
+    # -------------------------------------------------------------------------
+    # Task 1.7 (DET-F3): The anomaly.rego structural rules (credential_then_exec,
+    # web_search→bulk_read, etc.) are evaluated WITHIN the single authz OPA query
+    # rather than as a separate HTTP round-trip. We populate input.recent_calls
+    # from the Redis window (already updated by detect_anomaly above) so that
+    # authz.rego can import structural_deny_reasons from data.mcp.anomaly.
+    #
+    # FAIL-CLOSED (INV-004 parity): if we cannot read the window (Redis failure),
+    # we raise OPAUnavailableError → 503. Sending an empty list would silently
+    # bypass structural deny rules (same class as INV-004 allow-through on OPA
+    # unreachable). The difference from Step 2's anomaly score: the Python scorer
+    # is advisory; the structural Rego rules are mandatory policy gates.
+    recent_calls: list[dict] = []
+    if not is_testing:
+        try:
+            recent_calls = await _get_recent_calls_for_opa(client_id)
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch recent_calls for OPA anomaly evaluation — "
+                "failing closed per INV-004 parity (anomaly path)",
+                extra={"client_id": client_id, "tool_name": tool_name, "error": str(exc)},
+            )
+            raise OPAUnavailableError(
+                f"Anomaly recent_calls fetch failed: {exc}"
+            ) from exc
+
+    # -------------------------------------------------------------------------
     # Step 2.5: Profile lookup — check mcp_profiles for per-identity permission
     # -------------------------------------------------------------------------
     # If a profile row exists for (client_id, tool_name), inject it into OPA input.
@@ -237,6 +284,9 @@ async def invoke_tool(
         "is_testing": is_testing,
         "profile": profile_data,
         "tool_function_name": function_name,
+        # Task 1.7: recent_calls for anomaly.rego structural rule evaluation
+        # within the single combined authz OPA query (DET-F3).
+        "recent_calls": recent_calls,
     }
 
     opa_result = await evaluate_policy(opa_input)

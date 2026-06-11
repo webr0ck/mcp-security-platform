@@ -13,6 +13,9 @@ against a real DB — they must NOT set this flag.
 """
 from __future__ import annotations
 import os
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 _DEFAULTS = {
     "DB_PASSWORD": "test",
@@ -42,3 +45,28 @@ def pytest_configure(config: object) -> None:  # noqa: ANN001
         # Module may not be importable at configure time (e.g. missing deps);
         # individual test fixtures will set the flag directly if needed.
         pass
+
+
+@pytest.fixture(autouse=True)
+def _stub_get_recent_calls_for_opa():
+    """
+    Unit-test default: patch _get_recent_calls_for_opa to return [] so that
+    invocation.py unit tests don't need a live Redis connection.
+
+    Task 1.7 added a fail-closed Redis read before OPA evaluation; without this
+    stub every invoke_tool unit test would 503 on Redis not initialized.
+
+    Tests that specifically verify recent_calls behavior (test_anomaly_rego_wire.py)
+    override this by patching 'app.services.invocation._get_recent_calls_for_opa'
+    themselves within the test body. pytest's fixture system gives test-level patches
+    priority over autouse fixtures.
+    """
+    try:
+        with patch(
+            "app.services.invocation._get_recent_calls_for_opa",
+            new=AsyncMock(return_value=[]),
+        ):
+            yield
+    except (AttributeError, ModuleNotFoundError):
+        # Module not yet loaded or function not yet present — let the test proceed.
+        yield
