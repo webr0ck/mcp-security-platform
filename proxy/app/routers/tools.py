@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.services.auditor import run_audit, LLMAuditRequiredError
 
 import logging
 
@@ -517,13 +518,26 @@ async def update_tool(
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """
-    Update tool status or metadata. Cannot change name, version, or schema.
+    Update tool status, metadata, description, schema, or upstream_url.
     Required role: admin.
     Emits TOOL_STATUS_CHANGED audit event on status change.
     Per INV-006: activating a tool requires a valid SBOM signature.
+
+    Task 1.5 — Rug-pull mitigation (DET-F7, INV-005):
+    Any change to description, schema, or upstream_url triggers a re-audit.
+    If the re-audit result is critical risk, OR a name change collides with an
+    existing tool from a different source (MCP-005 shadow check), the tool is
+    forced to status='quarantined' regardless of caller-supplied status.
+
+    If REQUIRE_LLM_AUDIT=true and the LLM auditor is unavailable, the PATCH
+    returns 503 and NO mutation is applied (fail-closed, same as registration).
+
+    The mutation and re-audit outcome are applied atomically — either both
+    succeed or neither is committed.
     """
     import json
     import logging
+    from uuid import uuid4
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -541,6 +555,9 @@ async def update_tool(
 
     new_status = body.get("status")
     new_metadata = body.get("metadata")
+    new_description = body.get("description")
+    new_schema = body.get("schema")
+    new_upstream_url = body.get("upstream_url")
 
     # "internal" is NOT a DB-settable status — it is reserved for first-party platform
     # tools and exists only as an OPA policy bypass signal.  Allowing any operator to
@@ -556,10 +573,22 @@ async def update_tool(
             },
         )
 
-    # Fetch current tool (with server_id for Task 13)
+    # Fetch current tool (name, description, schema, upstream_url, source_repo, tags
+    # needed for re-audit; server_id and sbom_id for existing invariants)
     try:
         result = await db.execute(
-            text("SELECT t.status, t.server_id, s.sbom_id FROM tool_registry t LEFT JOIN sbom_records s ON s.tool_id = t.tool_id WHERE t.tool_id = :id AND t.deleted_at IS NULL ORDER BY s.generated_at DESC LIMIT 1"),
+            text(
+                """
+                SELECT t.name, t.description, t.schema, t.upstream_url,
+                       t.source_repo, t.tags, t.status, t.server_id,
+                       s.sbom_id
+                FROM tool_registry t
+                LEFT JOIN sbom_records s ON s.tool_id = t.tool_id
+                WHERE t.tool_id = :id AND t.deleted_at IS NULL
+                ORDER BY s.generated_at DESC
+                LIMIT 1
+                """
+            ),
             {"id": str(tool_id)},
         )
         row = result.fetchone()
@@ -571,35 +600,193 @@ async def update_tool(
 
     old_status = row.status
 
+    # Determine whether any re-audit-triggering fields are changing.
+    needs_reaudit = (
+        (new_description is not None and new_description != row.description)
+        or (new_schema is not None and new_schema != row.schema)
+        or (new_upstream_url is not None and new_upstream_url != row.upstream_url)
+    )
+
+    # Resolved values that will be written (fall back to current if not supplied)
+    effective_description = new_description if new_description is not None else row.description
+    effective_schema = new_schema if new_schema is not None else row.schema
+    effective_upstream_url = new_upstream_url if new_upstream_url is not None else row.upstream_url
+
+    # Task 1.5: Re-audit and MCP-005 shadow check when content fields change.
+    # Both must complete BEFORE any DB write — atomicity requirement.
+    forced_quarantine = False
+    reaudit_result = None
+
+    if needs_reaudit:
+        # Step 1: Re-run the auditor against the new content.
+        # LLMAuditRequiredError propagates as 503; no mutation applied.
+        try:
+            current_schema = row.schema if isinstance(row.schema, dict) else (
+                json.loads(row.schema) if row.schema else {}
+            )
+            audit_schema = effective_schema if isinstance(effective_schema, dict) else (
+                json.loads(effective_schema) if effective_schema else {}
+            )
+            reaudit_result = await run_audit(
+                tool_id=str(tool_id),
+                tool_name=row.name,
+                description=effective_description or "",
+                schema=audit_schema,
+                source_repo=row.source_repo,
+                tags=row.tags or [],
+            )
+        except LLMAuditRequiredError as exc:
+            logger.error(
+                "Tool PATCH refused — LLM auditor unavailable and REQUIRE_LLM_AUDIT=true "
+                "(no mutation applied): %s",
+                exc,
+                extra={"tool_id": str(tool_id)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "LLM_AUDIT_UNAVAILABLE",
+                    "message": (
+                        "Tool mutation is temporarily unavailable: the LLM auditor "
+                        "(Ollama) is unreachable and REQUIRE_LLM_AUDIT=true. "
+                        "Retry once the LLM service recovers. No changes were applied."
+                    ),
+                },
+            )
+
+        # Step 2: Force quarantine when re-audit reaches critical risk.
+        if reaudit_result.risk_level == "critical":
+            forced_quarantine = True
+            logger.warning(
+                "Tool PATCH re-audit reached critical risk — forcing quarantine (INV-005): "
+                "tool_id=%s risk_score=%s",
+                str(tool_id),
+                reaudit_result.risk_score,
+            )
+
+        # Step 3: MCP-005 cross-source name collision (shadow check).
+        # Re-run the same query used at registration time.
+        if not forced_quarantine:
+            try:
+                name_collision = await db.execute(
+                    text(
+                        "SELECT source_repo FROM tool_registry "
+                        "WHERE name = :name "
+                        "AND tool_id <> :tool_id "
+                        "AND COALESCE(source_repo, '') <> COALESCE(:source_repo, '') "
+                        "AND deleted_at IS NULL "
+                        "LIMIT 1"
+                    ),
+                    {
+                        "name": row.name,
+                        "tool_id": str(tool_id),
+                        "source_repo": row.source_repo,
+                    },
+                )
+                collision_row = name_collision.fetchone()
+                if collision_row is not None:
+                    forced_quarantine = True
+                    logger.warning(
+                        "MCP-005 tool-name collision detected on PATCH — forcing quarantine: "
+                        "tool_id=%s name=%r conflicting_source=%r",
+                        str(tool_id),
+                        row.name,
+                        collision_row[0],
+                    )
+            except Exception as exc:
+                logger.error(
+                    "MCP-005 shadow check failed during PATCH (failing safe — allowing): %s", exc
+                )
+
+    # Resolve the final status to write.
+    # forced_quarantine always wins regardless of caller-supplied status (INV-005).
+    effective_status: str | None
+    if forced_quarantine:
+        effective_status = "quarantined"
+    else:
+        effective_status = new_status
+
+    # Build the UPDATE statement.
     updates = ["updated_at = NOW()"]
     update_params: dict = {"tool_id": str(tool_id)}
 
-    if new_status:
+    if effective_status:
         # INV-006: cannot activate without SBOM signature
-        if new_status == "active" and not row.sbom_id:
+        if effective_status == "active" and not row.sbom_id:
             raise HTTPException(
                 status_code=422,
                 detail={"code": "SCHEMA_INVALID", "message": "Cannot activate: tool has no signed SBOM (INV-006)."},
             )
         updates.append("status = :new_status")
-        update_params["new_status"] = new_status
+        update_params["new_status"] = effective_status
 
     if new_metadata is not None:
         # Merge (not replace) metadata
         updates.append("metadata = metadata || CAST(:new_metadata AS jsonb)")
         update_params["new_metadata"] = json.dumps(new_metadata)
 
+    if new_description is not None:
+        updates.append("description = :new_description")
+        update_params["new_description"] = new_description
+
+    if new_schema is not None:
+        updates.append("schema = CAST(:new_schema AS jsonb)")
+        update_params["new_schema"] = (
+            json.dumps(new_schema) if isinstance(new_schema, dict) else new_schema
+        )
+
+    if new_upstream_url is not None:
+        updates.append("upstream_url = :new_upstream_url")
+        update_params["new_upstream_url"] = new_upstream_url
+
+    # Persist re-audit result if one was produced.
+    # Both writes happen inside one transaction — atomicity: either both land
+    # or neither does (the outer try/except rolls back on any exception).
     try:
         await db.execute(
             text(f"UPDATE tool_registry SET {', '.join(updates)} WHERE tool_id = :tool_id"),
             update_params,
         )
+
+        if reaudit_result is not None:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO tool_audit_results
+                      (audit_result_id, tool_id, auditor_version, risk_score, risk_level,
+                       findings, llm_analysis, static_analysis, created_at)
+                    VALUES
+                      (:audit_result_id, :tool_id, :auditor_version, :risk_score, :risk_level,
+                       CAST(:findings AS jsonb), CAST(:llm_analysis AS jsonb),
+                       CAST(:static_analysis AS jsonb), NOW())
+                    """
+                ),
+                {
+                    "audit_result_id": str(uuid4()),
+                    "tool_id": str(tool_id),
+                    "auditor_version": reaudit_result.auditor_version,
+                    "risk_score": reaudit_result.risk_score,
+                    "risk_level": reaudit_result.risk_level,
+                    "findings": json.dumps([]),
+                    "llm_analysis": json.dumps(reaudit_result.llm_analysis or {}),
+                    "static_analysis": json.dumps(reaudit_result.static_analysis or {}),
+                },
+            )
+
         await db.commit()
+
     except Exception as exc:
+        await db.rollback()
+        logger.error(
+            "Tool PATCH DB write failed — rolled back (atomicity preserved): %s",
+            exc,
+            extra={"tool_id": str(tool_id)},
+        )
         raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Update failed."})
 
-    # Emit audit event on status change
-    if new_status and new_status != old_status:
+    # Emit audit event on status change (including forced quarantine transitions).
+    final_status = effective_status or old_status
+    if final_status != old_status:
         try:
             from mcp_audit_logger import AuditEvent, AuditEventType, MCPAuditLogger
             audit_logger = MCPAuditLogger()
@@ -611,7 +798,10 @@ async def update_tool(
             audit_logger.emit_admin_event(event, extra_fields={
                 "tool_id": str(tool_id),
                 "old_status": old_status,
-                "new_status": new_status,
+                "new_status": final_status,
+                "forced_quarantine": forced_quarantine,
+                "reaudit_risk_score": reaudit_result.risk_score if reaudit_result else None,
+                "reaudit_risk_level": reaudit_result.risk_level if reaudit_result else None,
             })
         except Exception as exc:
             logger.error("update_tool audit emit failed", extra={"error": str(exc)})
@@ -1047,6 +1237,12 @@ async def invoke_tool(
             principal_type=getattr(request.state, "principal_type", None),
             # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
             user_kc_token=getattr(request.state, "user_kc_token", None),
+            # Task 1.2: "who" enrichment fields for the audit trail.
+            source_ip=(
+                request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                or (request.client.host if request.client else None)
+            ),
+            session_jti=getattr(request.state, "session_jti", None),
         )
         return JSONResponse(content=response)
 
