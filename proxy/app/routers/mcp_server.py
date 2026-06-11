@@ -235,33 +235,78 @@ def _load_grants_data() -> tuple[dict, dict]:
     return {}, {}
 
 
-async def _registered_tools_for_client(client_id: str, roles: list[str]) -> list[dict]:
-    """Return active registry tools visible to this client.
+async def _lookup_profile_row(profile_id: str, mcp_name: str):
+    """Return the mcp_profiles row for (profile_id, mcp_name), or None if absent.
 
-    Mirrors OPA client_has_invoke_permission logic:
-      - admin/platform_admin → all active tools
-      - others → tools in allowed_tools OR having a tag in allowed_tags
-    This is advisory; OPA re-enforces on every tools/call.
+    Absence means no explicit restriction — platform default applies (enabled=true,
+    all functions).  A row with enabled=False means this MCP is disabled for the
+    caller's profile.
+
+    Separate function so tests can patch it cleanly.
     """
     from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
-
-    grants, tools_meta = _load_grants_data()
-    role_set = set(roles)
-    is_admin = bool(role_set & {"admin", "platform_admin"})
-
-    if not is_admin:
-        grant = grants.get(client_id, {})
-        allowed_tools: set[str] = set(grant.get("allowed_tools", []))
-        allowed_tags: set[str] = set(grant.get("allowed_tags", []))
-        if not allowed_tools and not allowed_tags:
-            return []
 
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 text(
-                    "SELECT name, description, schema, tags FROM tool_registry "
+                    "SELECT enabled FROM mcp_profiles "
+                    "WHERE profile_id = :pid AND mcp_name = :mcp_name LIMIT 1"
+                ),
+                {"pid": profile_id, "mcp_name": mcp_name},
+            )
+            return result.mappings().fetchone()
+    except Exception as exc:
+        logger.warning(
+            "mcp_profiles lookup failed profile_id=%s mcp_name=%s: %s",
+            profile_id, mcp_name, exc,
+        )
+        return None
+
+
+async def _registered_tools_for_client(
+    client_id: str,
+    roles: list[str],
+    principal_id: str | None = None,
+    principal_type: str | None = None,
+) -> list[dict]:
+    """Return active registry tools visible to this client.
+
+    Task 4.1 — filters applied to ALL callers (admin bypass removed):
+      1. Server-linked tools (server_id IS NOT NULL): principal must be entitled to
+         the tool's server via check_entitlement().  There is no admin exception —
+         this mirrors the invoke path (enforce_tool_entitlement has no role bypass).
+      2. Profile gate: if mcp_profiles has enabled=false for (principal_id, tool_name)
+         the tool is excluded regardless of entitlement.
+      3. NULL-server_id tools (legacy / unlinked): shown only when the caller has an
+         explicit data.json grant (allowed_tools or allowed_tags). This mirrors the
+         OPA-only invoke path for unlinked tools (entitlement.py:78-80).
+
+    Discovery == invoke invariant: the set returned here equals the set that
+    enforce_tool_entitlement + profile check on the invoke path would allow.
+    OPA still re-enforces on every tools/call (advisory layer stays unchanged).
+
+    If principal_id or principal_type are absent, server-linked tools are hidden
+    (fail-closed: same as enforce_tool_entitlement with unresolved principal).
+    """
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    from app.services.entitlement import check_entitlement
+
+    grants, tools_meta = _load_grants_data()
+
+    # Caller's data.json grants — used for NULL-server_id tools (grants-only path).
+    grant = grants.get(client_id, {})
+    allowed_tools: set[str] = set(grant.get("allowed_tools", []))
+    allowed_tags: set[str] = set(grant.get("allowed_tags", []))
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    "SELECT name, description, schema, tags, server_id "
+                    "FROM tool_registry "
                     "WHERE status = 'active' AND deleted_at IS NULL ORDER BY name"
                 )
             )
@@ -275,12 +320,38 @@ async def _registered_tools_for_client(client_id: str, roles: list[str]) -> list
     for row in rows:
         if row["name"] in platform_names:
             continue
-        if not is_admin:
-            # Mirror OPA tag-grant rule exactly:
-            # OPA uses data.mcp.tools[tool_name].tags (data.json), NOT DB tags.
+
+        server_id = row["server_id"]
+
+        if server_id is None:
+            # ── NULL-server_id: grants-only visibility (OPA-only invoke path) ──
             meta_tags = set(tools_meta.get(row["name"], {}).get("tags", []))
             if row["name"] not in allowed_tools and not (meta_tags & allowed_tags):
                 continue
+        else:
+            # ── Server-linked: entitlement gate (no admin bypass) ──────────────
+            if not principal_id or not principal_type:
+                # Fail-closed: unresolved principal cannot see server-scoped tools.
+                continue
+            ent = await check_entitlement(
+                principal_type=principal_type,
+                principal_id=principal_id,
+                server_id=str(server_id),
+            )
+            if not ent.entitled:
+                continue
+
+        # ── Profile gate: mcp_profiles.enabled check ───────────────────────
+        # Only meaningful when we have a resolvable principal identity.
+        # Absence of a profile row = platform default (enabled=true).
+        if principal_id:
+            profile = await _lookup_profile_row(
+                profile_id=principal_id,
+                mcp_name=row["name"],
+            )
+            if profile is not None and not profile["enabled"]:
+                continue
+
         schema = row["schema"] or {}
         if isinstance(schema, str):
             try:
@@ -641,7 +712,14 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
     # ── Tool methods ──────────────────────────────────────────────────────
     if method == "tools/list":
         platform_tools = _visible_tools(roles)
-        registry_tools = await _registered_tools_for_client(client_id, roles)
+        principal_id: str | None = getattr(request.state, "principal_id", None)
+        principal_type: str | None = getattr(request.state, "principal_type", None)
+        registry_tools = await _registered_tools_for_client(
+            client_id=client_id,
+            roles=roles,
+            principal_id=principal_id,
+            principal_type=principal_type,
+        )
         tools = platform_tools + registry_tools
         logger.info(
             "MCP tools/list client=%s roles=%s visible=%d (platform=%d registry=%d)",
