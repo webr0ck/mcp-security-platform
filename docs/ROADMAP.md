@@ -82,7 +82,7 @@ Still roadmap: learned/statistical anomaly baseline (hardcoded sliding-window to
 
 **Delivered:** `lab/mcp-servers/self-service/server.py` — FastMCP server on port 8108.
 **Tools:** `list_available_mcps`, `enable_mcp`, `disable_mcp`, `get_profile`, `list_functions`, `enable_function`, `disable_function`.
-**Storage:** `mcp_profiles` + `mcp_profile_events` (V020 migration). Identity from proxy-injected `X-User-Sub`. OPA profile enforcement wired into invocation path (Python layer); Rego integration is Phase 5 work.
+**Storage:** `mcp_profiles` + `mcp_profile_events` (V020 migration). Identity from proxy-injected `X-User-Sub`. OPA profile enforcement wired into invocation path (Python layer); **Rego anomaly/profile integration complete** (`authz.rego` evaluates profile-based restrictions on the invoke path).
 **Test coverage:** 57 lab tests (20 self-service + 37 functional).
 
 ### Original Design (archived below for reference)

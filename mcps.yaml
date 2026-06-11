@@ -1,3 +1,12 @@
+# DEPRECATED — this file is no longer read by the dispatcher.
+# The server_registry database table is the single source of truth (Phase 3).
+# The dispatcher (proxy/app/credential_broker/dispatcher.py) reads from the
+# DB-backed Registry class (proxy/app/credential_broker/registry.py) with a
+# 30-second auto-refresh loop.  See README.md "Server registry" row.
+#
+# This file is retained as a reference for the DB import migration test in
+# proxy/tests/integration/test_registry_migration.py and as documentation of
+# the original server configuration shape.  Do not add new servers here.
 servers:
   grafana:
     url: "http://grafana:3000/mcp"
