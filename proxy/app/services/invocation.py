@@ -23,6 +23,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -52,9 +53,18 @@ _MAX_UPSTREAM_BODY_BYTES = 4 * 1024 * 1024  # 4 MiB
 _PROFILE_CACHE_TTL_SECONDS = 300  # 5 minutes — mirrors role cache TTL in auth.py
 
 
-async def _lookup_profile_with_cache(client_id: str, tool_name: str) -> dict | None:
+async def _lookup_profile_with_cache(
+    client_id: str,
+    tool_name: str,
+    profile_uuid: str | None = None,
+) -> dict | None:
     """
-    Look up an mcp_profiles row for (client_id, tool_name) with Redis caching.
+    Look up an mcp_profiles row with Redis caching.
+
+    Task 4.3 update: when ``profile_uuid`` is set, queries by
+    ``(profile_uuid, tool_name)`` — the named-profile path.
+    Falls back to legacy ``(client_id, tool_name)`` lookup when
+    ``profile_uuid`` is None (backward compatible).
 
     Task 1.10 (SELF-F2): fail-closed semantics — mirrors the role caching
     pattern in middleware/auth.py but with stricter failure posture:
@@ -73,7 +83,11 @@ async def _lookup_profile_with_cache(client_id: str, tool_name: str) -> dict | N
     import json as _json
     from app.core.redis_client import redis_pool
 
-    cache_key = f"mcp_profile:{client_id}:{tool_name}"
+    # Cache key disambiguates named-profile path from legacy path.
+    if profile_uuid:
+        cache_key = f"mcp_profile:uuid:{profile_uuid}:{tool_name}"
+    else:
+        cache_key = f"mcp_profile:{client_id}:{tool_name}"
     _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
 
     # -----------------------------------------------------------------------
@@ -108,13 +122,25 @@ async def _lookup_profile_with_cache(client_id: str, tool_name: str) -> dict | N
         from app.core.database import AsyncSessionLocal
         from sqlalchemy import text
         async with AsyncSessionLocal() as _db:
-            row = await _db.execute(
-                text(
-                    "SELECT enabled, allowed_functions "
-                    "FROM mcp_profiles WHERE profile_id=:pid AND mcp_name=:mname LIMIT 1"
-                ),
-                {"pid": client_id, "mname": tool_name},
-            )
+            if profile_uuid:
+                # Task 4.3: named-profile path — query by profile_uuid FK
+                row = await _db.execute(
+                    text(
+                        "SELECT enabled, allowed_functions "
+                        "FROM mcp_profiles "
+                        "WHERE profile_uuid=:uuid AND mcp_name=:mname LIMIT 1"
+                    ),
+                    {"uuid": profile_uuid, "mname": tool_name},
+                )
+            else:
+                # Legacy path — query by profile_id (client identity)
+                row = await _db.execute(
+                    text(
+                        "SELECT enabled, allowed_functions "
+                        "FROM mcp_profiles WHERE profile_id=:pid AND mcp_name=:mname LIMIT 1"
+                    ),
+                    {"pid": client_id, "mname": tool_name},
+                )
             prow = row.mappings().first()
             if prow:
                 profile_data = {
@@ -182,6 +208,7 @@ async def invoke_tool(
     user_kc_token: str | None = None,
     source_ip: str | None = None,
     session_jti: str | None = None,
+    profile_uuid: str | None = None,
 ) -> dict[str, Any]:
     """
     Execute the full tool invocation pipeline.
@@ -209,6 +236,10 @@ async def invoke_tool(
             (Task 1.2 — "who" enrichment for audit trail, LOG-F04).
         session_jti: OIDC session JWT ID (Task 1.2). Present only for
             session-JWT callers; None for mTLS / API-key callers.
+        profile_uuid: Named profile UUID from request.state (Task 4.3). When
+            set, profile lookup uses (profile_uuid, tool_name) instead of
+            (client_id, tool_name). None = legacy mcp_profiles path (backward
+            compatible).
 
     Returns:
         Dict matching the MCP JSON-RPC 2.0 response format with meta.audit_id.
@@ -342,12 +373,15 @@ async def invoke_tool(
     function_name: str = _jrpc_params.get("name", "") or ""
 
     # Task 1.10 (SELF-F2): fail-closed profile lookup with Redis last-known-state cache.
+    # Task 4.3: when profile_uuid is set, look up by (profile_uuid, tool_name) — named-profile path.
     # DB success → profile used + cache updated
     # DB error + cache hit → cached profile used
     # DB error + cache miss → ProfileLookupError raised → OPAUnavailableError → 503
     profile_data: dict = {}
     try:
-        _profile_result = await _lookup_profile_with_cache(client_id, tool_name)
+        _profile_result = await _lookup_profile_with_cache(
+            client_id, tool_name, profile_uuid=profile_uuid
+        )
         if _profile_result is not None:
             profile_data = _profile_result
     except ProfileLookupError as _profile_exc:
@@ -405,7 +439,12 @@ async def invoke_tool(
     }
 
     opa_result = await evaluate_policy(opa_input)
-    opa_decision_id = f"dec_{uuid4().hex[:16]}"
+    # Task 5.1 (LOG-F04): use the real OPA decision_id from the response body
+    # (present when --set=decision_logs.console=true is configured in docker-compose.yml).
+    # This ID correlates audit_events rows with OPA's own decision log stream in Loki
+    # (job: mcp-opa-decisions). Fall back to a locally-generated placeholder only when
+    # OPA did not emit a decision_id (e.g. older OPA builds without decision logging).
+    opa_decision_id: str = opa_result.get("decision_id") or f"dec_{uuid4().hex[:16]}"
 
     if not opa_result["allow"]:
         # Emit DENY audit event synchronously (INV-001)
@@ -508,8 +547,9 @@ async def invoke_tool(
                 "upstream_revalidation_failed: cannot fetch server allowlist entry"
             ) from _sr_exc
 
+    _pinned_ips: list[str] = []
     try:
-        await revalidate_upstream_ip_at_invoke(
+        _pinned_ips = await revalidate_upstream_ip_at_invoke(
             upstream_url=upstream_url,
             registered_allowlist_entry=_registered_allowlist_entry,
         )
@@ -1052,7 +1092,8 @@ async def _emit_audit_event(
                             anomaly_score, opa_reasons, request_id,
                             event_type, event_ts, event_ts_iso, platform_version,
                             original_outcome, hmac_signature, hmac_key_id,
-                            source_ip, principal_type, caller_roles, session_jti
+                            source_ip, principal_type, caller_roles, session_jti,
+                            opa_decision_id
                         ) VALUES (
                             :event_id, :client_id, :tool_name, :tool_id,
                             :outcome, :latency_ms, :sha256_hash,
@@ -1060,7 +1101,8 @@ async def _emit_audit_event(
                             :event_type, :event_ts, :event_ts_iso, :platform_version,
                             :original_outcome, :hmac_signature, :hmac_key_id,
                             CAST(:source_ip AS INET), :principal_type,
-                            CAST(:caller_roles AS TEXT[]), :session_jti
+                            CAST(:caller_roles AS TEXT[]), :session_jti,
+                            :opa_decision_id
                         )
                         """
                     ),
@@ -1105,6 +1147,10 @@ async def _emit_audit_event(
                         "principal_type": principal_type,
                         "caller_roles": __import__("json").dumps(roles) if roles else None,
                         "session_jti": session_jti,
+                        # Task 5.1 (LOG-F04): real OPA decision_id for cross-stream
+                        # correlation between audit_events and the OPA decision log
+                        # stream in Loki (job: mcp-opa-decisions).
+                        "opa_decision_id": opa_decision_id,
                     },
                 )
         except Exception as db_exc:

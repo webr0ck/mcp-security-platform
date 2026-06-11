@@ -162,6 +162,88 @@ scrape_configs:
           expression: '.*GET /health.*'
 
   # ===========================================================================
+  # Job: mcp-opa-decisions
+  # Scrapes OPA sidecar (mcp-opa) decision log output.
+  # OPA emits one structured JSON line per policy decision when started with
+  # --set=decision_logs.console=true (set in docker-compose.yml).
+  #
+  # INV-002 MANDATORY: OPA decision logs include the full policy input in the
+  # "input" field, which contains the raw tool params sent by the caller.
+  # Params may contain secrets, PII, or other sensitive data.
+  # The replace stage below REDACTS the "params" value from every log line
+  # before the line is shipped to Loki.  This is a non-negotiable control:
+  # Loki is queryable by the auditor role and must never contain raw params.
+  #
+  # Labels extracted: decision_id (for cross-referencing with audit_events),
+  # result_allow (true/false), bundle_revision.
+  # ===========================================================================
+  - job_name: mcp-opa-decisions
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: name
+            values: ["mcp-opa"]
+
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /mcp-opa
+        action: keep
+
+      - source_labels: [__meta_docker_container_name]
+        target_label: container
+        replacement: "$1"
+
+      - target_label: job
+        replacement: mcp-opa-decisions
+
+    pipeline_stages:
+      # -----------------------------------------------------------------------
+      # INV-002 redaction: strip the raw "params" value from the OPA input
+      # before parsing or shipping.  OPA decision log structure:
+      #   {"decision_id":"<uuid>","input":{"params":{...},"client_id":"..."},...}
+      # We replace the value of the "params" key (any JSON object or primitive)
+      # with the literal string "[REDACTED:params]" so the line can be ingested
+      # without exposing raw tool arguments.
+      #
+      # The regex targets "params": followed by any value up to the first
+      # top-level comma or closing brace that ends the params block.
+      # We use a non-greedy match on the JSON value content.
+      # -----------------------------------------------------------------------
+      - replace:
+          expression: '"params"\s*:\s*(\{[^}]*\}|"[^"]*"|\[[^\]]*\]|[^,}]+)'
+          replace: '"params":"[REDACTED:params]"'
+
+      # Parse the redacted JSON line to extract label fields.
+      - json:
+          expressions:
+            decision_id: decision_id
+            result_allow: result.allow
+            bundle_revision: bundles.mcp.revision
+            timestamp: timestamp
+
+      # Parse OPA's own timestamp (RFC3339 format).
+      - timestamp:
+          source: timestamp
+          format: RFC3339
+          fallback_formats:
+            - RFC3339Nano
+            - "2006-01-02T15:04:05Z"
+
+      # Promote low-cardinality fields to Loki labels.
+      # decision_id has high cardinality but is the primary cross-reference key —
+      # kept as a label so analysts can look up by ID in LogQL.
+      # result_allow is low cardinality (true/false).
+      - labels:
+          result_allow:   # true or false — policy outcome
+
+      # Drop OPA startup/health noise (bundle download, server ready, etc.)
+      # These lines do not contain "decision_id" and are not policy decisions.
+      - drop:
+          expression: '.*"decision_id".*'
+          invert_match: true
+
+  # ===========================================================================
   # Job: mcp-compliance
   # Scrapes compliance checker cron output.
   # Format: JSON lines with check results.

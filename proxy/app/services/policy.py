@@ -96,10 +96,21 @@ async def evaluate_policy(input_data: dict[str, Any]) -> dict[str, Any]:
     # as deny per INV-003 (default allow = false) and INV-004 (fail closed).
     # body.get("result", {}) returns None when the key is present with null value,
     # so we normalise None → {} explicitly before extracting allow.
+    #
+    # decision_id: OPA emits a top-level "decision_id" field in the response body
+    # when decision_logs.console=true is configured (--set=decision_logs.console=true
+    # in docker-compose.yml). This ID correlates the HTTP response with the decision
+    # log line emitted to OPA's stdout (scraped by Promtail as mcp-opa-decisions).
+    # Task 5.1 (LOG-F04): capture and thread this ID into audit_events so a single
+    # event can be cross-referenced between the audit DB, Loki (proxy stream), and
+    # Loki (OPA decision stream).
     raw_result = body.get("result")
     result: dict = raw_result if isinstance(raw_result, dict) else {}
     allow: bool = bool(result.get("allow", False))  # Default false per INV-003
     reasons: list[str] = list(result.get("reasons", []))
+    # OPA decision_id is at the top level of the response body, not inside "result".
+    # It is only present when decision logging is enabled; fall back to None when absent.
+    opa_decision_id: str | None = body.get("decision_id")
 
     logger.info(
         "OPA decision",
@@ -108,10 +119,11 @@ async def evaluate_policy(input_data: dict[str, Any]) -> dict[str, Any]:
             "reasons": reasons,
             "input_client": input_data.get("client_id"),
             "input_tool": input_data.get("tool_name"),
+            "opa_decision_id": opa_decision_id,
         },
     )
 
-    return {"allow": allow, "reasons": reasons}
+    return {"allow": allow, "reasons": reasons, "decision_id": opa_decision_id}
 
 
 async def manual_evaluate(input_data: dict[str, Any]) -> dict[str, Any]:
@@ -129,7 +141,9 @@ async def manual_evaluate(input_data: dict[str, Any]) -> dict[str, Any]:
         "allow": result["allow"],
         "reasons": result["reasons"],
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
-        "opa_decision_id": f"dec_{uuid4().hex[:16]}",
+        # Propagate the real OPA decision_id when present (decision logging enabled);
+        # fall back to a locally-generated placeholder only if OPA did not emit one.
+        "opa_decision_id": result.get("decision_id") or f"dec_{uuid4().hex[:16]}",
     }
 
 
