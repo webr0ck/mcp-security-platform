@@ -1,0 +1,27 @@
+---
+# Fixture: lab-mcp-bad is on internal-net — VIOLATES rule (i).
+
+services:
+  proxy:
+    image: proxy:test
+    networks:
+      - gateway-net
+      - proxy-db-net
+
+  lab-mcp-bad:
+    image: mcp:test
+    networks:
+      - internal-net   # VIOLATION: MCP server must not be on internal-net
+      - lab-net
+
+networks:
+  gateway-net:
+    driver: bridge
+  proxy-db-net:
+    driver: bridge
+    internal: true
+  internal-net:
+    external: true
+    name: mcp-security-platform_internal-net
+  lab-net:
+    driver: bridge

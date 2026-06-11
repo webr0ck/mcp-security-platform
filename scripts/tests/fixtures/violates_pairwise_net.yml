@@ -1,0 +1,29 @@
+---
+# Fixture: a third service joins the pairwise net — VIOLATES rule (iv).
+
+services:
+  proxy:
+    image: proxy:test
+    networks:
+      - gateway-net
+      - mcp-echo-net
+
+  lab-mcp-echo:
+    image: mcp:test
+    networks:
+      - mcp-echo-net
+      - lab-net
+
+  rogue-service:
+    image: rogue:test
+    networks:
+      - mcp-echo-net   # VIOLATION: non-proxy on the pairwise net
+
+networks:
+  gateway-net:
+    driver: bridge
+  mcp-echo-net:
+    driver: bridge
+    internal: true
+  lab-net:
+    driver: bridge

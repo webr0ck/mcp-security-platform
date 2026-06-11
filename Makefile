@@ -314,11 +314,11 @@ security-check:
 		FAILURES=$$((FAILURES + 1)); \
 	fi; \
 	\
-	echo "--- F-001: proxy network isolation ---"; \
-	if python3 scripts/check_network_isolation.py; then \
-		echo "PASS: F-001 proxy network isolation"; \
+	echo "--- F-001: proxy + MCP server network isolation (all compose tiers) ---"; \
+	if python3 scripts/check_network_isolation.py docker-compose.yml podman-compose.lab.yml compose.poc.yml; then \
+		echo "PASS: F-001 network isolation"; \
 	else \
-		echo "FAIL: F-001 proxy network isolation"; \
+		echo "FAIL: F-001 network isolation"; \
 		FAILURES=$$((FAILURES+1)); \
 	fi; \
 	\

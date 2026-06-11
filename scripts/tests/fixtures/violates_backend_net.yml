@@ -1,0 +1,21 @@
+---
+# Fixture: lab-mcp-bad shares proxy-redis-net with Redis — VIOLATES rule (ii).
+
+services:
+  redis:
+    image: redis:7
+    networks:
+      - proxy-redis-net
+
+  lab-mcp-bad:
+    image: mcp:test
+    networks:
+      - proxy-redis-net   # VIOLATION: MCP server on platform backend net
+      - lab-net
+
+networks:
+  proxy-redis-net:
+    driver: bridge
+    internal: true
+  lab-net:
+    driver: bridge
