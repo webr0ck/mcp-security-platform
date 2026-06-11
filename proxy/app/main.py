@@ -24,6 +24,7 @@ from app.routers import anomaly, audit, auth, compliance, health, integrations, 
 from app.routers import oidc_browser, admin_credentials, admin_grants, portal, server_registry, catalog, lab_links, entitlements, profiles
 from app.core.config import settings
 from app.core.database import check_database_health
+from app.core.log_filter import RedactingFilter
 from app.core.hardening import apply_process_hardening
 from app.core.redis_client import redis_pool
 from app.core.asyncpg_pool import asyncpg_pool
@@ -36,6 +37,14 @@ logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL, logging.INFO),
     format='{"time": "%(asctime)s", "level": "%(levelname)s", "logger": "%(name)s", "message": "%(message)s"}',
 )
+
+# INV-002: apply RedactingFilter to root logger and proxy app logger so that
+# token-shaped strings are scrubbed from the entire Loki-shipped log surface,
+# not just the structured audit stream.  This covers incidental leakage in
+# exception messages, httpx error strings, and DEBUG-logged response bodies.
+_redacting_filter = RedactingFilter()
+logging.getLogger().addFilter(_redacting_filter)
+logging.getLogger("app").addFilter(_redacting_filter)
 
 
 @asynccontextmanager
