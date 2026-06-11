@@ -12,6 +12,37 @@
 # ports are reachable from the host browser.  The seeder also joins
 # internal-net and vault-net to reach mcp-db and mcp-vault.
 
+# ── MCP server hardening profile (Task 2.3, ISO-F1.6) ────────────────────────
+# Applied to every lab MCP service via YAML merge key (<<: *mcp-hardening).
+# Matches the sandbox hardening profile in docker-compose.yml plus a seccomp
+# filter and resource limits appropriate for lab MCP workloads.
+#
+# Seccomp: sandbox/files/seccomp/mcp-sandbox.json (relative to repo root).
+# In rootless Podman the seccomp path must be absolute or relative to the
+# podman-compose working directory; both resolve correctly from the repo root.
+#
+# read_only: true — MCP servers should write nothing to the container FS.
+# /tmp is writable via tmpfs if needed (add per-service if required).
+#
+# Non-root user: set per Dockerfile (USER 1001); the compose user: field
+# is redundant when the image enforces it, but explicit here for clarity.
+x-mcp-hardening: &mcp-hardening
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+    - seccomp:sandbox/files/seccomp/mcp-sandbox.json
+  cap_drop:
+    - ALL
+  pids_limit: 64
+  deploy:
+    resources:
+      limits:
+        memory: 256m
+        cpus: "0.5"
+  user: "1001:1001"
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+
 services:
 
   # ── Keycloak IDP (replaces/augments Dex for full OAuth2 + PKCE + token exchange)
@@ -201,6 +232,10 @@ services:
   # ── Grafana MCP Server — points to real Grafana instance ────────────────────
   # Set GRAFANA_URL and GRAFANA_SERVICE_ACCOUNT_TOKEN in .env.lab
   lab-mcp-grafana:
+    <<: *mcp-hardening
+    # user: override — mcp-grafana binary runs as root by default; override to 65534 (nobody)
+    # TODO: confirm grafana/mcp-grafana supports non-root before removing user override
+    user: "65534:65534"
     # 0.4.2 no longer exists on DockerHub; use latest stable for lab.
     image: grafana/mcp-grafana:0.14.0
     container_name: lab-mcp-grafana
@@ -231,6 +266,7 @@ services:
   # ── NetBox MCP Server — points to real NetBox instance ──────────────────────
   # Set NETBOX_URL and NETBOX_TOKEN in .env.lab
   mcp-netbox:
+    <<: *mcp-hardening
     build: ./lab/mcp-servers/netbox
     image: mcp-netbox-server:lab
     container_name: mcp-netbox
@@ -294,6 +330,7 @@ services:
   # GITEA_TOKEN removed (Task 2.5): credential is broker-injected via credential_store.
   # The proxy injects the token as Authorization header; server.py reads it from there.
   lab-mcp-gitea:
+    <<: *mcp-hardening
     build: ./lab/mcp-servers/gitea
     image: lab-mcp-gitea:lab
     container_name: lab-mcp-gitea
@@ -324,6 +361,7 @@ services:
   # Egress traffic to *.microsoftonline.com / *.graph.microsoft.com routes via
   # the egress proxy on the mcp-egress-net (Task 2.4).
   lab-mcp-m365:
+    <<: *mcp-hardening
     build: ./lab/mcp-servers/m365
     image: lab-mcp-m365:lab
     container_name: lab-mcp-m365
@@ -358,6 +396,7 @@ services:
   # ── gateway: Podman/macOS compatibility override ─────────────────────────────
   # ── RAG Assistant — developer onboarding + doc search MCP server ────────────
   lab-rag-assistant:
+    <<: *mcp-hardening
     build: ./lab/mcp-servers/rag-assistant
     image: lab-rag-assistant:lab
     container_name: lab-rag-assistant
@@ -385,6 +424,7 @@ services:
 
   # ── Echo MCP — stress-test and auth-verification target ─────────────────────
   lab-mcp-echo:
+    <<: *mcp-hardening
     build:
       context: ./lab/mcp-servers/echo
     image: lab-mcp-echo:lab
@@ -415,6 +455,7 @@ services:
   #   mcp-notes-net    — proxy ↔ lab-mcp-notes (pairwise, no Redis)
   #   notes-private-net — lab-mcp-notes ↔ lab-notes-redis (no proxy, no platform)
   lab-mcp-notes:
+    <<: *mcp-hardening
     build:
       context: ./lab/mcp-servers/notes
     image: lab-mcp-notes:lab
@@ -464,6 +505,7 @@ services:
   # `principal` parameter when calling the proxy profile API on behalf of the user.
   # The proxy is reachable via mcp-self-service-net (pairwise, internal: true).
   lab-mcp-self-service:
+    <<: *mcp-hardening
     build:
       context: ./lab/mcp-servers/self-service
     image: lab-mcp-self-service:lab
@@ -490,6 +532,7 @@ services:
 
   # ── Search MCP — shared SA scenario (approach B credential injection) ────────
   lab-mcp-search:
+    <<: *mcp-hardening
     build:
       context: ./lab/mcp-servers/search
     image: lab-mcp-search:lab

@@ -6,12 +6,14 @@ RUN groupadd --gid 1001 appgroup && \
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "mcp[cli]>=1.0.0" uvicorn
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=appuser:appgroup server.py .
 
 USER appuser
 
+ENV TRANSPORT=http
 ENV HOST=0.0.0.0
 ENV PORT=8000
 

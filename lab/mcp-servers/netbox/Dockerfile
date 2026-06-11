@@ -1,5 +1,8 @@
-# TODO: pin @sha256:<digest> — run: docker pull python:3.12.11-slim && docker inspect --format='{{index .RepoDigests 0}}' python:3.12.11-slim
+# TODO: pin @sha256:<digest> — run: podman pull python:3.12.11-slim && podman inspect --format='{{index .RepoDigests 0}}' python:3.12.11-slim
 FROM python:3.12.11-slim
+
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid appgroup --no-create-home appuser
 
 WORKDIR /app
 
@@ -15,6 +18,8 @@ RUN pip show netbox-mcp-server 2>/dev/null || ( \
     pip install --no-cache-dir /tmp/netbox-mcp && \
     rm -rf /tmp/netbox-mcp /var/lib/apt/lists/* \
 )
+
+USER appuser
 
 ENV TRANSPORT=http
 ENV HOST=0.0.0.0

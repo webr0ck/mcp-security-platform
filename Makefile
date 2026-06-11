@@ -219,12 +219,18 @@ test-all:
 		python -m pytest tests/unit/ tests/integration/ tests/security/ \
 		-v --tb=short
 
-# Run red-team shell isolation tests (requires: docker compose up with sandbox)
+# Run red-team shell isolation tests (requires: docker compose up with sandbox + lab stack)
+# RT-001 and RT-006 are also run against lab-mcp-echo (Task 2.3) to validate
+# MCP server isolation, not just the generic sandbox. || true removed (Task 2.3).
 test-red-team:
 	@echo "Running red-team sandbox isolation tests..."
 	@echo "Requires: docker compose up (sandbox container must be running)"
-	@bash sandbox/tests/red_team/run_all.sh || true
-	@echo "Red-team tests complete. Review output above for PASS/FAIL."
+	@bash sandbox/tests/red_team/run_all.sh
+	@echo ""
+	@echo "Running lab MCP server isolation probes (RT-MCP-001)..."
+	@echo "Requires: lab stack running (podman-compose -f docker-compose.yml -f podman-compose.lab.yml up)"
+	@bash sandbox/tests/red_team/test_mcp_platform_backend_isolation.sh
+	@echo "Red-team tests complete."
 
 lint:
 	$(COMPOSE) exec $(PROXY_CONTAINER) ruff check app/
