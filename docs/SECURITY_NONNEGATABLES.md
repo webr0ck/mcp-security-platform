@@ -21,7 +21,7 @@ The per-INV "Enforcement:" lines below describe the *intended* control. Audited 
 | INV | Actually enforced by automation? |
 |---|---|
 | INV-002, INV-003, INV-005, INV-006 | ✅ Yes — real, gated. |
-| INV-001 | ✅ Test exists & is thorough, but at `proxy/tests/integration/test_audit_completeness.py` (not the path quoted below) and is **not** in `make security-check`. Credential-lifecycle audit added (CB-004). |
+| INV-001 | ✅ Extended (Task 1.1, 2026-06-11): auth-layer rejections (401/403) now also fail-closed — `AuditMiddleware` emits synchronously; emission failure → 500. `test_audit_completeness.py` extended with `test_401_produces_audit_event` and `test_403_produces_audit_event`. Credential-lifecycle audit added (CB-004). Not yet in `make security-check`. |
 | INV-004 | 🟡 Code correct & fail-closed; CI now runs the OPA-down phase (P1.4 fix) — previously skipped. |
 | INV-009, INV-010 | 🟡 Config-only; verified at deploy, no automated test. |
 | INV-008 | 🟡 CI trufflehog real; **no pre-commit hook in repo**, `make security-check` skips trufflehog if absent (ROADMAP P2.5). |
@@ -31,15 +31,22 @@ The per-INV "Enforcement:" lines below describe the *intended* control. Audited 
 
 ---
 
-## INV-001: Every Tool Invocation Has an Audit Record
+## INV-001: Every Tool Invocation and Auth-Layer Rejection Has an Audit Record
 
 **Statement:** Every call to `POST /tools/{tool_id}/invoke`, whether the outcome is ALLOW or DENY, must produce an audit event record before any response is returned to the caller.
 
-**Corollary:** The audit event must be emitted synchronously, not in a background task. If the audit emission fails, the invocation is treated as failed and a 500 is returned. There is no path where a tool executes and no audit record is produced.
+**Extension (Task 1.1, 2026-06-11 — LOG-F02/LOG-F03):** Auth-layer rejections (HTTP 401 Unauthenticated, HTTP 403 Forbidden) are **now also fail-closed** under INV-001. `AuditMiddleware` (`proxy/app/middleware/audit.py`) emits a synchronous audit event for every 401 and 403 response *after* the inner handler returns. Emission failure raises `AuditEmissionError`, which the middleware's own outer handler converts to HTTP 500. This means:
+- An attacker who can cause audit DB outages no longer gains a quieter brute-force channel (prior to this task, the middleware swallowed emission exceptions with `except Exception: pass`).
+- Every rejected request — whether unauthenticated probe or role-denied call — is now unconditionally recorded.
+- The audit row for auth failures has `tool_id IS NULL` (the invocation never reached the tool-lookup stage); `tool_name` carries the redacted `[HTTP_401] METHOD /path` string (attacker-chosen path segments are run through `redact_string` per INV-002).
 
-**Why:** Without a complete invocation log, compliance reporting and anomaly detection are invalid. Partial logs are worse than no logs because they create false confidence.
+**Rollout observable:** Watch the 5xx rate on unauthenticated probes after deploy. An audit-DB outage now 500s every probe. That is intended; it must page (Task 0.3 alerting is the prerequisite for comfort here). Table-growth/flooding is mitigated by gateway rate-limits (IPRateLimitMiddleware + Nginx layer). Add table-growth to rollout observables.
 
-**Enforcement:** Integration test `proxy/tests/integration/test_audit_completeness.py` (note: `integration/` subdir) asserts every invocation produces exactly one audit event; `proxy/tests/unit/test_mcp_client.py` covers the route-level contract. Credential enrollment also emits a synchronous audit event (CB-004). *Gap: not yet wired into `make security-check`.*
+**Corollary:** The audit event must be emitted synchronously, not in a background task. If the audit emission fails, the invocation is treated as failed and a 500 is returned. There is no path where a tool executes — or where authentication is rejected — without an audit record.
+
+**Why:** Without a complete invocation log, compliance reporting and anomaly detection are invalid. Partial logs are worse than no logs because they create false confidence. Audit gaps on auth-failure paths also mean brute-force attacks are invisible in the audit trail.
+
+**Enforcement:** Integration test `proxy/tests/integration/test_audit_completeness.py` (note: `integration/` subdir) asserts every invocation produces exactly one audit event; `test_401_produces_audit_event` and `test_403_produces_audit_event` (same file, added Task 1.1) assert auth-failure rows with `tool_id IS NULL`; `proxy/tests/unit/test_mcp_client.py` covers the route-level contract. Credential enrollment also emits a synchronous audit event (CB-004). *Gap: not yet wired into `make security-check`.*
 
 ---
 

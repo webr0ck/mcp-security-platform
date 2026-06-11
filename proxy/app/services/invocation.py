@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 broker_instance: CredentialBroker | None = None
 registry_instance: Registry | None = None
 
+# Test-fixture flag: when True, _emit_audit_event skips the DB INSERT entirely.
+# Set to True in unit tests that mock mcp-audit-logger but do not have a live DB.
+# This replaces the fragile type-guard (non-UUID event_id / non-str sha256_hash)
+# that previously gated the INSERT — the old guard was an emergent side-effect of
+# mock return values, not an explicit contract. This flag makes the intent explicit.
+# Never set this True in production code paths.
+_SKIP_AUDIT_DB_WRITE: bool = False
+
 # Hard cap on bytes read from an upstream MCP server. Guards against a
 # malicious upstream streaming unbounded data on the SSE channel.
 _MAX_UPSTREAM_BODY_BYTES = 4 * 1024 * 1024  # 4 MiB
@@ -52,6 +60,8 @@ async def invoke_tool(
     principal_id: str | None = None,
     principal_type: str | None = None,
     user_kc_token: str | None = None,
+    source_ip: str | None = None,
+    session_jti: str | None = None,
 ) -> dict[str, Any]:
     """
     Execute the full tool invocation pipeline.
@@ -75,6 +85,10 @@ async def invoke_tool(
             (RFC 8693 on-behalf-of exchange). Set only for direct-OIDC callers;
             None for api_key/mtls/session callers (oauth_user_token then fails
             closed in the dispatcher). Never logged (INV-002).
+        source_ip: Originating client IP from X-Forwarded-For / request.client.host
+            (Task 1.2 — "who" enrichment for audit trail, LOG-F04).
+        session_jti: OIDC session JWT ID (Task 1.2). Present only for
+            session-JWT callers; None for mTLS / API-key callers.
 
     Returns:
         Dict matching the MCP JSON-RPC 2.0 response format with meta.audit_id.
@@ -131,6 +145,10 @@ async def invoke_tool(
             anomaly_score=0.0,
             opa_decision_id="",
             is_testing=is_testing,
+            source_ip=source_ip,
+            principal_type=principal_type,
+            roles=client_roles,
+            session_jti=session_jti,
         )
         raise
 
@@ -238,6 +256,10 @@ async def invoke_tool(
             anomaly_score=anomaly_score,
             opa_decision_id=opa_decision_id,
             is_testing=is_testing,
+            source_ip=source_ip,
+            principal_type=principal_type,
+            roles=client_roles,
+            session_jti=session_jti,
         )
         raise OPADenyError(opa_result["reasons"])
 
@@ -316,6 +338,10 @@ async def invoke_tool(
                 anomaly_score=anomaly_score,
                 opa_decision_id=opa_decision_id,
                 is_testing=is_testing,
+                source_ip=source_ip,
+                principal_type=principal_type,
+                roles=client_roles,
+                session_jti=session_jti,
             )
             raise
 
@@ -443,6 +469,10 @@ async def invoke_tool(
         anomaly_score=anomaly_score,
         opa_decision_id=opa_decision_id,
         is_testing=is_testing,
+        source_ip=source_ip,
+        principal_type=principal_type,
+        roles=client_roles,
+        session_jti=session_jti,
     )
 
     # -------------------------------------------------------------------------
@@ -507,6 +537,10 @@ async def invoke_tool(
             anomaly_score=anomaly_score,
             opa_decision_id=opa_decision_id,
             is_testing=is_testing,
+            source_ip=source_ip,
+            principal_type=principal_type,
+            roles=client_roles,
+            session_jti=session_jti,
         )
         if BLOCK_ON_MATCH:
             return {
@@ -654,12 +688,28 @@ async def _emit_audit_event(
     anomaly_score: float,
     opa_decision_id: str,
     is_testing: bool,
+    source_ip: str | None = None,
+    principal_type: str | None = None,
+    roles: list[str] | None = None,
+    session_jti: str | None = None,
 ) -> str:
     """
     Emit a structured audit event via mcp-audit-logger.
     Returns the event_id for embedding in the response.
 
     This function is called synchronously before the response is returned (INV-001).
+
+    When tool_id is None (e.g. auth-failure 401/403 events from AuditMiddleware),
+    the event_type is set to INTERNAL_TOOL_INVOCATION so the schema validator does
+    not reject the missing tool_id (that constraint only applies to TOOL_INVOCATION).
+    The tool_name carries the redacted "[HTTP_401] METHOD /path" string so the event
+    is still machine-readable.
+
+    Args (new in Task 1.1/1.2):
+        source_ip: Originating client IP from X-Forwarded-For / request.client.host.
+        principal_type: 'human' | 'agent' | 'service' from request.state.
+        roles: List of roles held by the caller at invocation time.
+        session_jti: OIDC session JWT ID for tracing session-scoped invocations.
     """
     try:
         from mcp_audit_logger import AuditEvent, AuditEventType, AuditOutcome, MCPAuditLogger
@@ -670,8 +720,18 @@ async def _emit_audit_event(
             "error": getattr(AuditOutcome, "ERROR", AuditOutcome.DENY),
         }
         audit_logger = _get_audit_logger()
+
+        # Auth-failure events (401/403 from AuditMiddleware) have tool_id=None
+        # because the invocation never reached the tool-lookup stage.
+        # TOOL_INVOCATION requires tool_id, so use INTERNAL_TOOL_INVOCATION for
+        # these rows so the schema validator does not reject them.
+        if tool_id is None:
+            _event_type = AuditEventType.INTERNAL_TOOL_INVOCATION
+        else:
+            _event_type = AuditEventType.TOOL_INVOCATION
+
         event = AuditEvent(
-            event_type=AuditEventType.TOOL_INVOCATION,
+            event_type=_event_type,
             client_id=client_id,
             tool_name=tool_name,
             tool_id=tool_id,
@@ -683,23 +743,26 @@ async def _emit_audit_event(
             anomaly_score=anomaly_score,
             opa_decision_id=opa_decision_id,
             is_testing=is_testing,
+            source_ip=source_ip,
+            principal_type=principal_type,
+            roles=roles,
+            session_jti=session_jti,
         )
         sha256_hash = audit_logger.emit(event)
         event_id = str(event.event_id)
 
-        # Also persist to the audit_events index table (INV-001).
+        # Skip DB write when the test-fixture flag is set.
+        # This replaces the fragile type-guard (non-UUID event_id / non-str sha256_hash)
+        # and the tool_id-falsy skip that prevented 401/403 auth-failure events from
+        # being persisted.  Tests that need to avoid hitting a real DB must set
+        # _SKIP_AUDIT_DB_WRITE = True via the module-level flag below.
+        if _SKIP_AUDIT_DB_WRITE:
+            return event_id
+
+        # Persist to the audit_events index table (INV-001).
         # This allows the compliance API to query events without Loki.
-        # Guard: skip DB write if values look like test mocks (non-UUID event_id or
-        # non-string sha256_hash). This keeps unit tests that mock the audit logger
-        # from hitting the real DB.
-        # Also skip if tool_id is falsy (None/empty): audit_events.tool_id is a
-        # nullable UUID FK and PostgreSQL would reject an empty string cast to UUID.
-        import re as _re
-        _uuid_re = _re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', _re.I)
-        if not isinstance(sha256_hash, str) or not _uuid_re.match(event_id):
-            return event_id
-        if not tool_id:
-            return event_id
+        # tool_id may be None for auth-failure events (401/403) — the column is
+        # a nullable UUID FK, so NULL is valid; cast is applied only for non-None.
         try:
             from sqlalchemy import text as _text
             from app.core.database import engine as _db_engine
@@ -712,13 +775,16 @@ async def _emit_audit_event(
                             outcome, latency_ms, sha256_hash,
                             anomaly_score, opa_reasons, request_id,
                             event_type, event_ts, platform_version,
-                            original_outcome, hmac_signature, hmac_key_id
+                            original_outcome, hmac_signature, hmac_key_id,
+                            source_ip, principal_type, caller_roles, session_jti
                         ) VALUES (
                             :event_id, :client_id, :tool_name, :tool_id,
                             :outcome, :latency_ms, :sha256_hash,
                             :anomaly_score, CAST(:opa_reasons AS jsonb), :request_id,
                             :event_type, :event_ts, :platform_version,
-                            :original_outcome, :hmac_signature, :hmac_key_id
+                            :original_outcome, :hmac_signature, :hmac_key_id,
+                            CAST(:source_ip AS INET), :principal_type,
+                            CAST(:caller_roles AS TEXT[]), :session_jti
                         )
                         """
                     ),
@@ -752,6 +818,11 @@ async def _emit_audit_event(
                         # HMAC signature for tamper-evidence (Step 3).
                         "hmac_signature": _compute_hmac_signature(sha256_hash, event),
                         "hmac_key_id": "default",
+                        # Task 1.2 — "who" enrichment fields.
+                        "source_ip": source_ip,
+                        "principal_type": principal_type,
+                        "caller_roles": __import__("json").dumps(roles) if roles else None,
+                        "session_jti": session_jti,
                     },
                 )
         except Exception as db_exc:

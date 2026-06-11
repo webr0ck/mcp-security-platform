@@ -254,17 +254,19 @@ async def test_opa_down_produces_error_audit_event(db_conn: asyncpg.Connection):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_unauthenticated_produces_no_audit_event(db_conn: asyncpg.Connection):
+async def test_401_produces_audit_event(db_conn: asyncpg.Connection):
     """
-    Covers INV-001 corollary: unauthenticated requests (401) must NOT produce
-    audit events because they never enter the invocation pipeline.
+    Covers INV-001 extension (Task 1.1): unauthenticated requests (401) MUST
+    produce exactly one audit event with tool_id IS NULL.
 
-    Auth-layer rejections happen in AuthMiddleware before the invocation handler
-    is reached. Verifies that the audit_events table does not grow from 401s.
+    Prior to Task 1.1 the AuditMiddleware swallowed emission exceptions with
+    `except Exception: pass`, meaning a DB outage gave unauthenticated probes a
+    quieter channel. Post-Task-1.1 the emit is fail-closed (500 on failure) and
+    the row is unconditionally persisted.
+
+    The client_id for unauthenticated requests is 'unauthenticated' (the
+    AuditMiddleware fallback value).
     """
-    # Use a sentinel client ID to count events for a fictitious unauthenticated caller.
-    # Since we cannot know the client_id of an unauthed request, we count total events
-    # before and after and verify the count does not increase.
     total_before = await db_conn.fetchval("SELECT COUNT(*) FROM audit_events")
 
     async with httpx.AsyncClient() as client:
@@ -278,16 +280,98 @@ async def test_unauthenticated_produces_no_audit_event(db_conn: asyncpg.Connecti
         f"INV-009: Expected 401 for unauthenticated request, got {resp.status_code}"
     )
     body = resp.json()
-    # Auth middleware uses RFC-6750 format: {"error": "unauthenticated", "error_description": "..."}
     assert body.get("error") == "unauthenticated" or (
         isinstance(body.get("error"), dict) and body["error"].get("code") == "UNAUTHENTICATED"
     ), f"Expected unauthenticated error, got: {body}"
 
     total_after = await db_conn.fetchval("SELECT COUNT(*) FROM audit_events")
-    assert total_after == total_before, (
-        f"INV-001 corollary violated: audit_events grew by "
-        f"{total_after - total_before} for a 401 unauthenticated request. "
-        f"Auth-layer rejections must not produce audit events."
+    assert total_after == total_before + 1, (
+        f"INV-001 extension violated: expected exactly 1 new audit event for 401, "
+        f"got {total_after - total_before}."
+    )
+
+    # Verify the row has tool_id IS NULL (auth failure before tool lookup)
+    latest_unauth = await db_conn.fetchrow(
+        """
+        SELECT event_id, client_id, tool_id, outcome, tool_name
+        FROM audit_events
+        WHERE client_id = 'unauthenticated'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+    )
+    assert latest_unauth is not None, "Expected an audit row for unauthenticated client"
+    assert latest_unauth["tool_id"] is None, (
+        f"Expected tool_id IS NULL for auth-failure row, got: {latest_unauth['tool_id']}"
+    )
+    assert latest_unauth["outcome"] == "deny", (
+        f"Expected outcome='deny' for 401 auth row, got: {latest_unauth['outcome']}"
+    )
+    assert "401" in latest_unauth["tool_name"], (
+        f"Expected '[401]' in tool_name for auth-failure row, got: {latest_unauth['tool_name']}"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_403_produces_audit_event(db_conn: asyncpg.Connection):
+    """
+    Covers INV-001 extension (Task 1.1): authorization failures (403) MUST
+    produce exactly one audit event with tool_id IS NULL.
+
+    Uses a caller that authenticates successfully but lacks the agent role
+    (e.g. auditor-only role that cannot invoke tools).
+    """
+    # Headers for an authenticated caller with insufficient role for invocation.
+    # 'test-auditor-client' must exist in the test fixtures with role=auditor only.
+    import os
+    gw = os.getenv("GATEWAY_SHARED_SECRET", "")
+    auditor_headers = {"X-Client-Cert-CN": "test-auditor-client", "X-Gateway-Secret": gw}
+
+    # Count existing rows for this client_id before the request.
+    before_count = await db_conn.fetchval(
+        "SELECT COUNT(*) FROM audit_events WHERE client_id = 'test-auditor-client'"
+    )
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{PROXY_URL}/api/v1/tools/{ACTIVE_TOOL_ID}/invoke",
+            json=INVOKE_BODY_TEMPLATE,
+            headers=auditor_headers,
+        )
+
+    # Auditor-only callers fail the role check (agent or admin required).
+    assert resp.status_code == 403, (
+        f"Expected 403 for auditor-only caller on invoke, got {resp.status_code}. "
+        f"Body: {resp.text[:300]}"
+    )
+
+    after_count = await db_conn.fetchval(
+        "SELECT COUNT(*) FROM audit_events WHERE client_id = 'test-auditor-client'"
+    )
+    assert after_count == before_count + 1, (
+        f"INV-001 extension violated: expected exactly 1 new audit event for 403, "
+        f"got {after_count - before_count}."
+    )
+
+    latest = await db_conn.fetchrow(
+        """
+        SELECT event_id, client_id, tool_id, outcome, tool_name
+        FROM audit_events
+        WHERE client_id = 'test-auditor-client'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+    )
+    assert latest is not None
+    assert latest["tool_id"] is None, (
+        f"Expected tool_id IS NULL for 403 auth row, got: {latest['tool_id']}"
+    )
+    assert latest["outcome"] == "deny", (
+        f"Expected outcome='deny' for 403 auth row, got: {latest['outcome']}"
+    )
+    assert "403" in latest["tool_name"], (
+        f"Expected '[403]' in tool_name for 403-failure row, got: {latest['tool_name']}"
     )
 
 
