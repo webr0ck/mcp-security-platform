@@ -1,11 +1,10 @@
 """
-MCP Security Platform — Profile CRUD Router (Task 4.2)
+MCP Security Platform — Profile CRUD Router (Task 4.2 + Task 4.3)
 
-Exposes per-identity MCP profile management as a core proxy REST API.
-Ported from lab/mcp-servers/self-service/server.py — identity comes from
-request.state (auth middleware), NOT from X-User-* headers.
+Exposes per-identity MCP profile management (Task 4.2) and named profile
+management (Task 4.3) as core proxy REST APIs.
 
-Routes:
+Task 4.2 routes (per-identity MCP profile management):
   GET    /api/v1/profiles/{principal}/mcps/{mcp_name}         — get profile row
   PUT    /api/v1/profiles/{principal}/mcps/{mcp_name}         — upsert profile row
   POST   /api/v1/profiles/{principal}/mcps/{mcp_name}/enable  — enable MCP
@@ -13,11 +12,18 @@ Routes:
   POST   /api/v1/profiles/{principal}/mcps/{mcp_name}/functions/{fn}/enable  — enable function
   POST   /api/v1/profiles/{principal}/mcps/{mcp_name}/functions/{fn}/disable — disable function
 
+Task 4.3 routes (named profile management — admin only):
+  GET    /api/v1/profiles/named                                — list named profiles
+  POST   /api/v1/profiles/named                                — create named profile
+  GET    /api/v1/profiles/named/{name}                         — get named profile
+  PUT    /api/v1/profiles/named/{name}/mcps/{mcp_name}         — bind/update MCP for profile
+
 Authorization:
-  - Self-service: any authenticated principal may manage their own profile
+  - Self-service (Task 4.2): any authenticated principal may manage their own profile
     (principal path param == caller's client_id).
-  - Cross-profile admin: only callers whose roles include "admin" or "platform_admin"
+  - Cross-profile admin (Task 4.2): only callers whose roles include "admin" or "platform_admin"
     may manage another principal's profile.
+  - Named profile management (Task 4.3): admin/platform_admin only.
 
 Cache invalidation (Task 1.10):
   Every profile mutation invalidates/updates the Redis key:
@@ -554,3 +560,294 @@ async def disable_function(
             "allowed_functions": new_af,
         }
     )
+
+
+# =============================================================================
+# Task 4.3 — Named Profile Management
+#
+# Named profiles are platform-level scoped sets of MCP entitlements.
+# Users bind a named profile at login time via ?profile=<name>.
+# These endpoints are admin-only.
+# =============================================================================
+
+import re as _re
+
+
+def _assert_admin(request: Request) -> None:
+    """Raise HTTP 403 if the caller does not have an admin role."""
+    caller_roles: list[str] = list(getattr(request.state, "client_roles", []) or [])
+    if not any(r in _ADMIN_ROLES for r in caller_roles):
+        raise HTTPException(status_code=403, detail="Admin role required for named profile management")
+
+
+class NamedProfileCreateBody(BaseModel):
+    name: str
+    display_name: str | None = None
+    description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        if not _re.match(r'^[A-Za-z0-9_-]{1,64}$', v):
+            raise ValueError("Profile name must be 1-64 alphanumeric/hyphen/underscore characters")
+        return v
+
+
+class NamedProfileMCPBindingBody(BaseModel):
+    enabled: bool = True
+    allowed_functions: list[str] | None = None
+
+    @field_validator("allowed_functions")
+    @classmethod
+    def _no_empty_strings(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None and any(not fn.strip() for fn in v):
+            raise ValueError("allowed_functions entries must not be blank")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Named profile DB helpers
+# ---------------------------------------------------------------------------
+
+async def _get_named_profile(name: str) -> dict | None:
+    """Return named profile row or None if not found."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            text(
+                "SELECT id, name, display_name, description, created_by, created_at, is_active "
+                "FROM profiles WHERE name = :name LIMIT 1"
+            ),
+            {"name": name},
+        )
+        row = result.mappings().first()
+    if row is None:
+        return None
+    return dict(row)
+
+
+async def _list_named_profiles(active_only: bool = True) -> list[dict]:
+    """Return all named profiles."""
+    async with AsyncSessionLocal() as db:
+        where = "WHERE is_active = TRUE" if active_only else ""
+        result = await db.execute(
+            text(
+                f"SELECT id, name, display_name, description, created_by, created_at, is_active "
+                f"FROM profiles {where} ORDER BY name"
+            )
+        )
+        rows = result.mappings().fetchall()
+    return [dict(r) for r in rows]
+
+
+async def _create_named_profile(name: str, display_name: str | None, description: str | None, created_by: str) -> dict:
+    """Insert a named profile row and return the created record."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            text(
+                "INSERT INTO profiles (name, display_name, description, created_by) "
+                "VALUES (:name, :display_name, :description, :created_by) "
+                "RETURNING id, name, display_name, description, created_by, created_at, is_active"
+            ),
+            {
+                "name": name,
+                "display_name": display_name,
+                "description": description,
+                "created_by": created_by,
+            },
+        )
+        row = result.mappings().first()
+        await db.commit()
+    return dict(row)
+
+
+async def _upsert_profile_mcp_binding(
+    profile_uuid: str,
+    mcp_name: str,
+    enabled: bool,
+    allowed_functions: list[str] | None,
+) -> None:
+    """Insert or update a profile_mcp_bindings row."""
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text(
+                """
+                INSERT INTO profile_mcp_bindings
+                    (profile_id, mcp_name, enabled, allowed_functions, updated_at)
+                VALUES (:profile_id, :mcp_name, :enabled, :af, NOW())
+                ON CONFLICT (profile_id, mcp_name) DO UPDATE SET
+                    enabled           = EXCLUDED.enabled,
+                    allowed_functions = EXCLUDED.allowed_functions,
+                    updated_at        = NOW()
+                """
+            ),
+            {
+                "profile_id": profile_uuid,
+                "mcp_name": mcp_name,
+                "enabled": enabled,
+                "af": allowed_functions,
+            },
+        )
+        await db.commit()
+
+
+async def _get_profile_mcp_bindings(profile_uuid: str) -> list[dict]:
+    """Return all MCP bindings for a named profile."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            text(
+                "SELECT mcp_name, enabled, allowed_functions "
+                "FROM profile_mcp_bindings WHERE profile_id = :pid ORDER BY mcp_name"
+            ),
+            {"pid": profile_uuid},
+        )
+        rows = result.mappings().fetchall()
+    return [dict(r) for r in rows]
+
+
+async def _invalidate_profile_mcp_binding_cache(profile_uuid: str, mcp_name: str, new_value: dict | None) -> None:
+    """Invalidate Redis cache for a named-profile MCP binding (Task 4.3)."""
+    try:
+        from app.core.redis_client import redis_pool
+        redis = redis_pool.client
+        cache_key = f"mcp_profile:uuid:{profile_uuid}:{mcp_name}"
+        value = json.dumps(new_value) if new_value is not None else _SENTINEL_NO_ROW
+        await redis.setex(cache_key, _PROFILE_CACHE_TTL_SECONDS, value)
+        logger.debug(
+            "Named profile MCP binding cache updated",
+            extra={"profile_uuid": profile_uuid, "mcp_name": mcp_name},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to invalidate named profile MCP binding cache",
+            extra={"profile_uuid": profile_uuid, "mcp_name": mcp_name, "error": str(exc)},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Named profile routes (all admin-only)
+# ---------------------------------------------------------------------------
+
+@router.get("/named")
+async def list_named_profiles(request: Request) -> JSONResponse:
+    """
+    List all active named profiles.
+
+    RBAC: admin/platform_admin only.
+    """
+    _assert_admin(request)
+    profiles_list = await _list_named_profiles(active_only=True)
+    # Convert UUID and datetime objects to strings for JSON serialization.
+    def _serialise(p: dict) -> dict:
+        return {k: (str(v) if v is not None and not isinstance(v, (bool, int, str)) else v) for k, v in p.items()}
+    return JSONResponse({"profiles": [_serialise(p) for p in profiles_list]})
+
+
+@router.post("/named")
+async def create_named_profile(body: NamedProfileCreateBody, request: Request) -> JSONResponse:
+    """
+    Create a new named profile.
+
+    RBAC: admin/platform_admin only.
+    Returns HTTP 409 if a profile with the same name already exists.
+    """
+    _assert_admin(request)
+    actor: str = getattr(request.state, "client_id", "unknown")
+
+    # Check for duplicate name
+    existing = await _get_named_profile(body.name)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail=f"Profile '{body.name}' already exists")
+
+    try:
+        profile = await _create_named_profile(
+            name=body.name,
+            display_name=body.display_name,
+            description=body.description,
+            created_by=actor,
+        )
+    except Exception as exc:
+        logger.error("Failed to create named profile %r: %s", body.name, exc)
+        raise HTTPException(status_code=500, detail="Failed to create profile") from exc
+
+    def _serialise(p: dict) -> dict:
+        return {k: (str(v) if v is not None and not isinstance(v, (bool, int, str)) else v) for k, v in p.items()}
+
+    return JSONResponse(_serialise(profile), status_code=201)
+
+
+@router.get("/named/{name}")
+async def get_named_profile(name: str, request: Request) -> JSONResponse:
+    """
+    Get a named profile with its MCP bindings.
+
+    RBAC: admin/platform_admin only.
+    """
+    _assert_admin(request)
+
+    profile = await _get_named_profile(name)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
+
+    bindings = await _get_profile_mcp_bindings(str(profile["id"]))
+
+    def _serialise(p: dict) -> dict:
+        return {k: (str(v) if v is not None and not isinstance(v, (bool, int, str)) else v) for k, v in p.items()}
+
+    return JSONResponse({
+        **_serialise(profile),
+        "mcp_bindings": bindings,
+    })
+
+
+@router.put("/named/{name}/mcps/{mcp_name}")
+async def upsert_named_profile_mcp(
+    name: str,
+    mcp_name: str,
+    body: NamedProfileMCPBindingBody,
+    request: Request,
+) -> JSONResponse:
+    """
+    Bind or update an MCP binding for a named profile.
+
+    Sets whether the MCP is enabled for this profile and optionally restricts
+    to a set of allowed functions (NULL = all functions permitted).
+
+    RBAC: admin/platform_admin only.
+    """
+    _assert_admin(request)
+
+    profile = await _get_named_profile(name)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
+    if not profile.get("is_active"):
+        raise HTTPException(status_code=400, detail=f"Profile '{name}' is inactive")
+
+    # Validate the MCP exists in tool_registry
+    await _assert_mcp_exists(mcp_name)
+
+    profile_uuid = str(profile["id"])
+
+    try:
+        await _upsert_profile_mcp_binding(
+            profile_uuid=profile_uuid,
+            mcp_name=mcp_name,
+            enabled=body.enabled,
+            allowed_functions=body.allowed_functions,
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to upsert MCP binding for profile %r mcp=%r: %s", name, mcp_name, exc
+        )
+        raise HTTPException(status_code=500, detail="Failed to update profile MCP binding") from exc
+
+    new_value = {"enabled": body.enabled, "allowed_functions": body.allowed_functions}
+    await _invalidate_profile_mcp_binding_cache(profile_uuid, mcp_name, new_value)
+
+    return JSONResponse({
+        "ok": True,
+        "profile_name": name,
+        "profile_uuid": profile_uuid,
+        "mcp_name": mcp_name,
+        "enabled": body.enabled,
+        "allowed_functions": body.allowed_functions,
+    })

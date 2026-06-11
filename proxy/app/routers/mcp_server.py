@@ -265,11 +265,41 @@ async def _lookup_profile_row(profile_id: str, mcp_name: str):
         return None
 
 
+async def _lookup_profile_mcp_binding(profile_uuid: str, mcp_name: str):
+    """Return the profile_mcp_bindings row for (profile_uuid, mcp_name), or None if absent.
+
+    Task 4.3: named-profile binding lookup. Absence = default (enabled=true, all functions).
+    A row with enabled=False means this MCP is disabled for the profile.
+
+    Separate function so tests can patch it cleanly.
+    """
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    "SELECT enabled, allowed_functions FROM profile_mcp_bindings "
+                    "WHERE profile_id = :pid AND mcp_name = :mcp_name LIMIT 1"
+                ),
+                {"pid": profile_uuid, "mcp_name": mcp_name},
+            )
+            return result.mappings().fetchone()
+    except Exception as exc:
+        logger.warning(
+            "profile_mcp_bindings lookup failed profile_uuid=%s mcp_name=%s: %s",
+            profile_uuid, mcp_name, exc,
+        )
+        return None
+
+
 async def _registered_tools_for_client(
     client_id: str,
     roles: list[str],
     principal_id: str | None = None,
     principal_type: str | None = None,
+    profile_uuid: str | None = None,
 ) -> list[dict]:
     """Return active registry tools visible to this client.
 
@@ -282,6 +312,13 @@ async def _registered_tools_for_client(
       3. NULL-server_id tools (legacy / unlinked): shown only when the caller has an
          explicit data.json grant (allowed_tools or allowed_tags). This mirrors the
          OPA-only invoke path for unlinked tools (entitlement.py:78-80).
+
+    Task 4.3 — named profile filter:
+      When profile_uuid is set, ALSO filter by profile_mcp_bindings:
+        - If a binding row exists with enabled=False: exclude the tool.
+        - Absence of a binding row = default (enabled=true, not filtered).
+      This is an additional gate on top of the existing profile check.
+      Falls back to legacy mcp_profiles gate when profile_uuid is None.
 
     Discovery == invoke invariant: the set returned here equals the set that
     enforce_tool_entitlement + profile check on the invoke path would allow.
@@ -341,10 +378,17 @@ async def _registered_tools_for_client(
             if not ent.entitled:
                 continue
 
-        # ── Profile gate: mcp_profiles.enabled check ───────────────────────
-        # Only meaningful when we have a resolvable principal identity.
-        # Absence of a profile row = platform default (enabled=true).
-        if principal_id:
+        # ── Profile gate ────────────────────────────────────────────────────
+        # Task 4.3: when profile_uuid is set, check profile_mcp_bindings first.
+        # Absence of a binding row = default (enabled=true, not filtered).
+        if profile_uuid:
+            pmb = await _lookup_profile_mcp_binding(profile_uuid, row["name"])
+            if pmb is not None and not pmb["enabled"]:
+                continue
+        elif principal_id:
+            # Legacy path: mcp_profiles.enabled check keyed by principal_id.
+            # Only meaningful when we have a resolvable principal identity.
+            # Absence of a profile row = platform default (enabled=true).
             profile = await _lookup_profile_row(
                 profile_id=principal_id,
                 mcp_name=row["name"],
@@ -426,6 +470,8 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                     or (request.client.host if request.client else None)
                 ),
                 session_jti=getattr(request.state, "session_jti", None),
+                # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
+                profile_uuid=getattr(request.state, "profile_uuid", None),
             )
     except Exception as exc:
         from app.credential_broker.dispatcher import CredentialEnrollmentRequiredError
@@ -633,6 +679,8 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                     or (request.client.host if request.client else None)
                 ),
                 session_jti=getattr(request.state, "session_jti", None),
+                # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
+                profile_uuid=getattr(request.state, "profile_uuid", None),
             )
         return {"type": "text", "text": json.dumps(result, indent=2)}
     except Exception as exc:
@@ -733,6 +781,8 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
             roles=roles,
             principal_id=principal_id,
             principal_type=principal_type,
+            # Task 4.3: named profile UUID — filters tools by profile_mcp_bindings.
+            profile_uuid=getattr(request.state, "profile_uuid", None),
         )
         tools = platform_tools + registry_tools
         logger.info(

@@ -1243,6 +1243,8 @@ async def invoke_tool(
                 or (request.client.host if request.client else None)
             ),
             session_jti=getattr(request.state, "session_jti", None),
+            # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
+            profile_uuid=getattr(request.state, "profile_uuid", None),
         )
         return JSONResponse(content=response)
 

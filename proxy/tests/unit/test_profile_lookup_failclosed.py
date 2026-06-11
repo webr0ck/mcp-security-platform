@@ -192,7 +192,7 @@ async def test_db_error_cache_hit_uses_cached_profile():
         return "fake-audit-id"
 
     # _lookup_profile_with_cache: DB fails but returns cached result
-    async def _fake_lookup_with_cache_hit(client_id, tool_name):
+    async def _fake_lookup_with_cache_hit(client_id, tool_name, **kwargs):
         return cached_profile  # cache hit after DB error
 
     with patch.dict(sys.modules, stubs), \
@@ -252,7 +252,7 @@ async def test_db_error_cache_miss_yields_503():
         return "fake-audit-id"
 
     # _lookup_profile_with_cache: DB error + no cache → raises
-    async def _fake_lookup_miss(client_id, tool_name):
+    async def _fake_lookup_miss(client_id, tool_name, **kwargs):
         raise _inv_mod.ProfileLookupError(
             "DB unreachable and no cached profile for alice@corp/file_tool"
         )

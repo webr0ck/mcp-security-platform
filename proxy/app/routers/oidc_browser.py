@@ -140,12 +140,23 @@ def _pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-def _issue_session_jwt(subject: str, client_id: str, roles: list[str], jti: str) -> str:
-    """Issue an internal HS256 session JWT (never contains raw KC tokens)."""
+def _issue_session_jwt(
+    subject: str,
+    client_id: str,
+    roles: list[str],
+    jti: str,
+    profile_uuid: str | None = None,
+) -> str:
+    """Issue an internal HS256 session JWT (never contains raw KC tokens).
+
+    Task 4.3: adds optional ``profile`` claim containing the named profile UUID
+    string when a profile is bound to this session.  Absent claim = no profile
+    (backward compatible — auth middleware treats missing claim as None).
+    """
     import jwt as jose_jwt  # PyJWT
 
     now = int(time.time())
-    payload = {
+    payload: dict[str, Any] = {
         "sub": subject,
         "client_id": client_id,
         "roles": roles,
@@ -156,6 +167,8 @@ def _issue_session_jwt(subject: str, client_id: str, roles: list[str], jti: str)
         "exp": now + settings.SESSION_JWT_EXPIRE_SECONDS,
         "auth_method": "oidc_browser",
     }
+    if profile_uuid:
+        payload["profile"] = profile_uuid
     return jose_jwt.encode(payload, settings.PROXY_SECRET_KEY, algorithm="HS256")
 
 
@@ -183,6 +196,7 @@ def _decode_session_jwt(token: str) -> dict[str, Any] | None:
 async def oidc_login(
     request: Request,
     redirect_after: str = Query(default="/", alias="redirect"),
+    profile: str | None = Query(default=None),
 ):
     """
     Initiate Keycloak browser login with PKCE S256.
@@ -204,9 +218,21 @@ async def oidc_login(
 
     rand_part = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
     # Embed post-login redirect destination in state so the callback knows where to send the user.
-    # Format: <random>.<base64url(redirect_path)>  — KC round-trips state back unchanged.
+    # Format: <random>.<base64url(redirect_path)>[.<base64url(profile_name)>]
+    # KC round-trips state back unchanged.
     _safe_redirect = redirect_after if redirect_after.startswith("/") else "/"
     state = rand_part + "." + base64.urlsafe_b64encode(_safe_redirect.encode()).rstrip(b"=").decode()
+    # Task 4.3: embed profile name in state so callback can resolve it without a DB round-trip.
+    # Validate profile name: alphanumeric + hyphens/underscores only, max 64 chars.
+    _safe_profile: str | None = None
+    if profile:
+        import re as _re
+        if _re.match(r'^[A-Za-z0-9_-]{1,64}$', profile):
+            _safe_profile = profile
+        else:
+            logger.warning("Invalid profile name ignored at login: %r", profile)
+    if _safe_profile:
+        state += "." + base64.urlsafe_b64encode(_safe_profile.encode()).rstrip(b"=").decode()
     nonce = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
     verifier, challenge = _pkce_pair()
 
@@ -292,17 +318,55 @@ async def oidc_callback(
     session_id = str(row.session_id)
     callback_uri = row.redirect_uri
 
-    # Extract post-login redirect from state (<random>.<base64url(path)>)
+    # Extract post-login redirect from state (<random>.<base64url(path)>[.<base64url(profile)>])
     _post_login_redirect = "/portal"
+    _requested_profile_name: str | None = None
     if "." in state:
         try:
-            _encoded = state.split(".", 1)[1]
-            _padding = "=" * (-len(_encoded) % 4)
-            _decoded = base64.urlsafe_b64decode(_encoded + _padding).decode()
-            if _decoded.startswith("/"):
-                _post_login_redirect = _decoded
+            _parts = state.split(".")
+            # Part 1: random.  Part 2: base64url(redirect).  Part 3 (optional): base64url(profile).
+            if len(_parts) >= 2:
+                _encoded = _parts[1]
+                _padding = "=" * (-len(_encoded) % 4)
+                _decoded = base64.urlsafe_b64decode(_encoded + _padding).decode()
+                if _decoded.startswith("/"):
+                    _post_login_redirect = _decoded
+            if len(_parts) >= 3:
+                _p_encoded = _parts[2]
+                _p_padding = "=" * (-len(_p_encoded) % 4)
+                _p_decoded = base64.urlsafe_b64decode(_p_encoded + _p_padding).decode()
+                if _p_decoded:
+                    _requested_profile_name = _p_decoded
         except Exception:
             pass
+
+    # Task 4.3: resolve named profile UUID from profile name (if requested)
+    _profile_uuid: str | None = None
+    if _requested_profile_name:
+        try:
+            from sqlalchemy import text as _satext
+            from app.core.database import AsyncSessionLocal as _ASLS
+            async with _ASLS() as _pdb:
+                _prow = await _pdb.execute(
+                    _satext(
+                        "SELECT id FROM profiles WHERE name = :name AND is_active = TRUE LIMIT 1"
+                    ),
+                    {"name": _requested_profile_name},
+                )
+                _prof = _prow.fetchone()
+                if _prof:
+                    _profile_uuid = str(_prof[0])
+                else:
+                    logger.warning(
+                        "Requested profile %r not found or inactive — ignoring profile binding",
+                        _requested_profile_name,
+                    )
+        except Exception as _pexc:
+            logger.error(
+                "Failed to resolve profile %r during login callback: %s — proceeding without profile",
+                _requested_profile_name,
+                _pexc,
+            )
 
     # Exchange code for tokens at Keycloak (use internal URL)
     discovery = await _discover()
@@ -426,6 +490,7 @@ async def oidc_callback(
         client_id=client_id,
         roles=proxy_roles,
         jti=jti,
+        profile_uuid=_profile_uuid,
     )
 
     expires_at = datetime.now(timezone.utc).replace(microsecond=0)
@@ -450,7 +515,7 @@ async def oidc_callback(
         logger.error("Failed to encrypt KC tokens for session %s: %s", session_id, enc_exc)
         raise HTTPException(status_code=500, detail="Session encryption failed.") from enc_exc
 
-    # Update session record with identity + tokens
+    # Update session record with identity + tokens + optional profile binding (Task 4.3)
     try:
         from sqlalchemy import text
         from app.core.database import AsyncSessionLocal
@@ -465,7 +530,8 @@ async def oidc_callback(
                         session_jwt_jti = :jti,
                         expires_at = :exp,
                         ip_address = :ip,
-                        user_agent = :ua
+                        user_agent = :ua,
+                        profile_uuid = :profile_uuid
                     WHERE session_id = :sid
                 """),
                 {
@@ -477,6 +543,7 @@ async def oidc_callback(
                     "exp": expires_at,
                     "ip": request.client.host if request.client else None,
                     "ua": request.headers.get("user-agent", "")[:512],
+                    "profile_uuid": _profile_uuid,
                     "sid": session_id,
                 },
             )

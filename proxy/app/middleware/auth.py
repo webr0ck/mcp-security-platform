@@ -140,6 +140,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.client_roles = []
             request.state.principal_id = None
             request.state.principal_type = None
+            request.state.profile_uuid = None
             return await call_next(request)  # type: ignore[misc]
 
         client_id: str | None = None
@@ -187,6 +188,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         auth_method = "oidc_session"
                         request.state._jwt_roles = claims.get("roles", [])
                         request.state._kc_sub = claims.get("sub")
+                        # Task 4.3: propagate named profile UUID from JWT claim.
+                        # Absent claim → None (backward compatible: no profile = legacy path).
+                        request.state._session_profile_uuid = claims.get("profile")
                 except Exception:
                     pass
 
@@ -218,6 +222,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             auth_method = "oidc_session"
                             request.state._jwt_roles = claims.get("roles", [])
                             request.state._kc_sub = claims.get("sub")
+                            # Task 4.3: propagate named profile UUID from JWT claim.
+                            request.state._session_profile_uuid = claims.get("profile")
                     except Exception:
                         pass
 
@@ -280,6 +286,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         principal_id, principal_type = _build_principal_id(auth_method, client_id)
         request.state.principal_id = principal_id
         request.state.principal_type = principal_type
+        # Task 4.3: named profile UUID from session JWT claim (cookie path 2 or Bearer 3a).
+        # None when no profile was bound at login (backward compatible: legacy mcp_profiles path).
+        # mTLS and API-key callers never have a profile_uuid.
+        request.state.profile_uuid = getattr(request.state, "_session_profile_uuid", None)
 
         # ----------------------------------------------------------------
         # Load roles: merge DB role_assignments with any roles in the JWT.
