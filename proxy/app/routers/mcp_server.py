@@ -419,6 +419,13 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                 principal_type=getattr(request.state, "principal_type", None),
                 # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
                 user_kc_token=getattr(request.state, "user_kc_token", None),
+                # P1-F1: thread who-fields so MCP-path audit rows are non-NULL
+                # (mirrors the REST path pattern in routers/tools.py ~1241-1245).
+                source_ip=(
+                    request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                    or (request.client.host if request.client else None)
+                ),
+                session_jti=getattr(request.state, "session_jti", None),
             )
     except Exception as exc:
         from app.credential_broker.dispatcher import CredentialEnrollmentRequiredError
@@ -619,6 +626,13 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 principal_type=getattr(request.state, "principal_type", None),
                 # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
                 user_kc_token=getattr(request.state, "user_kc_token", None),
+                # P1-F1: thread who-fields so MCP-path audit rows are non-NULL
+                # (mirrors the REST path pattern in routers/tools.py ~1241-1245).
+                source_ip=(
+                    request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                    or (request.client.host if request.client else None)
+                ),
+                session_jti=getattr(request.state, "session_jti", None),
             )
         return {"type": "text", "text": json.dumps(result, indent=2)}
     except Exception as exc:

@@ -61,7 +61,6 @@ INJECTION_PHRASES: list[str] = [
 
     # --- Instruction markers (LLM template tokens) ---
     "[inst]",
-    "###  system:",
     "### instructions:",
     "### system:",
     "system:",
