@@ -601,6 +601,33 @@ async def create_gitea_token() -> Optional[str]:
     return token_sha1
 
 
+async def seed_m365_credential(conn: asyncpg.Connection, master_hex: str) -> bool:
+    """
+    Seed the AZURE_CLIENT_SECRET from environment into credential_store as an
+    entra_client_credentials-mode service credential for the m365 tool.
+
+    Task 2.5: AZURE_CLIENT_SECRET is removed from lab-mcp-m365's compose env;
+    it is stored in credential_store and injected by the broker at call time
+    via the X-Entra-Client-Secret header.
+
+    Returns True on success, False if the env var is absent (skip).
+    """
+    azure_secret = os.environ.get("AZURE_CLIENT_SECRET", "").strip()
+    if not azure_secret:
+        log.info("AZURE_CLIENT_SECRET not set in env — skipping m365 credential seeding")
+        return False
+
+    try:
+        await store_service_credential(
+            conn, master_hex, "entra_client_credentials", "m365-mcp", azure_secret
+        )
+        log.info("m365 AZURE_CLIENT_SECRET seeded into credential_store as entra_client_credentials")
+        return True
+    except Exception as exc:
+        log.error("m365 credential seeding failed: %s", exc)
+        return False
+
+
 async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     """
     Generate (or retrieve) a service API key for lab-mcp-self-service.
@@ -839,6 +866,14 @@ async def main() -> None:
         env_lab = str(Path(__file__).parent.parent.parent / ".env.lab")
         _write_env_var(env_lab, "NETBOX_TOKEN", netbox_token)
         results["netbox_env"] = "OK (written to .env.lab)"
+
+    # 7b. Seed M365 client secret into credential_store (Task 2.5)
+    if master_hex and results.get("tools_sql") == "OK":
+        log.info("Seeding M365 AZURE_CLIENT_SECRET into credential_store...")
+        conn_m365 = await wait_for_postgres(max_wait=10)
+        m365_ok = await seed_m365_credential(conn_m365, master_hex)
+        await conn_m365.close()
+        results["m365_cred_store"] = "OK" if m365_ok else "SKIPPED (AZURE_CLIENT_SECRET not set)"
 
     # 8. Seed self-service MCP API key (Task 2.2b / Task 2.5)
     log.info("Seeding lab-self-service API key...")

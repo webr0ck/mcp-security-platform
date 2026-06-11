@@ -85,7 +85,13 @@ def _is_delegated() -> bool:
 
 AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID") or os.environ.get("ENTRA_TENANT_ID", "")
 AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID") or os.environ.get("ENTRA_CLIENT_ID", "")
-AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET") or os.environ.get("ENTRA_CLIENT_SECRET", "")
+# Task 2.5: AZURE_CLIENT_SECRET is NOT read from env (env var removed from compose).
+# The credential broker injects it at call time via a custom Authorization header scheme.
+# The _InjectedAuthMiddleware captures an "X-Entra-Client-Secret" header if present;
+# _get_client_secret() returns it. Falls back to empty string (tools will fail loudly).
+_injected_client_secret: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_injected_client_secret", default=""
+)
 # UPN or object ID of the mailbox/calendar to access with app-only token.
 # Example: "user@contoso.com" or a GUID. Required for /me endpoints with client_credentials.
 M365_USER = os.environ.get("M365_USER", "")
@@ -118,6 +124,16 @@ mcp = FastMCP("m365-mcp")
 _token_cache: tuple[str, float] | None = None
 
 
+def _get_client_secret() -> str:
+    """
+    Return the Entra client secret for this request.
+
+    Task 2.5: secret comes from the broker-injected X-Entra-Client-Secret header,
+    NOT from the AZURE_CLIENT_SECRET env var (which is absent from compose).
+    """
+    return _injected_client_secret.get()
+
+
 async def _get_app_token() -> str:
     """Fetch (or return cached) app-only Microsoft Graph access token."""
     global _token_cache
@@ -125,10 +141,12 @@ async def _get_app_token() -> str:
     if _token_cache and now < _token_cache[1]:
         return _token_cache[0]
 
-    if not all([AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET]):
+    client_secret = _get_client_secret()
+    if not all([AZURE_TENANT_ID, AZURE_CLIENT_ID, client_secret]):
         raise ValueError(
-            "M365 MCP server not configured: set AZURE_TENANT_ID, AZURE_CLIENT_ID, "
-            "AZURE_CLIENT_SECRET in the container environment."
+            "M365 MCP server not configured: AZURE_TENANT_ID and AZURE_CLIENT_ID must be set, "
+            "and the credential broker must inject the client secret via X-Entra-Client-Secret header. "
+            "Ensure the tool is registered with injection_mode=entra_client_credentials in the proxy."
         )
 
     async with httpx.AsyncClient(timeout=10) as client:
@@ -137,7 +155,7 @@ async def _get_app_token() -> str:
             data={
                 "grant_type": "client_credentials",
                 "client_id": AZURE_CLIENT_ID,
-                "client_secret": AZURE_CLIENT_SECRET,
+                "client_secret": client_secret,
                 "scope": "https://graph.microsoft.com/.default",
             },
         )
@@ -515,11 +533,16 @@ class _InjectedAuthMiddleware:
 
         path = scope.get("path", "")
         auth = ""
+        client_secret = ""
         for k, v in scope.get("headers", []):
-            if k == b"authorization":
+            kl = k.lower()
+            if kl == b"authorization":
                 auth = v.decode("latin-1")
-                break
+            elif kl == b"x-entra-client-secret":
+                # Task 2.5: broker-injected client secret for entra_client_credentials mode
+                client_secret = v.decode("latin-1")
         _injected_auth.set(auth)
+        _injected_client_secret.set(client_secret)
 
         # NATIVE_AUTH: serve protected-resource metadata.
         if NATIVE_AUTH and path == _PRM_PATH:
