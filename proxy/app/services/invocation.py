@@ -226,7 +226,19 @@ async def invoke_tool(
     # OPA then applies mcp_disabled_for_profile / function_not_allowed_for_profile rules.
     # Absence of a row = platform default = no restriction.
     profile_data: dict = {}
-    function_name = params.get("tool_name", "")  # inner tool being invoked via invoke_tool
+    # Task 1.9 (SELF-F2): derive tool_function_name from json_rpc_request.params.name
+    # (the JSON-RPC function identifier), NOT from the tool body arguments.
+    #
+    # On the direct tools/call path (mcp_server.py _route_to_registry), the request
+    # is built as: params = {name: <function_name>, arguments: {...}}.
+    # Previously function_name = params.arguments.get("tool_name", "") which is
+    # always "" for direct calls — silently bypassing allowed_functions restrictions.
+    #
+    # The correct source is json_rpc_request["params"]["name"]:
+    #   - For tools/call: this is the function being invoked (e.g. "write_file")
+    #   - For other methods: falls back to "" (no function restriction)
+    _jrpc_params = json_rpc_request.get("params", {})
+    function_name: str = _jrpc_params.get("name", "") or ""
     try:
         from app.core.database import AsyncSessionLocal
         from sqlalchemy import text

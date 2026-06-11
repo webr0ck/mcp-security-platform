@@ -280,12 +280,27 @@ deny contains "mcp_disabled_for_profile" if {
     input.profile.enabled == false
 }
 
+# Task 1.9 (SELF-F2): two deny rules for function-level profile restrictions.
+#
+# Rule A: named function not in the allowed list — the nominal case.
 deny contains "function_not_allowed_for_profile" if {
     is_array(input.profile.allowed_functions)
     count(input.profile.allowed_functions) > 0
     not input.tool_function_name in input.profile.allowed_functions
     input.tool_function_name != ""
     input.tool_function_name != null
+}
+
+# Rule B: empty tool_function_name with a non-empty allowed_functions list.
+# Semantics: if the profile restricts to specific functions, a call with no
+# identified function name cannot satisfy the restriction. This closes the
+# fail-open on the direct tools/call path where tool_function_name was
+# previously always "" (derived from params.arguments instead of params.name).
+# After Task 1.9's Python fix, this rule fires only on truly un-named invocations.
+deny contains "function_not_allowed_for_profile" if {
+    is_array(input.profile.allowed_functions)
+    count(input.profile.allowed_functions) > 0
+    input.tool_function_name == ""
 }
 
 # =============================================================================
