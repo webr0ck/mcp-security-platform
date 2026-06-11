@@ -33,7 +33,7 @@ BLOCK_ON_MATCH = os.environ.get("RESPONSE_FILTER_BLOCK", "true").lower() == "tru
 _PATTERNS: list[re.Pattern[str]] = [
     # Role override instructions
     re.compile(r"ignore\s+(all\s+)?previous\s+instructions?", re.IGNORECASE),
-    re.compile(r"you\s+are\s+now\s+(a\s+)?(?:new\s+)?(?:ai|assistant|gpt|claude)", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+(?:an?\s+)?(?:new\s+)?(?:ai|assistant|gpt|claude)", re.IGNORECASE),
     re.compile(r"disregard\s+(?:your\s+)?(?:system\s+)?(?:prompt|instructions?)", re.IGNORECASE),
     # Exfiltration via function calls
     re.compile(r"call\s+(?:the\s+)?(?:send|post|upload|exfiltrate)\w*\s+(?:function|tool|api)", re.IGNORECASE),

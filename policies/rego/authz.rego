@@ -252,9 +252,13 @@ deny contains "meta_tool_role_not_authorized" if {
     not caller_may_use_meta_tool
 }
 
+# Task 1.4: reads injection phrases from data.mcp.injection_phrases instead of
+# an inline regex. This keeps authz.rego, response_filter.py, and tool_risk.rego
+# in sync through a single canonical source (injection_patterns.py → data.json).
 matches_prompt_injection(s) if {
     is_string(s)
-    regex.match(`(?i)(ignore previous|ignore all prior|you are now|act as|jailbreak)`, s)
+    some phrase in data.mcp.injection_phrases
+    contains(lower(s), phrase)
 }
 
 # walk(x) yields every leaf of x. We keep the string ones.

@@ -32,40 +32,20 @@ _risk_flag contains "filesystem_unrestricted" if {
     not param_def.enum
 }
 
+# Task 1.4: reads injection phrases from data.mcp.injection_phrases — the
+# canonical unified list shared with authz.rego and injection_patterns.py.
 _risk_flag contains "description_prompt_injection" if {
-    injection_phrases := [
-        "ignore previous",
-        "ignore all prior",
-        "you are now",
-        "act as",
-        "jailbreak",
-        "disregard",
-        "do not follow",
-        "override instructions",
-    ]
-    some phrase in injection_phrases
+    some phrase in data.mcp.injection_phrases
     contains(lower(input.description), phrase)
 }
 
 # DET-F8: scan per-parameter descriptions for the same injection phrases.
 # A tool with a benign top-level description but a poisoned param description
 # must score at least as high as an equivalent top-level injection.
-# Note: Task 1.4 will centralise these phrases into data.json; kept inline here
-# until that task lands to avoid cross-task file conflicts.
+# Task 1.4: now reads from data.mcp.injection_phrases (unified list).
 _risk_flag contains "param_description_injection" if {
-    injection_phrases := [
-        "ignore previous",
-        "ignore all prior",
-        "you are now",
-        "act as",
-        "jailbreak",
-        "disregard",
-        "do not follow",
-        "override instructions",
-        "system:",
-    ]
     some _param_name, param_def in input.schema.properties
-    some phrase in injection_phrases
+    some phrase in data.mcp.injection_phrases
     contains(lower(param_def.description), phrase)
 }
 

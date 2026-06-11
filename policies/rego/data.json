@@ -1,5 +1,37 @@
 {
   "mcp": {
+    "injection_phrases": [
+      "act as",
+      "disregard",
+      "do not follow",
+      "forget your",
+      "ignore all prior",
+      "ignore previous",
+      "jailbreak",
+      "override instructions",
+      "you are now",
+      "as an ai",
+      "new identity",
+      "persona override",
+      "pretend you are",
+      "roleplay as",
+      "your new role is",
+      "your persona is",
+      "your role is",
+      "[inst]",
+      "###  system:",
+      "### instructions:",
+      "### system:",
+      "system:",
+      "<!--",
+      "<instructions>",
+      "<prompt>",
+      "<system>",
+      "base64",
+      "call the exfiltrate",
+      "call the send",
+      "call the upload"
+    ],
     "grants": {
       "alice@corp": {
         "allowed_tools": [
