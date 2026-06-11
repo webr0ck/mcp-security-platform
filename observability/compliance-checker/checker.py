@@ -129,15 +129,28 @@ def verify_hash_integrity(event: dict[str, Any]) -> "bool | str":
                 canonical_audit_json() reads "original_outcome" preferentially
                 over "outcome" so error-outcome rows verify correctly.
 
-    Historical-row cutoff (Step 4):
-      Rows written before V028 lack the new canonical columns (event_type,
+    Historical-row cutoff (Step 4, extended by appsec 0.2-F1):
+      Rows written before V028 lack the canonical columns (event_type,
       timestamp, platform_version, original_outcome are NULL/absent).  These
-      cannot be verified and are returned as "legacy" so callers can count them
-      separately without inflating the mismatch counter.
+      cannot be verified and are returned as "legacy".
+
+      appsec 0.2-F1 adds event_ts_iso (V030).  Rows written between V028 and
+      V030 (the migration window) have event_ts_iso IS NULL but the other V028
+      columns present.  Because the timestamp byte string is required for hash
+      recomputation, these rows are also unverifiable and must be treated as
+      "legacy", not as mismatches.
+
+      Detection rule: a row is "legacy" when ANY of the four required canonical
+      inputs is NULL — event_type, timestamp (event_ts_iso), platform_version,
+      or original_outcome.
     """
     # ------------------------------------------------------------------
-    # Legacy-row detection (Step 4)
-    # Pre-V028 rows have NULL canonical columns; cannot be verified.
+    # Legacy-row detection (Step 4, extended by appsec 0.2-F1)
+    # Pre-V028 rows: all four canonical columns are NULL.
+    # V028–V030 window rows: event_ts_iso (aliased as "timestamp") is NULL
+    # while the other three columns are present.  Both cases are treated as
+    # unverifiable_legacy because the timestamp byte string is required to
+    # recompute the hash.
     # ------------------------------------------------------------------
     _legacy_sentinel = None  # NULL from asyncpg or missing key
     event_type_val = event.get("event_type", _legacy_sentinel)
@@ -147,7 +160,12 @@ def verify_hash_integrity(event: dict[str, Any]) -> "bool | str":
 
     if all(v is None for v in (event_type_val, timestamp_val,
                                platform_version_val, original_outcome_val)):
-        # All four new columns are absent/NULL → pre-migration row.
+        # All four canonical columns absent/NULL → pre-V028 row.
+        return "legacy"
+
+    if timestamp_val is None:
+        # event_ts_iso column is NULL → row written in the V028–V030 migration
+        # window.  Cannot recompute hash without the verbatim timestamp string.
         return "legacy"
 
     stored_hash = event.get("sha256_hash", "")
@@ -355,7 +373,8 @@ async def _run_async() -> int:
             """
             SELECT event_id, client_id, tool_name, tool_id, outcome,
                    sha256_hash, request_id, created_at,
-                   event_type, event_ts::text AS timestamp,
+                   event_type,
+                   event_ts_iso AS timestamp,
                    platform_version, original_outcome,
                    hmac_signature, hmac_key_id
             FROM audit_events

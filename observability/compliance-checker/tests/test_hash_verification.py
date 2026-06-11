@@ -199,7 +199,14 @@ class TestBreak2MissingSelectColumns:
         )
 
     def test_verify_fails_without_timestamp(self):
-        """Without timestamp the recomputed hash cannot match."""
+        """Without timestamp the recomputed hash cannot match.
+
+        After appsec 0.2-F1 the checker treats a NULL/missing timestamp as
+        "legacy" (unverifiable) rather than a hard mismatch False — because the
+        event_ts_iso column being NULL is now the marker for the V028–V030
+        migration window.  Either False or "legacy" is acceptable; the key
+        invariant is that the result is NOT True (i.e. verification does not pass).
+        """
         event = _make_allow_event()
         raw = event.to_dict()
         stored_hash = hash_audit_entry(raw)
@@ -207,7 +214,7 @@ class TestBreak2MissingSelectColumns:
         row_missing_ts = {
             "event_id": raw["event_id"],
             "event_type": raw["event_type"],
-            # timestamp intentionally omitted
+            # timestamp intentionally omitted (simulates event_ts_iso IS NULL)
             "client_id": raw["client_id"],
             "tool_name": raw["tool_name"],
             "tool_id": raw["tool_id"],
@@ -218,8 +225,11 @@ class TestBreak2MissingSelectColumns:
             "sha256_hash": stored_hash,
         }
 
-        assert not checker.verify_hash_integrity(row_missing_ts), (
-            "A row missing timestamp should FAIL verification."
+        result = checker.verify_hash_integrity(row_missing_ts)
+        assert result is not True, (
+            f"A row missing timestamp must NOT pass verification (got {result!r}). "
+            "Result may be False (mismatch) or 'legacy' (unverifiable) — both are correct. "
+            "appsec 0.2-F1: NULL timestamp is now treated as 'legacy' (V028–V030 window)."
         )
 
     def test_verify_passes_with_all_canonical_columns(self):
@@ -492,3 +502,201 @@ class TestLegacyRowCutoff:
 
         assert mismatches == 0, f"Expected 0 mismatches, got {mismatches}"
         assert unverifiable_legacy == 1, f"Expected 1 legacy row, got {unverifiable_legacy}"
+
+
+# ---------------------------------------------------------------------------
+# appsec 0.2-F1: event_ts_iso round-trip tests
+# ---------------------------------------------------------------------------
+
+class TestEventTsIsoRoundTrip:
+    """
+    appsec finding 0.2-F1 (CRITICAL, blocking).
+
+    The TIMESTAMPTZ column event_ts, when read back via event_ts::text, renders
+    as "2026-06-11 00:10:36.123456+00" (space separator, shortened "+00" offset)
+    rather than the Python isoformat() string "2026-06-11T00:10:36.123456+00:00".
+    This byte-level divergence causes every post-V028 row to fail both SHA-256
+    and HMAC verification.
+
+    Fix: persist event.timestamp.isoformat() verbatim into event_ts_iso (TEXT),
+    and SELECT event_ts_iso AS timestamp in the compliance checker.
+
+    These unit tests simulate the Postgres round-trip without a live database by
+    asserting that the writer-side isoformat() string and the checker-side
+    canonical_audit_json() call receive byte-identical timestamp bytes.
+
+    asyncpg text rendering rule (documented for future reference):
+      asyncpg renders TIMESTAMPTZ as ISO 8601 with a space separator and
+      shortened UTC offset ("+00" not "+00:00").  Python's isoformat() uses
+      "T" separator and "+00:00".  These are two different strings for the
+      same instant — storing the verbatim isoformat() text is the only way
+      to guarantee round-trip identity.
+    """
+
+    def _make_db_row_with_event_ts_iso(
+        self,
+        event: AuditEvent,
+        remap_error_to_deny: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Build a simulated DB row that includes event_ts_iso (the V030 column).
+        The timestamp field in the returned dict is set to event.timestamp.isoformat()
+        verbatim — exactly what the V030 INSERT stores and the updated SELECT reads.
+        """
+        logger_inst = MCPAuditLogger()
+        integrity_hash = logger_inst.emit(event)
+
+        raw = event.to_dict()
+        stored_outcome = raw["outcome"]
+        if remap_error_to_deny and stored_outcome == "error":
+            stored_outcome = "deny"
+
+        # Verbatim isoformat() string — what the writer stores in event_ts_iso.
+        event_ts_iso = event.timestamp.isoformat()
+
+        return {
+            "event_id": raw["event_id"],
+            "client_id": raw["client_id"],
+            "tool_name": raw["tool_name"],
+            "tool_id": raw["tool_id"],
+            "outcome": stored_outcome,
+            "sha256_hash": integrity_hash,
+            "request_id": raw["request_id"],
+            "event_type": raw["event_type"],
+            # V030: event_ts_iso is read back as "timestamp" by the updated SELECT.
+            # This is the byte-identical string that was fed into canonical_audit_json
+            # by hash_audit_entry at write time.
+            "timestamp": event_ts_iso,
+            "platform_version": raw["platform_version"],
+            "original_outcome": raw["outcome"],  # pre-remap value
+        }
+
+    def test_isoformat_with_microseconds_verifies(self):
+        """
+        Timestamp with microseconds (most rows): isoformat() produces
+        "2026-06-11T00:10:36.123456+00:00".  The checker must verify True.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        # Force a specific timestamp with microseconds to make the test deterministic.
+        ts = datetime(2026, 6, 11, 0, 10, 36, 123456, tzinfo=timezone.utc)
+        event = AuditEvent(
+            event_type=AuditEventType.TOOL_INVOCATION,
+            client_id="test-client-ts-micro",
+            tool_name="tool_with_microseconds",
+            tool_id="00000000-0000-0000-0000-000000000010",
+            outcome=AuditOutcome.ALLOW,
+            request_id="req-ts-micro-001",
+        )
+        # Override the auto-generated timestamp with our deterministic one.
+        object.__setattr__(event, "timestamp", ts)
+        # Re-run __post_init__ to recompute sha256_hash with the new timestamp.
+        # (sha256_hash is computed in __post_init__; reassigning timestamp after
+        # construction requires recomputing it explicitly.)
+        object.__setattr__(event, "sha256_hash", event._compute_hash())
+
+        row = self._make_db_row_with_event_ts_iso(event)
+
+        assert row["timestamp"] == "2026-06-11T00:10:36.123456+00:00", (
+            f"Writer must produce 'T' separator + '+00:00' suffix, "
+            f"got {row['timestamp']!r}"
+        )
+        assert checker.verify_hash_integrity(row) is True, (
+            "verify_hash_integrity must return True for a row with event_ts_iso. "
+            "FAIL = appsec 0.2-F1 not yet fixed (timestamp byte mismatch)."
+        )
+
+    def test_isoformat_without_microseconds_verifies(self):
+        """
+        Timestamp without microseconds: isoformat() produces
+        "2026-06-11T00:10:36+00:00".  Verification must still pass.
+        """
+        from datetime import datetime, timezone
+
+        ts = datetime(2026, 6, 11, 0, 10, 36, 0, tzinfo=timezone.utc)
+        event = AuditEvent(
+            event_type=AuditEventType.TOOL_INVOCATION,
+            client_id="test-client-ts-zero",
+            tool_name="tool_no_microseconds",
+            tool_id="00000000-0000-0000-0000-000000000011",
+            outcome=AuditOutcome.ALLOW,
+            request_id="req-ts-zero-001",
+        )
+        object.__setattr__(event, "timestamp", ts)
+        object.__setattr__(event, "sha256_hash", event._compute_hash())
+
+        row = self._make_db_row_with_event_ts_iso(event)
+
+        assert row["timestamp"] == "2026-06-11T00:10:36+00:00", (
+            f"Writer must produce 'T' separator + '+00:00' suffix (no fractional seconds), "
+            f"got {row['timestamp']!r}"
+        )
+        assert checker.verify_hash_integrity(row) is True, (
+            "verify_hash_integrity must return True for a zero-microseconds timestamp."
+        )
+
+    def test_postgres_cast_format_causes_mismatch(self):
+        """
+        Demonstrates the original bug: if the checker received the Postgres
+        TIMESTAMPTZ::text rendering ("2026-06-11 00:10:36.123456+00") instead of
+        the verbatim isoformat() string, verification MUST fail — confirming that
+        the fix (event_ts_iso) is load-bearing.
+        """
+        from datetime import datetime, timezone
+
+        ts = datetime(2026, 6, 11, 0, 10, 36, 123456, tzinfo=timezone.utc)
+        event = AuditEvent(
+            event_type=AuditEventType.TOOL_INVOCATION,
+            client_id="test-client-ts-cast",
+            tool_name="tool_cast_regression",
+            tool_id="00000000-0000-0000-0000-000000000012",
+            outcome=AuditOutcome.ALLOW,
+            request_id="req-ts-cast-001",
+        )
+        object.__setattr__(event, "timestamp", ts)
+        object.__setattr__(event, "sha256_hash", event._compute_hash())
+
+        row = self._make_db_row_with_event_ts_iso(event)
+
+        # Simulate the pre-fix checker receiving the Postgres cast rendering.
+        postgres_cast_rendering = "2026-06-11 00:10:36.123456+00"
+        row_with_cast_ts = dict(row)
+        row_with_cast_ts["timestamp"] = postgres_cast_rendering
+
+        assert checker.verify_hash_integrity(row_with_cast_ts) is not True, (
+            "A row with the Postgres TIMESTAMPTZ::text rendering must FAIL verification "
+            "— confirming the T-separator / +00:00 divergence is real and that the "
+            "event_ts_iso fix is load-bearing."
+        )
+
+    def test_v028_to_v030_window_row_treated_as_legacy(self):
+        """
+        A row written between V028 and V030 has event_ts_iso IS NULL (aliased as
+        timestamp=None in the SELECT) but the other V028 columns present.
+        It must be treated as unverifiable_legacy, NOT as a mismatch.
+        """
+        event = _make_allow_event()
+        raw = event.to_dict()
+        stored_hash = hash_audit_entry(raw)
+
+        # V028–V030 window: V028 columns present, event_ts_iso (timestamp) is NULL.
+        window_row = {
+            "event_id": raw["event_id"],
+            "client_id": raw["client_id"],
+            "tool_name": raw["tool_name"],
+            "tool_id": raw["tool_id"],
+            "outcome": raw["outcome"],
+            "sha256_hash": stored_hash,
+            "request_id": raw["request_id"],
+            "event_type": raw["event_type"],        # V028 column — present
+            "timestamp": None,                       # event_ts_iso — NULL (pre-V030)
+            "platform_version": raw["platform_version"],  # V028 column — present
+            "original_outcome": raw["outcome"],      # V028 column — present
+        }
+
+        result = checker.verify_hash_integrity(window_row)
+        assert result == "legacy", (
+            f"V028–V030 window row (event_ts_iso IS NULL) must return 'legacy', "
+            f"got {result!r}. appsec 0.2-F1: these rows cannot be verified "
+            f"without the verbatim isoformat() string."
+        )

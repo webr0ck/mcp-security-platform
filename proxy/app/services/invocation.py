@@ -774,14 +774,14 @@ async def _emit_audit_event(
                             event_id, client_id, tool_name, tool_id,
                             outcome, latency_ms, sha256_hash,
                             anomaly_score, opa_reasons, request_id,
-                            event_type, event_ts, platform_version,
+                            event_type, event_ts, event_ts_iso, platform_version,
                             original_outcome, hmac_signature, hmac_key_id,
                             source_ip, principal_type, caller_roles, session_jti
                         ) VALUES (
                             :event_id, :client_id, :tool_name, :tool_id,
                             :outcome, :latency_ms, :sha256_hash,
                             :anomaly_score, CAST(:opa_reasons AS jsonb), :request_id,
-                            :event_type, :event_ts, :platform_version,
+                            :event_type, :event_ts, :event_ts_iso, :platform_version,
                             :original_outcome, :hmac_signature, :hmac_key_id,
                             CAST(:source_ip AS INET), :principal_type,
                             CAST(:caller_roles AS TEXT[]), :session_jti
@@ -811,6 +811,12 @@ async def _emit_audit_event(
                         # Task 0.2 — canonical fields for hash recomputation.
                         "event_type": event.event_type.value,
                         "event_ts": event.timestamp,
+                        # appsec 0.2-F1: persist verbatim isoformat() string so the
+                        # compliance checker can read it without the Postgres
+                        # TIMESTAMPTZ::text rendering divergence (space separator,
+                        # "+00" instead of "+00:00") that would break SHA-256/HMAC
+                        # verification on every post-V028 row.
+                        "event_ts_iso": event.timestamp.isoformat(),
                         "platform_version": event.platform_version,
                         # Preserve the original (pre-remap) outcome for hash recomputation.
                         # For non-error outcomes original_outcome == outcome.

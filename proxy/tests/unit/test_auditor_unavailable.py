@@ -71,12 +71,18 @@ async def test_llm_unavailable_uses_full_static_weight():
     - combined_score MUST equal 1.0 * static_score (not 0.4 * static_score)
     - AuditResult.llm_unavailable MUST be True
     - A tool with description_prompt_injection flag at static_score=40
-      must reach combined_score=40 (not 16), which crosses the quarantine
-      threshold (OLLAMA_HIGH_RISK_THRESHOLD=70 is NOT crossed, but the
-      score must be the full weight — the critical boost test is separate).
+      must reach combined_score=40 (not 16).
 
-    Before fix: combined = int(40 * 0.4 + 0 * 0.6) = 16  (fails quarantine)
-    After fix:  combined = 1.0 * 40 = 40                  (correct full weight)
+    static_score=40 is a MEDIUM risk level (threshold is HIGH≥70, CRITICAL≥90),
+    so combined_score=40 does NOT cross the quarantine threshold on its own.
+    The security improvement is that at 1.0× weight the score is correctly 40
+    instead of being artificially deflated to 16 (0.4×) — which would hide the
+    risk signal entirely.  A tool with static_score≥90 (CRITICAL) would still
+    quarantine at 1.0× weight (combined=90), whereas at 0.4× it would produce
+    combined=36, dropping below even the HIGH threshold and bypassing quarantine.
+
+    Before fix: combined = int(40 * 0.4 + 0 * 0.6) = 16  (medium→low by deflation)
+    After fix:  combined = 1.0 * 40 = 40                  (medium score preserved)
     """
     static_result = {
         "risk_flags": ["description_prompt_injection"],

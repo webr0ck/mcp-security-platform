@@ -134,8 +134,21 @@ class AuditEvent:
                 raise AuditSchemaError("AuditEvent.outcome is required for TOOL_INVOCATION")
 
     def _compute_hash(self) -> str:
-        """SHA-256 over canonical fields for log integrity (INV-001, INV-007)."""
-        canonical = json.dumps({
+        """SHA-256 over canonical fields for log integrity (INV-001, INV-007).
+
+        Delegates to canonical_audit_json() from mcp_audit_logger.hasher — the
+        single authoritative canonicalizer shared by the writer (logger.emit) and
+        the verifier (compliance-checker verify_hash_integrity).
+
+        appsec 0.2-F2: the previous inline implementation used the wrong field set
+        (missing platform_version) and non-canonical json.dumps separators.  Both
+        bugs caused _compute_hash() to produce a value that differed from the hash
+        that logger.emit() stores (which uses hash_audit_entry → canonical_audit_json).
+        Delegating here ensures self.sha256_hash in to_dict() is consistent with
+        the authoritative hash stored in audit_events.sha256_hash.
+        """
+        from mcp_audit_logger.hasher import canonical_audit_json as _canonical_audit_json
+        canonical = _canonical_audit_json({
             "event_id": str(self.event_id),
             "event_type": self.event_type.value,
             "timestamp": self.timestamp.isoformat(),
@@ -143,9 +156,11 @@ class AuditEvent:
             "tool_name": self.tool_name,
             "tool_id": self.tool_id,
             "outcome": self.outcome.value if self.outcome else None,
+            "original_outcome": self.outcome.value if self.outcome else None,
             "request_id": self.request_id,
-        }, sort_keys=True)
-        return hashlib.sha256(canonical.encode()).hexdigest()
+            "platform_version": self.platform_version,
+        })
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
         return {
