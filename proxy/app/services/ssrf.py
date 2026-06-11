@@ -31,6 +31,7 @@ _BLOCKED_V4 = [
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),  # link-local + cloud metadata
     ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),   # CGNAT / RFC 6598 (Tailscale, AWS, K8s overlays)
 ]
 
 # Blocked private/reserved IPv6 networks
@@ -47,8 +48,11 @@ def _is_blocked_ip(addr: str) -> bool:
         ip = ipaddress.ip_address(addr)
         if isinstance(ip, ipaddress.IPv4Address):
             return any(ip in net for net in _BLOCKED_V4)
-        else:
-            return any(ip in net for net in _BLOCKED_V6)
+        # IPv4-mapped IPv6 (::ffff:a.b.c.d) — evaluate the embedded IPv4 address
+        # so that DNS rebind via IPv4-mapped form cannot bypass the V4 blocklist.
+        if ip.ipv4_mapped is not None:
+            return any(ip.ipv4_mapped in net for net in _BLOCKED_V4)
+        return any(ip in net for net in _BLOCKED_V6)
     except ValueError:
         return False
 

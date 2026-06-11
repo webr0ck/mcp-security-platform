@@ -693,12 +693,31 @@ async def invoke_tool(
         "X-User-Role": primary_role,
     }
 
+    # Build a PinnedIPTransport from the IP validated in Step 3c so that httpx
+    # never re-resolves the hostname between validation and the TCP connect
+    # (closes the TOCTOU window identified in appsec finding HIGH-2).
+    # _pinned_ips is non-empty when Step 3c succeeds; fall back to a plain
+    # transport only if the list is somehow empty (e.g. a raw-IP upstream_url
+    # where revalidation was a no-op — should not happen in practice).
+    from app.services.pinned_transport import PinnedIPTransport as _PinnedIPTransport
+
+    _upstream_hostname: str = urlparse(upstream_url).hostname or ""
+    if _pinned_ips and _upstream_hostname:
+        _transport: httpx.AsyncHTTPTransport = _PinnedIPTransport(
+            pinned_ip=_pinned_ips[0],
+            original_hostname=_upstream_hostname,
+        )
+    else:
+        # Fallback: plain transport (covers raw-IP upstreams; no resolver call
+        # needed because there is no hostname to re-resolve).
+        _transport = httpx.AsyncHTTPTransport()
+
     try:
         # Attempt to reuse a cached MCP-Session-Id before opening an HTTP client.
         # On cache hit we skip the 2-request initialize handshake entirely (Bug 1 fix).
         session_id = await _get_or_create_session(upstream_url, client_id, handshake_headers)
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(transport=_transport, timeout=30.0) as client:
             # If no cached session was available, run the full initialize handshake.
             if session_id is None:
                 try:

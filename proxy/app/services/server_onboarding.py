@@ -9,6 +9,12 @@ Key responsibilities:
   1. validate_mode_and_idp: Ensure injection mode and IdP type are compatible
   2. validate_upstream_url_ssrf: SSRF check with fail-closed DNS (Phase 3 hardening)
   3. validate_upstream_idp_config: Validate IdP configuration structure
+  4. revalidate_upstream_ip_at_invoke: Invoke-time re-validation (Task 3.1)
+
+Task 3.1 additions (ISO-F2.6 — private-upstream SSRF allowlist):
+  - UPSTREAM_PRIVATE_CIDR_ALLOWLIST support in validate_upstream_url_ssrf
+  - revalidate_upstream_ip_at_invoke for DNS-rebind / TOCTOU mitigation at call time
+  - Matched allowlist entry returned for server_registry provenance recording
 
 Phase 3 Hardening:
   - DNS resolution failure now raises (fail-closed, not pass)
@@ -17,6 +23,7 @@ Phase 3 Hardening:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import socket
 from urllib.parse import urlparse
@@ -189,34 +196,156 @@ def validate_upstream_idp_config(
 
 
 # ============================================================================
+# Private CIDR Allowlist helpers (Task 3.1)
+# ============================================================================
+
+
+def _parse_cidr_allowlist(cidr_list: list[str]) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """
+    Parse a list of CIDR strings into network objects.
+
+    Raises:
+        InvalidOnboardingConfig: if any entry is not a valid CIDR.
+    """
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for entry in cidr_list:
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError as exc:
+            raise InvalidOnboardingConfig(
+                f"UPSTREAM_PRIVATE_CIDR_ALLOWLIST entry '{entry}' is not a valid CIDR: {exc}"
+            ) from exc
+    return networks
+
+
+def _ip_in_allowlist(
+    ip_str: str,
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+) -> str | None:
+    """
+    Return the matching CIDR string if ip_str is contained in any network,
+    or None if it is not.
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return None
+    for net in networks:
+        if ip in net:
+            return str(net)
+    return None
+
+
+def _validate_resolved_ips_against_allowlist(
+    host: str,
+    ip_addresses: list[str],
+    allowlist_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+) -> str:
+    """
+    Validate that ALL resolved IPs for *host* are either:
+      (a) public (not blocked), OR
+      (b) within the same single allowlist CIDR entry.
+
+    A hostname resolving to a MIX of allowlisted and non-allowlisted (or public
+    and private) addresses is DENIED — this is the strictest interpretation and
+    closes partial-rebind attacks.
+
+    Returns:
+        The matched CIDR string if ALL addresses are private-and-allowlisted.
+        Empty string "" if ALL addresses are public.
+
+    Raises:
+        InvalidOnboardingConfig: if any IP is private and not in the allowlist,
+            or if addresses fall into different CIDR buckets (mixed resolution).
+    """
+    if not ip_addresses:
+        raise InvalidOnboardingConfig(f"No address found for hostname '{host}'")
+
+    # Categorise each resolved IP
+    matched_cidrs: set[str] = set()
+    public_count = 0
+
+    for ip_str in ip_addresses:
+        if _is_blocked_ip(ip_str):
+            # Private address — must be within the allowlist
+            match = _ip_in_allowlist(ip_str, allowlist_networks)
+            if match is None:
+                raise InvalidOnboardingConfig(
+                    f"Hostname '{host}' resolves to private/reserved IP '{ip_str}' "
+                    "which is not covered by UPSTREAM_PRIVATE_CIDR_ALLOWLIST. "
+                    "Add the containing CIDR to UPSTREAM_PRIVATE_CIDR_ALLOWLIST to "
+                    "permit this private upstream, or use a public IP."
+                )
+            matched_cidrs.add(match)
+        else:
+            public_count += 1
+
+    # Mixed resolution: some public, some private-allowlisted → deny
+    if matched_cidrs and public_count > 0:
+        raise InvalidOnboardingConfig(
+            f"Hostname '{host}' resolves to a mix of public and private-allowlisted IPs. "
+            "All resolved addresses must be consistently public or consistently within "
+            "the same allowlisted CIDR. This hostname is not safe to register."
+        )
+
+    # Private addresses in MORE THAN ONE different allowlist CIDR → deny
+    # (prevents a hostname that straddles two trust zones)
+    if len(matched_cidrs) > 1:
+        raise InvalidOnboardingConfig(
+            f"Hostname '{host}' resolves to IPs spanning multiple allowlist CIDRs "
+            f"({', '.join(sorted(matched_cidrs))}). "
+            "All resolved addresses must fall within a single allowlist entry."
+        )
+
+    if matched_cidrs:
+        return next(iter(matched_cidrs))  # the single matched CIDR
+    return ""  # all public
+
+
+# ============================================================================
 # Upstream URL SSRF Validation (Fail-Closed DNS)
 # ============================================================================
 
 
-async def validate_upstream_url_ssrf(upstream_url: str) -> None:
+async def validate_upstream_url_ssrf(
+    upstream_url: str,
+    private_cidr_allowlist: list[str] | None = None,
+) -> str | None:
     """
     Validate upstream URL against SSRF, with fail-closed DNS resolution.
+
+    Task 3.1: accepts an optional private_cidr_allowlist.  When the list is
+    non-empty, private IPs that fall within an allowlist entry are permitted;
+    the matched entry is returned so the caller can persist it as provenance on
+    the server_registry row.
 
     Phase 3 Hardening:
       - DNS resolution failure raises InvalidOnboardingConfig (fail-closed)
       - Prevents TOCTOU and DNS rebind attacks
-      - Blocks private/reserved IPv4 and IPv6 ranges
+      - Blocks private/reserved IPv4 and IPv6 ranges UNLESS allowlisted
 
     Checks performed:
       1. URL must be parseable
       2. Scheme must be HTTPS (no HTTP for upstream services)
-      3. Host must not be raw private/reserved IP
-      4. DNS resolution must succeed and resolve to public IP
-      5. No embedded credentials (user:pass@)
+      3. Host must not be raw private/reserved IP (unless in allowlist)
+      4. DNS resolution must succeed
+      5. ALL resolved IPs must be public OR ALL within a single allowlist CIDR
+         (mixed resolution is denied — closes partial-rebind attacks)
+      6. No embedded credentials (user:pass@)
 
     Args:
         upstream_url: str URL to validate
+        private_cidr_allowlist: optional list of CIDR strings that permit private
+            upstream addresses.  Default None / empty list = current behaviour
+            (all private IPs blocked).
+
+    Returns:
+        The matched allowlist CIDR string if a private upstream was allowlisted,
+        empty string "" for public upstreams, or None when the allowlist is not
+        used (legacy / empty list path — same as "").
 
     Raises:
         InvalidOnboardingConfig: if URL fails any check
-
-    Returns:
-        None on success
     """
     # Parse URL
     try:
@@ -241,11 +370,28 @@ async def validate_upstream_url_ssrf(upstream_url: str) -> None:
             f"Scheme '{parsed.scheme}' is not allowed for upstream; use HTTPS"
         )
 
-    # Block direct private IP addresses
+    # Build the parsed allowlist networks (raises InvalidOnboardingConfig on bad CIDR)
+    allowlist: list[str] = private_cidr_allowlist or []
+    allowlist_networks = _parse_cidr_allowlist(allowlist)
+
+    # Block direct private IP addresses when NOT in the allowlist
     if _is_blocked_ip(host):
-        raise InvalidOnboardingConfig(
-            f"Hostname '{host}' is a blocked private/reserved IP address"
+        if not allowlist_networks:
+            raise InvalidOnboardingConfig(
+                f"Hostname '{host}' is a blocked private/reserved IP address"
+            )
+        # host is a raw IP and the allowlist is non-empty: check it directly
+        match = _ip_in_allowlist(host, allowlist_networks)
+        if match is None:
+            raise InvalidOnboardingConfig(
+                f"Hostname '{host}' is a private/reserved IP address not covered "
+                "by UPSTREAM_PRIVATE_CIDR_ALLOWLIST"
+            )
+        logger.info(
+            "validate_upstream_url_ssrf: raw private IP allowed via allowlist entry",
+            extra={"host": host, "allowlist_entry": match},
         )
+        return match
 
     # Phase 3 Hardening: DNS resolution MUST succeed (fail-closed)
     # This prevents TOCTOU races and DNS rebind attacks
@@ -267,12 +413,165 @@ async def validate_upstream_url_ssrf(upstream_url: str) -> None:
             f"No address found for hostname '{host}'"
         )
 
-    # Check all resolved IPs against blocked ranges
-    for family, socktype, proto, canonname, sockaddr in resolved:
-        ip_str = sockaddr[0]  # sockaddr is (host, port) for AF_INET or (host, port, flowinfo, scope) for AF_INET6
-        if _is_blocked_ip(ip_str):
-            raise InvalidOnboardingConfig(
-                f"Hostname '{host}' resolves to blocked private/reserved IP '{ip_str}'"
+    ip_addresses = [sockaddr[0] for _, _, _, _, sockaddr in resolved]
+
+    if allowlist_networks:
+        # Allowlist path: validate ALL resolved IPs together — mixed resolution is denied
+        matched_entry = _validate_resolved_ips_against_allowlist(
+            host, ip_addresses, allowlist_networks
+        )
+        if matched_entry:
+            logger.info(
+                "validate_upstream_url_ssrf: private upstream allowed via CIDR allowlist",
+                extra={"host": host, "allowlist_entry": matched_entry},
             )
+        else:
+            logger.info(
+                "validate_upstream_url_ssrf: public upstream validated (allowlist present but not used)",
+                extra={"host": host},
+            )
+        return matched_entry
+    else:
+        # Legacy path: block any private IP (no allowlist)
+        for ip_str in ip_addresses:
+            if _is_blocked_ip(ip_str):
+                raise InvalidOnboardingConfig(
+                    f"Hostname '{host}' resolves to blocked private/reserved IP '{ip_str}'"
+                )
 
     logger.info(f"Validated upstream URL SSRF: {upstream_url}")
+    return None
+
+
+# ============================================================================
+# Invoke-time upstream IP re-validation (Task 3.1 — DNS-rebind / TOCTOU)
+# ============================================================================
+
+
+async def revalidate_upstream_ip_at_invoke(
+    upstream_url: str,
+    registered_allowlist_entry: str | None,
+) -> list[str]:
+    """
+    Re-validate the upstream host's resolved IPs at invocation time.
+
+    This is the TOCTOU / DNS-rebind mitigation called from the invoke path
+    (services/invocation.py Step 3c) AFTER the existing SSRF check
+    (validate_server_url / Step 3b).
+
+    Policy:
+      - If registered_allowlist_entry is None or "": the upstream was registered
+        as a public upstream.  All resolved IPs must be non-private.  Any private
+        IP causes a deny (the hostname has re-resolved to an internal address after
+        registration — classic rebind).
+      - If registered_allowlist_entry is set: the upstream is a known-private server.
+        ALL resolved IPs must fall within the registered CIDR.  Any IP outside it
+        causes a deny (rebind to a different internal host, or the CIDR changed).
+      - Mixed resolution (some IPs in CIDR, some outside) → deny regardless.
+
+    The caller uses the returned list to pin the httpx connection to one of the
+    validated IPs, preventing the OS from re-resolving the hostname before
+    connecting.  Pass the first IP to ``PinnedIPTransport`` in
+    ``app.services.pinned_transport`` together with the original hostname so
+    that TLS SNI and the Host header remain correct.
+
+    Args:
+        upstream_url: Full URL string — hostname is extracted.
+        registered_allowlist_entry: The CIDR recorded on server_registry at
+            registration time (upstream_allowlist_entry column).  None / "" for
+            public upstreams.
+
+    Returns:
+        List of IP address strings that passed validation.  Non-empty; the caller
+        may use any of them to pin the connection.
+
+    Raises:
+        UpstreamRevalidationError: if DNS resolution fails OR any resolved IP
+            falls outside the registered policy.
+    """
+    try:
+        parsed = urlparse(upstream_url)
+    except Exception as exc:
+        raise UpstreamRevalidationError(
+            f"Cannot parse upstream URL for revalidation: {exc}"
+        ) from exc
+
+    host = parsed.hostname or ""
+    if not host:
+        raise UpstreamRevalidationError(
+            "Upstream URL has no hostname — cannot revalidate"
+        )
+
+    # Resolve the hostname — fail-closed on DNS error
+    try:
+        loop = asyncio.get_event_loop()
+        resolved = await loop.getaddrinfo(
+            host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
+        )
+    except (socket.gaierror, OSError) as exc:
+        raise UpstreamRevalidationError(
+            f"DNS resolution failed for upstream host '{host}' at invoke time: {exc}"
+        ) from exc
+
+    if not resolved:
+        raise UpstreamRevalidationError(
+            f"DNS returned no addresses for upstream host '{host}' at invoke time"
+        )
+
+    ip_addresses = [sockaddr[0] for _, _, _, _, sockaddr in resolved]
+
+    if registered_allowlist_entry:
+        # Private-upstream path: ALL resolved IPs must stay within the registered CIDR
+        try:
+            registered_net = ipaddress.ip_network(registered_allowlist_entry, strict=False)
+        except ValueError as exc:
+            raise UpstreamRevalidationError(
+                f"Stored allowlist entry '{registered_allowlist_entry}' is not a valid CIDR: {exc}"
+            ) from exc
+
+        outside: list[str] = []
+        for ip_str in ip_addresses:
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+            except ValueError:
+                outside.append(ip_str)
+                continue
+            if ip_obj not in registered_net:
+                outside.append(ip_str)
+
+        if outside:
+            raise UpstreamRevalidationError(
+                f"Upstream host '{host}' resolved to IP(s) {outside} which are "
+                f"outside the registered allowlist CIDR '{registered_allowlist_entry}'. "
+                "Possible DNS-rebind attack or configuration drift. "
+                "Invocation denied (reason: upstream_revalidation_failed)."
+            )
+    else:
+        # Public-upstream path: no private IPs allowed
+        private_ips = [ip for ip in ip_addresses if _is_blocked_ip(ip)]
+        if private_ips:
+            raise UpstreamRevalidationError(
+                f"Upstream host '{host}' was registered as a public upstream but now "
+                f"resolves to private/reserved IP(s) {private_ips}. "
+                "Possible DNS-rebind attack. "
+                "Invocation denied (reason: upstream_revalidation_failed)."
+            )
+
+    logger.debug(
+        "revalidate_upstream_ip_at_invoke: all IPs validated",
+        extra={
+            "host": host,
+            "ips": ip_addresses,
+            "registered_allowlist_entry": registered_allowlist_entry or "(public)",
+        },
+    )
+    return ip_addresses
+
+
+class UpstreamRevalidationError(Exception):
+    """
+    Raised when invoke-time upstream IP re-validation fails.
+
+    The invoke path catches this and emits an audit event with
+    reason=upstream_revalidation_failed, then returns 503 (fail-closed).
+    """
