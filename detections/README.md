@@ -31,24 +31,34 @@ This maps to structured JSON emitted by `mcp-proxy` to stdout, collected by Prom
 |---|---|---|
 | `mcp-tool-invocation-denied.yml` | medium | Any single OPA deny |
 | `mcp-policy-probe-burst.yml` | high | 5+ denies in 60s from same client |
-| `mcp-high-anomaly-score.yml` | high | Allowed invocation with anomaly_score ≥ 0.8 |
+| `mcp-high-anomaly-score.yml` | high | Allowed invocation with anomaly_score > 0.85 |
+| `mcp-high-anomaly-denied.yml` | high | Denied invocation with anomaly_score > 0.85 (OPA blocked) |
 | `mcp-credential-change.yml` | medium | Credential uploaded/revoked/mode changed |
 | `mcp-quarantined-tool-access.yml` | critical | Invocation attempt on quarantined tool |
+| `mcp-slow-exfiltration.yml` | medium | Same tool invoked 30+ times in 1h (experimental) |
+| `mcp-tool-lifecycle-event.yml` | medium | Tool registered, status changed, or deleted |
 
 ## Compiling to SIEM backends
 
-```bash
-# Install sigma-cli
-pip install sigma-cli
+The rules are manually authored Sigma YAML; sigma-cli compilation is not yet automated.
+The LogQL equivalents for Loki alerting are maintained by hand in
+`observability/loki/rules/mcp_alerts.yml` and are mounted into the Loki ruler.
 
-# Compile to Elasticsearch/OpenSearch query (for Wazuh indexer)
-sigma convert -t opensearch -p mcp detections/
+When sigma-cli is available, the following commands will convert the rules:
+
+```bash
+# Install sigma-cli (pin versions for reproducibility)
+pip install sigma-cli==1.0.2 pysigma-backend-loki==1.0.0
 
 # Compile to Loki LogQL (for Grafana alerting)
-sigma convert -t loki detections/
+sigma convert -t loki -p sigma-pipeline-mcp.yml detections/
+
+# Compile to Elasticsearch/OpenSearch query (for Wazuh indexer)
+sigma convert -t opensearch -p sigma-pipeline-mcp.yml detections/
 
 # Compile to Splunk SPL
-sigma convert -t splunk detections/
+sigma convert -t splunk -p sigma-pipeline-mcp.yml detections/
 ```
 
-Create a pipeline file `sigma-pipeline-mcp.yml` to map the `mcp-security-platform` product to your index pattern.
+Create a pipeline file `sigma-pipeline-mcp.yml` to map the `mcp-security-platform` product
+to your index pattern before running the above commands.

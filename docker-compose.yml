@@ -541,6 +541,7 @@ services:
     command: -config.file=/etc/loki/loki.yml
     volumes:
       - ./observability/loki/loki.yml:/etc/loki/loki.yml:ro
+      - ./observability/loki/rules:/loki/rules:ro
       - loki-data:/loki
     tmpfs:
       - /tmp:size=64m,mode=1777

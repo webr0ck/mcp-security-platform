@@ -1,0 +1,185 @@
+# Loki Ruler Alert Rules — MCP Security Platform
+#
+# These are LogQL equivalents of the Sigma rules in detections/*.yml.
+# Maintained by hand because sigma-cli compilation is not yet automated.
+# When sigma-cli is available, regenerate with:
+#   sigma convert -t loki -p sigma-pipeline-mcp.yml detections/
+#
+# Mounted into the Loki ruler via loki.yml ruler.rule_path setting.
+# Alerts fire to Alertmanager at http://alertmanager:9093.
+#
+# Logsource mapping: audit events are JSON lines emitted to stdout by the
+# proxy container, collected by Promtail with label {job="mcp-audit"}.
+#
+# Field reference: event_type, outcome, client_id, tool_name, tool_id,
+#                  anomaly_score, deny_reasons (see detections/README.md)
+
+groups:
+  - name: mcp_security_alerts
+    interval: 1m
+    rules:
+
+      # ── mcp-tool-invocation-denied ──────────────────────────────────────────
+      # Sigma: mcp-tool-invocation-denied.yml | level: medium
+      # Any single OPA policy deny on a tool invocation.
+      - alert: MCPToolInvocationDenied
+        expr: |
+          count_over_time(
+            {job="mcp-audit"}
+            | json
+            | event_type = "TOOL_INVOCATION"
+            | outcome = "deny"
+            [5m]
+          ) > 0
+        for: 0m
+        labels:
+          severity: warning
+          sigma_id: a1b2c3d4-0001-4000-8000-mcp000000001
+        annotations:
+          summary: "MCP tool invocation denied by policy"
+          description: "At least one tool invocation was denied by OPA in the last 5 minutes. Check client_id and tool_name in the audit stream."
+
+      # ── mcp-policy-probe-burst ───────────────────────────────────────────────
+      # Sigma: mcp-policy-probe-burst.yml | level: high
+      # 5+ denials from the same client_id within 60 seconds.
+      - alert: MCPPolicyProbeBurst
+        expr: |
+          sum by (client_id) (
+            count_over_time(
+              {job="mcp-audit"}
+              | json
+              | event_type = "TOOL_INVOCATION"
+              | outcome = "deny"
+              [60s]
+            )
+          ) >= 5
+        for: 0m
+        labels:
+          severity: high
+          sigma_id: a1b2c3d4-0002-4000-8000-mcp000000002
+        annotations:
+          summary: "MCP policy probe burst detected"
+          description: "Client {{ $labels.client_id }} has been denied 5+ tool invocations in 60 seconds. Possible boundary probing or privilege-escalation attempt."
+
+      # ── mcp-high-anomaly-score ───────────────────────────────────────────────
+      # Sigma: mcp-high-anomaly-score.yml | level: high
+      # Allowed invocation where anomaly_score > 0.85.
+      - alert: MCPHighAnomalyScore
+        expr: |
+          count_over_time(
+            {job="mcp-audit"}
+            | json
+            | event_type = "TOOL_INVOCATION"
+            | outcome = "allow"
+            | anomaly_score > 0.85
+            [5m]
+          ) > 0
+        for: 0m
+        labels:
+          severity: high
+          sigma_id: a1b2c3d4-0003-4000-8000-mcp000000003
+        annotations:
+          summary: "MCP high anomaly score on allowed invocation"
+          description: "A tool invocation was allowed despite anomaly_score > 0.85. Review client_id and tool_name; possible exfiltration pattern."
+
+      # ── mcp-high-anomaly-denied ──────────────────────────────────────────────
+      # Sigma: mcp-high-anomaly-denied.yml | level: high
+      # Denied invocation where anomaly_score > 0.85 (OPA block threshold).
+      - alert: MCPHighAnomalyDenied
+        expr: |
+          count_over_time(
+            {job="mcp-audit"}
+            | json
+            | event_type = "TOOL_INVOCATION"
+            | outcome = "deny"
+            | anomaly_score > 0.85
+            [5m]
+          ) > 0
+        for: 0m
+        labels:
+          severity: high
+          sigma_id: a1b2c3d4-0008-4000-8000-mcp000000008
+        annotations:
+          summary: "MCP high anomaly score — invocation blocked by policy"
+          description: "A tool invocation was denied AND had anomaly_score > 0.85. Complement of MCPHighAnomalyScore — together they cover all anomalous invocations."
+
+      # ── mcp-credential-change ────────────────────────────────────────────────
+      # Sigma: mcp-credential-change.yml | level: medium
+      # Any credential upload, revocation, mode change, or API key event.
+      - alert: MCPCredentialChange
+        expr: |
+          count_over_time(
+            {job="mcp-audit"}
+            | json
+            | event_type =~ "CREDENTIAL_UPLOADED|CREDENTIAL_REVOKED|CREDENTIAL_MODE_CHANGED|API_KEY_CREATED|API_KEY_REVOKED"
+            [5m]
+          ) > 0
+        for: 0m
+        labels:
+          severity: warning
+          sigma_id: a1b2c3d4-0004-4000-8000-mcp000000004
+        annotations:
+          summary: "MCP credential change event"
+          description: "A credential was uploaded, revoked, or had its injection mode changed. Verify this was operator-initiated."
+
+      # ── mcp-quarantined-tool-access ──────────────────────────────────────────
+      # Sigma: mcp-quarantined-tool-access.yml | level: critical
+      # Any invocation attempt on a quarantined tool.
+      - alert: MCPQuarantinedToolAccess
+        expr: |
+          count_over_time(
+            {job="mcp-audit"}
+            | json
+            | event_type = "TOOL_INVOCATION"
+            | outcome = "deny"
+            | deny_reasons =~ "(?i)TOOL_QUARANTINED"
+            [5m]
+          ) > 0
+        for: 0m
+        labels:
+          severity: critical
+          sigma_id: a1b2c3d4-0005-4000-8000-mcp000000005
+        annotations:
+          summary: "MCP invocation attempt on quarantined tool"
+          description: "A client attempted to invoke a quarantined tool. This requires immediate investigation — the client may be stale or actively probing for a bypass."
+
+      # ── mcp-slow-exfiltration ────────────────────────────────────────────────
+      # Sigma: mcp-slow-exfiltration.yml | level: medium (experimental)
+      # Same tool invoked 30+ times in a 1-hour window by the same client.
+      - alert: MCPSlowExfiltration
+        expr: |
+          sum by (client_id, tool_name) (
+            count_over_time(
+              {job="mcp-audit"}
+              | json
+              | event_type = "TOOL_INVOCATION"
+              | outcome = "allow"
+              [1h]
+            )
+          ) >= 30
+        for: 0m
+        labels:
+          severity: warning
+          sigma_id: a1b2c3d4-0006-4000-8000-mcp000000006
+        annotations:
+          summary: "MCP sustained invocation — potential slow exfiltration"
+          description: "Client {{ $labels.client_id }} invoked {{ $labels.tool_name }} 30+ times in 1 hour. Low-rate sustained invocation of data-retrieval tools may indicate systematic exfiltration."
+
+      # ── mcp-tool-lifecycle-event ─────────────────────────────────────────────
+      # Sigma: mcp-tool-lifecycle-event.yml | level: medium
+      # Tool registered, status changed, or deleted.
+      - alert: MCPToolLifecycleEvent
+        expr: |
+          count_over_time(
+            {job="mcp-audit"}
+            | json
+            | event_type =~ "TOOL_REGISTERED|TOOL_STATUS_CHANGED|TOOL_DELETED"
+            [5m]
+          ) > 0
+        for: 0m
+        labels:
+          severity: warning
+          sigma_id: a1b2c3d4-0007-4000-8000-mcp000000007
+        annotations:
+          summary: "MCP tool lifecycle event"
+          description: "A tool was registered, had its status changed, or was deleted. Verify this was planned operator activity."
