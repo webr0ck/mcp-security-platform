@@ -533,7 +533,20 @@ async def invoke_tool(
     # Forward caller identity so MCP servers that implement per-user isolation
     # (notes, self-service) can resolve the user without re-parsing a JWT.
     # X-User-Role carries the highest-privilege role for admin-gate checks.
-    primary_role = client_roles[0] if client_roles else "user"
+    # Task 4.2 (SELF-F2): sort by privilege so the upstream always receives the
+    # most-privileged role, regardless of the order roles were resolved.
+    _ROLE_PRIORITY: dict[str, int] = {
+        "admin": 0,
+        "platform_admin": 0,
+        "agent": 1,
+        "auditor": 2,
+        "readonly": 3,
+    }
+    _sorted_roles = sorted(
+        client_roles,
+        key=lambda r: _ROLE_PRIORITY.get(r, 99),
+    )
+    primary_role = _sorted_roles[0] if _sorted_roles else "user"
 
     forward_base_headers = {
         **handshake_headers,

@@ -21,7 +21,7 @@ from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
 from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
-from app.routers import oidc_browser, admin_credentials, portal, server_registry, catalog, lab_links, entitlements
+from app.routers import oidc_browser, admin_credentials, portal, server_registry, catalog, lab_links, entitlements, profiles
 from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.hardening import apply_process_hardening
@@ -242,6 +242,7 @@ app.include_router(portal.router)              # Multi-role portal UI
 app.include_router(server_registry.router)     # Server registry CRUD + approval
 app.include_router(catalog.router)            # Principal-scoped server catalog (discovery==invoke)
 app.include_router(entitlements.router)       # Entitlement CRUD (Phase 2.2)
+app.include_router(profiles.router)           # Profile CRUD — self-service + admin (Task 4.2)
 app.include_router(lab_links.router)          # Lab convenience: / → portal, /netbox /grafana /keycloak
 
 # Static assets — served at /static/* (no auth required; public JS/CSS only)

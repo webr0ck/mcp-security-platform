@@ -744,7 +744,26 @@ async def fragment_my_access(request: Request):
     except Exception as exc:
         logger.error("portal my-access DB error: %s", exc)
 
-    # 3. Build access rows
+    # 3. Load MCP profile states for the current user (Task 4.2)
+    profile_states: dict[str, bool] = {}
+    if allowed_tools:
+        try:
+            from sqlalchemy import text as _text
+            from app.core.database import AsyncSessionLocal as _ASL
+            async with _ASL() as _psess:
+                _pres = await _psess.execute(
+                    _text(
+                        "SELECT mcp_name, enabled FROM mcp_profiles "
+                        "WHERE profile_id=:cid"
+                    ),
+                    {"cid": cid},
+                )
+                for _prow in _pres.fetchall():
+                    profile_states[_prow.mcp_name] = bool(_prow.enabled)
+        except Exception as exc:
+            logger.warning("portal my-access: could not load profile states: %s", exc)
+
+    # 4. Build access rows
     rows_html = []
     for tool_name in allowed_tools:
         t = tool_rows.get(tool_name)
@@ -762,16 +781,39 @@ async def fragment_my_access(request: Request):
             last_used = a.last_used.strftime("%Y-%m-%d %H:%M") if a.last_used else "Never"
             stats = f"{a.call_count} calls, {a.success_count} ok"
 
+        # Profile toggle — default enabled=true when no explicit row exists
+        mcp_enabled = profile_states.get(tool_name, True)
+        _toggle_action = "disable" if mcp_enabled else "enable"
+        _toggle_label = "Disable" if mcp_enabled else "Enable"
+        _toggle_style = (
+            "background:#1e293b;border:1px solid #f87171;color:#f87171;"
+            if mcp_enabled else
+            "background:#1e293b;border:1px solid #4ade80;color:#4ade80;"
+        )
+        _enabled_badge = _badge("enabled" if mcp_enabled else "disabled",
+                                "badge-active" if mcp_enabled else "badge-inactive")
+        _toggle_btn = (
+            f'<button class="btn-sm" style="{_toggle_style}padding:0.2rem 0.6rem;'
+            f'border-radius:4px;cursor:pointer;font-size:0.75rem" '
+            f'hx-post="/portal/actions/profile/{esc_py(tool_name)}/{_toggle_action}" '
+            f'hx-swap="outerHTML" '
+            f'hx-target="closest .access-row" '
+            f'hx-indicator=".htmx-indicator">'
+            f'{_toggle_label}</button>'
+        )
+
         rows_html.append(f"""
         <div class="access-row">
           <div>
             <div class="access-name">{esc_py(tool_name)}</div>
             <div class="access-stats">Last used: {esc_py(last_used)}{" &nbsp;·&nbsp; " + esc_py(stats) if stats else ""}</div>
           </div>
-          <div style="display:flex;gap:0.4rem;align-items:center">
+          <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+            {_enabled_badge}
             {_badge(status, f"badge-{status}")}
             {_badge(risk.lower() + " risk", f"badge-risk-{risk.lower()}")}
             {cred_badge}
+            {_toggle_btn}
           </div>
         </div>""")
 
@@ -839,6 +881,95 @@ async def fragment_my_access(request: Request):
     }}
     </script>
     """
+    return HTMLResponse(html)
+
+
+# ---------------------------------------------------------------------------
+# Actions: Profile MCP enable/disable (htmx — returns an updated access-row)
+# Task 4.2: toggle buttons in My Access tab post here; result replaces the row
+# ---------------------------------------------------------------------------
+
+@router.post("/actions/profile/{mcp_name}/enable", response_class=HTMLResponse)
+async def portal_profile_enable(mcp_name: str, request: Request) -> HTMLResponse:
+    """
+    Enable an MCP for the authenticated caller (self-service).
+
+    Called via htmx hx-post from the My Access tab toggle button.
+    Returns a replacement .access-row fragment with the updated state.
+    """
+    _require_portal_access(request)
+    cid = _client_id(request)
+    import httpx as _httpx
+    from starlette.datastructures import Headers as _Headers
+    try:
+        # Delegate to the profiles router via an internal HTTP-less call
+        from app.routers.profiles import enable_mcp as _enable_mcp
+        await _enable_mcp(principal=cid, mcp_name=mcp_name, request=request)
+    except Exception as exc:
+        logger.warning("portal profile enable failed: %s", exc)
+        return HTMLResponse(
+            f'<div class="access-row"><div class="access-name">{esc_py(mcp_name)}</div>'
+            f'<div style="color:var(--red);font-size:0.8rem">Enable failed: {esc_py(str(exc))}</div></div>'
+        )
+    return _build_access_row_fragment(mcp_name, enabled=True)
+
+
+@router.post("/actions/profile/{mcp_name}/disable", response_class=HTMLResponse)
+async def portal_profile_disable(mcp_name: str, request: Request) -> HTMLResponse:
+    """
+    Disable an MCP for the authenticated caller (self-service).
+
+    Called via htmx hx-post from the My Access tab toggle button.
+    Returns a replacement .access-row fragment with the updated state.
+    """
+    _require_portal_access(request)
+    cid = _client_id(request)
+    try:
+        from app.routers.profiles import disable_mcp as _disable_mcp
+        await _disable_mcp(principal=cid, mcp_name=mcp_name, request=request)
+    except Exception as exc:
+        logger.warning("portal profile disable failed: %s", exc)
+        return HTMLResponse(
+            f'<div class="access-row"><div class="access-name">{esc_py(mcp_name)}</div>'
+            f'<div style="color:var(--red);font-size:0.8rem">Disable failed: {esc_py(str(exc))}</div></div>'
+        )
+    return _build_access_row_fragment(mcp_name, enabled=False)
+
+
+def _build_access_row_fragment(mcp_name: str, enabled: bool) -> HTMLResponse:
+    """
+    Build a minimal .access-row HTML fragment after a profile toggle.
+    The htmx swap (hx-target="closest .access-row", hx-swap="outerHTML")
+    replaces the old row with this fragment.
+    """
+    _toggle_action = "disable" if enabled else "enable"
+    _toggle_label = "Disable" if enabled else "Enable"
+    _toggle_style = (
+        "background:#1e293b;border:1px solid #f87171;color:#f87171;"
+        if enabled else
+        "background:#1e293b;border:1px solid #4ade80;color:#4ade80;"
+    )
+    _enabled_badge = _badge("enabled" if enabled else "disabled",
+                            "badge-active" if enabled else "badge-inactive")
+    _toggle_btn = (
+        f'<button class="btn-sm" style="{_toggle_style}padding:0.2rem 0.6rem;'
+        f'border-radius:4px;cursor:pointer;font-size:0.75rem" '
+        f'hx-post="/portal/actions/profile/{esc_py(mcp_name)}/{_toggle_action}" '
+        f'hx-swap="outerHTML" '
+        f'hx-target="closest .access-row" '
+        f'hx-indicator=".htmx-indicator">'
+        f'{_toggle_label}</button>'
+    )
+    html = f"""
+        <div class="access-row">
+          <div>
+            <div class="access-name">{esc_py(mcp_name)}</div>
+          </div>
+          <div style="display:flex;gap:0.4rem;align-items:center">
+            {_enabled_badge}
+            {_toggle_btn}
+          </div>
+        </div>"""
     return HTMLResponse(html)
 
 
