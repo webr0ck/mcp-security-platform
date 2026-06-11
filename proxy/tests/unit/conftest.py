@@ -48,23 +48,26 @@ def pytest_configure(config: object) -> None:  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
-def _stub_get_recent_calls_for_opa():
+def _stub_invocation_redis_calls():
     """
-    Unit-test default: patch _get_recent_calls_for_opa to return [] so that
-    invocation.py unit tests don't need a live Redis connection.
+    Unit-test defaults: patch Redis-dependent functions in invocation.py so that
+    unit tests don't need a live Redis connection.
 
-    Task 1.7 added a fail-closed Redis read before OPA evaluation; without this
-    stub every invoke_tool unit test would 503 on Redis not initialized.
+    - _get_recent_calls_for_opa → [] (Task 1.7: fail-closed anomaly window fetch)
+    - _lookup_profile_with_cache → None (Task 1.10: fail-closed profile lookup)
+      None means "no profile row" = no restriction = default allow
 
-    Tests that specifically verify recent_calls behavior (test_anomaly_rego_wire.py)
-    override this by patching 'app.services.invocation._get_recent_calls_for_opa'
-    themselves within the test body. pytest's fixture system gives test-level patches
-    priority over autouse fixtures.
+    Tests that specifically verify these behaviors override these stubs by patching
+    the same targets themselves within the test body. pytest's test-level patches
+    take priority over autouse fixture-level patches.
     """
     try:
         with patch(
             "app.services.invocation._get_recent_calls_for_opa",
             new=AsyncMock(return_value=[]),
+        ), patch(
+            "app.services.invocation._lookup_profile_with_cache",
+            new=AsyncMock(return_value=None),
         ):
             yield
     except (AttributeError, ModuleNotFoundError):

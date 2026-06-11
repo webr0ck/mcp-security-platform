@@ -49,6 +49,107 @@ _SKIP_AUDIT_DB_WRITE: bool = False
 _MAX_UPSTREAM_BODY_BYTES = 4 * 1024 * 1024  # 4 MiB
 
 
+_PROFILE_CACHE_TTL_SECONDS = 300  # 5 minutes — mirrors role cache TTL in auth.py
+
+
+async def _lookup_profile_with_cache(client_id: str, tool_name: str) -> dict | None:
+    """
+    Look up an mcp_profiles row for (client_id, tool_name) with Redis caching.
+
+    Task 1.10 (SELF-F2): fail-closed semantics — mirrors the role caching
+    pattern in middleware/auth.py but with stricter failure posture:
+
+      DB success:            use profile + update Redis cache (TTL 300s)
+      DB error + cache hit:  use cached profile (last-known-state)
+      DB error + cache miss: raise ProfileLookupError → caller 503s
+
+    Returns:
+      dict with {enabled: bool, allowed_functions: list[str]} if a row exists,
+      or None if no profile row exists (no restriction, default allow).
+
+    Raises:
+      ProfileLookupError: if DB is unreachable and no cached profile available.
+    """
+    import json as _json
+    from app.core.redis_client import redis_pool
+
+    cache_key = f"mcp_profile:{client_id}:{tool_name}"
+    _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
+
+    # -----------------------------------------------------------------------
+    # Tier 1: Redis cache
+    # -----------------------------------------------------------------------
+    cached_raw: str | None = None
+    redis_available = False
+    try:
+        redis = redis_pool.client
+        cached_raw = await redis.get(cache_key)
+        redis_available = True
+    except Exception as _redis_exc:
+        logger.warning(
+            "Profile cache Redis read failed",
+            extra={"client_id": client_id, "tool_name": tool_name, "error": str(_redis_exc)},
+        )
+
+    if cached_raw is not None:
+        if cached_raw == _SENTINEL_NO_ROW:
+            return None  # cached "no profile row" — default allow
+        try:
+            return _json.loads(cached_raw)
+        except Exception:
+            pass  # malformed cache entry — fall through to DB
+
+    # -----------------------------------------------------------------------
+    # Tier 2: PostgreSQL mcp_profiles
+    # -----------------------------------------------------------------------
+    profile_data: dict | None = None
+    db_succeeded = False
+    try:
+        from app.core.database import AsyncSessionLocal
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as _db:
+            row = await _db.execute(
+                text(
+                    "SELECT enabled, allowed_functions "
+                    "FROM mcp_profiles WHERE profile_id=:pid AND mcp_name=:mname LIMIT 1"
+                ),
+                {"pid": client_id, "mname": tool_name},
+            )
+            prow = row.mappings().first()
+            if prow:
+                profile_data = {
+                    "enabled": prow["enabled"],
+                    "allowed_functions": prow["allowed_functions"],
+                }
+        db_succeeded = True
+    except Exception as _db_exc:
+        logger.error(
+            "mcp_profiles DB lookup failed",
+            extra={"client_id": client_id, "tool_name": tool_name, "error": str(_db_exc)},
+        )
+
+    if db_succeeded:
+        # Update Redis cache with the DB result (best-effort)
+        try:
+            redis = redis_pool.client
+            value = _json.dumps(profile_data) if profile_data is not None else _SENTINEL_NO_ROW
+            await redis.setex(cache_key, _PROFILE_CACHE_TTL_SECONDS, value)
+        except Exception as _cache_exc:
+            logger.warning(
+                "Failed to write profile to Redis cache",
+                extra={"client_id": client_id, "tool_name": tool_name, "error": str(_cache_exc)},
+            )
+        return profile_data
+
+    # -----------------------------------------------------------------------
+    # DB failed. We have no cached value (cache hit was handled above).
+    # Fail-closed: raise ProfileLookupError → caller converts to 503.
+    # -----------------------------------------------------------------------
+    raise ProfileLookupError(
+        f"DB unreachable and no cached profile for {client_id}/{tool_name}"
+    )
+
+
 async def _get_recent_calls_for_opa(client_id: str) -> list[dict]:
     """
     Read the per-client Redis anomaly window and return it in the format
@@ -225,7 +326,7 @@ async def invoke_tool(
     # If a profile row exists for (client_id, tool_name), inject it into OPA input.
     # OPA then applies mcp_disabled_for_profile / function_not_allowed_for_profile rules.
     # Absence of a row = platform default = no restriction.
-    profile_data: dict = {}
+    #
     # Task 1.9 (SELF-F2): derive tool_function_name from json_rpc_request.params.name
     # (the JSON-RPC function identifier), NOT from the tool body arguments.
     #
@@ -239,23 +340,25 @@ async def invoke_tool(
     #   - For other methods: falls back to "" (no function restriction)
     _jrpc_params = json_rpc_request.get("params", {})
     function_name: str = _jrpc_params.get("name", "") or ""
+
+    # Task 1.10 (SELF-F2): fail-closed profile lookup with Redis last-known-state cache.
+    # DB success → profile used + cache updated
+    # DB error + cache hit → cached profile used
+    # DB error + cache miss → ProfileLookupError raised → OPAUnavailableError → 503
+    profile_data: dict = {}
     try:
-        from app.core.database import AsyncSessionLocal
-        from sqlalchemy import text
-        async with AsyncSessionLocal() as _db:
-            row = await _db.execute(
-                text("SELECT enabled, allowed_functions FROM mcp_profiles WHERE profile_id=:pid AND mcp_name=:mname LIMIT 1"),
-                {"pid": client_id, "mname": tool_name},
-            )
-            prow = row.mappings().first()
-            if prow:
-                profile_data = {
-                    "enabled": prow["enabled"],
-                    "allowed_functions": prow["allowed_functions"],
-                }
-    except Exception as _exc:
-        # Fail-open: if DB is unreachable, skip profile check (do not block legitimate traffic)
-        logger.warning("mcp_profiles lookup failed for %s/%s: %s", client_id, tool_name, _exc)
+        _profile_result = await _lookup_profile_with_cache(client_id, tool_name)
+        if _profile_result is not None:
+            profile_data = _profile_result
+    except ProfileLookupError as _profile_exc:
+        logger.error(
+            "Profile lookup fail-closed: DB unreachable and no cached profile — "
+            "returning 503 per Task 1.10 (SELF-F2) fail-closed mandate",
+            extra={"client_id": client_id, "tool_name": tool_name, "error": str(_profile_exc)},
+        )
+        raise OPAUnavailableError(
+            f"Profile lookup failed (DB unreachable, no cache): {_profile_exc}"
+        ) from _profile_exc
 
     # -------------------------------------------------------------------------
     # Step 2.7: Resolve owned server IDs for server_owner/manager OPA rules.
@@ -988,3 +1091,18 @@ class ToolDeprecatedError(Exception):
         self.tool_id = tool_id
         self.tool_name = tool_name
         super().__init__(f"Tool '{tool_name}' ({tool_id}) is deprecated.")
+
+
+class ProfileLookupError(Exception):
+    """
+    Raised by _lookup_profile_with_cache when the DB is unreachable AND
+    no cached profile exists in Redis.
+
+    Task 1.10 (SELF-F2): profile lookup is fail-closed. DB error + cache miss
+    → raise this exception → caller converts to OPAUnavailableError → 503.
+
+    Security rationale: a profile may carry mcp_disabled_for_profile=True or
+    a restrictive allowed_functions list. If we cannot verify the profile state,
+    allowing the invocation to proceed would bypass those controls — the same
+    vulnerability class as INV-004 (OPA unreachable → allow-through).
+    """

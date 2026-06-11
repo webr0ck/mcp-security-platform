@@ -239,4 +239,22 @@ Integration test in same file (`@pytest.mark.integration`) covers the postgres-d
 
 ---
 
+## INV-015: MCP Profile Lookup Must Fail-Closed (Redis Last-Known-State)
+
+**Statement:** The `mcp_profiles` lookup in `proxy/app/services/invocation.py` (`_lookup_profile_with_cache`, Task 1.10) MUST fail-closed on database error:
+
+- **DB success:** use the profile data and update the Redis cache (TTL 300 s, key `mcp_profile:{client_id}:{tool_name}`).
+- **DB error + cache hit:** use the cached profile (last-known-state — the most recently successfully fetched profile row).
+- **DB error + cache miss:** raise `ProfileLookupError` → the invocation handler converts this to `OPAUnavailableError` → HTTP 503.
+
+**Why:** A profile row may carry `enabled=False` (disabling the MCP for this identity) or a restrictive `allowed_functions` list. If the lookup fails open (returns an empty profile on any DB error), an attacker who can trigger DB blips can bypass these restrictions silently. This is the same vulnerability class as INV-004 (OPA unreachable → allow-through), applied to per-identity profile restrictions.
+
+**Prior behavior (fixed Task 1.10):** `invocation.py` had a bare `except Exception: logger.warning(...)` that silently allowed invocations to proceed with `profile_data = {}` on any DB error — bypassing both `mcp_disabled_for_profile` and `allowed_functions` OPA rules.
+
+**Rollout observable:** Monitor the 503 rate on `/mcp` invocations. If the profile DB lookup fails and no cache entry is present, callers will see 503. A sustained 503 rate with a healthy DB indicates a bug in the cache path (revert trigger: >1% 503 rate over 1h with healthy OPA and DB → investigate `_lookup_profile_with_cache`; see plan Task 1.10 Bear Case).
+
+**Enforcement:** `proxy/tests/unit/test_profile_lookup_failclosed.py` — 3 tests covering DB success, DB error + cache hit, and DB error + cache miss (503). `proxy/tests/unit/conftest.py` stubs `_lookup_profile_with_cache` for all other unit tests (returns None = no restriction = default allow).
+
+---
+
 *End of Security Non-Negotiables*
