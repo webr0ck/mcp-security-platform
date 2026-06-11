@@ -7,11 +7,21 @@ Routes credential injection to the correct approach based on tool.injection_mode
   service                   — shared service credential (API key or client secret)
   user                      — per-user credential keyed by Keycloak sub
   service_account           — Keycloak client_credentials token for the tool's KC client
-  oauth_user_token          — user's Keycloak access token exchanged for upstream audience
+  kc_token_exchange         — RFC 8693 subject token exchange WITHIN the Keycloak realm only.
+                              The user's KC access token is exchanged for an upstream-audience
+                              token. For cross-IdP injection (e.g. Entra ID as the upstream),
+                              use entra_user_token instead — this mode only works when the
+                              upstream trusts the same Keycloak realm as the gateway.
+  oauth_user_token          — ALIAS for kc_token_exchange (deprecated name; kept for
+                              backwards compatibility with existing DB rows and configs).
+                              New registrations should use kc_token_exchange.
+  passthrough               — forward the caller's inbound Authorization header verbatim
+                              to the upstream (Case-3 / 3b). The upstream uses its own IDP.
   entra_client_credentials  — app-only Microsoft Graph token via Azure client_credentials grant
   entra_user_token          — per-user DELEGATED Microsoft Graph token; broker decrypts the
                               caller's stored Entra refresh token (enrolled at /auth/enroll/m365)
                               and refreshes it per call. Acts AS the signed-in user.
+                              For cross-IdP flows from KC to Entra. Requires ENTRA_TENANT_ID.
 
 All injection modes return a dict of HTTP headers to merge into the upstream
 request, or an empty dict on failure/no-op.
@@ -20,9 +30,22 @@ Task 9 (Phase 3): The tool_record received here contains injection_mode and
 credential_id populated from the DB-driven server_registry table via the
 Registry class (task_8). The dispatcher no longer reads mcps.yaml; all
 server/credential metadata comes from the database through invoke_tool().
+
+Task 3.2: Resolution order (server-level credential attachment):
+  1. tool_registry.injection_mode (per-tool override)
+  2. server_registry.default_injection_mode (server-level default)
+  3. fall back to 'none'
+
+Task 3.5: kc_token_exchange is the canonical name. oauth_user_token is an alias
+  mapped at dispatch entry for backwards compatibility.
+
+Task 3.6: Entra client_credentials token cache moved to Redis (replaces module-level dict).
+  Cache key: entra:cc:{tenant_id}:{client_id}
+  Falls through to a fresh fetch on Redis unavailability — auth still works but no caching.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from enum import Enum
@@ -30,19 +53,23 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Entra token cache TTL safety margin (seconds): fetch a fresh token this many
+# seconds before the cached one actually expires so we never forward a stale token.
+_ENTRA_TOKEN_CACHE_MARGIN_SECONDS = 60
+
 
 class InjectionMode(str, Enum):
     NONE = "none"
     SERVICE = "service"
     USER = "user"
     SERVICE_ACCOUNT = "service_account"
-    OAUTH_USER_TOKEN = "oauth_user_token"
+    # AUTH-F11 / AUTH-R4 (Task 3.5): kc_token_exchange is the canonical name.
+    # oauth_user_token is an alias kept for backwards compat with existing DB rows.
+    KC_TOKEN_EXCHANGE = "kc_token_exchange"
+    OAUTH_USER_TOKEN = "oauth_user_token"          # alias → KC_TOKEN_EXCHANGE
+    PASSTHROUGH = "passthrough"
     ENTRA_CLIENT_CREDENTIALS = "entra_client_credentials"
     ENTRA_USER_TOKEN = "entra_user_token"
-
-
-# Token cache for entra_client_credentials: {cache_key: (access_token, expires_at)}
-_entra_token_cache: dict[str, tuple[str, float]] = {}
 
 
 class CredentialInjectionError(RuntimeError):
@@ -80,7 +107,35 @@ async def dispatch_credential_injection(
     (broker not ready, missing credential, token exchange failure).
     Returns {} only for injection_mode='none'.
     """
-    mode_str = tool_record.get("injection_mode", "none")
+    # Task 3.2: Resolution order
+    #   1. tool-level injection_mode (explicit per-tool override)
+    #   2. server_default_injection_mode (server-level default)
+    #   3. fall back to 'none' (no-op; legitimate when no credential is needed)
+    #
+    # credential_id follows the same precedence: per-tool credential_id is preferred,
+    # server_default_credential_id is the fallback. The per-mode helpers receive
+    # whichever credential_id won (the tool_record is already resolved by the
+    # invocation layer via _resolve_effective_tool_record below, or at call time
+    # by apply_server_defaults() before dispatch_credential_injection is called).
+    _raw_mode = tool_record.get("injection_mode")
+    # Resolution order (Task 3.2):
+    #   1. tool-level injection_mode (per-tool override): use if not None and not empty string
+    #   2. server_default_injection_mode (server-level default)
+    #   3. fall back to 'none' (no-op; legitimate when no credential is needed)
+    #
+    # An empty string "" is NOT the same as None/unset — it is treated as an unknown
+    # mode string that will fail the InjectionMode() parse and raise CredentialInjectionError.
+    # This preserves the fail-closed invariant: "" must not silently become 'none'.
+    if _raw_mode is None:
+        _raw_mode = tool_record.get("server_default_injection_mode") or "none"
+
+    # Task 3.5 (AUTH-F11 / AUTH-R4): map the deprecated alias to the canonical name
+    # at the entry point so all downstream logic only sees kc_token_exchange.
+    # The DB enum still stores "oauth_user_token" for existing rows; we normalise here.
+    if _raw_mode == "oauth_user_token":
+        _raw_mode = "kc_token_exchange"
+
+    mode_str = _raw_mode
     try:
         mode = InjectionMode(mode_str)
     except ValueError:
@@ -137,13 +192,37 @@ async def dispatch_credential_injection(
                 inject_prefix=inject_prefix,
             )
 
-        case InjectionMode.OAUTH_USER_TOKEN:
-            return await _inject_oauth_user_token(
+        case InjectionMode.KC_TOKEN_EXCHANGE:
+            # RFC 8693 subject token exchange WITHIN the Keycloak realm only.
+            # For cross-IdP injection use entra_user_token.
+            return await _inject_kc_token_exchange(
                 tool_record=tool_record,
                 user_kc_token=user_kc_token,
                 inject_header=inject_header,
                 inject_prefix=inject_prefix,
             )
+
+        case InjectionMode.OAUTH_USER_TOKEN:
+            # This arm is unreachable in practice: the alias normalisation above
+            # maps oauth_user_token → kc_token_exchange before InjectionMode() is
+            # called, so the parsed enum value will always be KC_TOKEN_EXCHANGE.
+            # Kept as a belt-and-suspenders guard — if the alias normalisation is
+            # ever bypassed, we route to the same handler rather than falling
+            # through to the fail-closed terminal raise below.
+            return await _inject_kc_token_exchange(
+                tool_record=tool_record,
+                user_kc_token=user_kc_token,
+                inject_header=inject_header,
+                inject_prefix=inject_prefix,
+            )
+
+        case InjectionMode.PASSTHROUGH:
+            # Passthrough mode is handled at the invocation layer (invocation.py)
+            # before dispatch_credential_injection is called; if we reach here it
+            # means the invocation layer did NOT intercept it (e.g. test-time call).
+            # Return {} to indicate no additional headers — the inbound header
+            # will be forwarded verbatim by the caller.
+            return {}
 
         case InjectionMode.ENTRA_CLIENT_CREDENTIALS:
             return await _inject_entra_client_credentials(
@@ -281,13 +360,22 @@ async def _inject_service_account_token(
     return {inject_header: f"{inject_prefix} {token}".strip()}
 
 
-async def _inject_oauth_user_token(
+async def _inject_kc_token_exchange(
     tool_record: dict[str, Any],
     user_kc_token: str | None,
     inject_header: str,
     inject_prefix: str,
 ) -> dict[str, str]:
-    """Exchange the user's Keycloak access token for an upstream audience token."""
+    """
+    RFC 8693 subject token exchange WITHIN the Keycloak realm only.
+
+    Exchanges the user's Keycloak access token for an upstream-audience token.
+    This mode ONLY works when the upstream service trusts the same Keycloak realm
+    as the gateway. For cross-IdP injection (e.g. Entra ID as the upstream IDP),
+    use entra_user_token instead — that mode handles the KC→Entra delegation.
+
+    Formerly named _inject_oauth_user_token (AUTH-F11 / AUTH-R4, Task 3.5).
+    """
     from app.credential_broker.keycloak_client import exchange_token
 
     # Fail-closed (AUTH/CB): every failure path below MUST raise, never return {}.
@@ -299,14 +387,14 @@ async def _inject_oauth_user_token(
         # (6.3 wired invoke_tool to pass the real token; this path fires only for
         # non-OIDC callers whose bearer is not a KC subject token.)
         raise CredentialInjectionError(
-            f"oauth_user_token mode: no caller Keycloak access token available for tool "
+            f"kc_token_exchange mode: no caller Keycloak access token available for tool "
             f"{tool_record.get('tool_id')}; refusing to forward unauthenticated request"
         )
 
     audience = tool_record.get("kc_token_audience") or ""
     if not audience:
         raise CredentialInjectionError(
-            f"oauth_user_token mode: no kc_token_audience configured for tool "
+            f"kc_token_exchange mode: no kc_token_audience configured for tool "
             f"{tool_record.get('tool_id')}; refusing to forward unauthenticated request"
         )
 
@@ -316,7 +404,7 @@ async def _inject_oauth_user_token(
     )
     if not exchanged:
         raise CredentialInjectionError(
-            f"oauth_user_token mode: Keycloak token exchange returned no token for tool "
+            f"kc_token_exchange mode: Keycloak token exchange returned no token for tool "
             f"{tool_record.get('tool_id')}; refusing to forward unauthenticated request"
         )
 
@@ -335,7 +423,14 @@ async def _inject_entra_client_credentials(
     in the tool_record. Credentials are stored as encrypted JSON:
       {"tenant_id": "...", "client_id": "...", "client_secret": "..."}
 
-    Caches the token for 50 minutes (tokens are valid for 1 hour).
+    Task 3.6 (AUTH-F14 / AUTH-R7): Token caching uses Redis instead of a module-level
+    dict so the cache is shared across workers and survives process restarts cleanly.
+    Cache key: entra:cc:{tenant_id}:{client_id}
+    Redis TTL: expires_in - _ENTRA_TOKEN_CACHE_MARGIN_SECONDS (leave a 60s buffer).
+    If Redis is unavailable, falls through to a fresh token fetch — auth still works,
+    just without caching. Do NOT fail-closed on cache unavailability since the token
+    fetch itself can still succeed.
+
     Fail-closed: if credential_id is missing or credential_store lookup fails, raise.
     """
     import httpx
@@ -398,19 +493,36 @@ async def _inject_entra_client_credentials(
             "(tenant_id, client_id, client_secret); refusing to forward unauthenticated request"
         )
 
-    # Step 5: Check cache before calling Entra
-    cache_key = f"{tenant_id}:{client_id}"
-    cached = _entra_token_cache.get(cache_key)
-    if cached:
-        token, expires_at = cached
-        if time.monotonic() < expires_at:
-            return {inject_header: f"{inject_prefix} {token}".strip()}
+    # Step 5: Check Redis cache before calling Entra (Task 3.6 — AUTH-F14 / AUTH-R7).
+    # Mirror the pattern used by keycloak_client.py:53-93 for KC service-account tokens.
+    # Cache key format: entra:cc:{tenant_id}:{client_id}
+    redis_cache_key = f"entra:cc:{tenant_id}:{client_id}"
+    try:
+        from app.core.redis_client import redis_pool
+        redis = redis_pool.client
+        cached_raw = await redis.get(redis_cache_key)
+        if cached_raw:
+            cached_data = json.loads(cached_raw)
+            cached_token = cached_data.get("access_token")
+            if cached_token:
+                logger.debug(
+                    "entra_client_credentials: Redis cache hit for tenant=%s client=%s",
+                    tenant_id,
+                    client_id,
+                )
+                return {inject_header: f"{inject_prefix} {cached_token}".strip()}
+    except Exception as cache_exc:
+        # Redis unavailable: fall through to fresh fetch. Auth still works; just no caching.
+        logger.warning(
+            "entra_client_credentials: Redis cache read failed (falling through to fresh fetch): %s",
+            cache_exc,
+        )
 
     # Step 6: Exchange credentials for access token via Entra
     token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            resp = await http_client.post(
                 token_url,
                 data={
                     "grant_type": "client_credentials",
@@ -434,9 +546,29 @@ async def _inject_entra_client_credentials(
             "refusing to forward unauthenticated request"
         )
 
-    # Cache with 10-minute safety margin
-    _entra_token_cache[cache_key] = (access_token, time.monotonic() + expires_in - 600)
-    logger.info("entra_client_credentials: fetched new app-only token (expires_in=%d)", expires_in)
+    # Step 7: Write fresh token to Redis with TTL = expires_in - margin.
+    # On Redis failure: log warning and continue — the token itself is valid.
+    redis_ttl = max(1, expires_in - _ENTRA_TOKEN_CACHE_MARGIN_SECONDS)
+    try:
+        from app.core.redis_client import redis_pool as _redis_pool
+        _redis = _redis_pool.client
+        await _redis.setex(
+            redis_cache_key,
+            redis_ttl,
+            json.dumps({"access_token": access_token}),
+        )
+        logger.info(
+            "entra_client_credentials: fetched new app-only token and cached in Redis "
+            "(expires_in=%d ttl=%d)",
+            expires_in,
+            redis_ttl,
+        )
+    except Exception as write_exc:
+        logger.warning(
+            "entra_client_credentials: Redis cache write failed (token still usable): %s",
+            write_exc,
+        )
+
     return {inject_header: f"{inject_prefix} {access_token}".strip()}
 
 
