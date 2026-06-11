@@ -50,12 +50,17 @@ def pytest_configure(config: object) -> None:  # noqa: ANN001
 @pytest.fixture(autouse=True)
 def _stub_invocation_redis_calls():
     """
-    Unit-test defaults: patch Redis-dependent functions in invocation.py so that
-    unit tests don't need a live Redis connection.
+    Unit-test defaults: patch Redis-dependent and network-dependent functions in
+    invocation.py so that unit tests don't need a live Redis connection or DNS.
 
     - _get_recent_calls_for_opa → [] (Task 1.7: fail-closed anomaly window fetch)
     - _lookup_profile_with_cache → None (Task 1.10: fail-closed profile lookup)
       None means "no profile row" = no restriction = default allow
+    - revalidate_upstream_ip_at_invoke → returns ["127.0.0.1"] (Task 3.1: invoke-time
+      DNS-rebind revalidation — no-op in unit tests since upstream URLs are fake
+      hostnames that will never resolve.  Tests that specifically exercise the
+      revalidation logic (test_upstream_validator.py) patch DNS themselves and do
+      NOT rely on this stub.)
 
     Tests that specifically verify these behaviors override these stubs by patching
     the same targets themselves within the test body. pytest's test-level patches
@@ -68,6 +73,9 @@ def _stub_invocation_redis_calls():
         ), patch(
             "app.services.invocation._lookup_profile_with_cache",
             new=AsyncMock(return_value=None),
+        ), patch(
+            "app.services.server_onboarding.revalidate_upstream_ip_at_invoke",
+            new=AsyncMock(return_value=["127.0.0.1"]),
         ):
             yield
     except (AttributeError, ModuleNotFoundError):

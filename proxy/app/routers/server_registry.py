@@ -151,9 +151,21 @@ class ServerCreate(BaseModel):
     @field_validator("injection_mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        valid = {"none", "service", "user", "service_account", "oauth_user_token", "entra_user_token", "entra_client_credentials"}
+        # AUTH-R6 (Task 3.4): passthrough and entra_user_token are now exposed.
+        # kc_token_exchange is the canonical name for the former oauth_user_token.
+        valid = {
+            "none",
+            "service",
+            "user",
+            "service_account",
+            "kc_token_exchange",
+            "oauth_user_token",   # accepted alias; normalised to kc_token_exchange in dispatcher
+            "passthrough",
+            "entra_user_token",
+            "entra_client_credentials",
+        }
         if v not in valid:
-            raise ValueError(f"injection_mode must be one of {valid}")
+            raise ValueError(f"injection_mode must be one of {sorted(valid)}")
         return v
 
 
@@ -173,6 +185,10 @@ class ServerRegister(BaseModel):
     upstream_idp_type: optional IdP type for OAuth flows (gateway_idp, entra, etc.)
     upstream_idp_config: optional dict with IdP configuration (issuer, client_id, scopes)
     adapter_name: optional adapter name for health checks (gitea, m365, etc.)
+
+    AUTH-R6 (Task 3.4): passthrough and entra_user_token are now exposed here.
+    entra_user_token and entra_client_credentials require ENTRA_TENANT_ID to be set;
+    the validator checks this at request time and returns 422 if missing.
     """
     service_name: str
     upstream_url: str
@@ -191,9 +207,32 @@ class ServerRegister(BaseModel):
     @field_validator("injection_mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        valid = {"none", "service", "user", "service_account", "oauth_user_token", "entra_user_token", "entra_client_credentials"}
+        # AUTH-R6 (Task 3.4): passthrough and entra_user_token are now exposed.
+        # kc_token_exchange is the canonical name; oauth_user_token is accepted alias.
+        _ENTRA_MODES = {"entra_user_token", "entra_client_credentials"}
+        valid = {
+            "none",
+            "service",
+            "user",
+            "service_account",
+            "kc_token_exchange",
+            "oauth_user_token",   # accepted alias; normalised to kc_token_exchange in dispatcher
+            "passthrough",
+            "entra_user_token",
+            "entra_client_credentials",
+        }
         if v not in valid:
-            raise ValueError(f"injection_mode must be one of {valid}")
+            raise ValueError(f"injection_mode must be one of {sorted(valid)}")
+        # Entra modes require AZURE_TENANT_ID (surfaced as ENTRA_TENANT_ID in settings).
+        # Validate eagerly so operators get a clear 422 instead of a runtime failure.
+        if v in _ENTRA_MODES:
+            from app.core.config import get_settings
+            cfg = get_settings()
+            if not getattr(cfg, "ENTRA_TENANT_ID", None):
+                raise ValueError(
+                    f"injection_mode='{v}' requires ENTRA_TENANT_ID to be configured. "
+                    "Set the ENTRA_TENANT_ID environment variable and restart the service."
+                )
         return v
 
 
@@ -247,16 +286,27 @@ async def create_server(body: ServerCreate, request: Request):
     # Always attribute ownership to the authenticated requester, not the submitted value
     effective_owner_sub = getattr(request.state, "client_id", "unknown")
     owner = effective_owner_sub
+
+    # SSRF check with allowlist (Task 3.1)
+    from app.core.config import get_settings as _get_settings
+    _settings = _get_settings()
+    _allowlist = _settings.upstream_private_cidr_allowlist_parsed
+    try:
+        _ae = await validate_upstream_url_ssrf(body.upstream_url, private_cidr_allowlist=_allowlist)
+    except InvalidOnboardingConfig as exc:
+        raise HTTPException(status_code=400, detail=f"SSRF validation failed: {exc}") from exc
+    _upstream_allowlist_entry: str | None = _ae if _ae else None
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             text(
                 "INSERT INTO server_registry "
-                "(name, upstream_url, injection_mode, service_name, owner_sub, status) "
-                "VALUES (:name, :url, :mode::injection_mode_enum, :svc, :owner, 'pending') "
+                "(name, upstream_url, injection_mode, service_name, owner_sub, status, upstream_allowlist_entry) "
+                "VALUES (:name, :url, :mode::injection_mode_enum, :svc, :owner, 'pending', :allowlist_entry) "
                 "RETURNING server_id, name, status, created_at"
             ),
             {"name": body.name, "url": body.upstream_url, "mode": body.injection_mode,
-             "svc": body.service_name, "owner": owner},
+             "svc": body.service_name, "owner": owner, "allowlist_entry": _upstream_allowlist_entry},
         )
         await db.commit()
         row = result.fetchone()
@@ -291,11 +341,16 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     # SSRF guard: fail-closed DNS — DNS failure rejects the URL (same as registration).
+    # Task 3.1: also update upstream_allowlist_entry when upstream_url changes.
     if "upstream_url" in updates:
+        from app.core.config import get_settings as _get_settings
+        _settings = _get_settings()
+        _allowlist = _settings.upstream_private_cidr_allowlist_parsed
         try:
-            await validate_upstream_url_ssrf(updates["upstream_url"])
-        except (SSRFError, ValueError) as exc:
+            _patch_ae = await validate_upstream_url_ssrf(updates["upstream_url"], private_cidr_allowlist=_allowlist)
+        except (SSRFError, ValueError, InvalidOnboardingConfig) as exc:
             raise HTTPException(status_code=422, detail=f"upstream_url blocked by SSRF policy: {exc}") from exc
+        updates["upstream_allowlist_entry"] = _patch_ae if _patch_ae else None
 
     # Column names are interpolated — frozenset above is the ONLY guard.
     # Never add user-supplied strings to the allowlist.
@@ -407,7 +462,7 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     _require_platform_admin(request)
     approver = getattr(request.state, "client_id", "unknown")
 
-    # D1 SSRF allowlist: validate the upstream URL before approval
+    # D1 SSRF allowlist: re-validate the upstream URL at approval time (Task 3.1)
     async with AsyncSessionLocal() as db:
         url_row = await db.execute(
             text(
@@ -419,9 +474,12 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
         url_record = url_row.fetchone()
     if url_record is None:
         raise HTTPException(status_code=404, detail="Server not found")
+    from app.core.config import get_settings as _get_settings
+    _approval_settings = _get_settings()
+    _approval_allowlist = _approval_settings.upstream_private_cidr_allowlist_parsed
     try:
-        await validate_upstream_url_ssrf(url_record[0])
-    except (SSRFError, ValueError) as exc:
+        await validate_upstream_url_ssrf(url_record[0], private_cidr_allowlist=_approval_allowlist)
+    except (SSRFError, ValueError, InvalidOnboardingConfig) as exc:
         raise HTTPException(status_code=422, detail=f"SSRF validation failed: {exc}") from exc
 
     owner_sub = url_record[1]
@@ -546,11 +604,16 @@ async def register_server_self_service(body: ServerRegister, request: Request):
         except InvalidOnboardingConfig as exc:
             raise HTTPException(status_code=400, detail=f"Invalid IdP config: {exc}") from exc
 
-    # Validation 3: Upstream URL SSRF check (async)
+    # Validation 3: Upstream URL SSRF check (async) — pass allowlist for private upstreams
+    from app.core.config import get_settings as _get_settings
+    _settings = _get_settings()
+    _allowlist = _settings.upstream_private_cidr_allowlist_parsed
     try:
-        await validate_upstream_url_ssrf(body.upstream_url)
+        allowlist_entry = await validate_upstream_url_ssrf(body.upstream_url, private_cidr_allowlist=_allowlist)
     except InvalidOnboardingConfig as exc:
         raise HTTPException(status_code=400, detail=f"SSRF validation failed: {exc}") from exc
+    # Normalise: empty string → None so the DB column is NULL for public upstreams
+    upstream_allowlist_entry: str | None = allowlist_entry if allowlist_entry else None
 
     # Generate server_id and emit audit BEFORE database insert (INV-001)
     server_id = str(uuid.uuid4())
@@ -574,11 +637,11 @@ async def register_server_self_service(body: ServerRegister, request: Request):
                 INSERT INTO server_registry (
                     server_id, service_name, upstream_url, injection_mode,
                     upstream_idp_type, upstream_idp_config, adapter_name,
-                    owner_sub, status
+                    owner_sub, status, upstream_allowlist_entry
                 ) VALUES (
                     :server_id, :service_name, :upstream_url, :injection_mode::injection_mode_enum,
                     :upstream_idp_type, :upstream_idp_config::jsonb, :adapter_name,
-                    :owner_sub, 'pending'
+                    :owner_sub, 'pending', :upstream_allowlist_entry
                 )
                 RETURNING server_id, service_name, status, created_at
                 """
@@ -592,6 +655,7 @@ async def register_server_self_service(body: ServerRegister, request: Request):
                 "upstream_idp_config": body.upstream_idp_config,
                 "adapter_name": body.adapter_name,
                 "owner_sub": client_id,
+                "upstream_allowlist_entry": upstream_allowlist_entry,
             },
         )
         await db.commit()

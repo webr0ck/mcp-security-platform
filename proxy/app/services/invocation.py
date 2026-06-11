@@ -446,6 +446,104 @@ async def invoke_tool(
         raise ValueError(f"SSRF blocked upstream URL at invoke time: {exc}") from exc
 
     # -------------------------------------------------------------------------
+    # Step 3c: Invoke-time DNS-rebind / TOCTOU revalidation (Task 3.1 / ISO-F2.6)
+    #
+    # Registration-time SSRF checks are necessary but not sufficient — a hostname
+    # that resolved to a safe IP at registration time may later re-resolve to an
+    # internal address (DNS rebind) or to an IP outside the registered allowlist
+    # CIDR.  We resolve here, validate against the registered policy, and fail
+    # closed (503) on any anomaly per INV-004 parity.
+    #
+    # upstream_allowlist_entry: fetched from server_registry using the tool's
+    # server_id if available. NULL / empty = registered as a public upstream.
+    # -------------------------------------------------------------------------
+    from app.services.server_onboarding import (
+        UpstreamRevalidationError,
+        revalidate_upstream_ip_at_invoke,
+    )
+
+    _registered_allowlist_entry: str | None = tool_record.get("upstream_allowlist_entry")
+    if _registered_allowlist_entry is None and tool_server_id:
+        # upstream_allowlist_entry was not pre-fetched in tool_record (e.g. SELECT *
+        # from tool_registry does not carry server_registry columns). Fetch it once.
+        try:
+            from app.core.database import AsyncSessionLocal as _ASL
+            from sqlalchemy import text as _text
+            async with _ASL() as _db:
+                _sr = await _db.execute(
+                    _text(
+                        "SELECT upstream_allowlist_entry FROM server_registry "
+                        "WHERE server_id = :sid AND deleted_at IS NULL LIMIT 1"
+                    ),
+                    {"sid": tool_server_id},
+                )
+                _sr_row = _sr.fetchone()
+                if _sr_row is not None:
+                    _registered_allowlist_entry = _sr_row[0]  # may still be None (public)
+        except Exception as _sr_exc:
+            logger.error(
+                "invoke Step 3c: failed to fetch upstream_allowlist_entry from server_registry — "
+                "failing closed (upstream_revalidation_failed)",
+                extra={"tool_server_id": tool_server_id, "error": str(_sr_exc)},
+            )
+            await _emit_audit_event(
+                tool_id=str(tool_id),
+                tool_name=tool_name,
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=["upstream_revalidation_failed", "server_registry_lookup_error"],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=anomaly_score,
+                opa_decision_id=opa_decision_id,
+                is_testing=is_testing,
+                source_ip=source_ip,
+                principal_type=principal_type,
+                roles=client_roles,
+                session_jti=session_jti,
+            )
+            from app.services.policy import OPAUnavailableError
+            raise OPAUnavailableError(
+                "upstream_revalidation_failed: cannot fetch server allowlist entry"
+            ) from _sr_exc
+
+    try:
+        await revalidate_upstream_ip_at_invoke(
+            upstream_url=upstream_url,
+            registered_allowlist_entry=_registered_allowlist_entry,
+        )
+    except UpstreamRevalidationError as _rebind_exc:
+        logger.warning(
+            "invoke Step 3c: DNS-rebind or TOCTOU detected — denying invocation",
+            extra={
+                "upstream_url": upstream_url,
+                "registered_allowlist_entry": _registered_allowlist_entry,
+                "error": str(_rebind_exc),
+            },
+        )
+        await _emit_audit_event(
+            tool_id=str(tool_id),
+            tool_name=tool_name,
+            tool_version=tool_record.get("version"),
+            client_id=client_id,
+            outcome="deny",
+            deny_reasons=["upstream_revalidation_failed"],
+            request_id=request_id,
+            latency_ms=0,
+            anomaly_score=anomaly_score,
+            opa_decision_id=opa_decision_id,
+            is_testing=is_testing,
+            source_ip=source_ip,
+            principal_type=principal_type,
+            roles=client_roles,
+            session_jti=session_jti,
+        )
+        raise ValueError(
+            f"Upstream revalidation failed (DNS-rebind protection): {_rebind_exc}"
+        ) from _rebind_exc
+
+    # -------------------------------------------------------------------------
     # Step 4: Forward to upstream MCP server
     # -------------------------------------------------------------------------
     from app.credential_broker.dispatcher import (
