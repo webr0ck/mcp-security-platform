@@ -54,6 +54,8 @@ from app.services.consent import (
 )
 from app.services.server_onboarding import (
     InvalidOnboardingConfig,
+    UpstreamRevalidationError,
+    revalidate_upstream_ip_at_invoke,
     validate_mode_and_idp,
     validate_upstream_url_ssrf,
     validate_upstream_idp_config,
@@ -466,7 +468,8 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     async with AsyncSessionLocal() as db:
         url_row = await db.execute(
             text(
-                "SELECT upstream_url, owner_sub, adapter_name FROM server_registry "
+                "SELECT upstream_url, owner_sub, adapter_name, upstream_allowlist_entry "
+                "FROM server_registry "
                 "WHERE server_id = :id AND deleted_at IS NULL"
             ),
             {"id": server_id},
@@ -482,6 +485,26 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     except (SSRFError, ValueError, InvalidOnboardingConfig) as exc:
         raise HTTPException(status_code=422, detail=f"SSRF validation failed: {exc}") from exc
 
+    # S3: Pin the healthcheck to the IP already validated above (TOCTOU rebind fix).
+    # A TTL-0 DNS flip between validate_upstream_url_ssrf and the healthcheck
+    # connect could redirect the request to 169.254.169.254 / vault:8200 / etc.
+    # revalidate_upstream_ip_at_invoke resolves now and returns the validated IPs;
+    # we pin httpx to the first one via PinnedIPTransport inside get_healthcheck().
+    # Pass the per-server upstream_allowlist_entry (str | None), matching the
+    # same field invocation.py reads from the tool_record / server_registry row.
+    from urllib.parse import urlparse as _urlparse
+    _registered_allowlist_entry: str | None = url_record[3]  # upstream_allowlist_entry column
+    _pinned_ips: list[str] = []
+    _healthcheck_hostname: str = ""
+    try:
+        _pinned_ips = await revalidate_upstream_ip_at_invoke(
+            upstream_url=url_record[0],
+            registered_allowlist_entry=_registered_allowlist_entry,
+        )
+        _healthcheck_hostname = _urlparse(url_record[0]).hostname or ""
+    except UpstreamRevalidationError as exc:
+        raise HTTPException(status_code=400, detail=f"IP revalidation failed at approval: {exc}") from exc
+
     owner_sub = url_record[1]
     adapter_name = url_record[2]
 
@@ -490,7 +513,12 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     # If the server has an adapter_name, validate it's healthy via healthcheck.
     if adapter_name:
         try:
-            healthcheck_adapter = get_healthcheck(adapter_name, url_record[0])
+            healthcheck_adapter = get_healthcheck(
+                adapter_name,
+                url_record[0],
+                pinned_ip=_pinned_ips[0] if _pinned_ips else None,
+                original_hostname=_healthcheck_hostname or None,
+            )
             await healthcheck_adapter.healthcheck()
         except HealthcheckFailed as exc:
             raise HTTPException(
