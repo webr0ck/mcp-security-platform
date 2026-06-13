@@ -10,7 +10,6 @@ Outputs (written to OUTPUT_DIR, default /labeler):
 Idempotent: skips sub-CA if sub_ca.key already exists; always issues fresh leaf.
 """
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 

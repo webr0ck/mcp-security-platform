@@ -9,14 +9,14 @@ import base64
 import hashlib
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from app.services.jcs import jcs_tool_result, jcs_signed_input
+from app.services.jcs import jcs_signed_input, jcs_tool_result
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +65,11 @@ class TrustLabeler:
             return None
 
     def _load_leaf(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if self._cached_cert is not None:
-            expire_buffer = self._cached_cert.not_valid_after_utc - timedelta(seconds=_CACHE_REFRESH_BUFFER_SECONDS)
+            expire_buffer = self._cached_cert.not_valid_after_utc - timedelta(
+                seconds=_CACHE_REFRESH_BUFFER_SECONDS
+            )
             if now < expire_buffer:
                 return self._cached_cert, self._cached_key, self._cached_x5c
 
@@ -117,7 +119,7 @@ class TrustLabeler:
         content_hash = "sha256:" + hashlib.sha256(canonical_payload).hexdigest()
 
         nonce = secrets.token_urlsafe(16)
-        signed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        signed_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         signed_input_bytes = jcs_signed_input(
             label=label, content_hash=content_hash, nonce=nonce,
