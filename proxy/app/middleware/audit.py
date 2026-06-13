@@ -30,6 +30,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from app.core.security import generate_request_id
+from app.core.redis_client import redis_pool
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,14 @@ class AuditMiddleware(BaseHTTPMiddleware):
 # Endpoints that are exempt from IP-level rate limiting (health probes, metrics).
 _IP_RL_EXEMPT_PATHS = frozenset({"/health", "/health/ready", "/health/live", "/metrics"})
 
+# Pre-auth paths where Redis failure must fail-closed (return 429) rather than
+# fail-open. These are endpoints accessible before any authentication occurs and
+# are the most valuable targets for a Redis-teardown + flood attack.
+_IP_RL_FAIL_CLOSED_PATHS = frozenset({
+    "/oauth/register",
+    "/oauth/authorize",
+})
+
 # Default: 100 requests per minute per IP, across all endpoints.
 _IP_RL_LIMIT = 100
 _IP_RL_WINDOW = 60
@@ -166,7 +175,6 @@ class IPRateLimitMiddleware(BaseHTTPMiddleware):
 
         client_ip = request.client.host if request.client else "unknown"
         try:
-            from app.core.redis_client import redis_pool
             rl_client = redis_pool.rate_limit_client
             key = f"rl:ip:{client_ip}"
             pipe = rl_client.pipeline()
@@ -175,7 +183,16 @@ class IPRateLimitMiddleware(BaseHTTPMiddleware):
             results = await pipe.execute()
             count = results[0]
         except Exception:
-            count = 0  # fail-open
+            if request.url.path in _IP_RL_FAIL_CLOSED_PATHS:
+                logger.warning(
+                    "IP rate limit Redis error on pre-auth path; failing closed",
+                    extra={"path": request.url.path, "client_ip": client_ip},
+                )
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": {"code": "RATE_LIMITED", "message": "Too many requests from this IP"}},
+                )
+            count = 0  # fail-open for authenticated/other paths
 
         if count > self.limit:
             logger.warning(
