@@ -14,11 +14,11 @@ Tools:
   wazuh_cluster_health    — cluster status, node list, node health
   wazuh_list_agents       — list monitored agents with OS, version, status
   wazuh_get_agent_detail  — detailed view of one agent including last scan time
-  wazuh_list_alerts       — recent alerts (syscheck / fim / vulnerability)
-  wazuh_search_alerts     — free-text + field-filter alert search (last N minutes)
+  wazuh_list_alerts       — recent manager daemon logs (ossec.log entries by severity)
+  wazuh_search_alerts     — free-text search of the manager log buffer
   wazuh_get_rules         — list active detection rules with level filter
   wazuh_list_decoders     — list loaded decoders
-  wazuh_run_active_response — trigger an active response on an agent (admin only)
+  wazuh_run_active_response — trigger an active response on an agent (env-flag gated)
 
 Security design:
   - Wazuh API creds are injected by the broker as the Authorization header
@@ -271,31 +271,34 @@ def wazuh_get_agent_detail(agent_id: str) -> dict:
 
 @mcp.tool()
 def wazuh_list_alerts(
-    level_gte: int = 0,
+    log_type: str = "all",
     limit: int = DEFAULT_LIMIT,
 ) -> dict:
     """
-    Return recent Wazuh alerts from all agents.
+    Return recent Wazuh manager daemon log entries (ossec.log).
+
+    Note: this tool returns operational daemon logs from /manager/logs, NOT
+    security alert events. Security alerts require the Wazuh indexer (OpenSearch).
+    Use wazuh_search_alerts for free-text search of the same log buffer.
 
     Args:
-        level_gte: Minimum rule level to include (0 = all, 7 = high, 12 = critical).
-        limit: Maximum number of alerts to return (1–100).
+        log_type: Severity filter — 'all', 'error', 'warning', 'info', 'critical'.
+        limit: Maximum number of log entries to return (1–100).
 
-    Returns dict with keys: total, alerts (list of alert summaries).
-    Note: full alert history requires the Wazuh indexer; this returns the
-    last N alerts buffered in the manager's alert queue.
+    Returns dict with keys: total, logs (list of manager log entries).
     """
     limit = max(1, min(limit, MAX_LIMIT))
-    params: dict[str, Any] = {"type_log": "all", "limit": limit}
-    if level_gte > 0:
-        params["level"] = f"{level_gte}-15"
+    valid_types = {"all", "error", "warning", "info", "critical"}
+    if log_type not in valid_types:
+        log_type = "all"
+    params: dict[str, Any] = {"type_log": log_type, "limit": limit}
 
     try:
         resp = _api("GET", "/manager/logs", params=params)
         logs = resp.get("data", {}).get("affected_items", [])
         return {
             "total": resp.get("data", {}).get("total_affected_items", len(logs)),
-            "alerts": _strip_sensitive(logs, _SENSITIVE_KEYS),
+            "logs": _strip_sensitive(logs, _SENSITIVE_KEYS),
         }
     except Exception as exc:
         logger.error("wazuh_list_alerts failed: %s", exc)
@@ -305,23 +308,26 @@ def wazuh_list_alerts(
 @mcp.tool()
 def wazuh_search_alerts(
     query: str,
-    minutes: int = 60,
     limit: int = DEFAULT_LIMIT,
 ) -> dict:
     """
-    Search recent Wazuh alerts by free-text query within a time window.
+    Search the Wazuh manager log buffer using a filter expression.
+
+    Note: this searches manager daemon logs (ossec.log) via the Wazuh q= filter
+    language. Full security-event search across all agents requires the Wazuh
+    indexer (OpenSearch). Time-window filtering is not available in manager-only
+    deployments — this returns the most recent buffer matching the query.
 
     Args:
-        query: Text to search for in alert description / rule.description fields.
-        minutes: Look-back window in minutes (1–1440).
-        limit: Maximum number of matching alerts (1–100).
+        query: Filter expression forwarded as the Wazuh API q= parameter
+               (e.g. 'description=SSH'). Max 256 characters.
+        limit: Maximum number of matching log entries to return (1–100).
 
-    Returns dict with keys: query, minutes, total, alerts, note.
-    Note: full search requires the Wazuh indexer (OpenSearch). When the indexer
-    is unavailable, this tool searches the manager log buffer instead (smaller window).
+    Returns dict with keys: query, total, logs, note.
     """
     limit = max(1, min(limit, MAX_LIMIT))
-    minutes = max(1, min(minutes, 1440))
+    if len(query) > 256:
+        return {"error": "query exceeds 256-character limit"}
 
     try:
         resp = _api(
@@ -332,10 +338,9 @@ def wazuh_search_alerts(
         safe = _strip_sensitive(logs[:limit], _SENSITIVE_KEYS)
         return {
             "query": query,
-            "minutes": minutes,
             "total": len(safe),
-            "alerts": safe,
-            "note": "searching manager log buffer; indexer required for full history",
+            "logs": safe,
+            "note": "searching manager log buffer only; indexer required for full alert history",
         }
     except Exception as exc:
         logger.error("wazuh_search_alerts failed: %s", exc)
@@ -415,8 +420,9 @@ def wazuh_run_active_response(
     """
     Trigger a Wazuh active response on a specific agent.
 
-    ADMIN-ONLY: requires ALLOW_ACTIVE_RESPONSE=true in the server environment
-    AND the caller must hold the 'admin' role (enforced at the proxy layer).
+    Requires ALLOW_ACTIVE_RESPONSE=true in the server environment (off by default).
+    Callers should be restricted to the 'admin' role at the proxy/OPA layer;
+    this server does not re-enforce RBAC — configure the OPA grant accordingly.
 
     Args:
         agent_id: Target agent ID — numeric string e.g. '001'.
@@ -475,7 +481,7 @@ def wazuh_run_active_response(
 # ---------------------------------------------------------------------------
 
 def _build_app() -> ASGIApp:
-    base = mcp.get_asgi_app()
+    base = mcp.streamable_http_app()
     return AuthHeaderMiddleware(base)
 
 

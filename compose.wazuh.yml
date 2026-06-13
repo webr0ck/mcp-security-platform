@@ -95,8 +95,10 @@ services:
     build: ./lab/mcp-servers/wazuh
     image: lab-mcp-wazuh:lab
     container_name: lab-mcp-wazuh
-    ports:
-      - "127.0.0.1:8109:8000"
+    # No host port published — accessible only via mcp-wazuh-net (internal: true).
+    # All traffic must traverse the proxy; publishing a host port would bypass
+    # audit, OPA, RBAC, and mTLS (WAZ-001 fix).
+    # For local debugging: podman exec -it lab-mcp-wazuh python3 -c "..."
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"

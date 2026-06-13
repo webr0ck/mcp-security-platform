@@ -64,6 +64,9 @@ def _install_mcp_stub() -> None:
         def get_asgi_app(self):
             return MagicMock()
 
+        def streamable_http_app(self):
+            return MagicMock()
+
     # mcp.server.fastmcp sub-module
     mcp_server_fastmcp = types.ModuleType("mcp.server.fastmcp")
     mcp_server_fastmcp.FastMCP = _FastMCPStub
@@ -289,25 +292,25 @@ class TestListAlerts:
     def test_happy_path(self, srv):
         resp = {
             "data": {
-                "affected_items": [{"type": "ossec", "description": "Login failed"}],
+                "affected_items": [{"type": "ossec", "description": "Manager started"}],
                 "total_affected_items": 1,
             }
         }
         with _mock_api(srv, {"/manager/logs": resp}):
             result = srv.wazuh_list_alerts(limit=5)
         assert result["total"] == 1
-        assert "alerts" in result
+        assert "logs" in result  # daemon logs, not security alerts
 
     def test_api_error(self, srv):
         with patch.object(srv, "_api", side_effect=Exception("broken")):
             result = srv.wazuh_list_alerts()
         assert "error" in result
 
-    def test_level_gte_adds_level_param(self, srv):
-        """When level_gte > 0, the 'level' range param must be forwarded to _api."""
+    def test_log_type_forwarded_to_api(self, srv):
+        """log_type param must be forwarded as type_log to the Wazuh API."""
         resp = {
             "data": {
-                "affected_items": [{"type": "ossec", "description": "Critical"}],
+                "affected_items": [{"type": "ossec", "description": "Error event"}],
                 "total_affected_items": 1,
             }
         }
@@ -318,12 +321,26 @@ class TestListAlerts:
             return resp
 
         with patch.object(srv, "_api", side_effect=fake_api):
-            result = srv.wazuh_list_alerts(level_gte=7, limit=10)
+            result = srv.wazuh_list_alerts(log_type="error", limit=10)
 
-        assert "alerts" in result
+        assert "logs" in result
         assert "total" in result
-        # level range MUST reach the API (bug fix: params dict now forwarded)
-        assert captured["params"].get("level") == "7-15"
+        assert captured["params"].get("type_log") == "error"
+        # Must NOT send a 'level' range — that's a different endpoint's param
+        assert "level" not in captured["params"]
+
+    def test_invalid_log_type_defaults_to_all(self, srv):
+        """Unknown log_type values must be silently coerced to 'all'."""
+        resp = {"data": {"affected_items": [], "total_affected_items": 0}}
+        captured = {}
+
+        def fake_api(method, path, params=None, **kwargs):
+            captured["params"] = params or {}
+            return resp
+
+        with patch.object(srv, "_api", side_effect=fake_api):
+            srv.wazuh_list_alerts(log_type="7-15")  # old range format must be rejected
+
         assert captured["params"].get("type_log") == "all"
 
 
@@ -340,16 +357,16 @@ class TestSearchAlerts:
             }
         }
         with _mock_api(srv, {"/manager/logs": resp}):
-            result = srv.wazuh_search_alerts(query="SSH", minutes=30, limit=10)
+            result = srv.wazuh_search_alerts(query="SSH", limit=10)
         assert result["query"] == "SSH"
-        assert result["minutes"] == 30
-        assert "alerts" in result
+        assert "minutes" not in result  # removed: not applicable without indexer
+        assert "logs" in result
         assert "total" in result
 
     def test_note_field_present(self, srv):
         """
         The 'note' field communicates the manager-buffer limitation honestly.
-        It must always be present in the response, even when no alerts match.
+        It must always be present in the response, even when no logs match.
         """
         resp = {"data": {"affected_items": [], "total_affected_items": 0}}
         with _mock_api(srv, {"/manager/logs": resp}):
@@ -362,26 +379,26 @@ class TestSearchAlerts:
             result = srv.wazuh_search_alerts(query="test")
         assert "error" in result
 
-    def test_minutes_clamped_at_max(self, srv):
-        resp = {"data": {"affected_items": [], "total_affected_items": 0}}
-        captured = {}
+    def test_query_length_cap_enforced(self, srv):
+        """Queries exceeding 256 chars must be rejected before calling the API."""
+        calls = []
 
-        def fake_api(method, path, params=None, **kwargs):
-            captured["resp"] = resp
-            return resp
+        def fake_api(method, path, **kwargs):
+            calls.append(path)
+            return {"data": {"affected_items": [], "total_affected_items": 0}}
 
         with patch.object(srv, "_api", side_effect=fake_api):
-            result = srv.wazuh_search_alerts(query="x", minutes=99999, limit=5)
-        # Function must not crash; minutes is clamped internally to 1440
-        assert "alerts" in result
+            result = srv.wazuh_search_alerts(query="x" * 257)
+        assert "error" in result
+        assert not calls, "API must not be called for oversized query"
 
     def test_limit_applied_to_results(self, srv):
         """Result list must not exceed the requested limit."""
-        items = [{"description": f"alert {i}"} for i in range(20)]
+        items = [{"description": f"event {i}"} for i in range(20)]
         resp = {"data": {"affected_items": items, "total_affected_items": 20}}
         with _mock_api(srv, {"/manager/logs": resp}):
-            result = srv.wazuh_search_alerts(query="alert", limit=5)
-        assert len(result["alerts"]) <= 5
+            result = srv.wazuh_search_alerts(query="event", limit=5)
+        assert len(result["logs"]) <= 5
 
 
 # ---------------------------------------------------------------------------
