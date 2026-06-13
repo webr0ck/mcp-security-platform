@@ -50,16 +50,30 @@ All six blocking security findings from the 2026-06-12 in-session review are com
 
 ---
 
-## NEXT — After security fixes ship
+## DONE — PRD-0001 M3: Labeler / PKI / Signing (E3) — 2026-06-13
+
+Trust envelope signer fully implemented. Commits: `2ec2660` (JCS dep), `461e52f` (TrustLabeler), `2a2f1ab` (PKI scripts), `d4eec27` (pki perms fix), `0f45e71` (config), `09b9719` (router wiring), `c08a8b1` (compose sidecar), `2bd1d88` (lint).
+
+| Component | Deliverable | Commit |
+|---|---|---|
+| W3.3 | `jcs` (RFC 8785) dep + `jcs.py` helpers | `2ec2660` |
+| W3.4 core | `TrustLabeler` class — cert cache, ES256/JCS envelope, `sign_result()` → `None` on failure (W3.5) | `461e52f` |
+| W3.1 | `infra/pki/init-labeler-pki.py` — sub-CA (nameConstraints=`platform.internal`) + leaf (EKU OID `1.3.6.1.4.1.99999.1.1`, 15-min TTL) | `2a2f1ab` |
+| W3.2 | `infra/pki/renew-labeler-leaf.py` — atomic swap every 12 min | `2a2f1ab` |
+| Security | `_atomic_write` enforces `0o600` + `0o700` dir (appsec HIGH findings) | `d4eec27` |
+| W3.4 config | `TRUST_ENVELOPE_ENABLED`, `LABELER_CERT_PATH` etc. in `config.py`; startup init in `main.py` | `0f45e71` |
+| W3.4 wire | Signing at mcp_server.py Shape A + Shape B + tools.py REST; trust meta injected into invocation.py result | `09b9719` |
+| W3.2 infra | `labeler-data` volume + `labeler-renewal` sidecar (compose profile `trust-envelope`) + `make labeler-init` | `c08a8b1` |
+
+19 new tests. F-001 gate passes. OPA strict passes. Ruff clean on new files.
+
+---
+
+## NEXT
 
 Priority order:
 
-1. **PRD-0001 M3: Labeler / PKI (E3)**
-   - step-ca sub-CA + labeler leaf certificate + renewal sidecar
-   - JSON canonicalize dependency
-   - Sign RFC-0001 trust envelope at result assembly time
-
-2. **PRD-0001 M4: Independent verifier ("shim") + demo suite (E4/E5)**
+1. **PRD-0001 M4: Independent verifier ("shim") + demo suite (E4/E5)**
    - D1–D8 verifier deliverables
    - F-1–F-8 test coverage
    - Full trust-envelope POC end-to-end
