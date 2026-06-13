@@ -60,6 +60,13 @@ class HealthcheckAdapter(ABC):
                 original_hostname=self.original_hostname,
             )
             return httpx.AsyncClient(transport=transport, timeout=timeout)
+        if bool(self.pinned_ip) != bool(self.original_hostname):
+            logger.warning(
+                "HealthcheckAdapter._build_client: only one of pinned_ip/original_hostname set "
+                "(pinned_ip=%r, original_hostname=%r); falling back to unpinned client",
+                self.pinned_ip,
+                self.original_hostname,
+            )
         return httpx.AsyncClient(timeout=timeout)
 
     @abstractmethod
@@ -87,7 +94,7 @@ class GiteaHealthcheck(HealthcheckAdapter):
                 resp = await client.get(url)
                 resp.raise_for_status()
         except httpx.TimeoutException as exc:
-            raise HealthcheckFailed("gitea", f"Timeout after 5 seconds") from exc
+            raise HealthcheckFailed("gitea", "Timeout after 5 seconds") from exc
         except httpx.HTTPStatusError as exc:
             raise HealthcheckFailed(
                 "gitea",
@@ -114,7 +121,7 @@ class M365Healthcheck(HealthcheckAdapter):
                 resp = await client.get(url)
                 resp.raise_for_status()
         except httpx.TimeoutException as exc:
-            raise HealthcheckFailed("m365", f"Timeout after 10 seconds") from exc
+            raise HealthcheckFailed("m365", "Timeout after 10 seconds") from exc
         except httpx.HTTPStatusError as exc:
             raise HealthcheckFailed(
                 "m365",

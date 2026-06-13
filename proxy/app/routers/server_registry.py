@@ -495,13 +495,13 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     from urllib.parse import urlparse as _urlparse
     _registered_allowlist_entry: str | None = url_record[3]  # upstream_allowlist_entry column
     _pinned_ips: list[str] = []
-    _healthcheck_hostname: str = ""
+    _healthcheck_hostname: str | None = None
     try:
         _pinned_ips = await revalidate_upstream_ip_at_invoke(
             upstream_url=url_record[0],
             registered_allowlist_entry=_registered_allowlist_entry,
         )
-        _healthcheck_hostname = _urlparse(url_record[0]).hostname or ""
+        _healthcheck_hostname = _urlparse(url_record[0]).hostname or None
     except UpstreamRevalidationError as exc:
         raise HTTPException(status_code=400, detail=f"IP revalidation failed at approval: {exc}") from exc
 
@@ -513,11 +513,12 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     # If the server has an adapter_name, validate it's healthy via healthcheck.
     if adapter_name:
         try:
+            # revalidate_upstream_ip_at_invoke raises on failure; non-empty list guaranteed on success
             healthcheck_adapter = get_healthcheck(
                 adapter_name,
                 url_record[0],
                 pinned_ip=_pinned_ips[0] if _pinned_ips else None,
-                original_hostname=_healthcheck_hostname or None,
+                original_hostname=_healthcheck_hostname,
             )
             await healthcheck_adapter.healthcheck()
         except HealthcheckFailed as exc:

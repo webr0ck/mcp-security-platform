@@ -6,8 +6,12 @@ These tests verify that:
    preventing re-resolution of the hostname at connect time.
 2. GiteaHealthcheck and M365Healthcheck accept pinned_ip/original_hostname
    constructor args (regression guard for the seam).
+3. Partial args (only pinned_ip or only original_hostname) log a warning
+   and fall back to a plain client.
 """
 from __future__ import annotations
+
+import unittest.mock
 
 import pytest
 import httpx
@@ -23,6 +27,25 @@ from app.services.pinned_transport import PinnedIPTransport
 
 
 # ---------------------------------------------------------------------------
+# Shared fixture: CapturingAsyncClient
+# Subclasses httpx.AsyncClient and records the 'transport' kwarg passed to
+# __init__, so tests can assert which transport was (or wasn't) injected.
+# ---------------------------------------------------------------------------
+
+_original_async_client = httpx.AsyncClient
+
+
+class CapturingAsyncClient(_original_async_client):
+    """httpx.AsyncClient subclass that records the transport kwarg on construction."""
+
+    captured: list[object] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        CapturingAsyncClient.captured.append(kwargs.get("transport"))
+        super().__init__(**kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Test 1 — TOCTOU rebind: PinnedIPTransport is used when pinned_ip is set
 # ---------------------------------------------------------------------------
 
@@ -32,22 +55,15 @@ class TestTOCTOURebindPinning:
     PinnedIPTransport rather than letting httpx re-resolve the hostname.
     """
 
+    def setup_method(self) -> None:
+        CapturingAsyncClient.captured = []
+
     @pytest.mark.asyncio
     async def test_gitea_healthcheck_uses_pinned_transport(self) -> None:
         """
         GiteaHealthcheck with pinned_ip must build its httpx client with
         PinnedIPTransport, not a plain client that re-resolves DNS.
         """
-        captured_transport: list[object] = []
-
-        original_async_client = httpx.AsyncClient
-
-        class CapturingAsyncClient(original_async_client):
-            def __init__(self, **kwargs: object) -> None:
-                captured_transport.append(kwargs.get("transport"))
-                # Don't actually connect — override the GET
-                super().__init__(**kwargs)
-
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock(return_value=None)
 
@@ -60,8 +76,8 @@ class TestTOCTOURebindPinning:
                 )
                 await adapter.healthcheck()
 
-        assert len(captured_transport) == 1, "httpx.AsyncClient must be constructed once"
-        transport = captured_transport[0]
+        assert len(CapturingAsyncClient.captured) == 1, "httpx.AsyncClient must be constructed once"
+        transport = CapturingAsyncClient.captured[0]
         assert isinstance(transport, PinnedIPTransport), (
             f"Expected PinnedIPTransport, got {type(transport).__name__!r}. "
             "Without pinning, a TTL-0 DNS flip can redirect the healthcheck to "
@@ -74,15 +90,6 @@ class TestTOCTOURebindPinning:
         M365Healthcheck with pinned_ip must build its httpx client with
         PinnedIPTransport.
         """
-        captured_transport: list[object] = []
-
-        original_async_client = httpx.AsyncClient
-
-        class CapturingAsyncClient(original_async_client):
-            def __init__(self, **kwargs: object) -> None:
-                captured_transport.append(kwargs.get("transport"))
-                super().__init__(**kwargs)
-
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock(return_value=None)
 
@@ -95,8 +102,8 @@ class TestTOCTOURebindPinning:
                 )
                 await adapter.healthcheck()
 
-        assert len(captured_transport) == 1, "httpx.AsyncClient must be constructed once"
-        transport = captured_transport[0]
+        assert len(CapturingAsyncClient.captured) == 1, "httpx.AsyncClient must be constructed once"
+        transport = CapturingAsyncClient.captured[0]
         assert isinstance(transport, PinnedIPTransport), (
             f"Expected PinnedIPTransport, got {type(transport).__name__!r}."
         )
@@ -107,15 +114,6 @@ class TestTOCTOURebindPinning:
         Without pinned_ip, GiteaHealthcheck falls back to a plain httpx client
         (backward-compat: existing tests must not break).
         """
-        captured_transport: list[object] = []
-
-        original_async_client = httpx.AsyncClient
-
-        class CapturingAsyncClient(original_async_client):
-            def __init__(self, **kwargs: object) -> None:
-                captured_transport.append(kwargs.get("transport"))
-                super().__init__(**kwargs)
-
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock(return_value=None)
 
@@ -124,11 +122,21 @@ class TestTOCTOURebindPinning:
                 adapter = GiteaHealthcheck("http://gitea.example.com")
                 await adapter.healthcheck()
 
-        assert len(captured_transport) == 1
+        assert len(CapturingAsyncClient.captured) == 1
         # No transport kwarg passed → None (plain client)
-        assert captured_transport[0] is None, (
+        assert CapturingAsyncClient.captured[0] is None, (
             "Without pinned_ip, no transport should be injected (backward compat)."
         )
+
+    def test_partial_args_logs_warning_and_falls_back(self) -> None:
+        """Only pinned_ip set (no original_hostname) → warning logged, plain client used."""
+        adapter = GiteaHealthcheck("https://example.com", pinned_ip="1.2.3.4", original_hostname=None)
+        with unittest.mock.patch("app.credential_broker.adapters.healthcheck.logger") as mock_logger:
+            client = adapter._build_client(timeout=5.0)
+        assert isinstance(client, httpx.AsyncClient)
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        assert "pinned_ip" in warning_msg or "original_hostname" in warning_msg
 
 
 # ---------------------------------------------------------------------------
