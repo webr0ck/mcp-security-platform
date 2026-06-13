@@ -11,9 +11,6 @@ Exit 0 on all pass, 1 on any failure.
 """
 from __future__ import annotations
 
-import base64
-import hashlib
-import secrets
 import sys
 from datetime import UTC, datetime, timedelta
 
@@ -25,7 +22,6 @@ from cryptography.x509.oid import NameOID
 # Add proxy/ to path for imports
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "proxy"))
 
-from app.services.jcs import jcs_signed_input, jcs_tool_result
 from app.services.trust_labeler import TrustLabeler, TRUST_ENVELOPE_KEY
 from app.services.trust_verifier import TrustVerifier
 
@@ -57,7 +53,8 @@ def _make_pki(ttl_minutes=15):
 
 
 def _sign(leaf_key, leaf_cert, sub_ca, content, trust_tier=0):
-    import tempfile, os
+    import tempfile
+    import os
     with tempfile.TemporaryDirectory() as td:
         cert_p = os.path.join(td, "l.crt")
         key_p = os.path.join(td, "l.key")

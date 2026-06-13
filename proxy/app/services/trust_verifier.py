@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
+
 from app.services.jcs import jcs_signed_input, jcs_tool_result
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,9 @@ class TrustVerifier:
     ) -> VerifierVerdict:
         """Verify the trust envelope in result._meta. Fail-closed on any error."""
         try:
-            return self._verify(result, tool_name=tool_name, server_id=server_id, result_id=result_id)
+            return self._verify(
+                result, tool_name=tool_name, server_id=server_id, result_id=result_id
+            )
         except Exception:  # noqa: BLE001
             logger.warning("TrustVerifier.verify unexpected exception (fail-closed)", exc_info=True)
             return VerifierVerdict(accepted=False, integrity_rank=0, reason="unexpected_error")
@@ -145,7 +148,10 @@ class TrustVerifier:
                 ec.ECDSA(hashes.SHA256()),
             )
             # 2. Leaf must have been valid at signed_at (point-in-time, §6.3(5))
-            if not (leaf_cert.not_valid_before_utc <= signed_at_dt <= leaf_cert.not_valid_after_utc):
+            leaf_valid = (
+                leaf_cert.not_valid_before_utc <= signed_at_dt <= leaf_cert.not_valid_after_utc
+            )
+            if not leaf_valid:
                 return self._reject("chain_validation_failed")
             # 3. Sub-CA is the SPKI-pinned trust anchor; as the explicit trust root
             #    we do not enforce its validity window at signed_at — the trust is
@@ -189,11 +195,13 @@ class TrustVerifier:
 
         # ── Step 5: Content hash recomputation ───────────────────────────
         content = result.get("content", [])
-        structured_content = result.get("structuredContent", None)
+        structured_content = result.get("structuredContent")
         canonical = jcs_tool_result(content=content, structured_content=structured_content)
         expected_hash = "sha256:" + hashlib.sha256(canonical).hexdigest()
         if content_hash != expected_hash:
-            return self._reject(f"content_hash_mismatch got={content_hash[:12]}… want={expected_hash[:12]}…")
+            return self._reject(
+                f"content_hash_mismatch got={content_hash[:12]}… want={expected_hash[:12]}…"
+            )
 
         integrity_rank = int(label.get("integrity_rank", 0))
         return VerifierVerdict(accepted=True, integrity_rank=integrity_rank, reason=None)

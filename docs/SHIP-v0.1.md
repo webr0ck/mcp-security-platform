@@ -69,16 +69,27 @@ Trust envelope signer fully implemented. Commits: `2ec2660` (JCS dep), `461e52f`
 
 ---
 
+## DONE — PRD-0001 M4: Independent verifier + demo suite (E4/E5) — 2026-06-13
+
+Trust envelope independent verifier, passive observer, and demo suite fully implemented.
+
+| Component | Deliverable | Commit |
+|---|---|---|
+| W4.1 core | `TrustVerifier` + `VerifierVerdict` — SPKI-pinned sub-CA anchor, point-in-time validation at `signed_at`, hardcoded ES256, JCS content hash, fail-closed | `402d2e8` |
+| W4.1 tests | 16 tests: D4/D5/D6 + F-1…F-8 footgun coverage (all pass) | `402d2e8` |
+| W4.2 | `TrustObserver` passive observer — logs verdict, never blocks, fail-closed on non-dict | `56275b4` |
+| W4.2 config | `TRUST_OBSERVER_ENABLED` in `config.py`, `.env.example`; `init_verifier()` wired in lifespan | `56275b4` |
+| W5.2 | `scripts/demo_trust_envelope.py` — D4 (content tamper), D5 (rogue cert), D6 (valid) all PASS | `256737e` |
+
+20 new tests (16 verifier + 4 observer). Demo passes 3/3. Ruff clean on all new files.
+
+---
+
 ## NEXT
 
 Priority order:
 
-1. **PRD-0001 M4: Independent verifier ("shim") + demo suite (E4/E5)**
-   - D1–D8 verifier deliverables
-   - F-1–F-8 test coverage
-   - Full trust-envelope POC end-to-end
-
-3. **DA-1: Staging proof-run (INV-012 honesty)**
+1. **DA-1: Staging proof-run (INV-012 honesty)**
    - Stand up a staging stack and prove OPA rejects an unsigned/tampered bundle, OR downgrade INV-012 from "ENFORCED" to "mechanism present, runtime-rejection untested."
    - `scripts/check_signed_default.sh` is a static grep — relabel as structural/static check, not runtime assertion.
 
