@@ -26,6 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.services.auditor import run_audit, LLMAuditRequiredError
+from app.services.ssrf import validate_server_url, SSRFError
+from app.services.server_onboarding import revalidate_upstream_ip_at_invoke, UpstreamRevalidationError
+from app.services.pinned_transport import PinnedIPTransport
 
 import logging
 
@@ -1096,6 +1099,7 @@ async def invoke_tool(
     INV-005: Quarantined tools blocked before OPA evaluation.
     """
     from app.services.invocation import (
+        TaintFloorDenyError,
         ToolDeprecatedError,
         ToolQuarantinedError,
         invoke_tool as _invoke,
@@ -1246,6 +1250,23 @@ async def invoke_tool(
             # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
             profile_uuid=getattr(request.state, "profile_uuid", None),
         )
+        from app.services.trust_labeler import get_labeler as _get_labeler, TRUST_ENVELOPE_KEY as _TEK
+        _tl = _get_labeler()
+        if _tl is not None and isinstance(response.get("result"), dict):
+            _resp_meta = response.get("meta", {})
+            _envelope = _tl.sign_result(
+                content=response["result"].get("content", []),
+                structured_content=None,
+                tool_name=body.get("params", {}).get("name", ""),
+                server_id=_resp_meta.get("server_id", ""),
+                result_id=request_id,
+                trust_tier=_resp_meta.get("trust_tier"),
+                sensitivity_label=_resp_meta.get("sensitivity_label"),
+            )
+            if _envelope is not None:
+                response = dict(response)
+                response["result"] = dict(response["result"])
+                response["result"].setdefault("_meta", {})[_TEK] = _envelope
         return JSONResponse(content=response)
 
     except NotEntitledError:
@@ -1258,6 +1279,18 @@ async def invoke_tool(
             detail={
                 "code": "NOT_ENTITLED",
                 "message": "Not entitled to this tool's server.",
+            },
+        )
+
+    except TaintFloorDenyError:
+        # PRD-0001 M2: B-coarse taint floor denied a high-sensitivity sink in a
+        # tainted session. The deny audit (INV-001) is emitted inside invoke_tool;
+        # map to 403 without leaking required_integrity / taint internals.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "TAINT_FLOOR_DENIED",
+                "message": "Session restricted by trust policy.",
             },
         )
 
@@ -1435,7 +1468,7 @@ async def discover_tools(
         result = await db.execute(
             text(
                 """
-                SELECT server_id, upstream_url, service_name, status
+                SELECT server_id, upstream_url, service_name, status, upstream_allowlist_entry
                 FROM server_registry
                 WHERE server_id = :server_id AND deleted_at IS NULL
                 LIMIT 1
@@ -1462,10 +1495,51 @@ async def discover_tools(
 
     upstream_url = server_row.upstream_url
 
+    # N3 fix: SSRF re-validation at call time (closes DNS-rebind window).
+    # Step 2a: Static SSRF allowlist check.
+    try:
+        validate_server_url(upstream_url)
+    except SSRFError as _ssrf_exc:
+        logger.warning(
+            "discover_tools SSRF validation failed",
+            extra={"server_id": server_id, "upstream_url": upstream_url, "error": str(_ssrf_exc)},
+        )
+        return JSONResponse(
+            status_code=400,
+            content={"code": "SSRF_VALIDATION_FAILED", "message": str(_ssrf_exc)},
+        )
+
+    # Step 2b: Invoke-time DNS-rebind / TOCTOU revalidation against registered allowlist entry.
+    _registered_allowlist_entry = server_row.upstream_allowlist_entry
+    try:
+        _pinned_ips: list[str] = await revalidate_upstream_ip_at_invoke(
+            upstream_url=upstream_url,
+            registered_allowlist_entry=_registered_allowlist_entry,
+        )
+    except UpstreamRevalidationError as _rebind_exc:
+        logger.warning(
+            "discover_tools DNS-rebind or TOCTOU detected — denying request",
+            extra={
+                "server_id": server_id,
+                "upstream_url": upstream_url,
+                "registered_allowlist_entry": _registered_allowlist_entry,
+                "error": str(_rebind_exc),
+            },
+        )
+        return JSONResponse(
+            status_code=400,
+            content={"code": "UPSTREAM_REVALIDATION_FAILED", "message": str(_rebind_exc)},
+        )
+
+    # Step 2c: Pin TCP connection to the validated IP (eliminates TOCTOU window).
+    from urllib.parse import urlparse as _urlparse
+    _upstream_hostname: str = _urlparse(upstream_url).hostname or ""
+
     # Step 2: Call upstream server's /tools/list endpoint
     # Format: POST {upstream_url} with MCP tools/list JSON-RPC request
     try:
-        async with httpx.AsyncClient() as client:
+        _transport = PinnedIPTransport(_pinned_ips[0], _upstream_hostname) if (_pinned_ips and _upstream_hostname) else None
+        async with httpx.AsyncClient(transport=_transport) as client:
             # Initialize session (if needed by the upstream server)
             init_payload = {
                 "jsonrpc": "2.0",

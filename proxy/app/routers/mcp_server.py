@@ -44,6 +44,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["MCP"])
 
+# INV-015: sentinel used to distinguish a Redis connection exception from a
+# genuine cache miss (None).  A Redis exception must NEVER fall through to a
+# live DB call — that would re-introduce the fail-open for a different path.
+_SENTINEL_FAIL_CLOSED = object()
+
+
+class _ProfileLookupUnavailable(Exception):
+    """Raised by _dispatch when ProfileLookupError propagates from _registered_tools_for_client.
+
+    Carries the JSON-RPC error body so mcp_post can return it with HTTP 503.
+    INV-015: profile lookup fail-closed — DB error + cache miss → 503.
+    """
+    def __init__(self, rpc_error: dict) -> None:
+        self.rpc_error = rpc_error
+        super().__init__("Profile lookup unavailable")
+
 # ---------------------------------------------------------------------------
 # Resource guards
 # ---------------------------------------------------------------------------
@@ -218,8 +234,13 @@ def _can_call(tool_name: str, roles: list[str]) -> bool:
     return False
 
 
-def _load_grants_data() -> tuple[dict, dict]:
-    """Return (grants, tools_metadata) from data.json. Mirrors OPA bundle layout."""
+def _load_tools_meta() -> dict:
+    """Return tools metadata dict from data.json (mcp.tools section).
+
+    This half of the old _load_grants_data() is still file-based because
+    tools_meta is static tag metadata used for NULL-server_id tag matching
+    and lives in the signed OPA bundle.  It does NOT contain per-client grants.
+    """
     candidates = [
         "/app/policies/data.json",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../policies/rego/data.json"),
@@ -228,11 +249,82 @@ def _load_grants_data() -> tuple[dict, dict]:
         if os.path.exists(grants_path):
             try:
                 with open(grants_path) as f:
-                    d = json.load(f).get("mcp", {})
-                    return d.get("grants", {}), d.get("tools", {})
+                    return json.load(f).get("mcp", {}).get("tools", {})
             except Exception:
                 pass
-    return {}, {}
+    return {}
+
+
+async def _load_grants_data(client_id: str) -> tuple[dict, dict]:
+    """Return (grants, tools_metadata) for the given client_id.
+
+    grants dict shape: {client_id: {"allowed_tools": [...], "allowed_tags": [...], "max_risk_level": "..."}}
+    tools_meta dict shape: {tool_name: {"tags": [...]}} — loaded from data.json (static, unchanged).
+
+    N4 fix: grants are now read from the client_grants DB table rather than the
+    static policies/rego/data.json file, so admin API grant additions/revocations
+    are immediately visible to tools/list without a container restart.
+
+    Stale snapshot may list revoked tools for up to 60s; OPA re-enforces on invoke.
+
+    Fallback chain on DB error:
+      1. Redis cache key grants_snapshot:{client_id} (60s TTL write-through)
+      2. Empty grants dict — tools/list is best-effort; OPA enforces on invoke
+    """
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    from app.core.redis_client import redis_pool
+
+    tools_meta = _load_tools_meta()
+    cache_key = f"grants_snapshot:{client_id}"
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    "SELECT allowed_tools, allowed_tags, max_risk_level "
+                    "FROM client_grants WHERE client_id = :client_id"
+                ),
+                {"client_id": client_id},
+            )
+            row = result.mappings().fetchone()
+
+        if row is None:
+            return {}, tools_meta
+
+        grants = {
+            client_id: {
+                "allowed_tools": row["allowed_tools"] or [],
+                "allowed_tags": row["allowed_tags"] or [],
+                "max_risk_level": row["max_risk_level"] or "high",
+            }
+        }
+
+        # Write-through to Redis so the cache reflects the live DB state.
+        try:
+            redis = redis_pool.client
+            await redis.setex(cache_key, 60, json.dumps(grants))
+        except Exception as cache_exc:
+            logger.debug("grants cache write-through failed client_id=%s: %s", client_id, cache_exc)
+
+        return grants, tools_meta
+
+    except Exception as db_exc:
+        logger.warning("DB error loading grants for client_id=%s: %s — trying cache", client_id, db_exc)
+
+        # Fallback: Redis snapshot (may be up to 60s stale).
+        try:
+            redis = redis_pool.client
+            cached = await redis.get(cache_key)
+            if cached:
+                grants = json.loads(cached)
+                return grants, tools_meta
+        except Exception as cache_exc:
+            logger.warning("grants cache fallback also failed client_id=%s: %s", client_id, cache_exc)
+
+        # Both DB and cache unavailable — return empty grants.
+        # tools/list is best-effort; OPA re-enforces on invoke (INV-004).
+        return {}, tools_meta
 
 
 async def _lookup_profile_row(profile_id: str, mcp_name: str):
@@ -242,11 +334,28 @@ async def _lookup_profile_row(profile_id: str, mcp_name: str):
     all functions).  A row with enabled=False means this MCP is disabled for the
     caller's profile.
 
+    INV-015: fail-closed semantics.
+      DB success:             write-through to Redis (TTL 120s), return row or None.
+      DB error + cache hit:   return cached value (last-known-state).
+      DB error + cache miss:  raise ProfileLookupError → caller converts to 503.
+      Redis exception:        treat as _SENTINEL_FAIL_CLOSED — never fall through
+                              to a live DB call on Redis exception.
+
     Separate function so tests can patch it cleanly.
     """
+    import json as _json
     from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
+    from app.core.redis_client import redis_pool
+    from app.services.invocation import ProfileLookupError
+    from redis.exceptions import RedisError
 
+    cache_key = f"profile_row:{profile_id}:{mcp_name}"
+    _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
+
+    # ── Try DB first ────────────────────────────────────────────────────────
+    db_raised = False
+    db_row = None
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -256,13 +365,52 @@ async def _lookup_profile_row(profile_id: str, mcp_name: str):
                 ),
                 {"pid": profile_id, "mcp_name": mcp_name},
             )
-            return result.mappings().fetchone()
+            db_row = result.mappings().fetchone()
+
+        # DB succeeded — write-through to Redis (best-effort)
+        try:
+            redis = redis_pool.client
+            value = _json.dumps(dict(db_row)) if db_row is not None else _SENTINEL_NO_ROW
+            await redis.setex(cache_key, 120, value)
+        except Exception as _cache_exc:
+            logger.debug(
+                "profile_row cache write-through failed profile_id=%s mcp_name=%s: %s",
+                profile_id, mcp_name, _cache_exc,
+            )
+        return db_row
+
     except Exception as exc:
+        db_raised = True
         logger.warning(
             "mcp_profiles lookup failed profile_id=%s mcp_name=%s: %s",
             profile_id, mcp_name, exc,
         )
-        return None
+
+    # ── DB failed — try Redis cache (SENTINEL pattern, INV-015) ────────────
+    cached = _SENTINEL_FAIL_CLOSED
+    try:
+        redis = redis_pool.client
+        cached = await redis.get(cache_key)
+    except RedisError as _redis_exc:
+        logger.warning(
+            "profile_row Redis fallback failed profile_id=%s mcp_name=%s: %s",
+            profile_id, mcp_name, _redis_exc,
+        )
+        cached = _SENTINEL_FAIL_CLOSED
+
+    if cached is _SENTINEL_FAIL_CLOSED or (db_raised and cached is None):
+        raise ProfileLookupError(
+            f"DB unreachable and no cached mcp_profiles row for {profile_id}/{mcp_name}"
+        )
+
+    if cached == _SENTINEL_NO_ROW:
+        return None  # cached "no row" — default allow
+    try:
+        return _json.loads(cached)
+    except Exception:
+        raise ProfileLookupError(
+            f"Malformed cache entry for mcp_profiles {profile_id}/{mcp_name}"
+        )
 
 
 async def _lookup_profile_mcp_binding(profile_uuid: str, mcp_name: str):
@@ -271,11 +419,28 @@ async def _lookup_profile_mcp_binding(profile_uuid: str, mcp_name: str):
     Task 4.3: named-profile binding lookup. Absence = default (enabled=true, all functions).
     A row with enabled=False means this MCP is disabled for the profile.
 
+    INV-015: fail-closed semantics (same pattern as _lookup_profile_row).
+      DB success:             write-through to Redis (TTL 120s), return row or None.
+      DB error + cache hit:   return cached value (last-known-state).
+      DB error + cache miss:  raise ProfileLookupError → caller converts to 503.
+      Redis exception:        treat as _SENTINEL_FAIL_CLOSED — never fall through
+                              to a live DB call on Redis exception.
+
     Separate function so tests can patch it cleanly.
     """
+    import json as _json
     from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
+    from app.core.redis_client import redis_pool
+    from app.services.invocation import ProfileLookupError
+    from redis.exceptions import RedisError
 
+    cache_key = f"profile_binding:{profile_uuid}:{mcp_name}"
+    _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
+
+    # ── Try DB first ────────────────────────────────────────────────────────
+    db_raised = False
+    db_row = None
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -285,13 +450,52 @@ async def _lookup_profile_mcp_binding(profile_uuid: str, mcp_name: str):
                 ),
                 {"pid": profile_uuid, "mcp_name": mcp_name},
             )
-            return result.mappings().fetchone()
+            db_row = result.mappings().fetchone()
+
+        # DB succeeded — write-through to Redis (best-effort)
+        try:
+            redis = redis_pool.client
+            value = _json.dumps(dict(db_row)) if db_row is not None else _SENTINEL_NO_ROW
+            await redis.setex(cache_key, 120, value)
+        except Exception as _cache_exc:
+            logger.debug(
+                "profile_binding cache write-through failed profile_uuid=%s mcp_name=%s: %s",
+                profile_uuid, mcp_name, _cache_exc,
+            )
+        return db_row
+
     except Exception as exc:
+        db_raised = True
         logger.warning(
             "profile_mcp_bindings lookup failed profile_uuid=%s mcp_name=%s: %s",
             profile_uuid, mcp_name, exc,
         )
-        return None
+
+    # ── DB failed — try Redis cache (SENTINEL pattern, INV-015) ────────────
+    cached = _SENTINEL_FAIL_CLOSED
+    try:
+        redis = redis_pool.client
+        cached = await redis.get(cache_key)
+    except RedisError as _redis_exc:
+        logger.warning(
+            "profile_binding Redis fallback failed profile_uuid=%s mcp_name=%s: %s",
+            profile_uuid, mcp_name, _redis_exc,
+        )
+        cached = _SENTINEL_FAIL_CLOSED
+
+    if cached is _SENTINEL_FAIL_CLOSED or (db_raised and cached is None):
+        raise ProfileLookupError(
+            f"DB unreachable and no cached profile_mcp_bindings row for {profile_uuid}/{mcp_name}"
+        )
+
+    if cached == _SENTINEL_NO_ROW:
+        return None  # cached "no row" — default allow
+    try:
+        return _json.loads(cached)
+    except Exception:
+        raise ProfileLookupError(
+            f"Malformed cache entry for profile_mcp_bindings {profile_uuid}/{mcp_name}"
+        )
 
 
 async def _registered_tools_for_client(
@@ -326,14 +530,18 @@ async def _registered_tools_for_client(
 
     If principal_id or principal_type are absent, server-linked tools are hidden
     (fail-closed: same as enforce_tool_entitlement with unresolved principal).
+
+    INV-015: ProfileLookupError raised by _lookup_profile_row /
+    _lookup_profile_mcp_binding is NOT caught here — it propagates to the
+    tools/list handler which returns a JSON-RPC 503 error.
     """
     from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
     from app.services.entitlement import check_entitlement
 
-    grants, tools_meta = _load_grants_data()
+    grants, tools_meta = await _load_grants_data(client_id)
 
-    # Caller's data.json grants — used for NULL-server_id tools (grants-only path).
+    # Caller's DB grants — used for NULL-server_id tools (grants-only path).
     grant = grants.get(client_id, {})
     allowed_tools: set[str] = set(grant.get("allowed_tools", []))
     allowed_tags: set[str] = set(grant.get("allowed_tags", []))
@@ -482,6 +690,12 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             logger.info("MCP invoke denied (not entitled) tool=%s client=%s reason=%s",
                         name, client_id, exc.reason)
             return _err(req_id, -32003, "Access denied: not entitled to this tool's server")
+        from app.services.invocation import TaintFloorDenyError
+        if isinstance(exc, TaintFloorDenyError):
+            # PRD-0001 M2: taint floor denied a high-sensitivity sink in a tainted
+            # session. Audit already emitted in invoke_tool (INV-001). No internals leaked.
+            logger.info("MCP invoke denied (taint floor) tool=%s client=%s", name, client_id)
+            return _err(req_id, -32003, "Access denied: session restricted by trust policy")
         if isinstance(exc, CredentialEnrollmentRequiredError):
             return _err(
                 req_id,
@@ -510,7 +724,18 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
     content = upstream.get("result", {}).get("content", [])
     if not content:
         content = [{"type": "text", "text": json.dumps(upstream.get("result", {}))}]
-    return _ok(req_id, {"content": content})
+    from app.services.trust_labeler import get_labeler as _get_labeler, build_envelope_result as _build_envelope_result
+    _upstream_meta = upstream.get("meta", {})
+    _result_payload = _build_envelope_result(
+        content=content,
+        labeler=_get_labeler(),
+        tool_name=name,
+        server_id=_upstream_meta.get("server_id", ""),
+        result_id=request_id,
+        trust_tier=_upstream_meta.get("trust_tier"),
+        sensitivity_label=_upstream_meta.get("sensitivity_label"),
+    )
+    return _ok(req_id, _result_payload)
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +916,10 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
             logger.info("invoke_tool denied (not entitled) tool=%s client=%s reason=%s",
                         tool_name, client_id, exc.reason)
             return {"type": "text", "text": "Access denied: not entitled to this tool's server"}
+        from app.services.invocation import TaintFloorDenyError
+        if isinstance(exc, TaintFloorDenyError):
+            logger.info("invoke_tool denied (taint floor) tool=%s client=%s", tool_name, client_id)
+            return {"type": "text", "text": "Access denied: session restricted by trust policy"}
         logger.exception("invoke_tool pipeline error for %s", tool_name)
         return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}
 
@@ -773,17 +1002,29 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
 
     # ── Tool methods ──────────────────────────────────────────────────────
     if method == "tools/list":
+        from app.services.invocation import ProfileLookupError
         platform_tools = _visible_tools(roles)
         principal_id: str | None = getattr(request.state, "principal_id", None)
         principal_type: str | None = getattr(request.state, "principal_type", None)
-        registry_tools = await _registered_tools_for_client(
-            client_id=client_id,
-            roles=roles,
-            principal_id=principal_id,
-            principal_type=principal_type,
-            # Task 4.3: named profile UUID — filters tools by profile_mcp_bindings.
-            profile_uuid=getattr(request.state, "profile_uuid", None),
-        )
+        try:
+            registry_tools = await _registered_tools_for_client(
+                client_id=client_id,
+                roles=roles,
+                principal_id=principal_id,
+                principal_type=principal_type,
+                # Task 4.3: named profile UUID — filters tools by profile_mcp_bindings.
+                profile_uuid=getattr(request.state, "profile_uuid", None),
+            )
+        except ProfileLookupError:
+            # INV-015: DB error + cache miss on profile lookup → fail-closed 503.
+            # Raise _ProfileLookupUnavailable so mcp_post returns HTTP 503.
+            logger.error(
+                "tools/list profile lookup unavailable client=%s — returning 503",
+                client_id,
+            )
+            raise _ProfileLookupUnavailable(
+                _err(req_id, -32603, "Profile lookup unavailable — service degraded")
+            )
         tools = platform_tools + registry_tools
         logger.info(
             "MCP tools/list client=%s roles=%s visible=%d (platform=%d registry=%d)",
@@ -845,6 +1086,7 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
         if not handler:
             return _err(req_id, -32601, f"Tool '{name}' has no handler")
 
+        from app.services.invocation import AuditEmissionError
         try:
             import asyncio
             import time
@@ -868,7 +1110,23 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
                     latency_ms=latency_ms,
                     opa_decision_id=f"dec_{uuid4().hex[:16]}",
                 )
-            return _ok(req_id, {"content": [content]})
+            from app.services.trust_labeler import get_labeler as _get_labeler, build_envelope_result as _build_envelope_result
+            _platform_payload = _build_envelope_result(
+                content=[content],
+                labeler=_get_labeler(),
+                tool_name=name,
+                server_id="__platform__",
+                result_id=_effective_request_id,
+                trust_tier=4,
+                sensitivity_label="low",
+            )
+            return _ok(req_id, _platform_payload)
+        except AuditEmissionError:
+            # INV-001 (SR-2): an audit-emission failure on the meta-tool ALLOW
+            # path must fail-closed (propagate → AuditMiddleware HTTP 500), never
+            # be swallowed into a JSON-RPC tool-execution error. The meta-tools
+            # are read-only, so a post-execution 500 has no side effect to undo.
+            raise
         except Exception as exc:
             logger.exception("Tool handler error: %s", name)
             return _err(req_id, -32603, "Tool execution error (internal). Check server logs.")
@@ -911,7 +1169,11 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
 
     # Single message
     if isinstance(body, dict):
-        result = await _dispatch(body, request)
+        try:
+            result = await _dispatch(body, request)
+        except _ProfileLookupUnavailable as _plu:
+            # INV-015: profile lookup fail-closed — DB error + cache miss → 503.
+            return JSONResponse(_plu.rpc_error, status_code=503)
         if result is None:
             return JSONResponse({}, status_code=202)
         return JSONResponse(result)
@@ -934,7 +1196,11 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
                 msg["_batch_index"] = i
                 msg["_request_id"] = f"{batch_request_id}#{i}"
                 tagged.append(msg)
-        responses = await asyncio.gather(*[_dispatch(msg, request) for msg in tagged])
+        try:
+            responses = await asyncio.gather(*[_dispatch(msg, request) for msg in tagged])
+        except _ProfileLookupUnavailable as _plu:
+            # INV-015: profile lookup fail-closed — one batch message triggered 503.
+            return JSONResponse(_plu.rpc_error, status_code=503)
         responses = [r for r in responses if r is not None]
         if not responses:
             return JSONResponse({}, status_code=202)

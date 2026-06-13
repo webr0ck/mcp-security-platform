@@ -304,6 +304,57 @@ async def invoke_tool(
         raise
 
     # -------------------------------------------------------------------------
+    # Step 1.6: B-coarse taint floor (RFC-0001 §8.1, PRD-0001 M2).
+    # Order: INV-005 quarantine -> taint-floor -> INV-004 OPA. A session tainted
+    # by a prior untrusted result cannot invoke a high-sensitivity or credential-
+    # injecting sink. Fail-closed (INV-015); the deny is audited (INV-001) before
+    # the exception propagates, like the entitlement gate above. Dark unless the
+    # TAINT_FLOOR_ENABLED flag is set.
+    # -------------------------------------------------------------------------
+    from app.core.config import settings as _tf_settings
+    _taint_server_trust_tier: int | None = None  # stashed for write-before-forward below
+    if _tf_settings.TAINT_FLOOR_ENABLED:
+        from app.services.taint_floor import (
+            effective_injection_mode,
+            effective_required_integrity,
+            taint_floor_decision,
+        )
+        from app.services.taint_store import is_tainted_for_principal
+
+        _taint_server_trust_tier, _server_default_injection = await _lookup_server_trust(
+            tool_server_id
+        )
+        _raw_required = tool_record.get("required_integrity")
+        _tool_required = 1 if _raw_required is None else int(_raw_required)
+        _eff_injection = effective_injection_mode(
+            tool_record.get("injection_mode"),
+            _server_default_injection,
+        )
+        _required = effective_required_integrity(_tool_required, _eff_injection)
+        _tainted = await is_tainted_for_principal(principal_id)
+        if taint_floor_decision(tainted=_tainted, required_integrity=_required) == "deny":
+            await _emit_audit_event(
+                tool_id=str(tool_id) if tool_id is not None else None,
+                tool_name=tool_name,
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=[f"taint_floor:required_integrity={_required}"],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=0.0,
+                opa_decision_id="",
+                is_testing=is_testing,
+                source_ip=source_ip,
+                principal_type=principal_type,
+                roles=client_roles,
+                session_jti=session_jti,
+            )
+            raise TaintFloorDenyError(
+                str(tool_id) if tool_id is not None else "", tool_name, _required
+            )
+
+    # -------------------------------------------------------------------------
     # Step 2: Anomaly detection
     # -------------------------------------------------------------------------
     # Testing bypass: skip anomaly for admin is_testing requests so test suites
@@ -846,6 +897,21 @@ async def invoke_tool(
         }
 
     # -------------------------------------------------------------------------
+    # Write-before-forward (RFC-0001 §8.1, PRD-0001 M2). A real result came back
+    # from the upstream server. If that server is untrusted (binary integrity 0;
+    # fail-closed when trust_tier is unknown), taint the principal's session BEFORE
+    # the result is forwarded — and BEFORE the response-injection screen below, so a
+    # BLOCK_ON_MATCH early-return can never skip the taint write (appsec M-1). A
+    # write failure raises TaintStoreError -> the request fails closed (500).
+    # -------------------------------------------------------------------------
+    if _tf_settings.TAINT_FLOOR_ENABLED:
+        from app.services.taint_floor import result_taints_session
+        from app.services.taint_store import mark_tainted_for_principal
+
+        if result_taints_session(_taint_server_trust_tier):
+            await mark_tainted_for_principal(principal_id)
+
+    # -------------------------------------------------------------------------
     # Step 6a: Indirect prompt-injection screen on the tool RESPONSE (MCP-003 /
     # CROSS-001). Perimeter controls cannot intercept tool responses — the LLM
     # processes them as content, so they must be screened here before return.
@@ -891,9 +957,45 @@ async def invoke_tool(
     upstream_response.setdefault("meta", {})
     upstream_response["meta"]["audit_id"] = audit_id
     upstream_response["meta"]["latency_ms"] = latency_ms
+    # Trust envelope context — read by the router signing layer (PRD-0001 M3)
+    upstream_response["meta"]["trust_tier"] = _taint_server_trust_tier
+    upstream_response["meta"]["server_id"] = tool_server_id
+    upstream_response["meta"]["sensitivity_label"] = tool_record.get("sensitivity_label")
 
     return upstream_response
 
+
+
+async def _lookup_server_trust(server_id: str) -> tuple[int | None, str | None]:
+    """Fetch (trust_tier, default_injection_mode) for a tool's server (PRD-0001 M2).
+
+    Fail-CLOSED: returns (None, None) for an unlinked tool (empty server_id) or on any
+    DB error, so the caller treats the result as untrusted (binary integrity 0) and the
+    server's injection-default cannot silently relax the floor.
+    """
+    if not server_id:
+        return (None, None)
+    from app.core.database import AsyncSessionLocal
+    from sqlalchemy import text
+
+    try:
+        async with AsyncSessionLocal() as _db:
+            row = (
+                await _db.execute(
+                    text(
+                        "SELECT trust_tier, default_injection_mode FROM server_registry "
+                        "WHERE server_id = :sid AND deleted_at IS NULL LIMIT 1"
+                    ),
+                    {"sid": server_id},
+                )
+            ).mappings().fetchone()
+    except Exception as exc:  # noqa: BLE001 - any DB error must fail closed
+        logger.warning("server trust lookup failed (fail-closed untrusted): %s", exc)
+        return (None, None)
+    if row is None:
+        return (None, None)
+    dim = row.get("default_injection_mode")
+    return (row.get("trust_tier"), str(dim) if dim is not None else None)
 
 
 async def _get_or_create_session(upstream_url: str, client_id: str, headers: dict) -> str | None:
@@ -1166,7 +1268,11 @@ async def _emit_audit_event(
                         # Task 1.2 — "who" enrichment fields.
                         "source_ip": source_ip,
                         "principal_type": principal_type,
-                        "caller_roles": __import__("json").dumps(roles) if roles else None,
+                        # caller_roles is a TEXT[] column (V029): bind the Python list
+                        # directly so asyncpg encodes a Postgres array. (Previously
+                        # json.dumps'd to a string, which asyncpg rejects for TEXT[] —
+                        # a pre-existing bug surfaced by the PRD-0001 M2 deny-audit path.)
+                        "caller_roles": list(roles) if roles else None,
                         "session_jti": session_jti,
                         # Task 5.1 (LOG-F04): real OPA decision_id for cross-stream
                         # correlation between audit_events and the OPA decision log
@@ -1203,31 +1309,31 @@ async def emit_internal_tool_event(
     latency_ms: int,
     opa_decision_id: str,
 ) -> None:
-    """Emit an audit event for internal platform tools (no tool_id/registry entry).
-    Uses INTERNAL_TOOL_INVOCATION event type which doesn't require a tool_id UUID.
-    Failures are logged but not re-raised — internal tool audit is best-effort.
+    """Emit a *fail-closed* audit event for internal platform meta-tools
+    (no tool_id/registry entry) on the /mcp dispatch path.
+
+    SR-2 / INV-001: routes through ``_emit_audit_event`` (with ``tool_id=None``,
+    which selects ``INTERNAL_TOOL_INVOCATION``) so the event is persisted to
+    ``audit_events`` AND an emission failure raises ``AuditEmissionError``.
+    The caller is ``_dispatch`` (routers/mcp_server.py); the exception
+    propagates through ``mcp_post`` to ``AuditMiddleware``, which converts it to
+    an HTTP 500. Previously this swallowed all failures with a warning, leaving
+    a meta-tool allow/deny with no durable audit record — a gap an attacker who
+    can disrupt the audit store could use to make meta-tool calls invisible.
     """
-    try:
-        from mcp_audit_logger import AuditEvent, AuditEventType, AuditOutcome, MCPAuditLogger
-        outcome_map = {
-            "allow": AuditOutcome.ALLOW,
-            "deny": AuditOutcome.DENY,
-            "error": getattr(AuditOutcome, "ERROR", AuditOutcome.DENY),
-        }
-        audit_logger = _get_audit_logger()
-        event = AuditEvent(
-            event_type=AuditEventType.INTERNAL_TOOL_INVOCATION,
-            client_id=client_id,
-            tool_name=tool_name,
-            outcome=outcome_map.get(outcome, AuditOutcome.DENY),
-            request_id=request_id,
-            latency_ms=latency_ms,
-            deny_reasons=deny_reasons,
-            opa_decision_id=opa_decision_id,
-        )
-        audit_logger.emit(event)
-    except Exception as exc:
-        logger.warning("Internal tool audit emission failed (non-critical): %s", exc)
+    await _emit_audit_event(
+        tool_id=None,
+        tool_name=tool_name,
+        tool_version=None,
+        client_id=client_id,
+        outcome=outcome,
+        deny_reasons=deny_reasons,
+        request_id=request_id,
+        latency_ms=latency_ms,
+        anomaly_score=0.0,
+        opa_decision_id=opa_decision_id,
+        is_testing=False,
+    )
 
 
 # Module-level singleton so we don't re-instantiate on every invocation
@@ -1269,6 +1375,23 @@ class ToolDeprecatedError(Exception):
         self.tool_id = tool_id
         self.tool_name = tool_name
         super().__init__(f"Tool '{tool_name}' ({tool_id}) is deprecated.")
+
+
+class TaintFloorDenyError(Exception):
+    """Raised when the B-coarse taint floor denies a sink in a tainted session.
+
+    RFC-0001 §8.1 / PRD-0001 M2. App-layer deny, pre-OPA, fail-closed — the deny
+    is audited (INV-001) before this propagates. Routers map it to a deny response.
+    """
+
+    def __init__(self, tool_id: str, tool_name: str, required_integrity: int) -> None:
+        self.tool_id = tool_id
+        self.tool_name = tool_name
+        self.required_integrity = required_integrity
+        super().__init__(
+            f"Tool '{tool_name}' ({tool_id}) denied by taint floor "
+            f"(required_integrity={required_integrity}; session tainted)."
+        )
 
 
 class ProfileLookupError(Exception):

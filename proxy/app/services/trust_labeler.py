@@ -155,3 +155,33 @@ def init_labeler(cert_path: str, key_path: str, sub_ca_path: str) -> None:
     global _labeler
     _labeler = TrustLabeler(cert_path=cert_path, key_path=key_path, sub_ca_path=sub_ca_path)
     logger.info("TrustLabeler initialised (cert=%s)", cert_path)
+
+
+def build_envelope_result(
+    *,
+    content: list,
+    labeler: TrustLabeler | None,
+    tool_name: str,
+    server_id: str,
+    result_id: str,
+    trust_tier: int | None,
+    sensitivity_label: str | None,
+) -> dict:
+    """Return result dict, attaching the trust envelope when labeler is configured.
+
+    Signing failure omits _meta without raising — enforcement is never affected (W3.5).
+    """
+    result: dict = {"content": content}
+    if labeler is not None:
+        envelope = labeler.sign_result(
+            content=content,
+            structured_content=None,
+            tool_name=tool_name,
+            server_id=server_id or "__unknown__",
+            result_id=result_id,
+            trust_tier=trust_tier,
+            sensitivity_label=sensitivity_label,
+        )
+        if envelope is not None:
+            result["_meta"] = {TRUST_ENVELOPE_KEY: envelope}
+    return result
