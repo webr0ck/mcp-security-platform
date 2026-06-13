@@ -344,6 +344,15 @@ security-check:
 	fi; \
 	\
 	echo ""; \
+	echo "--- N1: Loki label consistency (no stale job=mcp-audit in alert rules) ---"; \
+	if bash scripts/check_loki_labels.sh; then \
+		echo "PASS: N1 Loki label check"; \
+	else \
+		echo "FAIL: N1 Loki label check — alert rules reference a label Promtail does not assign"; \
+		FAILURES=$$((FAILURES+1)); \
+	fi; \
+	\
+	echo ""; \
 	if [ "$$FAILURES" -gt 0 ]; then \
 		echo "════════════════════════════════════════════════════════"; \
 		echo "RESULT: $$FAILURES check(s) FAILED"; \
@@ -403,6 +412,16 @@ setup: _check-env up
 	@echo "=== Setup complete ==="
 	@echo "Next step: make pull-model (downloads llama3.2, ~2GB)"
 	@echo "Then: make smoke-test"
+
+labeler-init: ## Generate trust envelope sub-CA + initial labeler leaf (run once before TRUST_ENVELOPE_ENABLED=true)
+	@echo "=== Generating labeler PKI (sub-CA + leaf cert) ==="
+	podman run --rm \
+	  -v labeler-data:/labeler \
+	  -v $(PWD)/infra/pki:/scripts:ro \
+	  -e LABELER_PKI_DIR=/labeler \
+	  python:3.12-slim \
+	  sh -c "pip install cryptography --quiet --no-cache-dir && python3 /scripts/init-labeler-pki.py"
+	@echo "=== Labeler PKI ready. Set TRUST_ENVELOPE_ENABLED=true in .env and run make up. ==="
 
 _check-env:
 	@if [ ! -f .env ]; then \

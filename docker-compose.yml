@@ -105,6 +105,9 @@ volumes:
     driver: local
   vault-tls:
     driver: local
+  # PRD-0001 M3: shared labeler PKI volume — sidecar writes sub_ca.key + leaf.*; proxy reads leaf.* + sub_ca.crt
+  labeler-data:
+    driver: local
   # Shared tmpfs volume for rendered alertmanager config (init container → alertmanager)
   alertmanager-rendered:
     driver: local
@@ -236,6 +239,8 @@ services:
       # OPA policies bind-mounted read-only (git is the source of truth)
       - ./policies/rego:/app/policies:ro
       # NOTE: mcps.yaml removed (Task 9) — servers now loaded from DB registry
+      # PRD-0001 M3: trust envelope labeler certs (read-only — sidecar holds sub_ca.key)
+      - labeler-data:/labeler:ro
     tmpfs:
       - /tmp:size=64m,mode=1777
     # Non-root user (UID 1001 defined in proxy/Dockerfile)
@@ -267,6 +272,11 @@ services:
     environment:
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # PRD-0001 M3: trust envelope labeler (disabled by default; run make labeler-init first)
+      - TRUST_ENVELOPE_ENABLED=${TRUST_ENVELOPE_ENABLED:-false}
+      - LABELER_CERT_PATH=/labeler/leaf.crt
+      - LABELER_KEY_PATH=/labeler/leaf.key
+      - LABELER_SUB_CA_PATH=/labeler/sub_ca.crt
     logging: *default-logging
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health/ready"]
@@ -801,6 +811,31 @@ services:
       - AUDIT_ARCHIVAL_CUTOFF_DAYS=${AUDIT_ARCHIVAL_CUTOFF_DAYS:-90}
       - ENABLE_AUDIT_DELETE_AFTER_ARCHIVE=${ENABLE_AUDIT_DELETE_AFTER_ARCHIVE:-0}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    logging: *default-logging
+
+  # ============================================================
+  # PRD-0001 M3: Trust Envelope Labeler Renewal Sidecar
+  # ============================================================
+  labeler-renewal:
+    # Holds sub_ca.key (provisioner credential) and rotates the labeler leaf every 12 min.
+    # The proxy mounts labeler-data read-only and can never access sub_ca.key.
+    image: python:3.12-slim
+    container_name: mcp-labeler-renewal
+    restart: unless-stopped
+    command: >
+      sh -c "pip install cryptography --quiet --no-cache-dir &&
+             python3 /scripts/renew-labeler-leaf.py"
+    volumes:
+      - labeler-data:/labeler
+      - ./infra/pki:/scripts:ro
+    environment:
+      - LABELER_PKI_DIR=/labeler
+      - LABELER_LEAF_TTL_MINUTES=15
+      - LABELER_RENEWAL_INTERVAL_SECONDS=720
+    networks:
+      - observability-net
+    profiles:
+      - trust-envelope
     logging: *default-logging
 
 # Docker Secrets — secret values are injected as files, not plain env vars (INV-008)
