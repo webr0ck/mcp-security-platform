@@ -145,7 +145,16 @@ async def lifespan(app: FastAPI):
             extra={"error": str(exc)},
         )
 
-    # Step 6: Verify database on startup (warn but don't crash)
+    # Step 6: Initialize trust envelope labeler (PRD-0001 M3) — fail-graceful
+    if settings.TRUST_ENVELOPE_ENABLED:
+        from app.services.trust_labeler import init_labeler as _init_labeler
+        _init_labeler(
+            cert_path=settings.LABELER_CERT_PATH,
+            key_path=settings.LABELER_KEY_PATH,
+            sub_ca_path=settings.LABELER_SUB_CA_PATH,
+        )
+
+    # Step 7: Verify database on startup (warn but don't crash)
     db_ok = await check_database_health()
     if not db_ok:
         logger.warning("Database not reachable at startup — health endpoint will report degraded")

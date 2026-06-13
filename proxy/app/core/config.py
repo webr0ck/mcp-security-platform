@@ -129,6 +129,20 @@ class Settings(BaseSettings):
     # registration blocks.  See docs/ARCHITECTURE-v2.md §5.2.
     REQUIRE_LLM_AUDIT: bool = False
 
+    # PRD-0001 M2 — B-coarse taint floor (RFC-0001 §8.1). When True, a session
+    # tainted by an untrusted (server trust_tier-derived) result is denied any
+    # high-sensitivity / credential-injecting sink, enforced in invocation.py and
+    # audited (INV-001). Default False so the control is dark until the V038
+    # migration + server_registry.trust_tier JOIN on the tool-fetch query are in
+    # place and the D1/D2 integration tests pass. Fail-closed when enabled.
+    TAINT_FLOOR_ENABLED: bool = False
+
+    # Trust envelope labeler (PRD-0001 M3 / RFC-0001)
+    TRUST_ENVELOPE_ENABLED: bool = False
+    LABELER_CERT_PATH: str = "/labeler/leaf.crt"
+    LABELER_KEY_PATH: str = "/labeler/leaf.key"
+    LABELER_SUB_CA_PATH: str = "/labeler/sub_ca.crt"
+
     @property
     def ollama_base_url(self) -> str:
         return f"http://{self.OLLAMA_HOST}:{self.OLLAMA_PORT}"
@@ -231,6 +245,30 @@ class Settings(BaseSettings):
     ARTIFACTORY_BASE_URL: str = ""
     ARTIFACTORY_REPO: str = "mcp-sbom-local"
     ARTIFACTORY_API_KEY: str = ""
+
+    # =========================================================================
+    # SSRF / Private-Upstream Allowlist (Task 3.1, ISO-F2.6)
+    # =========================================================================
+    # Comma-separated list of CIDR ranges that private MCP server upstreams are
+    # allowed to resolve into.  Default empty = current behaviour (all private
+    # IPs are blocked — no change for deployments that don't use this feature).
+    #
+    # Example: "10.100.0.0/24,172.16.50.0/28"
+    #
+    # Security intent: only upstreams whose ALL resolved IPs fall within one of
+    # these CIDRs (or are public) may be registered and called.  A hostname that
+    # resolves to a MIX of allowlisted and non-allowlisted IPs is denied (the
+    # most restrictive interpretation — prevents partial-rebind attacks).
+    #
+    # This value is also used at invocation time to re-validate the upstream
+    # hostname before each call (DNS-rebind / TOCTOU mitigation).  See
+    # proxy/app/services/server_onboarding.py :: revalidate_upstream_ip_at_invoke.
+    UPSTREAM_PRIVATE_CIDR_ALLOWLIST: str = ""
+
+    @property
+    def upstream_private_cidr_allowlist_parsed(self) -> list[str]:
+        """Return the allowlist as a list of CIDR strings, filtering blanks."""
+        return [c.strip() for c in self.UPSTREAM_PRIVATE_CIDR_ALLOWLIST.split(",") if c.strip()]
 
     # =========================================================================
     # Rate Limiting (requests per minute per role)
