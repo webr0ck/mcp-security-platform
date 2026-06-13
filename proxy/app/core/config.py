@@ -143,6 +143,9 @@ class Settings(BaseSettings):
     LABELER_KEY_PATH: str = "/labeler/leaf.key"
     LABELER_SUB_CA_PATH: str = "/labeler/sub_ca.crt"
 
+    # Trust envelope observer (W4.2) — passive verification log; never blocks
+    TRUST_OBSERVER_ENABLED: bool = False
+
     @property
     def ollama_base_url(self) -> str:
         return f"http://{self.OLLAMA_HOST}:{self.OLLAMA_PORT}"

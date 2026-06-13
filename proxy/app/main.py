@@ -154,6 +154,11 @@ async def lifespan(app: FastAPI):
             sub_ca_path=settings.LABELER_SUB_CA_PATH,
         )
 
+    # Trust envelope observer (PRD-0001 M4 / W4.2) — passive, advisory only
+    if settings.TRUST_OBSERVER_ENABLED:
+        from app.services.trust_verifier import init_verifier as _init_verifier
+        _init_verifier(sub_ca_cert_path=settings.LABELER_SUB_CA_PATH)
+
     # Step 7: Verify database on startup (warn but don't crash)
     db_ok = await check_database_health()
     if not db_ok:
