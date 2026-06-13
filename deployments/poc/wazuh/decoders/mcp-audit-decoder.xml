@@ -1,0 +1,30 @@
+<!-- deployments/poc/wazuh/decoders/mcp-audit-decoder.xml
+     Decoder for MCP audit events emitted via direct UDP syslog by wazuh_syslog.py.
+     Format on wire:
+       <priority>TIMESTAMP MCP-PROXY mcp_audit: {"client_id":"...","tool_name":"...","outcome":"...","anomaly_score":0.0,"risk_level":"...","request_id":"..."}
+
+     Fields decoded:
+       srcuser    <- client_id
+       id         <- tool_name
+       action     <- outcome (allow|deny)
+       extra_data <- anomaly_score
+       status     <- risk_level
+
+     Note: events shipped via Filebeat (container logs path) are decoded by the
+     built-in JSON decoder and do NOT need this decoder — they match on
+     <decoded_as>json</decoded_as> in mcp-audit-rules.xml.
+     This decoder handles the syslog UDP path only (Podman-compatible).
+-->
+
+<!-- Pre-match: identify MCP audit syslog messages -->
+<decoder name="mcp-audit-pre">
+  <prematch>mcp_audit: {</prematch>
+</decoder>
+
+<!-- Extract fields from the JSON payload after the prefix -->
+<decoder name="mcp-audit">
+  <parent>mcp-audit-pre</parent>
+  <prematch offset="after_prematch">{"client_id":"</prematch>
+  <regex offset="after_prematch">([^"]+)","tool_name":"([^"]+)","outcome":"([^"]+)","anomaly_score":([0-9.]+),"risk_level":"([^"]+)"</regex>
+  <order>srcuser,id,action,extra_data,status</order>
+</decoder>

@@ -137,6 +137,16 @@ class Settings(BaseSettings):
     # place and the D1/D2 integration tests pass. Fail-closed when enabled.
     TAINT_FLOOR_ENABLED: bool = False
 
+    # =========================================================================
+    # Wazuh SIEM integration (AI attack detection)
+    # =========================================================================
+    # When WAZUH_SYSLOG_HOST is non-empty, each audit event is also emitted as
+    # a UDP syslog datagram to the Wazuh manager (best-effort, never fail-closed).
+    # Decoded by: deployments/poc/wazuh/decoders/mcp-audit-decoder.xml
+    # Detected by: deployments/poc/wazuh/rules/0960-mcp-ai-attacks.xml
+    WAZUH_SYSLOG_HOST: str = ""          # e.g. "lab-wazuh-manager" — empty = disabled
+    WAZUH_SYSLOG_PORT: int = 514         # UDP syslog port on Wazuh manager
+
     # Trust envelope labeler (PRD-0001 M3 / RFC-0001)
     TRUST_ENVELOPE_ENABLED: bool = False
     LABELER_CERT_PATH: str = "/labeler/leaf.crt"

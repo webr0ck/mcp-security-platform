@@ -1,0 +1,182 @@
+<!-- deployments/poc/wazuh/rules/0960-mcp-ai-attacks.xml
+     AI attack detection rules for the MCP Security Platform.
+     Parent: 100500 (base MCP audit event from mcp-audit-rules.xml).
+
+     Rule ID range: 100510-100529
+     Groups: ai_attack, jailbreak, exfiltration, anomaly, active_response
+
+     Events arrive via two paths:
+       1. Filebeat → Wazuh Beats (port 5044): json.* fields from container logs
+       2. Syslog UDP → Wazuh (port 514): srcuser/action/status fields from proxy emitter
+
+     Detection philosophy: every AI agent is a potential attacker.
+     Alert on patterns that indicate a misaligned, jailbroken, or hijacked agent:
+       - Policy probes (repeated denials)
+       - Behavioural anomaly on allowed invocations
+       - SIEM data exfiltration via wazuh_* tools
+       - Active response abuse
+       - Privilege escalation attempts
+-->
+
+<group name="mcp_ai_attack_detection">
+
+  <!-- ================================================================ -->
+  <!-- AI AGENT IDENTITY                                                 -->
+  <!-- Rules that fire specifically on agent principal_type              -->
+  <!-- ================================================================ -->
+
+  <!-- 100510: Agent principal denied by OPA/RBAC -->
+  <rule id="100510" level="8">
+    <if_sid>100501</if_sid>
+    <field name="json.principal_type">^agent$</field>
+    <description>MCP AI: AI agent $(json.client_id) denied on tool $(json.tool_name)</description>
+    <group>ai_attack,policy_violation,</group>
+  </rule>
+
+  <!-- 100511: AI agent policy probe burst — jailbreak signal -->
+  <!-- Fires when the same agent gets 3+ denials in 60s -->
+  <rule id="100511" level="13" frequency="3" timeframe="60">
+    <if_sid>100510</if_sid>
+    <same_field>json.client_id</same_field>
+    <description>MCP AI: jailbreak probe — agent $(json.client_id) received 3+ policy denials in 60s</description>
+    <group>ai_attack,jailbreak,</group>
+    <options>alert_by_email</options>
+  </rule>
+
+  <!-- 100512: AI agent high anomaly score on allowed invocation -->
+  <!-- Indicates behavioural drift — agent doing unusual things with access -->
+  <rule id="100512" level="11">
+    <if_sid>100503</if_sid>
+    <field name="json.principal_type">^agent$</field>
+    <description>MCP AI: agent $(json.client_id) allowed with high anomaly score $(json.anomaly_score) on $(json.tool_name)</description>
+    <group>ai_attack,anomaly,</group>
+  </rule>
+
+  <!-- 100513: AI agent with high anomaly AND denied (strong compromise signal) -->
+  <rule id="100513" level="14">
+    <if_sid>100510</if_sid>
+    <field name="json.anomaly_score">^(0\.7[0-9]|0\.[89][0-9]|1\.0)$</field>
+    <description>MCP AI: CRITICAL — agent $(json.client_id) denied with anomaly score $(json.anomaly_score): possible prompt injection or agent hijack</description>
+    <group>ai_attack,jailbreak,anomaly,</group>
+    <options>alert_by_email</options>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- SIEM DATA EXFILTRATION                                            -->
+  <!-- AI agent reading security event data at scale                    -->
+  <!-- ================================================================ -->
+
+  <!-- 100514: Agent reading SIEM/security-event data via wazuh_* tools -->
+  <rule id="100514" level="7">
+    <if_sid>100500</if_sid>
+    <field name="json.principal_type">^agent$</field>
+    <field name="json.tool_name">^wazuh_(list_alerts|search_alerts|list_ai_alerts|list_agents|get_agent_detail|get_rules|list_decoders)$</field>
+    <field name="json.outcome">^allow$</field>
+    <description>MCP AI: agent $(json.client_id) reading SIEM data via $(json.tool_name)</description>
+    <group>ai_attack,data_access,</group>
+  </rule>
+
+  <!-- 100515: Agent SIEM read burst — exfiltration pattern -->
+  <rule id="100515" level="13" frequency="10" timeframe="60">
+    <if_sid>100514</if_sid>
+    <same_field>json.client_id</same_field>
+    <description>MCP AI: SIEM exfiltration pattern — agent $(json.client_id) made 10+ SIEM reads in 60s</description>
+    <group>ai_attack,exfiltration,</group>
+    <options>alert_by_email</options>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- ACTIVE RESPONSE ABUSE                                             -->
+  <!-- Any use of wazuh_run_active_response via MCP is high-risk        -->
+  <!-- ================================================================ -->
+
+  <!-- 100516: Active response triggered via MCP proxy (always alert) -->
+  <rule id="100516" level="10">
+    <if_sid>100500</if_sid>
+    <field name="json.tool_name">^wazuh_run_active_response$</field>
+    <field name="json.outcome">^allow$</field>
+    <description>MCP: active response triggered via MCP by $(json.client_id) — verify this was authorised</description>
+    <group>ai_attack,active_response,</group>
+  </rule>
+
+  <!-- 100517: Active response triggered by agent principal — escalated alert -->
+  <rule id="100517" level="14">
+    <if_sid>100516</if_sid>
+    <field name="json.principal_type">^agent$</field>
+    <description>MCP AI: CRITICAL — AI agent $(json.client_id) triggered active response; possible agent-executed attack</description>
+    <group>ai_attack,active_response,</group>
+    <options>alert_by_email</options>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- INVOCATION BURSTS                                                 -->
+  <!-- AI agents running at superhuman speed — detect loop attacks       -->
+  <!-- ================================================================ -->
+
+  <!-- 100518: Agent invocation burst (any tool, 20+ in 60s) -->
+  <rule id="100518" level="10" frequency="20" timeframe="60">
+    <if_sid>100500</if_sid>
+    <field name="json.principal_type">^agent$</field>
+    <field name="json.outcome">^allow$</field>
+    <same_field>json.client_id</same_field>
+    <description>MCP AI: agent $(json.client_id) invocation burst — 20+ tool calls in 60s (agent loop?)</description>
+    <group>ai_attack,burst,</group>
+  </rule>
+
+  <!-- 100519: Agent burst on high-risk tools -->
+  <rule id="100519" level="12" frequency="5" timeframe="60">
+    <if_sid>100500</if_sid>
+    <field name="json.principal_type">^agent$</field>
+    <field name="json.risk_level">^(high|critical)$</field>
+    <field name="json.outcome">^allow$</field>
+    <same_field>json.client_id</same_field>
+    <description>MCP AI: agent $(json.client_id) burst on high/critical risk tools — 5+ in 60s</description>
+    <group>ai_attack,burst,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- QUARANTINE EVENTS                                                 -->
+  <!-- ================================================================ -->
+
+  <!-- 100520: Tool quarantined by active response (auto-remediation log) -->
+  <rule id="100520" level="6">
+    <if_sid>100500</if_sid>
+    <field name="json.event_type">^TOOL_STATUS_CHANGED$</field>
+    <field name="json.tool_status">^quarantined$</field>
+    <description>MCP AI: tool $(json.tool_name) auto-quarantined by active response</description>
+    <group>ai_attack,auto_remediation,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- SYSLOG PATH (direct UDP from proxy — Podman-compatible)           -->
+  <!-- These rules match events emitted via wazuh_syslog.py             -->
+  <!-- srcuser=client_id, id=tool_name, action=outcome, status=risk_level -->
+  <!-- ================================================================ -->
+
+  <!-- 100521: OPA deny via syslog path -->
+  <rule id="100521" level="6">
+    <decoded_as>mcp-audit</decoded_as>
+    <field name="action">^deny$</field>
+    <description>MCP (syslog): tool invocation denied — client $(srcuser) tool $(id)</description>
+    <group>mcp_audit,policy_violation,</group>
+  </rule>
+
+  <!-- 100522: High anomaly via syslog path -->
+  <rule id="100522" level="9">
+    <decoded_as>mcp-audit</decoded_as>
+    <field name="action">^allow$</field>
+    <field name="extra_data">^(0\.7[0-9]|0\.[89][0-9]|1\.0)$</field>
+    <description>MCP (syslog): high anomaly score $(extra_data) on allowed invocation of $(id)</description>
+    <group>mcp_audit,anomaly,</group>
+  </rule>
+
+  <!-- 100523: Active response via syslog path -->
+  <rule id="100523" level="10">
+    <decoded_as>mcp-audit</decoded_as>
+    <field name="id">^wazuh_run_active_response$</field>
+    <field name="action">^allow$</field>
+    <description>MCP (syslog): active response triggered by $(srcuser)</description>
+    <group>mcp_audit,active_response,</group>
+  </rule>
+
+</group>

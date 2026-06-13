@@ -476,6 +476,69 @@ def wazuh_run_active_response(
         return {"error": str(exc)}
 
 
+@mcp.tool()
+def wazuh_list_ai_alerts(limit: int = DEFAULT_LIMIT) -> dict:
+    """
+    List recent Wazuh alerts fired by MCP AI attack detection rules.
+
+    Returns events from rules 100510–100523 which detect:
+    - AI agent policy probe bursts (jailbreak attempts)
+    - Agent invocations with high behavioural anomaly scores
+    - SIEM data exfiltration patterns (agent reading security events at scale)
+    - Active response invocations via MCP (any principal, especially agents)
+    - Agent invocation bursts (loop detection)
+
+    Also returns the set of AI detection rules currently loaded in Wazuh,
+    confirming the ruleset is active.
+
+    Args:
+        limit: Maximum number of recent log entries to return (1–100).
+
+    Returns dict with keys: active_ai_rules, rule_count, recent_events,
+            event_count, note.
+    """
+    limit = max(1, min(limit, MAX_LIMIT))
+    try:
+        # Query AI detection rules (100510–100529) to confirm they are loaded
+        rules_resp = _api("GET", "/rules", params={
+            "rule_ids": ",".join(str(i) for i in range(100510, 100530)),
+            "limit": 20,
+        })
+        active_rules = [
+            {
+                "id": r.get("id"),
+                "level": r.get("level"),
+                "description": r.get("description", ""),
+                "groups": r.get("groups", []),
+            }
+            for r in rules_resp.get("data", {}).get("affected_items", [])
+        ]
+
+        # Search manager log buffer for any MCP audit events (syslog path)
+        logs_resp = _api("GET", "/manager/logs", params={
+            "limit": limit,
+            "q": "mcp_audit",
+        })
+        logs = logs_resp.get("data", {}).get("affected_items", [])
+        safe_logs = _strip_sensitive(logs, _SENSITIVE_KEYS)
+
+        return {
+            "active_ai_rules": active_rules,
+            "rule_count": len(active_rules),
+            "recent_events": safe_logs,
+            "event_count": len(safe_logs),
+            "note": (
+                "AI attack rules: 100510-100523 in 0960-mcp-ai-attacks.xml. "
+                "Detects: jailbreak probes, anomaly-scored agent invocations, "
+                "SIEM exfiltration, active-response abuse, invocation bursts. "
+                "Full alert history requires the Wazuh indexer."
+            ),
+        }
+    except Exception as exc:
+        logger.error("wazuh_list_ai_alerts failed: %s", exc)
+        return {"error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # ASGI app — wrap FastMCP with AuthHeaderMiddleware
 # ---------------------------------------------------------------------------

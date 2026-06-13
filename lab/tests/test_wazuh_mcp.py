@@ -735,6 +735,87 @@ class TestActiveResponseArgValidation:
 # wazuh_list_decoders sensitive key stripping (MEDIUM-2 fix)
 # ---------------------------------------------------------------------------
 
+class TestListAiAlerts:
+    def test_returns_active_rules_and_events(self, srv):
+        rules_resp = {
+            "data": {
+                "affected_items": [
+                    {"id": 100511, "level": 13, "description": "jailbreak probe", "groups": ["ai_attack"]},
+                    {"id": 100515, "level": 13, "description": "SIEM exfiltration", "groups": ["ai_attack", "exfiltration"]},
+                ],
+                "total_affected_items": 2,
+            }
+        }
+        logs_resp = {
+            "data": {
+                "affected_items": [{"description": "mcp_audit event", "type": "info"}],
+                "total_affected_items": 1,
+            }
+        }
+
+        call_paths = []
+
+        def fake_api(method, path, params=None, **kwargs):
+            call_paths.append(path)
+            if path == "/rules":
+                return rules_resp
+            if path == "/manager/logs":
+                return logs_resp
+            raise ValueError(f"Unexpected: {method} {path}")
+
+        with patch.object(srv, "_api", side_effect=fake_api):
+            result = srv.wazuh_list_ai_alerts(limit=10)
+
+        assert "active_ai_rules" in result
+        assert result["rule_count"] == 2
+        assert result["active_ai_rules"][0]["id"] == 100511
+        assert "recent_events" in result
+        assert result["event_count"] == 1
+        assert "note" in result
+        assert "jailbreak" in result["note"].lower() or "ai" in result["note"].lower()
+
+    def test_api_error_returns_error_key(self, srv):
+        with patch.object(srv, "_api", side_effect=Exception("manager down")):
+            result = srv.wazuh_list_ai_alerts()
+        assert "error" in result
+
+    def test_limit_clamped(self, srv):
+        captured = {}
+
+        def fake_api(method, path, params=None, **kwargs):
+            captured[path] = params or {}
+            if path == "/rules":
+                return {"data": {"affected_items": [], "total_affected_items": 0}}
+            return {"data": {"affected_items": [], "total_affected_items": 0}}
+
+        with patch.object(srv, "_api", side_effect=fake_api):
+            srv.wazuh_list_ai_alerts(limit=9999)
+
+        assert captured.get("/manager/logs", {}).get("limit", 0) <= srv.MAX_LIMIT
+
+    def test_sensitive_fields_stripped_from_events(self, srv):
+        rules_resp = {"data": {"affected_items": [], "total_affected_items": 0}}
+        logs_resp = {
+            "data": {
+                "affected_items": [
+                    {"description": "mcp_audit", "token": "leaked-secret", "type": "info"}
+                ],
+                "total_affected_items": 1,
+            }
+        }
+
+        def fake_api(method, path, **kwargs):
+            if path == "/rules":
+                return rules_resp
+            return logs_resp
+
+        with patch.object(srv, "_api", side_effect=fake_api):
+            result = srv.wazuh_list_ai_alerts()
+
+        assert result["event_count"] == 1
+        assert "token" not in result["recent_events"][0]
+
+
 class TestDecoderStripping:
     def test_sensitive_keys_stripped_from_decoders(self, srv):
         resp = {

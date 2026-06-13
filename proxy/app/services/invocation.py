@@ -1285,6 +1285,31 @@ async def _emit_audit_event(
             logger.error("CRITICAL: audit_events DB write failed: %s", db_exc)
             raise AuditEmissionError(f"audit_events DB write failed: {db_exc}") from db_exc
 
+        # ---------------------------------------------------------------
+        # Secondary: best-effort syslog UDP to Wazuh manager.
+        # Runs AFTER the primary audit (PostgreSQL) succeeds.
+        # Failure here is non-fatal — must never affect INV-001.
+        # ---------------------------------------------------------------
+        from app.core.config import get_settings as _get_settings
+        _s = _get_settings()
+        if _s.WAZUH_SYSLOG_HOST:
+            try:
+                from app.services import wazuh_syslog as _ws
+                _ws.emit(
+                    _s.WAZUH_SYSLOG_HOST,
+                    _s.WAZUH_SYSLOG_PORT,
+                    client_id=client_id,
+                    tool_name=tool_name,
+                    outcome=outcome,
+                    anomaly_score=anomaly_score,
+                    risk_level="unknown",  # not available here; rules use json.risk_level from filebeat
+                    request_id=request_id,
+                    principal_type=principal_type,
+                    deny_reasons=deny_reasons or [],
+                )
+            except Exception:
+                pass  # swallow — secondary path must never affect INV-001
+
         return event_id
     except AuditEmissionError:
         raise

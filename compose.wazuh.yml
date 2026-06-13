@@ -72,15 +72,26 @@ services:
       # WAZUH_API_PASSWORD here configures the Wazuh manager's own admin password.
       # Must be set in .env.lab; no safe default (fail-closed on missing cred).
       WAZUH_API_PASSWORD: "${WAZUH_API_PASSWORD:?Set WAZUH_API_PASSWORD in .env.lab}"
+      # Active response: MCP proxy URL + admin key for tool quarantine
+      # quarantine-mcp-tool.py reads these to call the proxy admin API.
+      MCP_PROXY_URL: "http://proxy:8000"
+      MCP_ADMIN_API_KEY: "${MCP_ADMIN_API_KEY:-}"
+      MCP_AR_DRY_RUN: "${WAZUH_AR_DRY_RUN:-true}"  # dry-run by default; set false to enable
     volumes:
       - wazuh-manager-data:/var/ossec/data
+      # Detection rules (base + AI attack)
       - ./deployments/poc/wazuh/rules:/var/ossec/etc/rules/custom:ro
+      # Decoder for MCP audit syslog UDP events
+      - ./deployments/poc/wazuh/decoders:/var/ossec/etc/decoders/custom:ro
+      # Active response: auto-quarantine MCP tools on AI attack rules
+      - ./deployments/poc/wazuh/active-response/quarantine-mcp-tool.py:/var/ossec/active-response/bin/quarantine-mcp-tool.py:ro
     ports:
       - "127.0.0.1:55000:55000"   # Wazuh REST API (JWT auth)
       - "127.0.0.1:1514:1514/udp" # Agent syslog
       - "127.0.0.1:1515:1515"     # Agent registration
     networks:
       - wazuh-manager-net
+      - proxy-wazuh-syslog-net  # receive syslog UDP from proxy (AI attack events)
     healthcheck:
       test: ["CMD-SHELL", "curl -sf -k https://localhost:55000/ | grep -q 'title' && exit 0 || exit 1"]
       interval: 30s
@@ -127,10 +138,41 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # ── Extend the proxy with the new wazuh pairwise networks ───────────────────
+  # ── Filebeat: ship mcp-proxy container logs to Wazuh (Beats protocol) ──────
+  # Reads proxy container logs from the Podman/Docker socket and forwards
+  # to Wazuh manager port 5044 so mcp-audit-rules.xml (json.* fields) fire.
+  # For Podman rootless: adjust the socket path below to your UID.
+  lab-filebeat-wazuh:
+    image: elastic/filebeat:8.13.0
+    container_name: lab-filebeat-wazuh
+    user: root
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /usr/share/filebeat/data:mode=755
+    volumes:
+      - ./deployments/poc/wazuh/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      # Podman rootless socket — run `echo /run/user/$(id -u)/podman/podman.sock`
+      # Docker: /var/run/docker.sock
+      - /run/user/1000/podman/podman.sock:/var/run/docker.sock:ro
+    command: filebeat -e -strict.perms=false
+    networks:
+      - wazuh-manager-net
+    depends_on:
+      lab-wazuh-manager:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Extend the proxy with the new wazuh networks ─────────────────────────
   proxy:
     networks:
       - mcp-wazuh-net
+      - proxy-wazuh-syslog-net  # syslog UDP → Wazuh manager (AI attack events)
+    environment:
+      WAZUH_SYSLOG_HOST: "lab-wazuh-manager"
+      WAZUH_SYSLOG_PORT: "514"
 
 volumes:
   wazuh-manager-data:
@@ -141,7 +183,12 @@ networks:
   mcp-wazuh-net:
     driver: bridge
     internal: true
-  # Pairwise: lab-mcp-wazuh ↔ lab-wazuh-manager (no proxy on this net)
+  # Pairwise: lab-mcp-wazuh ↔ lab-wazuh-manager (REST API; also used by filebeat)
   wazuh-manager-net:
+    driver: bridge
+    internal: true
+  # Syslog UDP only: proxy → lab-wazuh-manager port 514
+  # Separate from wazuh-manager-net so proxy cannot reach the Wazuh REST API.
+  proxy-wazuh-syslog-net:
     driver: bridge
     internal: true
