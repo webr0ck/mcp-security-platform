@@ -1,0 +1,145 @@
+---
+# compose.wazuh.yml — optional lab overlay: adds Wazuh SIEM + Wazuh MCP server.
+#
+# Usage (combine with base lab stack):
+#   podman compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.dev.yml \
+#     -f podman-compose.lab.yml \
+#     -f compose.wazuh.yml \
+#     up -d
+#
+# Required env vars (.env or .env.lab):
+#   WAZUH_API_PASSWORD   — Wazuh API admin password (default: labpassword for lab)
+#   WAZUH_INDEXER_PASSWORD — OpenSearch / indexer admin password (optional; indexer
+#                            not included in this lightweight lab config)
+#
+# Network topology:
+#   wazuh-manager-net (internal: true) — proxy + mcp-wazuh + wazuh-manager only
+#   mcp-wazuh-net     (internal: true) — proxy + mcp-wazuh pairwise (no manager)
+#
+# Security note: Wazuh manager API uses HTTPS with a self-signed cert in lab;
+# VERIFY_SSL=false is intentional for the lab overlay. Never use in production.
+#
+# Wazuh active-response is disabled by default (ALLOW_ACTIVE_RESPONSE=false).
+# Enable only for named demo scenarios; requires 'admin' role at the proxy layer.
+
+# ── MCP server hardening — matches podman-compose.lab.yml anchor ─────────────
+x-mcp-hardening: &mcp-hardening
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+    - seccomp:${PWD}/sandbox/files/seccomp/mcp-sandbox.json
+  cap_drop:
+    - ALL
+  pids_limit: 64
+  deploy:
+    resources:
+      limits:
+        memory: 256m
+        cpus: "0.5"
+  user: "1001:1001"
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+
+services:
+
+  # ── Wazuh manager — single-node, no indexer for lightweight lab use ──────────
+  # Full cluster (manager + indexer + dashboard) is ~4GB RAM minimum.
+  # This config runs manager-only for MCP API demo purposes.
+  # Add wazuh-indexer + wazuh-dashboard from compose.poc.yml for full SIEM.
+  lab-wazuh-manager:
+    image: wazuh/wazuh-manager:4.9.1
+    container_name: lab-wazuh-manager
+    hostname: wazuh-manager
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_PTRACE   # Wazuh process monitoring
+      - NET_BIND_SERVICE
+    read_only: false  # ossec writes extensively to /var/ossec/
+    tmpfs:
+      - /tmp
+    environment:
+      INDEXER_URL: ""
+      FILEBEAT_SSL_VERIFICATION_MODE: none
+      SSL_CERTIFICATE_AUTHORITIES: ""
+      SSL_CERTIFICATE: ""
+      SSL_KEY: ""
+      # Lab: disable Filebeat shipment (no indexer running)
+      # WAZUH_API_PASSWORD here configures the Wazuh manager's own admin password.
+      # Must be set in .env.lab; no safe default (fail-closed on missing cred).
+      WAZUH_API_PASSWORD: "${WAZUH_API_PASSWORD:?Set WAZUH_API_PASSWORD in .env.lab}"
+    volumes:
+      - wazuh-manager-data:/var/ossec/data
+      - ./deployments/poc/wazuh/rules:/var/ossec/etc/rules/custom:ro
+    ports:
+      - "127.0.0.1:55000:55000"   # Wazuh REST API (JWT auth)
+      - "127.0.0.1:1514:1514/udp" # Agent syslog
+      - "127.0.0.1:1515:1515"     # Agent registration
+    networks:
+      - wazuh-manager-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -k https://localhost:55000/ | grep -q 'title' && exit 0 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 12
+      start_period: 120s
+    restart: unless-stopped
+
+  # ── Wazuh MCP Server — reads from Wazuh REST API ─────────────────────────────
+  lab-mcp-wazuh:
+    <<: *mcp-hardening
+    build: ./lab/mcp-servers/wazuh
+    image: lab-mcp-wazuh:lab
+    container_name: lab-mcp-wazuh
+    ports:
+      - "127.0.0.1:8109:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      WAZUH_API_URL: "https://lab-wazuh-manager:55000"
+      WAZUH_API_USER: "wazuh"
+      # WAZUH_API_PASSWORD deliberately absent — injected by broker at call time
+      # (service mode, approach B). Fallback to WAZUH_API_PASSWORD env only when
+      # the broker is unavailable (lab/dev without credential store).
+      # WAZUH_API_PASSWORD: empty string forces broker-injection path (HIGH-1 fix).
+      # For local dev without the broker: set WAZUH_API_PASSWORD in .env.lab.
+      WAZUH_API_PASSWORD: "${WAZUH_API_PASSWORD:-}"
+      VERIFY_SSL: "${WAZUH_VERIFY_SSL:-false}"
+      ALLOW_ACTIVE_RESPONSE: "${WAZUH_ALLOW_ACTIVE_RESPONSE:-false}"
+      FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
+    depends_on:
+      lab-wazuh-manager:
+        condition: service_healthy
+    networks:
+      - mcp-wazuh-net        # pairwise with proxy only
+      - wazuh-manager-net    # can reach wazuh manager API
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Extend the proxy with the new wazuh pairwise networks ───────────────────
+  proxy:
+    networks:
+      - mcp-wazuh-net
+
+volumes:
+  wazuh-manager-data:
+    driver: local
+
+networks:
+  # Pairwise: proxy ↔ lab-mcp-wazuh (no manager access from proxy directly)
+  mcp-wazuh-net:
+    driver: bridge
+    internal: true
+  # Pairwise: lab-mcp-wazuh ↔ lab-wazuh-manager (no proxy on this net)
+  wazuh-manager-net:
+    driver: bridge
+    internal: true

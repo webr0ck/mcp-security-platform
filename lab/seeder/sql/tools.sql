@@ -178,3 +178,32 @@ ON CONFLICT (name, version) DO UPDATE SET
     upstream_url   = EXCLUDED.upstream_url,
     injection_mode = EXCLUDED.injection_mode,
     updated_at     = NOW();
+
+-- ── Wazuh MCP — service-account Wazuh API JWT (compose.wazuh.yml overlay) ────
+-- Seeded as status='quarantined' (safe default when overlay is not running).
+-- To activate after deploying compose.wazuh.yml:
+--   UPDATE tool_registry SET status='active' WHERE name='wazuh-siem' AND version='1.0.0';
+-- injection_mode='service': broker injects Wazuh API JWT as Authorization header.
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode, inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'wazuh-siem', '1.0.0',
+    'Wazuh SIEM: list alerts, agents, rules, and trigger active responses. Service-account auth (Wazuh API JWT).',
+    '{"type":"object","properties":{"tool_name":{"type":"string","enum":["wazuh_cluster_health","wazuh_list_agents","wazuh_get_agent_detail","wazuh_list_alerts","wazuh_search_alerts","wazuh_get_rules","wazuh_list_decoders","wazuh_run_active_response"]},"arguments":{"type":"object"}},"required":["tool_name"],"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-wazuh:8000/mcp',
+    'quarantined', 'high', 75,
+    '["Direct access to security event data","wazuh_run_active_response can modify system state","Requires admin Wazuh API credentials","Active response disabled by default (ALLOW_ACTIVE_RESPONSE=false)"]'::jsonb,
+    'lab-seeder', 'wazuh', 'B', 'service', 'Authorization', 'Bearer '
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url        = EXCLUDED.upstream_url,
+    service_name        = EXCLUDED.service_name,
+    credential_approach = EXCLUDED.credential_approach,
+    injection_mode      = EXCLUDED.injection_mode,
+    inject_header       = EXCLUDED.inject_header,
+    inject_prefix       = EXCLUDED.inject_prefix,
+    updated_at          = NOW();
