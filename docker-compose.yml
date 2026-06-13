@@ -293,6 +293,10 @@ services:
       - "--addr=0.0.0.0:8181"
       - "--log-format=json"
       - "--log-level=info"
+      # INV-002: load OPA config for decision log masking of /input/params and
+      # /input/arguments. This is the PRIMARY redaction path; the Promtail
+      # replace stage is defense-in-depth only.
+      - "--config-file=/opa-config/opa-config.yaml"
       - "--set=decision_logs.console=true"
       # INV-012: signed-only runtime policy is now the DEFAULT (HS256 symmetric,
       # identical to scripts/sign_policy_bundle.sh — no crypto-scheme change).
@@ -314,6 +318,8 @@ services:
       # against POLICY_SIGNING_KEY. git is the source of truth for the Rego
       # source; bundle.tar.gz is the signed artefact derived from it.
       - ./policies/bundle.tar.gz:/policies/bundle.tar.gz:ro
+      # INV-002: OPA config for decision log masking (primary redaction layer).
+      - ./policies/rego/opa-config.yaml:/opa-config/opa-config.yaml:ro
     networks:
       - internal-net      # peer/lab compatibility
       - proxy-opa-net      # F-001: pairwise channel the proxy dials
@@ -367,8 +373,9 @@ services:
       - OLLAMA_MAX_LOADED_MODELS=1
     logging: *default-logging
     healthcheck:
-      # /api/tags returns the list of available models; empty list is OK, 200 means healthy
-      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      # ollama list exits 0 when the server is ready; empty list is fine.
+      # (The image ships no curl/wget; bash /dev/tcp works but ollama CLI is simpler.)
+      test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -480,7 +487,8 @@ services:
       # TLS listener: skip verify because step-ca root is not in the vault image trust store.
       # vault status exits 0 (active) or 1 (sealed/standby); either means Vault is up.
       # Exit codes 1 and 2 are both acceptable here — we only want to catch hard failures.
-      test: ["CMD", "vault", "status", "-address=https://localhost:8200", "-tls-skip-verify"]
+      # String form (not list) so podman-compose lab overlay can replace it (list+list concatenates).
+      test: "CMD vault status -address=https://localhost:8200 -tls-skip-verify"
       interval: 10s
       timeout: 5s
       retries: 10
@@ -611,6 +619,11 @@ services:
       # Disable analytics / telemetry
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      # Alerting contact-point webhook URL (provisioning/alerting/contact-points.yml).
+      # Must be non-empty; Grafana rejects provisioning if this is unset.
+      # In production, set to your real Slack/PagerDuty webhook in .env.
+      - GF_ALERTING_WEBHOOK_URL=${GF_ALERTING_WEBHOOK_URL}
+      - GF_ALERTING_WEBHOOK_URL_CRITICAL=${GF_ALERTING_WEBHOOK_URL_CRITICAL}
     depends_on:
       loki:
         condition: service_healthy
@@ -625,21 +638,28 @@ services:
   alertmanager-config-renderer:
     # Init container: renders alertmanager.yml template (${VAR} placeholders)
     # into a shared tmpfs volume before Alertmanager starts.
-    # Uses alpine + gettext (envsubst) — NOT the prom/alertmanager busybox image,
-    # which has no envsubst binary.
+    # Uses a pre-built image with gettext (envsubst) baked in — NOT the
+    # prom/alertmanager busybox image (no envsubst) and NOT a runtime apk add
+    # (observability-net is internal: true, no internet access at runtime).
     # Image pinned by digest (alpine:3.20); update with:
     #   podman pull alpine:3.20 && podman inspect --format='{{index .RepoDigests 0}}' alpine:3.20
-    image: docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e
+    build:
+      context: ./observability/alertmanager
+      dockerfile: Dockerfile.renderer
+    image: mcp-alertmanager-renderer:local
     container_name: mcp-alertmanager-renderer
     restart: "no"
-    env_file:
-      - .env
+    # S4: Do NOT use env_file: [.env] here — that would expose GATEWAY_SHARED_SECRET
+    # to a container that only needs webhook URLs.  Only the two vars consumed by
+    # entrypoint.sh are injected explicitly.
+    environment:
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL}
+      - ALERT_WEBHOOK_URL_CRITICAL=${ALERT_WEBHOOK_URL_CRITICAL:-}
     volumes:
       - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager-template/alertmanager.yml:ro
       - ./observability/alertmanager/entrypoint.sh:/entrypoint.sh:ro
       - alertmanager-rendered:/run/alertmanager
-    command: >
-      /bin/sh -c "apk add --no-cache gettext >/dev/null 2>&1 && /entrypoint.sh"
+    command: ["/bin/sh", "/entrypoint.sh"]
     networks:
       - observability-net
 
@@ -722,8 +742,14 @@ services:
         condition: service_healthy
     networks:
       - observability-net
-    env_file:
-      - .env
+    # S4: Do NOT use env_file: [.env] — exposes GATEWAY_SHARED_SECRET unnecessarily.
+    # Only the vars consumed by setup-minio.sh are injected explicitly.
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-http://minio:9000}
+      - MINIO_AUDIT_BUCKET=${MINIO_AUDIT_BUCKET:-mcp-audit-archive}
+      - MINIO_RETENTION_DAYS=${MINIO_RETENTION_DAYS:-90}
     volumes:
       - ./infra/scripts/setup-minio.sh:/setup-minio.sh:ro
     entrypoint: ["/bin/sh", "/setup-minio.sh"]
@@ -754,11 +780,27 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    env_file:
-      - .env
+    # S4: Do NOT use env_file: [.env] — exposes GATEWAY_SHARED_SECRET unnecessarily.
+    # Only the vars consumed by compliance-checker/checker.py are injected explicitly.
     environment:
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-mcp_security}
+      - COMPLIANCE_DB_USER=${COMPLIANCE_DB_USER}
+      - COMPLIANCE_DB_PASSWORD=${COMPLIANCE_DB_PASSWORD}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-http://minio:9000}
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_AUDIT_BUCKET=${MINIO_AUDIT_BUCKET:-mcp-audit-archive}
+      - MINIO_COMPLIANCE_ARCHIVE_BUCKET=${MINIO_COMPLIANCE_ARCHIVE_BUCKET:-compliance-archive}
+      - MINIO_RETENTION_DAYS=${MINIO_RETENTION_DAYS:-90}
+      - AUDIT_LOG_HMAC_KEY=${AUDIT_LOG_HMAC_KEY:-}
+      - COMPLIANCE_ALERT_WEBHOOK=${COMPLIANCE_ALERT_WEBHOOK:-}
       - COMPLIANCE_CRON_SCHEDULE=${COMPLIANCE_CRON_SCHEDULE:-0 2 * * *}
       - COMPLIANCE_SAMPLE_SIZE=${COMPLIANCE_SAMPLE_SIZE:-1000}
+      - AUDIT_ARCHIVAL_CUTOFF_DAYS=${AUDIT_ARCHIVAL_CUTOFF_DAYS:-90}
+      - ENABLE_AUDIT_DELETE_AFTER_ARCHIVE=${ENABLE_AUDIT_DELETE_AFTER_ARCHIVE:-0}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     logging: *default-logging
 
 # Docker Secrets — secret values are injected as files, not plain env vars (INV-008)

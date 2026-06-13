@@ -44,6 +44,8 @@ The per-INV "Enforcement:" lines below describe the *intended* control. Audited 
 
 **Corollary:** The audit event must be emitted synchronously, not in a background task. If the audit emission fails, the invocation is treated as failed and a 500 is returned. There is no path where a tool executes — or where authentication is rejected — without an audit record.
 
+**Extension (2026-06-12 — SR-2):** The `/mcp` platform meta-tool path (`platform_info`, `enrollment_status`, `security_pulse_summary`, `list_registered_tools`) is **now also fail-closed**. `emit_internal_tool_event` (`proxy/app/services/invocation.py`) routes through `_emit_audit_event` (with `tool_id=None` → `INTERNAL_TOOL_INVOCATION`), so a meta-tool allow/deny that cannot be durably audited raises `AuditEmissionError` → HTTP 500 instead of the prior best-effort `logger.warning` swallow. This closes a gap where an attacker who could disrupt the audit store made meta-tool calls invisible. Tested by `test_dispatch_meta_tool_audit_failure_fails_closed` (`proxy/tests/unit/test_mcp_opa_audit.py`).
+
 **Why:** Without a complete invocation log, compliance reporting and anomaly detection are invalid. Partial logs are worse than no logs because they create false confidence. Audit gaps on auth-failure paths also mean brute-force attacks are invisible in the audit trail.
 
 **Enforcement:** Integration test `proxy/tests/integration/test_audit_completeness.py` (note: `integration/` subdir) asserts every invocation produces exactly one audit event; `test_401_produces_audit_event` and `test_403_produces_audit_event` (same file, added Task 1.1) assert auth-failure rows with `tool_id IS NULL`; `proxy/tests/unit/test_mcp_client.py` covers the route-level contract. Credential enrollment also emits a synchronous audit event (CB-004). *Gap: not yet wired into `make security-check`.*
@@ -203,7 +205,9 @@ This line must never be removed or changed to `default allow = true`.
 
 ## INV-013: Credential Broker — At-Rest Encryption and Lifecycle Audit
 
-**Statement:** Every third-party credential stored by the credential broker MUST be (a) envelope-encrypted at rest with AES-256-GCM under a per-user KEK derived via HKDF-SHA256 from a Vault-held master secret transported only over TLS; (b) keyed to the **authenticated** caller identity (`request.state.client_id`), never a client-supplied header; and (c) every enroll / refresh / revoke / delete on `credential_store` MUST emit a synchronous audit event before the response (same hard-fail discipline as INV-001).
+**Statement:** Every third-party credential stored by the credential broker MUST be (a) envelope-encrypted at rest with AES-256-GCM under a per-user KEK derived via HKDF-SHA256 from a Vault-held master secret transported only over TLS, where the master secret MUST decode to **at least 32 bytes (256-bit)** of key material; (b) keyed to the **authenticated** caller identity (`request.state.client_id`), never a client-supplied header; and (c) every enroll / refresh / revoke / delete on `credential_store` MUST emit a synchronous audit event before the response (same hard-fail discipline as INV-001).
+
+**Entropy floor (2026-06-12 — SR-4):** `_decode_master_secret` (`proxy/app/credential_broker/kms.py`) rejects any decoded master secret shorter than 32 bytes with `KMSError`, fail-closed at fetch time. HKDF accepts any-length IKM and would otherwise silently stretch a misconfigured short/low-entropy Vault value (e.g. `"0"`) into a deterministic 32-byte KEK with no error. Tested by `test_kms.py` (`test_decode_master_secret_rejects_short_hex`, `_rejects_short_base64`, `_accepts_32_byte_hex`).
 
 **Why:** The broker holds the keys to M365/Bitbucket/Grafana/Netbox/Dex. Identity collapse or a plaintext master key (the original CB-001/CB-002 CRITICALs) compromises every brokered credential at once.
 
@@ -253,7 +257,28 @@ Integration test in same file (`@pytest.mark.integration`) covers the postgres-d
 
 **Rollout observable:** Monitor the 503 rate on `/mcp` invocations. If the profile DB lookup fails and no cache entry is present, callers will see 503. A sustained 503 rate with a healthy DB indicates a bug in the cache path (revert trigger: >1% 503 rate over 1h with healthy OPA and DB → investigate `_lookup_profile_with_cache`; see plan Task 1.10 Bear Case).
 
-**Enforcement:** `proxy/tests/unit/test_profile_lookup_failclosed.py` — 3 tests covering DB success, DB error + cache hit, and DB error + cache miss (503). `proxy/tests/unit/conftest.py` stubs `_lookup_profile_with_cache` for all other unit tests (returns None = no restriction = default allow).
+**Covered functions (all must obey the fail-closed rule):**
+- `_lookup_profile_with_cache` (`proxy/app/services/invocation.py`) — invoke path; cache key `mcp_profile:{client_id}:{tool_name}` (or `mcp_profile:uuid:{uuid}:{tool_name}` for named profiles), TTL 300s.
+- `_lookup_profile_row` (`proxy/app/routers/mcp_server.py`) — tools/list path; cache key `profile_row:{profile_id}:{mcp_name}`, TTL 120s.
+- `_lookup_profile_mcp_binding` (`proxy/app/routers/mcp_server.py`) — tools/list named-profile path; cache key `profile_binding:{profile_uuid}:{mcp_name}`, TTL 120s.
+
+In all three functions: a Redis `ConnectionError`/`RedisError` is treated as `_SENTINEL_FAIL_CLOSED` and MUST NOT fall through to a live DB call. The SENTINEL pattern ensures a Redis exception and a genuine cache miss are distinguishable.
+
+**Enforcement:** `proxy/tests/unit/test_profile_lookup_failclosed.py` — 3 tests covering DB success, DB error + cache hit, and DB error + cache miss (503) for `_lookup_profile_with_cache`. `proxy/tests/unit/test_mcp_server_profile_failclosed.py` — 4 tests covering `_lookup_profile_row` DB+Redis-down, `_lookup_profile_row` DB-down+cache-miss, `_lookup_profile_row` DB-down+cache-hit, and tools/list 503 when `ProfileLookupError` propagates. `proxy/tests/unit/conftest.py` stubs `_lookup_profile_with_cache` for all other unit tests (returns None = no restriction = default allow).
+
+---
+
+## S4: Grafana/gateway-net Co-Tenancy — Accepted Risk Ruling (2026-06-13)
+
+**Statement:** Grafana resides on `gateway-net` so that Nginx can reverse-proxy the dashboard at `/grafana/`. This is intentional design and will not be changed without a product decision.
+
+**Compensating control:** `GATEWAY_SHARED_SECRET` is scoped exclusively to the `proxy` service. The three non-edge containers that previously received `.env` via `env_file` — `alertmanager-config-renderer`, `minio-init`, and `compliance-checker` — now receive only the env vars they actually consume via explicit `environment:` keys. This eliminates the attack surface where a gateway-net peer could read `GATEWAY_SHARED_SECRET` from a container it can exec into.
+
+**Explicitly prohibited:** Re-introducing a CIDR allowlist as a compensating control is **prohibited**. This decision supersedes and is consistent with the RT-NEW-005 ruling. CIDR allowlists carry TOCTOU fragility (gvproxy address reassignment) and were explicitly rejected during the Phase 1 security review.
+
+**Path to stronger isolation:** If co-tenancy of Grafana on `gateway-net` is deemed unacceptable in a future threat model review, the correct path is a separate reverse-proxy hop on a dedicated `grafana-proxy-net` — Grafana on `observability-net` only, with a dedicated Nginx location block that connects via the new net. This requires a product decision and architecture review before implementation.
+
+**Enforcement (F-001 gate, S4):** `scripts/check_network_isolation.py` now includes `_check_gateway_secret_env_file_scope()`, which asserts that only `proxy` has `.env` in its `env_file`. Any regression where a non-edge service re-acquires `.env` will fail the `make security-check` gate. Unit test: `scripts/tests/test_check_network_isolation.py::TestGatewaySecretEnvFileScope`.
 
 ---
 

@@ -19,6 +19,7 @@ sys.path.insert(0, str(_SCRIPTS_DIR))
 from check_network_isolation import (
     _check_mcp_isolation,
     _check_egress_proxy,
+    _check_gateway_secret_env_file_scope,
     _is_credential_var,
     _is_mcp_service,
 )
@@ -174,3 +175,105 @@ class TestEgressProxy:
         _check_egress_proxy(c, "test", fails)
         assert any("read-only" in f for f in fails), \
             f"Expected read-only violation for egress-proxy config not found: {fails}"
+
+
+class TestGatewaySecretEnvFileScope:
+    """S4: GATEWAY_SHARED_SECRET must not be leaked via .env env_file to non-proxy services."""
+
+    def _compose_with_env_file(self, svc_name: str, env_files: list[str]) -> dict:
+        """Build a minimal compose dict with proxy and one additional service."""
+        return {
+            "services": {
+                "proxy": {
+                    "image": "mcp-proxy:local",
+                    "networks": {"gateway-net": None},
+                    "env_file": [".env"],
+                },
+                svc_name: {
+                    "image": "alpine:3.20",
+                    "networks": {"observability-net": None},
+                    "env_file": env_files,
+                },
+            },
+        }
+
+    def test_non_proxy_service_with_dotenv_fails(self):
+        """A non-proxy service with .env in env_file must be caught by the gate."""
+        c = self._compose_with_env_file("alertmanager-config-renderer", [".env"])
+        fails: list[str] = []
+        _check_gateway_secret_env_file_scope(c, "test.yml", fails)
+        assert any(
+            "alertmanager-config-renderer" in f and "S4" in f for f in fails
+        ), f"Expected S4 violation for alertmanager-config-renderer not found: {fails}"
+
+    def test_non_proxy_service_without_dotenv_passes(self):
+        """A non-proxy service that does NOT have .env must pass the gate."""
+        c = self._compose_with_env_file("alertmanager-config-renderer", [".env.alertmanager"])
+        fails: list[str] = []
+        _check_gateway_secret_env_file_scope(c, "test.yml", fails)
+        assert not any("alertmanager-config-renderer" in f for f in fails), \
+            f"Unexpected S4 failure: {fails}"
+
+    def test_non_proxy_service_no_env_file_passes(self):
+        """A non-proxy service with no env_file at all must pass the gate."""
+        c = {
+            "services": {
+                "proxy": {
+                    "image": "mcp-proxy:local",
+                    "env_file": [".env"],
+                },
+                "minio-init": {
+                    "image": "minio/mc:latest",
+                    "environment": {"MINIO_ROOT_USER": "admin"},
+                },
+            }
+        }
+        fails: list[str] = []
+        _check_gateway_secret_env_file_scope(c, "test.yml", fails)
+        assert fails == [], f"Unexpected S4 failure for no-env_file service: {fails}"
+
+    def test_proxy_with_dotenv_passes(self):
+        """The proxy service itself is allowed to have .env — must not be flagged."""
+        c = {
+            "services": {
+                "proxy": {
+                    "image": "mcp-proxy:local",
+                    "env_file": [".env"],
+                },
+            }
+        }
+        fails: list[str] = []
+        _check_gateway_secret_env_file_scope(c, "test.yml", fails)
+        assert fails == [], f"proxy should be allowed to have .env: {fails}"
+
+    def test_skips_when_no_proxy_service(self):
+        """Lab overlays without a proxy service must be silently skipped."""
+        c = {
+            "services": {
+                "lab-mcp-notes": {
+                    "image": "lab-notes:local",
+                    "env_file": [".env"],
+                },
+            }
+        }
+        fails: list[str] = []
+        _check_gateway_secret_env_file_scope(c, "podman-compose.lab.yml", fails)
+        assert fails == [], \
+            f"Gate should skip lab overlays without proxy service: {fails}"
+
+    def test_multiple_violators_all_caught(self):
+        """All non-proxy services with .env must be reported — not just the first."""
+        c = {
+            "services": {
+                "proxy": {"image": "mcp-proxy:local", "env_file": [".env"]},
+                "minio-init": {"image": "minio/mc:latest", "env_file": [".env"]},
+                "compliance-checker": {"image": "mcp-cc:latest", "env_file": [".env"]},
+            }
+        }
+        fails: list[str] = []
+        _check_gateway_secret_env_file_scope(c, "test.yml", fails)
+        assert len(fails) == 2, \
+            f"Expected 2 violations (minio-init + compliance-checker), got: {fails}"
+        names = " ".join(fails)
+        assert "minio-init" in names and "compliance-checker" in names, \
+            f"Both violators should appear in fails: {fails}"

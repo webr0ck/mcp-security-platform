@@ -65,6 +65,12 @@ PLATFORM_BACKEND_NETS = frozenset({
     "vault-net",
 })
 
+# ── S4: Services that are allowed to receive the full .env (GATEWAY_SHARED_SECRET) ──
+# Only the proxy legitimately uses GATEWAY_SHARED_SECRET to validate the
+# X-Forwarded-Client-CN header in _is_trusted_proxy (proxy/app/middleware/auth.py).
+# All other services must scope env vars explicitly via environment: keys.
+_GATEWAY_SECRET_ALLOWED_SERVICES: frozenset[str] = frozenset({"proxy"})
+
 # ── Platform-privileged credential env var prefixes/names ────────────────────
 _CREDENTIAL_PREFIXES = ("POSTGRES_", "PGPASSWORD")
 _CREDENTIAL_EXACT = frozenset({
@@ -395,6 +401,62 @@ def _check_egress_proxy(c: dict, compose_file: str, fails: list[str]) -> None:
             config_ro)
 
 
+def _env_files_for_service(service_def: dict) -> list[str]:
+    """Return the list of env_file paths declared for a compose service."""
+    raw = service_def.get("env_file")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    result = []
+    for entry in raw:
+        if isinstance(entry, str):
+            result.append(entry)
+        elif isinstance(entry, dict):
+            result.append(entry.get("path", ""))
+    return result
+
+
+def _check_gateway_secret_env_file_scope(
+    c: dict, compose_file: str, fails: list[str]
+) -> None:
+    """
+    S4 gate: assert that only services in _GATEWAY_SECRET_ALLOWED_SERVICES have
+    '.env' in their env_file list.
+
+    Any service with env_file: ['.env'] receives GATEWAY_SHARED_SECRET (and all
+    other secrets in .env).  Non-edge containers must use explicit environment:
+    keys instead of inheriting the full .env.
+
+    Applies only to compose files that contain the proxy service (i.e. the main
+    production compose).  Overlay files and lab configs may legitimately omit
+    the proxy service and need not satisfy this constraint.
+    """
+    svc = c.get("services") or {}
+    if "proxy" not in svc:
+        # Lab overlay or stub file — this gate is only meaningful in the full
+        # compose topology that includes the proxy service.
+        return
+
+    tag = f"[{compose_file}] " if compose_file else ""
+
+    def chk(label: str, cond: bool) -> None:
+        print(("PASS  " if cond else "FAIL  ") + tag + label)
+        if not cond:
+            fails.append(tag + label)
+
+    for name, s in svc.items():
+        env_files = _env_files_for_service(s)
+        if ".env" not in env_files:
+            continue
+        allowed = name in _GATEWAY_SECRET_ALLOWED_SERVICES
+        chk(
+            f"service '{name}' with '.env' env_file is in allowed list "
+            f"{sorted(_GATEWAY_SECRET_ALLOWED_SERVICES)} (S4)",
+            allowed,
+        )
+
+
 def _svc_nets(s: dict) -> frozenset[str]:
     nets = s.get("networks") or {}
     if isinstance(nets, list):
@@ -418,6 +480,9 @@ def _run_checks_for_file(compose_file: str, fails: list[str]) -> None:
 
     # Run egress proxy checks
     _check_egress_proxy(c, compose_file, fails)
+
+    # S4: Assert GATEWAY_SHARED_SECRET is not leaked via .env env_file
+    _check_gateway_secret_env_file_scope(c, compose_file, fails)
 
 
 def main() -> int:
