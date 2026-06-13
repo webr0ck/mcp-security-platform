@@ -114,6 +114,8 @@ class TrustVerifier:
         age_seconds = (now - signed_at_dt).total_seconds()
         if age_seconds > self._max_age:
             return self._reject(f"envelope_too_old_age={age_seconds:.0f}s")
+        if age_seconds < -self._skew:
+            return self._reject(f"envelope_future_dated_age={age_seconds:.0f}s")
 
         # ── Step 2: Chain validation (SPKI anchor, point-in-time) ────────
         if len(x5c) < 1:
@@ -203,7 +205,7 @@ class TrustVerifier:
                 f"content_hash_mismatch got={content_hash[:12]}… want={expected_hash[:12]}…"
             )
 
-        integrity_rank = int(label.get("integrity_rank", 0))
+        integrity_rank = max(0, min(4, int(label.get("integrity_rank", 0))))
         return VerifierVerdict(accepted=True, integrity_rank=integrity_rank, reason=None)
 
 

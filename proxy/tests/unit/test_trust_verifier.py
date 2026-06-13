@@ -357,6 +357,58 @@ class TestF6MaxEnvelopeAge:
         assert v.integrity_rank == 0
 
 
+# ── F-6b: future-dated envelope ──────────────────────────────────────────
+
+class TestF6FutureDated:
+    def test_future_dated_envelope_rejected(self, pki, verifier):
+        """MEDIUM fix: signed_at more than clock_skew_seconds in the future → rejected."""
+        content = [{"type": "text", "text": "x"}]
+        # 2 minutes in the future — beyond the 60s skew allowance
+        future = (datetime.now(UTC) + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        envelope = _build_envelope(pki["leaf_key"], pki["leaf_cert"], pki["sub_ca_cert"], content, signed_at=future)
+        result = _make_tool_result(content, envelope)
+        v = verifier.verify(result, tool_name="t", server_id="s", result_id="r")
+        assert v.accepted is False
+        assert v.integrity_rank == 0
+
+    def test_slightly_future_within_skew_accepted(self, pki, verifier):
+        """Clock skew within 60s tolerance → accepted."""
+        content = [{"type": "text", "text": "x"}]
+        # 30 seconds in the future — within skew allowance
+        slightly_future = (datetime.now(UTC) + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        envelope = _build_envelope(pki["leaf_key"], pki["leaf_cert"], pki["sub_ca_cert"], content, signed_at=slightly_future)
+        result = _make_tool_result(content, envelope)
+        # tool_name/server_id/result_id must match _build_envelope defaults for sig to verify
+        v = verifier.verify(result, tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is True
+
+
+# ── integrity_rank clamp ──────────────────────────────────────────────────
+
+class TestIntegrityRankClamp:
+    def test_out_of_range_rank_is_clamped(self, pki, verifier):
+        """LOW fix: integrity_rank embedded in label is clamped to [0, 4]."""
+        content = [{"type": "text", "text": "x"}]
+        # Build envelope with rank=9999 in the label
+        envelope = _build_envelope(pki["leaf_key"], pki["leaf_cert"], pki["sub_ca_cert"], content, trust_tier=0)
+        envelope["label"]["integrity_rank"] = 9999
+        # Re-sign with the manipulated label (simulating a legitimate signer going rogue)
+        from app.services.jcs import jcs_signed_input
+        signed_input_bytes = jcs_signed_input(
+            label=envelope["label"],
+            content_hash=envelope["binding"]["content_hash"],
+            nonce=envelope["binding"]["nonce"],
+            signed_at=envelope["binding"]["signed_at"],
+            result_id="rid-1", tool_name="web_search", server_id="srv-1",
+        )
+        sig_der = pki["leaf_key"].sign(signed_input_bytes, ec.ECDSA(hashes.SHA256()))
+        envelope["sig"]["value"] = base64.urlsafe_b64encode(sig_der).rstrip(b"=").decode()
+        result = _make_tool_result(content, envelope)
+        v = verifier.verify(result, tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is True
+        assert v.integrity_rank == 4  # clamped from 9999
+
+
 # ── F-7: no envelope → integrity_rank=0 ─────────────────────────────────
 
 class TestF7NoEnvelope:

@@ -59,9 +59,12 @@ def _sign(leaf_key, leaf_cert, sub_ca, content, trust_tier=0):
         cert_p = os.path.join(td, "l.crt")
         key_p = os.path.join(td, "l.key")
         sub_p = os.path.join(td, "s.crt")
-        open(cert_p, "wb").write(leaf_cert.public_bytes(serialization.Encoding.PEM))
-        open(key_p, "wb").write(leaf_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
-        open(sub_p, "wb").write(sub_ca.public_bytes(serialization.Encoding.PEM))
+        with open(cert_p, "wb") as f:
+            f.write(leaf_cert.public_bytes(serialization.Encoding.PEM))
+        with open(key_p, "wb") as f:
+            f.write(leaf_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
+        with open(sub_p, "wb") as f:
+            f.write(sub_ca.public_bytes(serialization.Encoding.PEM))
         labeler = TrustLabeler(cert_p, key_p, sub_p)
         return labeler.sign_result(content=content, structured_content=None, tool_name="web_search", server_id="demo-srv", result_id="demo-rid-1", trust_tier=trust_tier, sensitivity_label="low")
 
