@@ -23,10 +23,20 @@ RENEWAL_INTERVAL = int(os.environ.get("LABELER_RENEWAL_INTERVAL_SECONDS", "720")
 MCP_LABELER_OID = x509.ObjectIdentifier("1.3.6.1.4.1.99999.1.1")
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
+def _atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+    """Atomic write with explicit permissions. Does not rely on umask (private key safety)."""
     tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(data)
-    tmp.rename(path)
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except Exception:
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
+        raise
+    os.replace(str(tmp), str(path))
 
 
 def renew_once() -> None:

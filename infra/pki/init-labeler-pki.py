@@ -37,11 +37,20 @@ def _pem_key(key) -> bytes:
     )
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    """Write to .tmp then rename — atomic on POSIX filesystems."""
+def _atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+    """Atomic write with explicit permissions. Does not rely on umask (private key safety)."""
     tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(data)
-    tmp.rename(path)
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except Exception:
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
+        raise
+    os.replace(str(tmp), str(path))
 
 
 def generate_sub_ca():
@@ -107,7 +116,8 @@ def generate_leaf(sub_ca_key, sub_ca_cert):
 
 
 def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(str(OUTPUT_DIR), 0o700)  # tighten if dir existed with wider perms
     sub_ca_key_path = OUTPUT_DIR / "sub_ca.key"
 
     if sub_ca_key_path.exists():
