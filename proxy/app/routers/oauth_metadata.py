@@ -86,7 +86,7 @@ async def _check_register_rate_limit(client_ip: str, limit: int = 10, window: in
         results = await pipe.execute()
         return results[0] <= limit
     except Exception:
-        return True  # fail-open
+        return False  # fail-closed: rate-limit must not bypass on infrastructure error
 
 # "claude-code" is a pre-registered public Keycloak client (publicClient: true,
 # no secret, PKCE S256 required, any localhost redirect URI allowed).
@@ -173,6 +173,11 @@ async def oauth_server_metadata(request: Request):
     data["registration_endpoint"] = f"{proxy}/oauth/register"
     # Ensure MCP clients know PKCE S256 is required (Keycloak enforces it on claude-code)
     data["code_challenge_methods_supported"] = ["S256"]
+    # Override scopes_supported to only advertise the scopes enabled on the
+    # claude-code public client. Keycloak's discovery lists every realm scope,
+    # but MCP clients use scopes_supported to build the authorization request —
+    # requesting an unenabled scope returns invalid_scope.
+    data["scopes_supported"] = ["openid", "profile", "email", "roles", "offline_access"]
 
     return data
 
@@ -246,13 +251,16 @@ async def oauth_protected_resource(request: Request):
     """
     proxy = _proxy_base(request)
     issuer = _public_issuer()
+    # Point authorization_servers at the proxy's own filtered discovery endpoint
+    # (not Keycloak directly). If we listed Keycloak's issuer URL, MCP clients
+    # would fetch Keycloak's native discovery document which advertises every realm
+    # scope — causing invalid_scope on the authorization request. Our proxy's
+    # /.well-known/oauth-authorization-server overrides scopes_supported to only
+    # the scopes enabled on the claude-code public client.
     return {
         "resource": proxy,
-        # Single entry: Keycloak is the only authorization server.
-        "authorization_servers": [issuer] if issuer else [],
+        "authorization_servers": [proxy],
         "bearer_methods_supported": ["header", "cookie"],
         "resource_documentation": f"{proxy}/docs",
-        # Advertise that the resource accepts both API keys and OIDC tokens
-        # so clients know they can use either mechanism.
         "introspection_endpoint": f"{issuer}/protocol/openid-connect/token/introspect" if issuer else None,
     }

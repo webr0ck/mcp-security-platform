@@ -31,8 +31,19 @@ def _decode_master_secret(encoded: str) -> bytes:
     """
     s = encoded.strip()
     if len(s) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", s):
-        return bytes.fromhex(s)
-    return base64.b64decode(s)
+        raw = bytes.fromhex(s)
+    else:
+        raw = base64.b64decode(s)
+    # SR-4: enforce a 256-bit entropy floor. HKDF accepts any-length IKM and
+    # silently stretches a short/low-entropy secret into a 32-byte KEK, so a
+    # misconfigured Vault value (e.g. "0") would yield a deterministic key with
+    # no error. Fail closed before any KEK is ever derived from it.
+    if len(raw) < _KEK_SIZE:
+        raise KMSError(
+            f"master_secret must be at least {_KEK_SIZE} bytes (256-bit); "
+            f"decoded to {len(raw)} bytes"
+        )
+    return raw
 
 
 class VaultKMSClient:

@@ -42,6 +42,16 @@ class CredentialBroker:
         self._master_secret: bytearray | None = None
         self._master_secret_fetched_at: datetime | None = None
 
+    @property
+    def vault_client(self) -> "VaultKMSClient":
+        """Public accessor used by dispatcher helpers (entra_client_credentials path)."""
+        return self._kms
+
+    @property
+    def db_pool(self) -> "async_sessionmaker":
+        """Public accessor used by dispatcher helpers (entra_client_credentials path)."""
+        return self._db_factory
+
     @staticmethod
     def _zero(buf: bytearray | None) -> None:
         if buf:
@@ -123,11 +133,28 @@ class CredentialBroker:
             if record is None:
                 raise CredentialNotEnrolledError(user_sub=user_sub, service=service)
 
-            refresh_token = decrypt(bytes(record.encrypted_blob), user_sub, master)
+            # Pass full four-field AAD to match _make_aad() contract (FIND-010 / INV-013).
+            # owner_type is always "user" on this path (service credentials use approach_a
+            # via decrypt_credential, not this broker method).
+            refresh_token = decrypt(
+                bytes(record.encrypted_blob),
+                user_sub,
+                master,
+                service=service,
+                tool_id=None,
+                owner_type="user",
+            )
             adapter = self._approach_a_adapters[service]
             access_token, new_refresh, expires_in = await adapter.refresh(refresh_token)
 
-            new_encrypted = encrypt(new_refresh, user_sub, master)
+            new_encrypted = encrypt(
+                new_refresh,
+                user_sub,
+                master,
+                service=service,
+                tool_id=None,
+                owner_type="user",
+            )
             await db.execute(
                 text(
                     "UPDATE credential_store SET encrypted_blob=:blob WHERE user_sub=:sub AND service=:svc"

@@ -105,9 +105,26 @@ Priority order:
 
 ---
 
+---
+
+## DONE — Wazuh SIEM integration (lab tier) — 2026-06-13
+
+Wazuh lab overlay added for AI attack detection and active-response quarantine.
+
+| Component | Deliverable | Commit |
+|---|---|---|
+| Detection rules | 14 Wazuh rules (`0960-mcp-ai-attacks.xml`, rule IDs 100510–100523) — prompt injection, tool exfil, policy probe burst, slow exfil, quarantined-tool access | `ed5755e` |
+| Active response | `quarantine-mcp-tool.py` — auto-quarantine on HIGH anomaly; integrates with proxy `/api/v1/tools/{id}/quarantine` | `ed5755e` |
+| MCP server | `deployments/poc/wazuh/` — decoder, filebeat, compose overlay (`compose.wazuh.yml`) | `93ff07b` |
+| Bug fixes | 5 blocking issues from 3-critic review resolved (auth, error handling, idempotency, retry) | `0ab5300` |
+
+---
+
 ## DEFERRED
 
+- **PRD-0001 M1 (V038 schema) and M2 (taint floor enforcement)** — UNCOMMITTED. `taint_floor.py`, `taint_store.py`, `V038__trust_envelope.sql`, and related tests are present as working files but not yet committed to the branch. M3/M4 (labeler/verifier) are complete and committed; M1/M2 are the blocking enforcement control. Demo criteria D1/D2 (block a tainted session's high-sink call + INV-001 audit row) are unproven until M2 is committed. Next action: commit M1/M2 as a follow-up PR before any public demo that includes D1/D2 scenarios.
 - **S5 (kms envelope AAD for app-only secrets)** — LOW. The `kms.py:envelope_encrypt/decrypt` helpers pass `AAD=None` (used by the app-only-secret / `entra_client_credentials` regime). The live `approach_a` broker path is NOT affected — it already binds full AAD. S5 is deferred until the app-only-secret regime is in active use. Tracked in `credential_broker/kms.py` docstring and `SECURITY_NONNEGATABLES.md §INV-013 SR-5`.
+- **DA-1: INV-012 runtime proof-run** — `scripts/check_signed_default.sh` is a static grep only. Runtime rejection by OPA of an unsigned/tampered bundle is untested. Downgrade README claim from "ENFORCED" to "mechanism present, runtime-rejection statically validated" until a staging proof-run passes.
 - **C-precise per-value taint (conformant harness)** — RFC-0001 §8.2 future work. No code or test exists today.
 - **Confidentiality / BLP exfiltration axis** — RFC-0001 §15 future work. Out of scope for v0.1.
 - **Federated trust roots** — RFC-0001 §15 future work. Out of scope for v0.1.

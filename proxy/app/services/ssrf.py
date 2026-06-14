@@ -37,24 +37,63 @@ _BLOCKED_V4 = [
 # Blocked private/reserved IPv6 networks
 _BLOCKED_V6 = [
     ipaddress.ip_network("::1/128"),            # loopback
+    ipaddress.ip_network("::/128"),             # unspecified (also caught by not is_global)
     ipaddress.ip_network("fc00::/7"),            # unique local
     ipaddress.ip_network("fe80::/10"),           # link-local
     ipaddress.ip_network("fd00:ec2::/32"),       # AWS IPv6 metadata
 ]
 
+# IPv6 transition prefixes that embed a 32-bit IPv4 address in their low bits.
+# These can be globally-routable (is_global == True) while wrapping a
+# private/loopback/metadata IPv4 target, so the embedded v4 must be re-checked.
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")     # RFC 6052 well-known NAT64
+_V4COMPAT_PREFIX = ipaddress.ip_network("::/96")          # deprecated IPv4-compatible IPv6
+
+
+def _v4_blocked(ip4: ipaddress.IPv4Address) -> bool:
+    return any(ip4 in net for net in _BLOCKED_V4)
+
+
+def _embedded_v4s(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
+    """Extract every embedded IPv4 address from an IPv6 transition form.
+
+    Covers IPv4-mapped (::ffff:a.b.c.d), 6to4 (2002:V4::/16), Teredo
+    (2001:0::/32 — both server and client v4), NAT64 (64:ff9b::/96) and the
+    deprecated IPv4-compatible (::/96) forms. A globally-routable IPv6 wrapper
+    must not be able to smuggle a private/loopback/metadata IPv4 target past
+    the filter.
+    """
+    found: list[ipaddress.IPv4Address] = []
+    if ip.ipv4_mapped is not None:
+        found.append(ip.ipv4_mapped)
+    if ip.sixtofour is not None:
+        found.append(ip.sixtofour)
+    if ip.teredo is not None:
+        found.extend(ip.teredo)  # (server, client)
+    if ip in _NAT64_PREFIX or ip in _V4COMPAT_PREFIX:
+        found.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
+    return found
+
 
 def _is_blocked_ip(addr: str) -> bool:
     try:
         ip = ipaddress.ip_address(addr)
-        if isinstance(ip, ipaddress.IPv4Address):
-            return any(ip in net for net in _BLOCKED_V4)
-        # IPv4-mapped IPv6 (::ffff:a.b.c.d) — evaluate the embedded IPv4 address
-        # so that DNS rebind via IPv4-mapped form cannot bypass the V4 blocklist.
-        if ip.ipv4_mapped is not None:
-            return any(ip.ipv4_mapped in net for net in _BLOCKED_V4)
-        return any(ip in net for net in _BLOCKED_V6)
     except ValueError:
         return False
+    if isinstance(ip, ipaddress.IPv4Address):
+        return _v4_blocked(ip)
+    # IPv6: re-check any embedded IPv4 (mapped/6to4/Teredo/NAT64/v4-compatible)
+    # against the V4 blocklist so a globally-routable wrapper cannot smuggle a
+    # private/loopback/metadata IPv4 target through.
+    if any(_v4_blocked(v4) for v4 in _embedded_v4s(ip)):
+        return True
+    # Explicit IPv6 blocklist (loopback, unspecified, ULA, link-local, AWS v6 metadata).
+    if any(ip in net for net in _BLOCKED_V6):
+        return True
+    # Deny-by-default: only a globally-routable IPv6 may be an upstream target.
+    # This catches :: (unspecified), ULA, link-local, documentation ranges, etc.
+    # without enumerating every reserved prefix by hand.
+    return not ip.is_global
 
 
 def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
@@ -118,8 +157,11 @@ def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
                 )
     except SSRFError:
         raise
-    except OSError:
-        pass  # DNS failure — allow (don't block registration because DNS is flaky)
+    except OSError as exc:
+        raise SSRFError(
+            f"DNS resolution failed for {host!r}: {exc}. "
+            "Register the server only when DNS is reachable."
+        ) from exc
 
 
 async def check_hostname_dns(hostname: str) -> list[str]:

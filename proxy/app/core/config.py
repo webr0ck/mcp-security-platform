@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # =========================================================================
     # Deployment
     # =========================================================================
-    ENVIRONMENT: Literal["development", "staging", "production"] = "development"
+    ENVIRONMENT: Literal["development", "staging", "production"] = "production"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     PLATFORM_VERSION: str = "1.0.0"
 

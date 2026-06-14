@@ -246,9 +246,9 @@ async def oidc_login(
             await session.execute(
                 text("""
                     INSERT INTO oidc_sessions
-                        (state, pkce_code_verifier, nonce, redirect_uri)
+                        (state, pkce_code_verifier, pkce_code_challenge_method, nonce, redirect_uri)
                     VALUES
-                        (:state, :verifier, :nonce, :redirect_uri)
+                        (:state, :verifier, 'S256', :nonce, :redirect_uri)
                 """),
                 {
                     "state": state,
@@ -317,6 +317,19 @@ async def oidc_callback(
     stored_nonce = row.nonce
     session_id = str(row.session_id)
     callback_uri = row.redirect_uri
+    # Proxy-layer PKCE method enforcement: reject sessions that did not use S256.
+    # Prevents downgrade even if Keycloak's pkce_code_challenge_method is misconfigured.
+    stored_method = getattr(row, "pkce_code_challenge_method", "S256")
+    if stored_method != "S256":
+        logger.error(
+            "PKCE method %r is not S256 for session %s — rejecting callback",
+            stored_method,
+            session_id,
+        )
+        return JSONResponse(
+            status_code=400,
+            content={"error": "pkce_method_not_s256", "message": "Only S256 PKCE is accepted."},
+        )
 
     # Extract post-login redirect from state (<random>.<base64url(path)>[.<base64url(profile)>])
     _post_login_redirect = "/portal"
@@ -362,10 +375,21 @@ async def oidc_callback(
                         _requested_profile_name,
                     )
         except Exception as _pexc:
+            # INV-015: profile lookup fail-closed.  A DB error during login
+            # must NOT silently continue with profile_uuid=None — that would
+            # allow a session to be issued without the profile binding that the
+            # caller explicitly requested, potentially bypassing tool restrictions.
             logger.error(
-                "Failed to resolve profile %r during login callback: %s — proceeding without profile",
+                "Failed to resolve profile %r during login callback: %s — returning 503",
                 _requested_profile_name,
                 _pexc,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "profile_lookup_failed",
+                    "message": "Profile lookup unavailable — service degraded. Please retry.",
+                },
             )
 
     # Exchange code for tokens at Keycloak (use internal URL)
@@ -463,7 +487,15 @@ async def oidc_callback(
     # Even without full signature verification, this binds the token to the
     # specific login session initiated by /login.
     token_nonce = id_token_claims.get("nonce")
-    if stored_nonce and token_nonce != stored_nonce:
+    # Fail-closed: a missing stored_nonce is treated as a reject, not a skip.
+    # A NULL/empty nonce means the session row is corrupt or was tampered with.
+    if not stored_nonce:
+        logger.error(
+            "OIDC nonce absent for session %s — possible DB corruption; rejecting callback",
+            session_id,
+        )
+        raise HTTPException(400, "OIDC nonce absent — cannot validate token binding")
+    if token_nonce != stored_nonce:
         logger.warning(
             "OIDC nonce mismatch for session %s: stored=%s token=%s",
             session_id,
@@ -671,6 +703,11 @@ async def oidc_session_info(
     if not claims:
         return JSONResponse(status_code=401, content={"error": "invalid_session"})
 
+    # Enforce JTI revocation — consistent with auth middleware on all other paths.
+    jti = claims.get("jti")
+    if jti and await _is_session_jti_revoked(jti):
+        return JSONResponse(status_code=401, content={"error": "session_revoked"})
+
     return JSONResponse(content={
         "subject": claims.get("sub"),
         "client_id": claims.get("client_id"),
@@ -773,6 +810,22 @@ async def token_refresh(
                 "Failed to revoke session %s after decryption failure: %s",
                 row.session_id, revoke_exc,
             )
+            # N6: Compensating Redis revocation — best-effort (prevents TOCTOU window
+            # if DB revocation write failed silently after decrypt-else-revoke).
+            try:
+                import math as _math
+                from app.core.redis_client import redis_pool as _redis_pool
+                _jti = jti  # jti decoded from claims earlier in this function (line 712)
+                _exp = claims.get("exp", 0)
+                _ttl = max(_math.ceil(_exp - time.time()), 300) if _exp else 86400
+                _redis = _redis_pool.client
+                await _redis.setex(f"revoked_jti:{_jti}", _ttl, "1")
+                logger.warning(
+                    "Redis compensating revocation written for jti %s after DB failure",
+                    _jti[:8] if _jti and len(_jti) >= 8 else _jti,
+                )
+            except Exception as _redis_err:
+                logger.warning("Redis compensating revocation write failed: %s", _redis_err)
         return JSONResponse(
             status_code=401,
             content={"error": "session_revoked_relogin_required"},

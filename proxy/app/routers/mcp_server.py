@@ -726,15 +726,29 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
         content = [{"type": "text", "text": json.dumps(upstream.get("result", {}))}]
     from app.services.trust_labeler import get_labeler as _get_labeler, build_envelope_result as _build_envelope_result
     _upstream_meta = upstream.get("meta", {})
+    _server_id = _upstream_meta.get("server_id", "")
     _result_payload = _build_envelope_result(
         content=content,
         labeler=_get_labeler(),
         tool_name=name,
-        server_id=_upstream_meta.get("server_id", ""),
+        server_id=_server_id,
         result_id=request_id,
         trust_tier=_upstream_meta.get("trust_tier"),
         sensitivity_label=_upstream_meta.get("sensitivity_label"),
     )
+    # M4 W4.2: passive inline observer — verify the envelope we just built.
+    # Never blocks or raises; advisory only (D4/D5/D6 demo scenarios).
+    from app.core.config import get_settings as _gs
+    if _gs().TRUST_OBSERVER_ENABLED:
+        from app.services.trust_observer import observe_result as _observe
+        from app.services.trust_verifier import get_verifier as _get_verifier
+        _observe(
+            _result_payload,
+            verifier=_get_verifier(),
+            tool_name=name,
+            server_id=_server_id,
+            result_id=request_id,
+        )
     return _ok(req_id, _result_payload)
 
 

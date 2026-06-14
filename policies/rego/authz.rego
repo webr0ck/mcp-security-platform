@@ -143,8 +143,11 @@ client_has_invoke_permission if {
 }
 
 # Admins (admin/platform_admin) may invoke any active tool
-# without requiring explicit per-tool grants.  Critical/quarantined tools
-# are still blocked by the risk-gate below.
+# without requiring explicit per-tool grants.
+# Quarantined tools are denied by status (blocked at app layer + deny rule above).
+# Critical-risk tools require max_risk_level: critical in the caller's grant entry
+# (see risk_level_within_threshold below) — they are NOT unconditionally blocked
+# for admins.
 client_has_invoke_permission if {
     some role in input.client_roles
     role in {"admin", "platform_admin"}

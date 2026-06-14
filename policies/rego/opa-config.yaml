@@ -1,0 +1,17 @@
+# OPA runtime configuration — INV-002 compliance
+#
+# Primary masking layer: OPA strips /input/params and /input/arguments from
+# decision log entries BEFORE they are emitted to stdout/console. This is the
+# authoritative redaction path for decision logs (not the Promtail regex, which
+# is defense-in-depth only).
+#
+# References:
+#   https://www.openpolicyagent.org/docs/latest/decision-logs/#masking-sensitive-data
+#   docs/SECURITY_NONNEGATABLES.md INV-002
+
+decision_logs:
+  mask_paths:
+    - "/input/params"
+    - "/input/arguments"
+    - "/input/profile"       # access control config — not a secret but not log-worthy
+    - "/input/recent_calls"  # behavioral fingerprint — INV-002 defense-in-depth
