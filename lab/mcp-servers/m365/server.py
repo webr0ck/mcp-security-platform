@@ -71,9 +71,27 @@ _PRM_PATH = "/.well-known/oauth-protected-resource"
 _injected_auth: contextvars.ContextVar[str] = contextvars.ContextVar("injected_auth", default="")
 
 
+def _http_request():
+    """Best-effort access to the current Starlette HTTP request.
+
+    The MCP streamable-http server sets request_ctx in the SAME task that runs
+    the tool, so reading headers here works even though the ASGI middleware's
+    contextvar (set in a different task) does not propagate to the tool.
+    """
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+        req = getattr(request_ctx.get(), "request", None)
+        if req is not None and hasattr(req, "headers"):
+            return req
+    except Exception:
+        pass
+    return None
+
+
 def _injected_token() -> str:
     """Return the bearer token the gateway injected for this request, or ''."""
-    raw = _injected_auth.get()
+    req = _http_request()
+    raw = req.headers.get("authorization", "") if req is not None else _injected_auth.get()
     if raw and raw[:7].lower() == "bearer ":
         return raw[7:].strip()
     return ""
@@ -131,6 +149,9 @@ def _get_client_secret() -> str:
     Task 2.5: secret comes from the broker-injected X-Entra-Client-Secret header,
     NOT from the AZURE_CLIENT_SECRET env var (which is absent from compose).
     """
+    req = _http_request()
+    if req is not None:
+        return req.headers.get("x-entra-client-secret", "")
     return _injected_client_secret.get()
 
 

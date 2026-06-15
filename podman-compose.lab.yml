@@ -30,7 +30,7 @@ x-mcp-hardening: &mcp-hardening
   read_only: true
   security_opt:
     - no-new-privileges:true
-    - seccomp:sandbox/files/seccomp/mcp-sandbox.json
+    - seccomp:${PWD}/sandbox/files/seccomp/mcp-sandbox.json
   cap_drop:
     - ALL
   pids_limit: 64
@@ -83,7 +83,10 @@ services:
 
   # ── Keycloak seeder — updates client secrets from env vars post-import ─────
   lab-keycloak-seeder:
-    image: alpine:3.19
+    build:
+      context: ./lab/keycloak
+      dockerfile: Dockerfile.seeder
+    image: lab-keycloak-seeder:lab
     container_name: lab-keycloak-seeder
     restart: "no"
     depends_on:
@@ -91,7 +94,7 @@ services:
         condition: service_healthy
     volumes:
       - ./lab/keycloak/seed.sh:/seed.sh:ro
-    command: ["sh", "-c", "apk add --no-cache curl jq bash -q && bash /seed.sh"]
+    command: ["bash", "/seed.sh"]
     environment:
       KC_URL: http://lab-keycloak:8080
       KC_REALM: mcp
@@ -256,11 +259,12 @@ services:
       - lab-net
       - mcp-grafana-net   # pairwise net with proxy only; replaces internal-net
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=4)\" 2>/dev/null || python3 -c \"import urllib.request,json; urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'ping','id':1}).encode(),headers={'Content-Type':'application/json'},method='POST'),timeout=4)\" 2>/dev/null"]
+      # grafana/mcp-grafana image has no python3/curl/wget — use bash /dev/tcp (/bin/sh lacks it)
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8000 2>/dev/null && exec 3>&-'"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 30s
     restart: unless-stopped
 
   # ── NetBox MCP Server — points to real NetBox instance ──────────────────────
@@ -365,6 +369,7 @@ services:
     build: ./lab/mcp-servers/m365
     image: lab-mcp-m365:lab
     container_name: lab-mcp-m365
+    pids_limit: 512  # override hardening default (64): stateless_http uses more worker threads
     ports:
       - "127.0.0.1:8103:8000"
     environment:
@@ -406,6 +411,9 @@ services:
   lab-egress-proxy:
     image: ubuntu/squid:latest
     container_name: lab-egress-proxy
+    # Rootless Podman cannot setgid/setuid inside the container. Start as proxy
+    # user (uid/gid 13) so Squid doesn't need to change users at runtime.
+    user: "13:13"
     volumes:
       - ./lab/egress-proxy/squid.conf:/etc/squid/squid.conf:ro
     networks:
@@ -423,7 +431,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   # ── gateway: Podman/macOS compatibility override ─────────────────────────────
   # ── RAG Assistant — developer onboarding + doc search MCP server ────────────
@@ -688,7 +696,9 @@ services:
       # Remapped to 8201 — port 8200 is used by isl-vault from intentional-secrets-lab
       - "8201:8200"
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:8200/v1/sys/health || exit 1"]
+      # String form so podman-compose replaces (not concatenates) the base compose's vault healthcheck.
+      # Dev mode uses plain HTTP; the base compose checks HTTPS TLS, which doesn't apply here.
+      test: "CMD-SHELL wget -qO- http://127.0.0.1:8200/v1/sys/health > /dev/null 2>&1"
       interval: 10s
       timeout: 5s
       retries: 6
@@ -902,6 +912,25 @@ networks:
   observability-net:
     external: true
     name: mcp-security-platform_observability-net
+  # Proxy service networks — shared with the base compose stack
+  gateway-net:
+    external: true
+    name: mcp-security-platform_gateway-net
+  step-ca-net:
+    external: true
+    name: mcp-security-platform_step-ca-net
+  proxy-opa-net:
+    external: true
+    name: mcp-security-platform_proxy-opa-net
+  proxy-ollama-net:
+    external: true
+    name: mcp-security-platform_proxy-ollama-net
+  proxy-redis-net:
+    external: true
+    name: mcp-security-platform_proxy-redis-net
+  proxy-db-net:
+    external: true
+    name: mcp-security-platform_proxy-db-net
   # ── Per-MCP pairwise networks (Task 2.2a+2.2b) ───────────────────────────
   # Each is internal: true — no routing to/from the host or other containers
   # except the proxy. MCP servers cannot reach each other or platform backends.
@@ -942,9 +971,14 @@ networks:
     internal: false   # this net has internet access via lab-egress-proxy NAT
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
-# podman-compose 1.5.x does not support the Docker Compose v2 'environment:'
-# secret type. Override here with a file-based definition so the lab stack can
-# start without requiring STEP_CA_PROVISIONER_PASSWORD in the environment.
+# podman-compose does not support the Docker Compose v2 'environment:' secret
+# source. The base docker-compose.yml defines step_ca_password with
+# environment: STEP_CA_PROVISIONER_PASSWORD.  When the two files are merged,
+# podman-compose 1.6+ performs a deep merge that keeps both keys.  Setting
+# environment: ~ (null) here causes the deep-merged value to be null (falsy),
+# which suppresses the podman-compose validator's "environment not supported"
+# error, while file: provides the actual secret content from disk.
 secrets:
   step_ca_password:
+    environment: ""
     file: ./lab/step-ca-password
