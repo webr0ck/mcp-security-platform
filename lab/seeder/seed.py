@@ -816,6 +816,15 @@ async def main() -> None:
         log.error("tools.sql seeding failed: %s", exc)
         results["tools_sql"] = f"FAILED: {exc}"
 
+    # 4b. Onboard servers (server_registry + link tool_registry.server_id + entitlement)
+    log.info("Seeding server_registry...")
+    try:
+        await run_sql_file(conn, SQL_DIR / "servers.sql")
+        results["servers_sql"] = "OK"
+    except Exception as exc:
+        log.error("servers.sql seeding failed: %s", exc)
+        results["servers_sql"] = f"FAILED: {exc}"
+
     # 5. Insert RBAC seed rows
     log.info("Seeding RBAC roles...")
     try:

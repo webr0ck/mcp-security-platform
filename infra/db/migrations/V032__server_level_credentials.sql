@@ -13,7 +13,7 @@
 
 ALTER TABLE server_registry
     ADD COLUMN IF NOT EXISTS default_credential_id UUID
-        REFERENCES credential_store(credential_id)
+        REFERENCES credential_store(id)
         ON DELETE SET NULL;
 
 COMMENT ON COLUMN server_registry.default_credential_id IS

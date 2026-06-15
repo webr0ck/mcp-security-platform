@@ -129,7 +129,7 @@ class Registry:
             rows = await self.db_pool.fetch(
                 """
                 SELECT server_id, service_name, upstream_url, injection_mode,
-                       status, credential_id
+                       status, default_credential_id AS credential_id
                 FROM server_registry
                 WHERE status = $1 AND deleted_at IS NULL
                 ORDER BY service_name

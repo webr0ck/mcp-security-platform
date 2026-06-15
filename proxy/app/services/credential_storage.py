@@ -79,23 +79,27 @@ async def store_credential(
     # Step 3: Store in credential_store table
     credential_id = str(uuid.uuid4())
     try:
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO credential_store
-                    (id, user_sub, service, tool_id, credential_type, owner_type,
-                     encrypted_blob, created_at, updated_at)
-                VALUES
-                    ($1, $2, $3, $4, $5, $6, $7, now(), now())
-                """,
-                credential_id,
-                user_sub,
-                service,
-                tool_id,
-                credential_type,
-                owner_type,
-                nonce + ciphertext,  # Store nonce || ciphertext
+        from sqlalchemy import text
+        async with db_pool() as session:
+            await session.execute(
+                text("""
+                    INSERT INTO credential_store
+                        (id, user_sub, service, tool_id, credential_type, owner_type,
+                         encrypted_blob, created_at, updated_at)
+                    VALUES
+                        (:id, :sub, :svc, :tid, :ctype, :otype, :blob, now(), now())
+                """),
+                {
+                    "id": credential_id,
+                    "sub": user_sub,
+                    "svc": service,
+                    "tid": tool_id,
+                    "ctype": credential_type,
+                    "otype": owner_type,
+                    "blob": nonce + ciphertext,  # Store nonce || ciphertext
+                },
             )
+            await session.commit()
     except Exception as exc:
         logger.error(
             "Failed to store credential in database",
@@ -160,15 +164,17 @@ async def retrieve_credential(
 
     # Step 2: Fetch encrypted_blob from database
     try:
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT encrypted_blob, user_sub, service, tool_id, owner_type
-                FROM credential_store
-                WHERE id = $1
-                """,
-                credential_id,
+        from sqlalchemy import text
+        async with db_pool() as session:
+            result = await session.execute(
+                text("""
+                    SELECT encrypted_blob, user_sub, service, tool_id, owner_type
+                    FROM credential_store
+                    WHERE id = :cid
+                """),
+                {"cid": credential_id},
             )
+            row = result.mappings().first()
             if not row:
                 raise KeyError(f"Credential {credential_id} not found")
     except KeyError:
@@ -183,14 +189,14 @@ async def retrieve_credential(
     encrypted_blob = row["encrypted_blob"]
     retrieved_user_sub = row["user_sub"]
     retrieved_service = row["service"]
-    retrieved_tool_id = row["tool_id"]
+    retrieved_tool_id = str(row["tool_id"]) if row["tool_id"] is not None else None
     retrieved_owner_type = row["owner_type"]
 
     # Verify context matches (fail-closed if metadata changed)
     if (
         retrieved_user_sub != user_sub
         or retrieved_service != service
-        or retrieved_tool_id != tool_id
+        or retrieved_tool_id != (str(tool_id) if tool_id is not None else None)
         or retrieved_owner_type != owner_type
     ):
         logger.warning(
