@@ -33,9 +33,10 @@ import pytest_asyncio
 # Configuration
 # ---------------------------------------------------------------------------
 
-DB_DSN = os.environ.get(
-    "TEST_DB_DSN",
-    "postgresql://mcp_app:devpassword@localhost:5432/mcp_security",
+from app.core.config import settings as _settings
+DB_DSN = os.environ.get("TEST_DB_DSN") or (
+    f"postgresql://{_settings.DB_USER}:{_settings.DB_PASSWORD}"
+    f"@{_settings.DB_HOST}:{_settings.DB_PORT}/{_settings.DB_NAME}"
 )
 
 # Project root — scripts/db_migrate.sh lives here

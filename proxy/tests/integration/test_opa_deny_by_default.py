@@ -10,7 +10,10 @@ Requires: docker compose up opa proxy
 import pytest
 import httpx
 
-OPA_URL = "http://localhost:8181"
+from app.core.config import settings as _settings
+# OPA runs as the `opa` compose service (opa:8181) inside the proxy container;
+# localhost only applies when the port is published to the host.
+OPA_URL = f"http://{_settings.OPA_HOST}:{_settings.OPA_PORT}"
 AUTHZ_ENDPOINT = f"{OPA_URL}/v1/data/mcp/authz"
 
 

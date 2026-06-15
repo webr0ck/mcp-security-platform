@@ -31,7 +31,16 @@ import httpx
 import pytest
 
 PROXY_URL = "http://localhost:8000"
-DB_DSN = "postgresql://mcp_app:devpassword@localhost:5432/mcp_security"
+import os as _os
+from app.core.config import settings as _settings
+
+# Derive the DSN from the same settings the app uses (DB_HOST=db inside the
+# proxy container; localhost only when run from the host with TEST_DB_DSN).
+# asyncpg.connect needs a plain postgresql:// DSN (no +asyncpg driver tag).
+DB_DSN = _os.environ.get("TEST_DB_DSN") or (
+    f"postgresql://{_settings.DB_USER}:{_settings.DB_PASSWORD}"
+    f"@{_settings.DB_HOST}:{_settings.DB_PORT}/{_settings.DB_NAME}"
+)
 
 # Test tool UUIDs — must match seeded fixtures
 ACTIVE_TOOL_ID = "00000000-0000-0000-0000-000000000010"
