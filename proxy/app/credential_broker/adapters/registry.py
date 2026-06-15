@@ -75,7 +75,18 @@ def register_adapter(
         raise ValueError(f"approach must be 'A' or 'B', got {approach!r}")
 
     def deco(build_fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
-        _SPECS[(approach, name)] = AdapterSpec(
+        key = (approach, name)
+        if key in _SPECS:
+            # Last-import-wins is intentional (a clash must not take down broker
+            # assembly), but a silent shadow hides accidental name collisions and
+            # supply-chain tampering. Surface it loudly so it is detectable.
+            logger.warning(
+                "adapter_registration_overwritten",
+                # NB: "name"/"module"/"msg" etc. are reserved LogRecord attrs and
+                # raise KeyError if passed via extra — use prefixed keys.
+                extra={"adapter_approach": approach, "adapter_name": name},
+            )
+        _SPECS[key] = AdapterSpec(
             name=name, approach=approach, build=build_fn, requires=tuple(requires)
         )
         return build_fn

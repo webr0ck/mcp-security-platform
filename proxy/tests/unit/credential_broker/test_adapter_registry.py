@@ -94,3 +94,27 @@ def test_register_adapter_rejects_bad_approach():
         @registry.register_adapter(name="bad", approach="C")
         def _build(settings):  # pragma: no cover
             return None
+
+
+@pytest.mark.unit
+def test_duplicate_registration_warns(caplog):
+    """Re-registering the same (approach, name) overwrites but must log a warning
+    so accidental collisions / supply-chain shadowing are observable."""
+    import logging
+
+    @registry.register_adapter(name="acme-dup", approach="B")
+    def _first(settings):  # pragma: no cover
+        return "first"
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            @registry.register_adapter(name="acme-dup", approach="B")
+            def _second(settings):  # pragma: no cover
+                return "second"
+        assert any(
+            "adapter_registration_overwritten" in r.message for r in caplog.records
+        )
+        # last-import-wins still holds
+        assert registry.get_spec("acme-dup", approach="B").build(None) == "second"
+    finally:
+        registry._SPECS.pop(("B", "acme-dup"), None)
