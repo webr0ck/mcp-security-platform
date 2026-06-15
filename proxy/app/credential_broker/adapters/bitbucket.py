@@ -79,3 +79,23 @@ class BitbucketAdapter:
                 raise TokenExchangeError("bitbucket", exc.response.status_code) from None
             data = resp.json()
         return data["access_token"], data["refresh_token"], int(data["expires_in"])
+
+
+# --- Adapter plugin registration (see adapters/registry.py) ----------------
+from app.credential_broker.adapters.registry import register_adapter
+
+
+@register_adapter(
+    name="bitbucket",
+    approach="A",
+    requires=("BITBUCKET_CLIENT_ID", "BITBUCKET_CLIENT_SECRET"),
+)
+def _build_from_settings(settings):
+    return BitbucketAdapter(
+        client_id=settings.BITBUCKET_CLIENT_ID,
+        client_secret=settings.BITBUCKET_CLIENT_SECRET,
+        redirect_uri=settings.BITBUCKET_REDIRECT_URI,
+        scopes=settings.bitbucket_scopes_list,
+        auth_url=settings.BITBUCKET_AUTH_URL,
+        token_url=settings.BITBUCKET_TOKEN_URL,
+    )

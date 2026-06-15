@@ -93,3 +93,20 @@ class DexAdapter:
         # sessions without offline_access or server-side refresh disabled).
         refresh_token: str = data.get("refresh_token", "")
         return data["access_token"], refresh_token, int(data["expires_in"])
+
+
+# --- Adapter plugin registration (see adapters/registry.py) ----------------
+from app.credential_broker.adapters.registry import register_adapter
+
+
+@register_adapter(
+    name="dex", approach="A", requires=("DEX_CLIENT_ID", "DEX_CLIENT_SECRET")
+)
+def _build_from_settings(settings):
+    return DexAdapter(
+        issuer_url=settings.DEX_ISSUER_URL,
+        client_id=settings.DEX_CLIENT_ID,
+        client_secret=settings.DEX_CLIENT_SECRET,
+        redirect_uri=settings.DEX_REDIRECT_URI,
+        scopes=settings.dex_scopes_list,
+    )

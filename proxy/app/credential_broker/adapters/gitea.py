@@ -24,3 +24,12 @@ class GiteaAdapter(BaseAdapter):
 
     async def revoke(self, token_id: str) -> None:
         pass  # static token — nothing to revoke
+
+
+# --- Adapter plugin registration (see adapters/registry.py) ----------------
+from app.credential_broker.adapters.registry import register_adapter
+
+
+@register_adapter(name="gitea", approach="B", requires=("GITEA_ADMIN_TOKEN",))
+def _build_from_settings(settings):
+    return GiteaAdapter(admin_token=settings.GITEA_ADMIN_TOKEN)

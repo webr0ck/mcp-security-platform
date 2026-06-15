@@ -87,3 +87,22 @@ class M365Adapter:
                 raise TokenExchangeError("m365", exc.response.status_code) from None
             data = resp.json()
         return data["access_token"], data["refresh_token"], int(data["expires_in"])
+
+
+# --- Adapter plugin registration (see adapters/registry.py) ----------------
+from app.credential_broker.adapters.registry import register_adapter
+
+
+@register_adapter(
+    name="m365", approach="A", requires=("ENTRA_CLIENT_ID", "ENTRA_CLIENT_SECRET")
+)
+def _build_from_settings(settings):
+    return M365Adapter(
+        client_id=settings.ENTRA_CLIENT_ID,
+        client_secret=settings.ENTRA_CLIENT_SECRET,
+        tenant_id=settings.ENTRA_TENANT_ID,
+        redirect_uri=settings.ENTRA_REDIRECT_URI,
+        scopes=settings.entra_scopes_list,
+        token_url=settings.entra_token_url,
+        auth_url=settings.entra_auth_url,
+    )

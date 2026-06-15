@@ -42,3 +42,16 @@ class GrafanaAdapter(BaseAdapter):
             resp = await client.delete(url, headers=self._headers)
             resp.raise_for_status()
         logger.info("grafana_token_revoked", extra={"token_id": token_id})
+
+
+# --- Adapter plugin registration (see adapters/registry.py) ----------------
+from app.credential_broker.adapters.registry import register_adapter
+
+
+@register_adapter(name="grafana", approach="B", requires=("GRAFANA_ADMIN_TOKEN",))
+def _build_from_settings(settings):
+    return GrafanaAdapter(
+        base_url=settings.GRAFANA_BASE_URL,
+        service_account_id=settings.GRAFANA_SERVICE_ACCOUNT_ID,
+        admin_token=settings.GRAFANA_ADMIN_TOKEN,
+    )

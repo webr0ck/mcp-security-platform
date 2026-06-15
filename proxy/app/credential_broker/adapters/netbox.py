@@ -59,3 +59,15 @@ class NetboxAdapter(BaseAdapter):
             )
             resp.raise_for_status()
         logger.info("netbox_token_revoked", extra={"token_id": token_id})
+
+
+# --- Adapter plugin registration (see adapters/registry.py) ----------------
+from app.credential_broker.adapters.registry import register_adapter
+
+
+@register_adapter(name="netbox", approach="B", requires=("NETBOX_ADMIN_TOKEN",))
+def _build_from_settings(settings):
+    return NetboxAdapter(
+        base_url=settings.NETBOX_BASE_URL,
+        admin_token=settings.NETBOX_ADMIN_TOKEN,
+    )

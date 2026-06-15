@@ -34,40 +34,20 @@ _CONSENT_TTL_SECONDS = 300  # independent of PKCE TTL — consent precedes PKCE 
 
 
 def _get_adapter(service: str):
-    settings = get_settings()
+    """Resolve an Approach-A OAuth adapter by service name via the plugin registry.
+
+    Unified with the credential broker's discovery layer (adapters/registry.py):
+    enrollment no longer hardcodes the m365/bitbucket/dex list. Any Approach-A
+    adapter that self-registers is resolvable here with no edit to this file.
+    Instances are cached per service for the process lifetime.
+    """
     if service not in _OAUTH_ADAPTERS:
-        if service == "m365":
-            from app.credential_broker.adapters.m365 import M365Adapter
-            _OAUTH_ADAPTERS["m365"] = M365Adapter(
-                client_id=settings.ENTRA_CLIENT_ID,
-                client_secret=settings.ENTRA_CLIENT_SECRET,
-                tenant_id=settings.ENTRA_TENANT_ID,
-                redirect_uri=settings.ENTRA_REDIRECT_URI,
-                scopes=settings.entra_scopes_list,
-                token_url=settings.entra_token_url,
-                auth_url=settings.entra_auth_url,
-            )
-        elif service == "bitbucket":
-            from app.credential_broker.adapters.bitbucket import BitbucketAdapter
-            _OAUTH_ADAPTERS["bitbucket"] = BitbucketAdapter(
-                client_id=settings.BITBUCKET_CLIENT_ID,
-                client_secret=settings.BITBUCKET_CLIENT_SECRET,
-                redirect_uri=settings.BITBUCKET_REDIRECT_URI,
-                scopes=settings.bitbucket_scopes_list,
-                auth_url=settings.BITBUCKET_AUTH_URL,
-                token_url=settings.BITBUCKET_TOKEN_URL,
-            )
-        elif service == "dex":
-            from app.credential_broker.adapters.dex import DexAdapter
-            _OAUTH_ADAPTERS["dex"] = DexAdapter(
-                issuer_url=settings.DEX_ISSUER_URL,
-                client_id=settings.DEX_CLIENT_ID,
-                client_secret=settings.DEX_CLIENT_SECRET,
-                redirect_uri=settings.DEX_REDIRECT_URI,
-                scopes=settings.dex_scopes_list,
-            )
-        else:
+        from app.credential_broker.adapters.registry import get_spec
+
+        spec = get_spec(service)
+        if spec is None or spec.approach != "A":
             return None
+        _OAUTH_ADAPTERS[service] = spec.build(get_settings())
     return _OAUTH_ADAPTERS.get(service)
 
 

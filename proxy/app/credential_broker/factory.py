@@ -7,6 +7,12 @@ live Redis client. Called once from the app lifespan (main.py).
 Returns None if VAULT_TOKEN is empty (Vault not configured in this deployment).
 In that state, any tool with service_name + credential_approach set will
 fail-closed via CredentialInjectionError in the invocation service.
+
+Adapter wiring is NOT hand-coded here. Each adapter module self-registers via
+@register_adapter (see adapters/registry.py); build_adapters() discovers every
+configured adapter and buckets it by approach. Adding a new credentialed MCP
+server therefore requires NO edit to this file — drop an adapter module and
+approve a server_registry row.
 """
 from __future__ import annotations
 
@@ -46,10 +52,7 @@ def build_broker(settings: "Settings", redis_client):
     from app.credential_broker.broker import CredentialBroker
     from app.credential_broker.kms import VaultKMSClient
     from app.credential_broker.session import SessionStore
-    from app.credential_broker.adapters.gitea import GiteaAdapter
-    from app.credential_broker.adapters.grafana import GrafanaAdapter
-    from app.credential_broker.adapters.netbox import NetboxAdapter
-    from app.credential_broker.adapters.m365 import M365Adapter
+    from app.credential_broker.adapters.registry import build_adapters
 
     kms = VaultKMSClient(
         addr=settings.VAULT_ADDR,
@@ -58,41 +61,12 @@ def build_broker(settings: "Settings", redis_client):
     )
     session_store = SessionStore(redis_client, ttl=settings.BROKER_SESSION_TTL_SECONDS)
 
-    approach_b_adapters: dict = {}
-    approach_a_adapters: dict = {}
-
-    if settings.GRAFANA_ADMIN_TOKEN:
-        approach_b_adapters["grafana"] = GrafanaAdapter(
-            base_url=settings.GRAFANA_BASE_URL,
-            service_account_id=settings.GRAFANA_SERVICE_ACCOUNT_ID,
-            admin_token=settings.GRAFANA_ADMIN_TOKEN,
-        )
-
-    if settings.NETBOX_ADMIN_TOKEN:
-        approach_b_adapters["netbox"] = NetboxAdapter(
-            base_url=settings.NETBOX_BASE_URL,
-            admin_token=settings.NETBOX_ADMIN_TOKEN,
-        )
-
-    if settings.GITEA_ADMIN_TOKEN:
-        approach_b_adapters["gitea"] = GiteaAdapter(
-            admin_token=settings.GITEA_ADMIN_TOKEN,
-        )
-
-    # Approach A (per-user OAuth refresh): delegated Entra/M365 access. The
-    # refresh token is stored encrypted per Keycloak sub at /auth/callback/m365;
-    # broker._resolve_a() decrypts it and calls M365Adapter.refresh() per call to
-    # mint a fresh DELEGATED Graph access token (acts as the signed-in user).
-    if settings.ENTRA_CLIENT_ID and settings.ENTRA_CLIENT_SECRET:
-        approach_a_adapters["m365"] = M365Adapter(
-            client_id=settings.ENTRA_CLIENT_ID,
-            client_secret=settings.ENTRA_CLIENT_SECRET,
-            tenant_id=settings.ENTRA_TENANT_ID,
-            redirect_uri=settings.ENTRA_REDIRECT_URI,
-            scopes=settings.entra_scopes_list,
-            token_url=settings.entra_token_url,
-            auth_url=settings.entra_auth_url,
-        )
+    # Discover and instantiate every CONFIGURED adapter. Approach A (per-user
+    # OAuth refresh, e.g. m365/bitbucket/dex) and Approach B (gateway-provisioned
+    # tokens, e.g. grafana/netbox/gitea) are bucketed by each adapter's own
+    # declared `approach`. Unconfigured adapters (missing `requires` settings)
+    # are skipped — identical gating to the previous hand-written factory.
+    approach_a_adapters, approach_b_adapters = build_adapters(settings)
 
     broker = CredentialBroker(
         session=session_store,
