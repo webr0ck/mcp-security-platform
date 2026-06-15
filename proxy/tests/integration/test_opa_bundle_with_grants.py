@@ -23,7 +23,23 @@ import httpx
 import pytest
 
 OPA_URL = "http://localhost:8181"
-_REPO_ROOT = Path(__file__).parents[4]
+def _find_repo_root() -> Path:
+    """Locate the repo root (the dir that contains policies/) by walking upward.
+
+    Robust across the host layout (<repo>/proxy/tests/integration/...) and the
+    proxy container (proxy mounted at /app, so no repo root exists above it).
+    Never raises at import time — if policies/ is not found (e.g. the repo root
+    is not mounted into the container), it falls back to the file's own dir, in
+    which case the bundle lookups below simply trigger pytest.skip.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "policies").is_dir():
+            return parent
+    return here.parent
+
+
+_REPO_ROOT = _find_repo_root()
 
 # Test grant data to push
 _TEST_GRANTS = {
