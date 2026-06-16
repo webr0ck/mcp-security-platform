@@ -25,7 +25,10 @@ def test_vault_settings_defaults():
     # never transit a plaintext channel. http:// is rejected outside dev.
     assert s.VAULT_ADDR == "https://vault:8200"
     assert s.VAULT_TOKEN == "change-me-in-production"
-    assert s.BROKER_MASTER_SECRET_PATH == "secret/data/credential-broker"
+    # Default MUST match where the secret is actually seeded (lab/seeder/seed.py
+    # and .env.lab.example both use secret/data/mcp/broker-master). A mismatched
+    # default previously caused a Vault 404 → all credential injection failed.
+    assert s.BROKER_MASTER_SECRET_PATH == "secret/data/mcp/broker-master"
 
 
 def test_vault_settings_can_be_overridden():

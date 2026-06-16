@@ -313,7 +313,13 @@ class Settings(BaseSettings):
     # Optional path to a CA bundle for verifying the Vault TLS certificate.
     # Empty string => use system trust store (httpx default verify=True).
     VAULT_CA_BUNDLE: str = ""
-    BROKER_MASTER_SECRET_PATH: str = "secret/data/credential-broker"
+    # KV-v2 API read path for the broker master secret. MUST match where the
+    # secret is actually seeded: lab/seeder/seed.py writes "secret/data/mcp/
+    # broker-master" and .env.lab.example sets the same. The previous default
+    # ("secret/data/credential-broker") pointed at an unseeded path, so any
+    # deployment that did not explicitly set BROKER_MASTER_SECRET_PATH got a
+    # Vault 404 → KMSError → every user/entra credential injection failed.
+    BROKER_MASTER_SECRET_PATH: str = "secret/data/mcp/broker-master"
     # CB-008: how long the broker may cache the Vault master secret in process
     # memory before it must be re-fetched (honours Vault rotation; bounds the
     # window a heap dump exposes the master).

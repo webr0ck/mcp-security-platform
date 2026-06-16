@@ -711,6 +711,31 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                     ),
                 },
             )
+        from app.credential_broker.dispatcher import ServiceCredentialMissingError
+        # ORDERING INVARIANT: this guard MUST precede any future
+        # `isinstance(exc, CredentialInjectionError)` guard — ServiceCredentialMissingError
+        # subclasses it, so a parent-class guard placed above would shadow this branch
+        # and silently regress to the generic -32603 (leaking internals on fallthrough).
+        if isinstance(exc, ServiceCredentialMissingError):
+            # Service-mode credential is admin-provisioned, not user-enrolled.
+            # Surface an admin-actionable deny instead of a generic 500 (and
+            # never a misleading "log in first" prompt).
+            logger.warning("MCP invoke: service credential missing tool=%s service=%s",
+                           name, exc.service)
+            return _err(
+                req_id,
+                -32011,
+                f"Service credential not provisioned for '{exc.service}'",
+                data={
+                    "service": exc.service,
+                    "action": "contact_admin",
+                    "instructions": (
+                        f"The '{exc.service}' tool uses a shared service credential that a "
+                        "platform administrator must provision. Contact your platform admin; "
+                        "this is not something you can self-enroll."
+                    ),
+                },
+            )
         logger.exception("Registry tool invocation error for %s", name)
         return _err(req_id, -32603, f"Tool invocation failed: {exc}")
 
@@ -945,6 +970,18 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 f"\U0001F449 Open this link in your browser (while signed in to the "
                 f"proxy) to log in:\n    {exc.enrollment_url}\n\n"
                 f"After you finish sign-in/consent, retry this tool call."
+            )}
+        from app.credential_broker.dispatcher import ServiceCredentialMissingError
+        # ORDERING INVARIANT: keep this BEFORE any isinstance(exc, CredentialInjectionError)
+        # guard — ServiceCredentialMissingError subclasses it (see _route_to_registry note).
+        if isinstance(exc, ServiceCredentialMissingError):
+            logger.warning("invoke_tool: service credential missing tool=%s service=%s",
+                           tool_name, exc.service)
+            return {"type": "text", "text": (
+                f"⛔ Service credential not provisioned for '{exc.service}'.\n\n"
+                f"This tool uses a shared service credential that a platform administrator "
+                f"must provision — it is not something you can self-enroll.\n\n"
+                f"\U0001F449 Contact your platform admin to provision the '{exc.service}' credential."
             )}
         logger.exception("invoke_tool pipeline error for %s", tool_name)
         return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}

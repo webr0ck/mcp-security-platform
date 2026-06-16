@@ -122,7 +122,6 @@ class CredentialBroker:
 
     async def _resolve_a(self, user_sub: str, service: str, session_id: str) -> CredentialResult:
         from sqlalchemy import text
-        master = await self._get_master_secret()
 
         async with self._db_factory() as db:
             row = await db.execute(
@@ -130,8 +129,16 @@ class CredentialBroker:
                 {"sub": user_sub, "svc": service},
             )
             record = row.fetchone()
+            # Enrollment check MUST precede the KMS/Vault master-secret fetch. An
+            # unenrolled caller has to receive an actionable CredentialNotEnrolledError
+            # (→ "log in first" prompt) even when Vault is unreachable. Fetching the
+            # master secret first would surface a generic KMSError on a Vault outage
+            # and mask the real "not enrolled" signal — the m365-graph vs dex-calendar
+            # divergence this ordering fixes.
             if record is None:
                 raise CredentialNotEnrolledError(user_sub=user_sub, service=service)
+
+            master = await self._get_master_secret()
 
             # Pass full four-field AAD to match _make_aad() contract (FIND-010 / INV-013).
             # owner_type is always "user" on this path (service credentials use approach_a

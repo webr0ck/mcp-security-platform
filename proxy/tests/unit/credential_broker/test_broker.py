@@ -109,3 +109,48 @@ async def test_broker_resolve_a_uses_session_factory():
 
     # Factory must have been called exactly once to create a session
     mock_factory.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_broker_resolve_a_checks_enrollment_before_kms():
+    """Unenrolled caller → CredentialNotEnrolledError even when Vault/KMS is down.
+
+    Regression guard: the enrollment (record-exists) check MUST precede the
+    master-secret fetch. Otherwise a Vault/KMS outage raises KMSError first and
+    masks the actionable "you haven't enrolled" signal as a generic internal
+    error — exactly the m365-graph vs dex-calendar divergence we are fixing.
+    """
+    from app.credential_broker.broker import CredentialBroker, CredentialNotEnrolledError
+    from app.credential_broker.kms import KMSError
+
+    # No row in credential_store → caller is not enrolled.
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.execute = AsyncMock(
+        return_value=MagicMock(fetchone=MagicMock(return_value=None))
+    )
+    mock_session.commit = AsyncMock()
+    mock_factory = MagicMock(return_value=mock_session)
+
+    broker = CredentialBroker.__new__(CredentialBroker)
+    broker._session = AsyncMock()
+    broker._approach_b_adapters = {}
+    broker._approach_a_adapters = {}
+    broker._kms = AsyncMock()
+    broker._db_factory = mock_factory
+    broker._master_secret = None
+    broker._master_secret_fetched_at = None
+    # Simulate Vault unreachable: any master-secret fetch blows up.
+    broker._get_master_secret = AsyncMock(side_effect=KMSError("Vault unreachable"))
+
+    with pytest.raises(CredentialNotEnrolledError):
+        await broker.resolve(
+            user_sub="alice@corp",
+            service="m365-graph",
+            session_id="sess-1",
+            approach="A",
+        )
+
+    # The KMS/Vault master secret must NOT have been touched for an unenrolled caller.
+    broker._get_master_secret.assert_not_awaited()

@@ -95,6 +95,29 @@ class CredentialEnrollmentRequiredError(CredentialInjectionError):
         )
 
 
+class ServiceCredentialMissingError(CredentialInjectionError):
+    """
+    Raised when a SERVICE-mode tool has no provisioned shared credential.
+
+    Unlike CredentialEnrollmentRequiredError this is NOT a per-user login
+    problem — service credentials are provisioned by a platform admin, not the
+    caller. Carries the service name so callers can surface an admin-actionable
+    message ("contact platform admin") instead of either a generic internal
+    error or a misleading "log in first" prompt.
+    """
+
+    def __init__(self, service: str, tool_id: str | None = None) -> None:
+        self.service = service
+        # tool_id is kept as an attribute for structured logging only — it is
+        # deliberately NOT in the exception message so it can never leak to a
+        # caller via a generic `f"...: {exc}"` fallthrough handler.
+        self.tool_id = tool_id
+        super().__init__(
+            f"No service credential provisioned for service '{service}'; "
+            "refusing to forward unauthenticated request"
+        )
+
+
 async def dispatch_credential_injection(
     tool_record: dict[str, Any],
     client_id: str,
@@ -270,10 +293,7 @@ async def _inject_service_credential(
         ) from exc
 
     if not plaintext:
-        raise CredentialInjectionError(
-            f"No service credential found for tool_id={tool_id} service={service_name}; "
-            "refusing to forward unauthenticated request"
-        )
+        raise ServiceCredentialMissingError(service=service_name, tool_id=tool_id)
     token = plaintext.strip()
     return {inject_header: f"{inject_prefix} {token}".strip()}
 
