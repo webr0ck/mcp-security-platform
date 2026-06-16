@@ -1,0 +1,2301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP Security Platform — Architecture</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:       #050d17;
+      --bg2:      #091422;
+      --bg3:      #0c1a2e;
+      --panel:    rgba(9, 20, 34, 0.8);
+      --cyan:     #00d4ff;
+      --cyan-lo:  rgba(0, 212, 255, 0.08);
+      --cyan-mid: rgba(0, 212, 255, 0.2);
+      --green:    #00ff88;
+      --green-lo: rgba(0, 255, 136, 0.1);
+      --orange:   #ff8c42;
+      --orange-lo:rgba(255, 140, 66, 0.1);
+      --red:      #ff3d6b;
+      --red-lo:   rgba(255, 61, 107, 0.1);
+      --text:     #c4d8e8;
+      --text-dim: #4a6a80;
+      --border:   rgba(0, 212, 255, 0.1);
+      --border2:  rgba(0, 212, 255, 0.2);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      overflow-x: hidden;
+      line-height: 1.6;
+    }
+
+    /* ── Grid texture ── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background-image:
+        linear-gradient(rgba(0,212,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,212,255,.025) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+
+    /* ── Noise overlay ── */
+    body::after {
+      content: '';
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      opacity: .025;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 200px 200px;
+    }
+
+    section, header, footer, nav { position: relative; z-index: 1; }
+
+    /* ── Nav ── */
+    nav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 1.25rem 2.5rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(5, 13, 23, 0.92);
+      backdrop-filter: blur(12px);
+      position: sticky; top: 0; z-index: 100;
+    }
+
+    .nav-logo {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .8rem; font-weight: 600;
+      color: var(--cyan);
+      letter-spacing: .1em;
+      display: flex; align-items: center; gap: .5rem;
+    }
+
+    .nav-logo::before {
+      content: '▸';
+      animation: blink 1.2s step-end infinite;
+    }
+
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .nav-links { display: flex; gap: 2rem; }
+    .nav-links a {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; color: var(--text-dim);
+      text-decoration: none; letter-spacing: .08em;
+      transition: color .2s;
+    }
+    .nav-links a:hover { color: var(--cyan); }
+
+    .badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .68rem; padding: .3rem .75rem;
+      border: 1px solid var(--border2);
+      border-radius: 2px; color: var(--cyan);
+      background: var(--cyan-lo);
+      letter-spacing: .05em;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 6rem 2rem 4rem;
+      text-align: center;
+    }
+
+    .hero-eyebrow {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; color: var(--cyan);
+      letter-spacing: .2em; text-transform: uppercase;
+      margin-bottom: 1.5rem;
+      display: flex; align-items: center; gap: .75rem;
+    }
+
+    .hero-eyebrow::before, .hero-eyebrow::after {
+      content: ''; flex: 1; max-width: 60px;
+      height: 1px; background: var(--cyan-mid);
+    }
+
+    h1 {
+      font-size: clamp(3rem, 8vw, 6.5rem);
+      font-weight: 800; line-height: 1.0;
+      letter-spacing: -.02em;
+      background: linear-gradient(135deg, #fff 0%, var(--cyan) 60%, #5b9bd5 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 1.5rem;
+    }
+
+    .hero-sub {
+      font-size: 1.15rem; color: var(--text-dim);
+      max-width: 540px; margin: 0 auto 3.5rem;
+      line-height: 1.7;
+    }
+
+    .hero-sub strong { color: var(--text); font-weight: 600; }
+
+    .hero-cta {
+      display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;
+      margin-bottom: 5rem;
+    }
+
+    .btn {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .78rem; letter-spacing: .08em;
+      padding: .75rem 1.75rem; border-radius: 2px;
+      text-decoration: none; transition: all .2s;
+      border: 1px solid transparent;
+    }
+
+    .btn-primary {
+      background: var(--cyan); color: var(--bg);
+      border-color: var(--cyan);
+    }
+
+    .btn-primary:hover {
+      background: transparent; color: var(--cyan);
+      box-shadow: 0 0 24px rgba(0,212,255,.35);
+    }
+
+    .btn-ghost {
+      color: var(--text-dim); border-color: var(--border2);
+      background: transparent;
+    }
+
+    .btn-ghost:hover { color: var(--text); border-color: var(--cyan); }
+
+    /* ── Main flow diagram ── */
+    .flow-wrap {
+      width: 100%; max-width: 1100px; margin: 0 auto;
+    }
+
+    #flow-canvas {
+      width: 100%; height: 520px; display: block;
+    }
+
+    .flow-legend {
+      display: flex; gap: 2rem; justify-content: center; margin-top: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .legend-item {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .68rem; color: var(--text-dim);
+      display: flex; align-items: center; gap: .4rem;
+      letter-spacing: .06em;
+    }
+
+    .legend-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+    }
+
+    /* ── Section headers ── */
+    .section-header {
+      text-align: center; margin-bottom: 4rem;
+    }
+
+    .section-tag {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .68rem; color: var(--cyan);
+      letter-spacing: .18em; text-transform: uppercase;
+      margin-bottom: .75rem; display: block;
+    }
+
+    .section-header h2 {
+      font-size: clamp(1.8rem, 4vw, 2.8rem);
+      font-weight: 700; letter-spacing: -.02em;
+      color: #fff;
+      margin-bottom: .75rem;
+    }
+
+    .section-header p {
+      color: var(--text-dim); font-size: .95rem;
+      max-width: 500px; margin: 0 auto;
+    }
+
+    /* ── Thesis section ── */
+    .thesis {
+      padding: 7rem 2rem;
+      background: linear-gradient(180deg, transparent, var(--bg2) 30%, var(--bg2) 70%, transparent);
+    }
+
+    .thesis-grid {
+      max-width: 900px; margin: 0 auto;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1.5rem;
+    }
+
+    .thesis-card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 4px; padding: 2rem;
+      transition: border-color .3s, box-shadow .3s;
+      backdrop-filter: blur(8px);
+    }
+
+    .thesis-card:hover {
+      border-color: var(--border2);
+      box-shadow: 0 0 30px rgba(0,212,255,.08);
+    }
+
+    .thesis-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 2.5rem; font-weight: 600;
+      color: var(--cyan); opacity: .3;
+      line-height: 1; margin-bottom: .75rem;
+    }
+
+    .thesis-card h3 { font-size: 1.05rem; color: #fff; margin-bottom: .5rem; }
+    .thesis-card p { font-size: .88rem; color: var(--text-dim); line-height: 1.7; }
+
+    /* ── Journey section ── */
+    .journey { padding: 7rem 2rem; }
+
+    .journey-flow {
+      max-width: 1000px; margin: 0 auto;
+    }
+
+    .journey-step {
+      display: grid;
+      grid-template-columns: 60px 1fr;
+      gap: 0 2rem;
+      margin-bottom: 0;
+      position: relative;
+    }
+
+    .step-line-col {
+      display: flex; flex-direction: column; align-items: center;
+    }
+
+    .step-circle {
+      width: 44px; height: 44px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; font-weight: 600;
+      border: 1.5px solid;
+      transition: all .3s;
+      cursor: default;
+    }
+
+    .step-circle.cyan  { border-color: var(--cyan);   color: var(--cyan);   background: var(--cyan-lo); }
+    .step-circle.green { border-color: var(--green);  color: var(--green);  background: var(--green-lo); }
+    .step-circle.orange{ border-color: var(--orange); color: var(--orange); background: var(--orange-lo); }
+    .step-circle.red   { border-color: var(--red);    color: var(--red);    background: var(--red-lo); }
+
+    .step-connector {
+      flex: 1; width: 1.5px; min-height: 40px;
+      background: linear-gradient(180deg, var(--border2), var(--border));
+      margin: 4px 0;
+    }
+
+    .step-body {
+      padding-bottom: 2.5rem;
+    }
+
+    .step-tag {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; letter-spacing: .14em;
+      text-transform: uppercase; color: var(--text-dim);
+      margin-bottom: .35rem;
+    }
+
+    .step-body h3 { font-size: 1.15rem; color: #fff; margin-bottom: .4rem; }
+
+    .step-body p { font-size: .88rem; color: var(--text-dim); line-height: 1.7; max-width: 580px; }
+
+    .step-chips {
+      display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .75rem;
+    }
+
+    .chip {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .64rem; padding: .2rem .55rem;
+      border-radius: 2px; letter-spacing: .04em;
+    }
+
+    .chip.cyan   { background: var(--cyan-lo);   color: var(--cyan);   border: 1px solid rgba(0,212,255,.2); }
+    .chip.green  { background: var(--green-lo);  color: var(--green);  border: 1px solid rgba(0,255,136,.2); }
+    .chip.orange { background: var(--orange-lo); color: var(--orange); border: 1px solid rgba(255,140,66,.2); }
+    .chip.red    { background: var(--red-lo);    color: var(--red);    border: 1px solid rgba(255,61,107,.2); }
+    .chip.dim    { background: rgba(74,106,128,.1); color: var(--text-dim); border: 1px solid rgba(74,106,128,.2); }
+
+    /* ── Layers grid ── */
+    .layers { padding: 7rem 2rem; background: var(--bg2); }
+
+    .layers-grid {
+      max-width: 1100px; margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+      gap: 1px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .layer-card {
+      background: var(--panel); padding: 1.75rem;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      transition: background .25s;
+      cursor: default;
+    }
+
+    .layer-card:hover { background: rgba(0,212,255,.04); }
+
+    .layer-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; color: var(--text-dim);
+      letter-spacing: .1em; margin-bottom: .6rem;
+    }
+
+    .layer-title {
+      font-size: 1rem; font-weight: 700; color: #fff;
+      margin-bottom: .6rem; line-height: 1.3;
+    }
+
+    .layer-desc {
+      font-size: .82rem; color: var(--text-dim); line-height: 1.65;
+    }
+
+    .layer-status {
+      display: inline-block; margin-top: .9rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; padding: .18rem .5rem;
+      border-radius: 2px; letter-spacing: .06em;
+    }
+
+    .layer-status.enforced { background: var(--green-lo); color: var(--green); border: 1px solid rgba(0,255,136,.2); }
+    .layer-status.partial  { background: var(--orange-lo); color: var(--orange); border: 1px solid rgba(255,140,66,.2); }
+
+    /* ── Enforcement table ── */
+    .enforcement { padding: 7rem 2rem; }
+
+    .enforcement-table {
+      max-width: 1000px; margin: 0 auto;
+      border: 1px solid var(--border); border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .enf-row {
+      display: grid; grid-template-columns: 220px 1fr 1fr;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .enf-row:last-child { border-bottom: none; }
+
+    .enf-header {
+      background: rgba(0,212,255,.05);
+    }
+
+    .enf-cell {
+      padding: 1rem 1.25rem;
+      font-size: .82rem;
+      border-right: 1px solid var(--border);
+    }
+
+    .enf-cell:last-child { border-right: none; }
+
+    .enf-header .enf-cell {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .68rem; color: var(--cyan);
+      letter-spacing: .1em; text-transform: uppercase;
+      font-weight: 600;
+    }
+
+    .enf-area {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; color: var(--text); font-weight: 500;
+    }
+
+    .enf-enforced { color: var(--green); }
+    .enf-roadmap  { color: var(--text-dim); }
+
+    .tick  { color: var(--green);  margin-right: .35rem; }
+    .arrow { color: var(--orange); margin-right: .35rem; }
+
+    /* ── Stack grid ── */
+    .stack { padding: 7rem 2rem; background: var(--bg2); }
+
+    .stack-grid {
+      max-width: 900px; margin: 0 auto;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 1px;
+      border: 1px solid var(--border); border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .stack-item {
+      background: var(--panel); padding: 1.25rem;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      transition: background .2s;
+    }
+
+    .stack-item:hover { background: var(--cyan-lo); }
+
+    .stack-role {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .6rem; color: var(--text-dim);
+      letter-spacing: .1em; text-transform: uppercase;
+      margin-bottom: .3rem;
+    }
+
+    .stack-name {
+      font-size: .9rem; font-weight: 600; color: #fff;
+    }
+
+    /* ── Stats bar ── */
+    .stats-bar {
+      max-width: 1100px; margin: 4rem auto 0;
+      display: flex; gap: 1px;
+      border: 1px solid var(--border); border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .stat {
+      flex: 1; padding: 1.5rem; background: var(--panel);
+      text-align: center; border-right: 1px solid var(--border);
+    }
+
+    .stat:last-child { border-right: none; }
+
+    .stat-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.9rem; font-weight: 600; color: var(--cyan);
+      line-height: 1; margin-bottom: .35rem;
+    }
+
+    .stat-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; color: var(--text-dim);
+      letter-spacing: .1em; text-transform: uppercase;
+    }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2.5rem 2.5rem;
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 1rem;
+    }
+
+    .footer-left {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; color: var(--text-dim);
+    }
+
+    .footer-left span { color: var(--cyan); }
+
+    .footer-right {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .68rem; color: var(--text-dim); letter-spacing: .05em;
+    }
+
+    /* ── Separator ── */
+    .sep {
+      max-width: 1100px; margin: 0 auto;
+      height: 1px; background: linear-gradient(90deg, transparent, var(--border2), transparent);
+    }
+
+    /* ── Glow pulse ── */
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 0 15px rgba(0,212,255,.2); }
+      50%       { box-shadow: 0 0 35px rgba(0,212,255,.5); }
+    }
+
+    /* ── Scroll reveal ── */
+    .reveal {
+      opacity: 0; transform: translateY(24px);
+      transition: opacity .6s ease, transform .6s ease;
+    }
+
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+
+    /* ── Nav link active ── */
+    .nav-links a.active { color: var(--cyan); }
+
+    /* ── Credentials section ── */
+    .credentials { padding: 7rem 2rem; }
+
+    .modes-grid {
+      max-width: 1100px; margin: 0 auto;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 1.25rem;
+    }
+
+    .mode-card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 4px; padding: 1.75rem 1.75rem 1.5rem;
+      transition: border-color .3s, box-shadow .3s;
+      backdrop-filter: blur(8px);
+      position: relative; overflow: hidden;
+    }
+
+    .mode-card::before {
+      content: ''; position: absolute;
+      top: 0; left: 0; right: 0; height: 2px;
+      background: var(--mode-color, var(--cyan));
+      opacity: .6;
+    }
+
+    .mode-card:hover {
+      border-color: var(--mode-color, var(--cyan));
+      box-shadow: 0 0 28px color-mix(in srgb, var(--mode-color, var(--cyan)) 15%, transparent);
+    }
+
+    .mode-pill {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .7rem; font-weight: 600;
+      padding: .22rem .6rem; border-radius: 2px;
+      letter-spacing: .06em; display: inline-block;
+      margin-bottom: 1rem;
+      background: color-mix(in srgb, var(--mode-color, var(--cyan)) 12%, transparent);
+      color: var(--mode-color, var(--cyan));
+      border: 1px solid color-mix(in srgb, var(--mode-color, var(--cyan)) 30%, transparent);
+    }
+
+    .mode-card h3 {
+      font-size: 1.05rem; color: #fff; margin-bottom: .5rem; font-weight: 700;
+    }
+
+    .mode-card p {
+      font-size: .83rem; color: var(--text-dim); line-height: 1.65; margin-bottom: 1rem;
+    }
+
+    .mode-mini-flow {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .68rem; color: var(--text-dim);
+      background: rgba(0,0,0,.25);
+      border: 1px solid var(--border);
+      border-radius: 3px; padding: .75rem 1rem;
+      line-height: 1.8; white-space: pre;
+      overflow-x: auto;
+    }
+
+    .mode-mini-flow .hi  { color: var(--mode-color, var(--cyan)); }
+    .mode-mini-flow .dim { color: var(--text-dim); }
+
+    .mode-meta {
+      margin-top: .9rem; display: flex; flex-wrap: wrap; gap: .4rem;
+    }
+
+    /* ── Lifecycle section ── */
+    .lifecycle { padding: 7rem 2rem; background: var(--bg2); }
+
+    .lifecycle-chain {
+      max-width: 900px; margin: 0 auto;
+      display: flex; flex-direction: column; gap: 0;
+    }
+
+    .lc-step {
+      display: grid; grid-template-columns: 48px 1fr;
+      gap: 0 1.5rem;
+    }
+
+    .lc-icon-col {
+      display: flex; flex-direction: column; align-items: center;
+    }
+
+    .lc-icon {
+      width: 48px; height: 48px; border-radius: 3px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem; flex-shrink: 0;
+      border: 1px solid; font-family: 'JetBrains Mono', monospace;
+      font-size: .7rem; font-weight: 600; letter-spacing: .04em;
+    }
+
+    .lc-icon.cyan   { border-color: var(--cyan);   color: var(--cyan);   background: var(--cyan-lo); }
+    .lc-icon.orange { border-color: var(--orange); color: var(--orange); background: var(--orange-lo); }
+    .lc-icon.green  { border-color: var(--green);  color: var(--green);  background: var(--green-lo); }
+    .lc-icon.dim    { border-color: var(--border2); color: var(--text-dim); background: rgba(0,0,0,.2); }
+
+    .lc-vert {
+      flex: 1; width: 1px; min-height: 32px;
+      background: linear-gradient(180deg, var(--border2), var(--border));
+      margin: 4px 0;
+    }
+
+    .lc-body { padding-bottom: 2rem; }
+
+    .lc-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; color: var(--text-dim);
+      letter-spacing: .1em; text-transform: uppercase; margin-bottom: .3rem;
+    }
+
+    .lc-body h3 { font-size: 1rem; color: #fff; margin-bottom: .35rem; }
+
+    .lc-body p  { font-size: .83rem; color: var(--text-dim); line-height: 1.65; max-width: 560px; }
+
+    .lc-code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; color: var(--cyan);
+      background: rgba(0,212,255,.06); border: 1px solid var(--border);
+      border-radius: 2px; padding: .15rem .45rem; display: inline;
+    }
+
+    /* ── Admin panel section ── */
+    .adminpanel { padding: 7rem 2rem; }
+
+    .admin-mockup {
+      max-width: 1050px; margin: 0 auto;
+      border: 1px solid var(--border); border-radius: 4px;
+      overflow: hidden;
+      box-shadow: 0 0 60px rgba(0,212,255,.06);
+    }
+
+    .admin-topbar {
+      background: var(--bg3); border-bottom: 1px solid var(--border);
+      padding: .85rem 1.5rem;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+
+    .admin-title {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .75rem; color: var(--cyan); letter-spacing: .1em;
+      display: flex; align-items: center; gap: .6rem;
+    }
+
+    .admin-title::before {
+      content: '◈'; font-size: .8rem;
+    }
+
+    .admin-tabs {
+      display: flex; gap: 0;
+      border: 1px solid var(--border); border-radius: 2px; overflow: hidden;
+    }
+
+    .admin-tab {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .65rem; padding: .35rem .9rem;
+      color: var(--text-dim); background: transparent;
+      border-right: 1px solid var(--border); letter-spacing: .06em;
+      cursor: default;
+    }
+
+    .admin-tab:last-child { border-right: none; }
+    .admin-tab.active { background: var(--cyan-lo); color: var(--cyan); }
+
+    .admin-body { background: var(--panel); }
+
+    .admin-toolbar {
+      padding: .85rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 1rem;
+    }
+
+    .admin-search {
+      flex: 1; max-width: 280px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; padding: .4rem .75rem;
+      background: rgba(0,0,0,.3); border: 1px solid var(--border);
+      border-radius: 2px; color: var(--text-dim);
+      outline: none;
+    }
+
+    .admin-btn {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .68rem; padding: .4rem .9rem;
+      border-radius: 2px; border: 1px solid; cursor: default;
+      letter-spacing: .05em;
+    }
+
+    .admin-btn.primary {
+      background: var(--cyan-lo); color: var(--cyan); border-color: var(--border2);
+    }
+
+    .admin-tbl { width: 100%; border-collapse: collapse; }
+
+    .admin-tbl th {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; color: var(--text-dim);
+      letter-spacing: .1em; text-transform: uppercase;
+      padding: .65rem 1.5rem; text-align: left;
+      border-bottom: 1px solid var(--border);
+      background: rgba(0,0,0,.1);
+    }
+
+    .admin-tbl td {
+      padding: .85rem 1.5rem; border-bottom: 1px solid var(--border);
+      font-size: .83rem; vertical-align: middle;
+    }
+
+    .admin-tbl tr:last-child td { border-bottom: none; }
+    .admin-tbl tr:hover td { background: rgba(0,212,255,.025); }
+
+    .tbl-name {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .78rem; color: #fff; font-weight: 500;
+    }
+
+    .tbl-service {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; color: var(--text-dim);
+    }
+
+    .mode-tag {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .64rem; padding: .18rem .5rem;
+      border-radius: 2px; letter-spacing: .05em; white-space: nowrap;
+    }
+
+    .mode-tag.none     { color: var(--text-dim); border: 1px solid var(--border); }
+    .mode-tag.service  { color: var(--cyan);   background: var(--cyan-lo);   border: 1px solid rgba(0,212,255,.2); }
+    .mode-tag.user     { color: #a78bfa;        background: rgba(167,139,250,.1); border: 1px solid rgba(167,139,250,.25); }
+    .mode-tag.sa       { color: var(--orange);  background: var(--orange-lo); border: 1px solid rgba(255,140,66,.2); }
+    .mode-tag.oauth    { color: var(--green);   background: var(--green-lo);  border: 1px solid rgba(0,255,136,.2); }
+
+    .cred-status {
+      display: flex; align-items: center; gap: .4rem;
+      font-family: 'JetBrains Mono', monospace; font-size: .72rem;
+    }
+
+    .cred-dot { width: 7px; height: 7px; border-radius: 50%; }
+    .cred-dot.ok      { background: var(--green); box-shadow: 0 0 6px rgba(0,255,136,.5); }
+    .cred-dot.missing { background: var(--red); }
+    .cred-dot.na      { background: var(--text-dim); }
+
+    .tbl-actions { display: flex; gap: .5rem; }
+
+    .tbl-btn {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; padding: .22rem .6rem;
+      border-radius: 2px; border: 1px solid var(--border);
+      color: var(--text-dim); cursor: default;
+      transition: all .2s; white-space: nowrap;
+    }
+
+    .tbl-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+    .tbl-btn.danger:hover { border-color: var(--red); color: var(--red); }
+
+    /* upload modal */
+    .upload-modal {
+      margin: 1.5rem; border: 1px solid var(--border2);
+      border-radius: 4px; overflow: hidden;
+    }
+
+    .modal-bar {
+      background: rgba(0,212,255,.06);
+      border-bottom: 1px solid var(--border);
+      padding: .75rem 1.25rem;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+
+    .modal-title {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; color: var(--cyan); letter-spacing: .08em;
+    }
+
+    .modal-body {
+      padding: 1.25rem; display: grid;
+      grid-template-columns: 1fr 1fr; gap: 1rem;
+    }
+
+    .field { display: flex; flex-direction: column; gap: .35rem; }
+
+    .field label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; color: var(--text-dim); letter-spacing: .08em;
+    }
+
+    .field input, .field select {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; padding: .45rem .7rem;
+      background: rgba(0,0,0,.3); border: 1px solid var(--border);
+      border-radius: 2px; color: var(--text); outline: none;
+      appearance: none;
+    }
+
+    .field input:focus, .field select:focus {
+      border-color: var(--cyan);
+    }
+
+    .field.wide { grid-column: 1 / -1; }
+
+    .modal-foot {
+      padding: .85rem 1.25rem; border-top: 1px solid var(--border);
+      display: flex; justify-content: flex-end; gap: .65rem;
+    }
+
+    /* ── Secrets Per MCP section ── */
+    .secrets { padding: 7rem 2rem; background: var(--bg2); }
+
+    .actors-grid {
+      max-width: 1050px; margin: 0 auto;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;
+    }
+
+    @media (max-width: 860px) { .actors-grid { grid-template-columns: 1fr; } }
+
+    .actor-card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 4px; overflow: hidden;
+      transition: border-color .3s, box-shadow .3s;
+      backdrop-filter: blur(8px);
+      position: relative;
+    }
+
+    .actor-card::before {
+      content: ''; position: absolute;
+      top: 0; left: 0; right: 0; height: 2px;
+      background: var(--actor-color, var(--cyan)); opacity: .7;
+    }
+
+    .actor-card:hover {
+      border-color: color-mix(in srgb, var(--actor-color, var(--cyan)) 50%, transparent);
+      box-shadow: 0 0 30px color-mix(in srgb, var(--actor-color, var(--cyan)) 10%, transparent);
+    }
+
+    .actor-header {
+      padding: 1.4rem 1.6rem 1rem;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--actor-color, var(--cyan)) 5%, transparent);
+    }
+
+    .actor-role {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; letter-spacing: .16em; text-transform: uppercase;
+      color: var(--actor-color, var(--cyan));
+      margin-bottom: .45rem;
+      display: flex; align-items: center; gap: .5rem;
+    }
+
+    .actor-role::before {
+      content: ''; display: inline-block;
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--actor-color, var(--cyan));
+      box-shadow: 0 0 8px var(--actor-color, var(--cyan));
+    }
+
+    .actor-header h3 {
+      font-size: 1.05rem; color: #fff; font-weight: 700;
+      margin-bottom: .3rem;
+    }
+
+    .actor-header p {
+      font-size: .82rem; color: var(--text-dim); line-height: 1.6;
+    }
+
+    .actor-form {
+      padding: 1.25rem 1.6rem;
+    }
+
+    .actor-form .field { margin-bottom: .85rem; }
+
+    .actor-scope-note {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .68rem; color: var(--text-dim);
+      background: rgba(0,0,0,.25); border: 1px solid var(--border);
+      border-radius: 3px; padding: .65rem .9rem;
+      margin-bottom: 1rem; line-height: 1.7;
+    }
+
+    .actor-scope-note .hi { color: var(--actor-color, var(--cyan)); }
+
+    .actor-scope-badge {
+      display: inline-flex; align-items: center; gap: .4rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .65rem; padding: .22rem .6rem;
+      border-radius: 2px; margin-top: .2rem;
+    }
+
+    .actor-footer {
+      padding: .85rem 1.6rem;
+      border-top: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+
+    .actor-footer-note {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .65rem; color: var(--text-dim);
+    }
+
+    /* ── Hamburger nav button ── */
+    .nav-burger {
+      display: none;
+      background: none; border: 1px solid var(--border2);
+      color: var(--cyan); cursor: pointer;
+      font-family: 'JetBrains Mono', monospace; font-size: .75rem;
+      padding: .35rem .7rem; border-radius: 2px;
+    }
+
+    /* ── Mobile ── */
+    @media (max-width: 700px) {
+      nav { padding: 1rem; }
+      .nav-burger { display: block; }
+      .nav-links {
+        display: none; position: fixed; top: 52px; left: 0; right: 0;
+        background: rgba(5,13,23,0.98); border-bottom: 1px solid var(--border);
+        flex-direction: column; gap: 0; padding: .5rem 0; z-index: 200;
+        backdrop-filter: blur(16px);
+      }
+      .nav-links.open { display: flex; }
+      .nav-links a {
+        padding: .75rem 1.5rem; font-size: .8rem;
+        border-bottom: 1px solid var(--border);
+      }
+      .hero { padding: 5rem 1.25rem 3rem; }
+      .enf-row { grid-template-columns: 1fr; }
+      .enf-cell { border-right: none; border-bottom: 1px solid var(--border); }
+      .enforcement-table { overflow-x: auto; }
+      .stats-bar { flex-direction: column; }
+      .stat { border-right: none; border-bottom: 1px solid var(--border); }
+      .stat-num { font-size: 1.3rem; }
+      /* Admin panel mobile */
+      .admin-mockup { overflow-x: auto; }
+      .admin-tbl { min-width: 700px; }
+      .admin-topbar { flex-direction: column; align-items: flex-start; gap: .5rem; }
+      .admin-tabs { width: 100%; overflow-x: auto; }
+      .modal-body { grid-template-columns: 1fr; }
+      .field.wide { grid-column: 1; }
+      /* Actor cards */
+      .actors-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Nav ── -->
+<nav>
+  <div class="nav-logo">MCP Security Platform</div>
+  <button class="nav-burger" id="nav-burger" aria-label="menu">≡ menu</button>
+  <div class="nav-links" id="nav-links">
+    <a href="#flow">Flow</a>
+    <a href="#journey">Journey</a>
+    <a href="#credentials">Credentials</a>
+    <a href="#secrets">Secrets</a>
+    <a href="#lifecycle">Lifecycle</a>
+    <a href="#adminpanel">Admin</a>
+    <a href="#layers">Layers</a>
+    <a href="#enforcement">Enforced</a>
+    <a href="#stack">Stack</a>
+  </div>
+  <a class="badge" href="https://github.com/purplehootie/mcp-security-platform" target="_blank">GitHub ↗</a>
+</nav>
+
+<!-- ── Hero ── -->
+<section class="hero" id="top">
+  <div class="hero-eyebrow">Reference Implementation · Work in Progress</div>
+  <h1>MCP Security<br>Platform</h1>
+  <p class="hero-sub">
+    Securing <strong>Model Context Protocol</strong> tool calls at runtime — by
+    <strong>mediating every call</strong> through identity, policy, and audit.
+    Not static classification. Runtime enforcement.
+  </p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="#flow">Explore Architecture ↓</a>
+    <a class="btn btn-ghost" href="#journey">Request Journey</a>
+  </div>
+
+  <!-- Flow diagram canvas -->
+  <div class="flow-wrap" id="flow">
+    <canvas id="flow-canvas"></canvas>
+    <div class="flow-legend">
+      <div class="legend-item"><div class="legend-dot" style="background:#00d4ff"></div>Request (mTLS)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ff8c42"></div>Cred fetch/inject</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#00ff88"></div>Allowed + enriched</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ff3d6b"></div>Blocked by OPA</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div>Graph API (oauth token)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#60a5fa"></div>Jira OAuth 2.0</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#fbbf24"></div>Grafana (service key)</div>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-bar" style="margin-top: 3.5rem;">
+    <div class="stat"><div class="stat-num">440</div><div class="stat-label">Tests</div></div>
+    <div class="stat"><div class="stat-num">15</div><div class="stat-label">Layers</div></div>
+    <div class="stat"><div class="stat-num">4</div><div class="stat-label">Compose Stacks</div></div>
+    <div class="stat"><div class="stat-num">SHA-256</div><div class="stat-label">Per-event Audit</div></div>
+    <div class="stat"><div class="stat-num">F-001</div><div class="stat-label">Isolation Proven</div></div>
+  </div>
+</section>
+
+<!-- ── Thesis ── -->
+<section class="thesis">
+  <div class="section-header reveal">
+    <span class="section-tag">The Thesis</span>
+    <h2>Mediate. Don't classify.</h2>
+    <p>Static scanning can't catch semantic capability. A server that wraps a C2 framework looks like any other server — until it calls home.</p>
+  </div>
+  <div class="thesis-grid">
+    <div class="thesis-card reveal">
+      <div class="thesis-num">01</div>
+      <h3>Identity at the edge</h3>
+      <p>Nginx terminates mTLS and injects the verified client CN. Every downstream service inherits a signed identity — not a header it made up.</p>
+    </div>
+    <div class="thesis-card reveal" style="transition-delay:.1s">
+      <div class="thesis-num">02</div>
+      <h3>Policy, not heuristics</h3>
+      <p>OPA/Rego evaluates every invocation. Deny-by-default unless inventory says allowed. Policy as code, testable, versionable, auditable.</p>
+    </div>
+    <div class="thesis-card reveal" style="transition-delay:.2s">
+      <div class="thesis-num">03</div>
+      <h3>Audit you can trust</h3>
+      <p>SHA-256 hash/event, redaction before storage, Loki-shipped and MinIO-archived. Compliance checker runs daily. No silent gaps.</p>
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ── Journey ── -->
+<section class="journey" id="journey">
+  <div class="section-header reveal">
+    <span class="section-tag">Request Journey</span>
+    <h2>From LLM client to MCP server</h2>
+    <p>Every tool call traverses the same gauntlet. No shortcuts. No escape hatches.</p>
+  </div>
+
+  <div class="journey-flow">
+
+    <div class="journey-step reveal">
+      <div class="step-line-col">
+        <div class="step-circle cyan">CLI</div>
+        <div class="step-connector"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-tag">Origin</div>
+        <h3>AI Client</h3>
+        <p>LLM agent or MCP client issues a tool-call request. Holds a client certificate issued by the internal step-ca. No cert, no entry.</p>
+        <div class="step-chips">
+          <span class="chip cyan">mTLS client cert</span>
+          <span class="chip dim">step-ca issued</span>
+          <span class="chip dim">PKCE session</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="journey-step reveal" style="transition-delay:.07s">
+      <div class="step-line-col">
+        <div class="step-circle cyan">GW</div>
+        <div class="step-connector"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-tag">Layer 1 — Nginx Gateway</div>
+        <h3>TLS termination &amp; rate limiting</h3>
+        <p>Nginx verifies the client cert, extracts the CN, injects <code style="font-family:JetBrains Mono,monospace;font-size:.8em;color:var(--cyan)">X-Client-Cert-CN</code>. Rate-limited per CN and source IP. Structured logs emitted.</p>
+        <div class="step-chips">
+          <span class="chip cyan">mTLS verify</span>
+          <span class="chip cyan">CN injection</span>
+          <span class="chip orange">rate-limit /CN + IP</span>
+          <span class="chip dim">structured logs</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="journey-step reveal" style="transition-delay:.14s">
+      <div class="step-line-col">
+        <div class="step-circle cyan">PX</div>
+        <div class="step-connector"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-tag">Layer 2 — FastAPI Proxy</div>
+        <h3>Auth · RBAC · Quarantine · Manifest audit</h3>
+        <p>Identity resolved from Keycloak session JWT + cert CN. RBAC checked against PostgreSQL roles. Quarantined tools blocked. Tool manifest validated by LLM risk scorer (Ollama, advisory).</p>
+        <div class="step-chips">
+          <span class="chip cyan">OIDC/PKCE S256</span>
+          <span class="chip cyan">RBAC</span>
+          <span class="chip orange">quarantine check</span>
+          <span class="chip dim">CycloneDX SBOM</span>
+          <span class="chip dim">Ollama risk score</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="journey-step reveal" style="transition-delay:.21s">
+      <div class="step-line-col">
+        <div class="step-circle orange">OPA</div>
+        <div class="step-connector"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-tag">Layer 2 — Policy Engine (OPA)</div>
+        <h3>Rego policy evaluation</h3>
+        <p>OPA sidecar evaluates the full request context against Rego rules. Deny-by-default: if the tool isn't in the inventory with allow, it's blocked. Anomaly score assessed.</p>
+        <div class="step-chips">
+          <span class="chip orange">INV-003 deny-default</span>
+          <span class="chip orange">anomaly score</span>
+          <span class="chip dim">static tool analysis</span>
+          <span class="chip dim">Rego testable</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="journey-step reveal" style="transition-delay:.28s">
+      <div class="step-line-col">
+        <div class="step-circle cyan">CB</div>
+        <div class="step-connector"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-tag">Layer 2 — Credential Broker</div>
+        <h3>Upstream credential injection</h3>
+        <p>Broker resolves the injection mode for the target tool (none / service / user / oauth). AES-256-GCM encrypted at rest, HKDF-SHA256 KEK. Vault HTTPS-only. Enrollment audit emitted synchronously.</p>
+        <div class="step-chips">
+          <span class="chip cyan">AES-256-GCM</span>
+          <span class="chip cyan">HKDF-SHA256 KEK</span>
+          <span class="chip orange">CB-001 session identity</span>
+          <span class="chip dim">roadmap: wired to path</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="journey-step reveal" style="transition-delay:.35s">
+      <div class="step-line-col">
+        <div class="step-circle green">AU</div>
+        <div class="step-connector"></div>
+      </div>
+      <div class="step-body">
+        <div class="step-tag">Layer 3 — Observability &amp; Audit</div>
+        <h3>Audit emission &amp; archival</h3>
+        <p>Every allowed invocation emits a SHA-256 signed audit event. Sensitive fields redacted before storage. Shipped to Loki, Grafana dashboards, archived to MinIO. Compliance checker runs daily.</p>
+        <div class="step-chips">
+          <span class="chip green">SHA-256 / event</span>
+          <span class="chip green">redaction engine</span>
+          <span class="chip dim">Loki → Grafana</span>
+          <span class="chip dim">MinIO archival</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="journey-step reveal" style="transition-delay:.42s">
+      <div class="step-line-col">
+        <div class="step-circle green">MCP</div>
+      </div>
+      <div class="step-body">
+        <div class="step-tag">Destination — Network-isolated backend</div>
+        <h3>MCP Server receives the call</h3>
+        <p>Target MCP server is network-isolated (F-001 proven in lab, regression-gated in CI). Cannot reach the proxy directly. Receives enriched context and injected credentials.</p>
+        <div class="step-chips">
+          <span class="chip green">F-001 proven</span>
+          <span class="chip green">network-isolated</span>
+          <span class="chip dim">CI regression gate</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ── Credential Injection Modes ── -->
+<section class="credentials" id="credentials">
+  <div class="section-header reveal">
+    <span class="section-tag">Credential Broker</span>
+    <h2>Five injection modes</h2>
+    <p>Each tool in the registry declares one mode. The dispatcher reads it at call-time, decrypts, and injects the right header — the MCP server never sees a raw secret.</p>
+  </div>
+
+  <div class="modes-grid">
+
+    <!-- none -->
+    <div class="mode-card reveal" style="--mode-color: var(--text-dim)">
+      <div class="mode-pill">none</div>
+      <h3>No credential</h3>
+      <p>Upstream is called without any injected auth. Use for public endpoints, sandboxed tools, or where the MCP server manages its own auth.</p>
+      <div class="mode-mini-flow"><span class="hi">Proxy</span><span class="dim"> ──────────────────→ </span><span class="hi">MCP server</span>
+<span class="dim">                 (no header added)</span></div>
+      <div class="mode-meta">
+        <span class="chip dim">no secrets stored</span>
+        <span class="chip dim">default mode</span>
+      </div>
+    </div>
+
+    <!-- service -->
+    <div class="mode-card reveal" style="--mode-color: var(--cyan); transition-delay:.07s">
+      <div class="mode-pill">service</div>
+      <h3>Shared service credential</h3>
+      <p>One API key or client secret shared across all users of this tool. Admin uploads it once. Stored encrypted, keyed as <code class="lc-code">__service__</code>. All calls get the same header.</p>
+      <div class="mode-mini-flow"><span class="dim">Admin uploads API key
+credential_store: user_sub=</span><span class="hi">__service__</span>
+<span class="dim">AES-256-GCM(HKDF-SHA256 KEK)
+
+On call: decrypt → </span><span class="hi">Authorization: Bearer &lt;key&gt;</span></div>
+      <div class="mode-meta">
+        <span class="chip cyan">AES-256-GCM</span>
+        <span class="chip cyan">HKDF-SHA256 KEK</span>
+        <span class="chip dim">admin-managed</span>
+      </div>
+    </div>
+
+    <!-- user -->
+    <div class="mode-card reveal" style="--mode-color: #a78bfa; transition-delay:.14s">
+      <div class="mode-pill" style="--mode-color:#a78bfa">user</div>
+      <h3>Per-user personal credential</h3>
+      <p>Each user uploads their own token (personal API key, PAT, etc). Stored separately per <code class="lc-code">user_sub</code>. User A's call never touches User B's credential.</p>
+      <div class="mode-mini-flow"><span class="dim">User uploads own token  (user_sub = </span><span class="hi">a3f8c1d2-7b4e-4f12</span><span class="dim">)
+credential_store: encrypted per user_sub
+
+On call: sub from session →
+    decrypt(user_sub) → </span><span class="hi">Authorization: Bearer &lt;user-tok&gt;</span></div>
+      <div class="mode-meta">
+        <span class="chip" style="color:#a78bfa;background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.25)">per-user isolation</span>
+        <span class="chip dim">user self-service</span>
+        <span class="chip cyan">HKDF KEK per sub</span>
+      </div>
+    </div>
+
+    <!-- service_account -->
+    <div class="mode-card reveal" style="--mode-color: var(--orange); transition-delay:.21s">
+      <div class="mode-pill">service_account</div>
+      <h3>Keycloak client_credentials</h3>
+      <p>Proxy fetches a short-lived token from Keycloak using the tool's registered <code class="lc-code">kc_client_id</code> + client secret. Token is not stored between calls — fetched fresh each time.</p>
+      <div class="mode-mini-flow"><span class="dim">Admin stores KC client_secret in credential_store
+  user_sub=</span><span class="hi">__kc_sa__</span><span class="dim">, service=kc_client_id
+
+On call: POST /token (client_credentials)
+    Keycloak → access_token (TTL ~5min)
+    → </span><span class="hi">Authorization: Bearer &lt;kc-token&gt;</span></div>
+      <div class="mode-meta">
+        <span class="chip orange">client_credentials flow</span>
+        <span class="chip dim">short-lived tokens</span>
+        <span class="chip dim">Keycloak-issued</span>
+      </div>
+    </div>
+
+    <!-- oauth_user_token -->
+    <div class="mode-card reveal" style="--mode-color: var(--green); transition-delay:.28s">
+      <div class="mode-pill">oauth_user_token</div>
+      <h3>User token exchange</h3>
+      <p>The user's Keycloak access token is exchanged for an audience-scoped token targeting the upstream service. No separate secret stored — the user's session is the credential.</p>
+      <div class="mode-mini-flow"><span class="dim">User's KC access token (from session)
+    + kc_token_audience on tool record
+
+POST /token (token_exchange)
+    subject_token=&lt;user-kc-tok&gt;
+    audience=&lt;</span><span class="hi">upstream-service</span><span class="dim">&gt;
+    → </span><span class="hi">Authorization: Bearer &lt;exchanged-tok&gt;</span></div>
+      <div class="mode-meta">
+        <span class="chip green">token exchange (RFC 8693)</span>
+        <span class="chip dim">no secrets stored</span>
+        <span class="chip dim">audience-scoped</span>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ── Secret Lifecycle ── -->
+<section class="lifecycle" id="lifecycle">
+  <div class="section-header reveal">
+    <span class="section-tag">Secret Lifecycle</span>
+    <h2>Upload → Encrypt → Inject</h2>
+    <p>A secret never travels in plaintext after it crosses the admin upload boundary. Here's every step.</p>
+  </div>
+
+  <div class="lifecycle-chain">
+
+    <div class="lc-step reveal">
+      <div class="lc-icon-col">
+        <div class="lc-icon cyan">ADM</div>
+        <div class="lc-vert"></div>
+      </div>
+      <div class="lc-body">
+        <div class="lc-label">Step 1 — Upload</div>
+        <h3>Admin submits plaintext via HTTPS</h3>
+        <p>PUT <code class="lc-code">/admin/credentials/{tool_id}</code> with <code class="lc-code">{ secret, credential_type, owner_type, user_sub? }</code>. TLS in transit. Requires <code class="lc-code">admin</code> role. Audit event emitted synchronously before the response returns.</p>
+      </div>
+    </div>
+
+    <div class="lc-step reveal" style="transition-delay:.07s">
+      <div class="lc-icon-col">
+        <div class="lc-icon orange">KEK</div>
+        <div class="lc-vert"></div>
+      </div>
+      <div class="lc-body">
+        <div class="lc-label">Step 2 — Key derivation</div>
+        <h3>HKDF-SHA256 derives a per-identity KEK</h3>
+        <p>The broker derives a Key Encryption Key from the master secret using <code class="lc-code">HKDF-SHA256(master, info="mcp-credential-broker-kek-v1:{user_sub}")</code>. Service credentials use <code class="lc-code">__service__</code> as the identity. This means the master secret alone cannot decrypt any credential — the identity must also be known.</p>
+      </div>
+    </div>
+
+    <div class="lc-step reveal" style="transition-delay:.14s">
+      <div class="lc-icon-col">
+        <div class="lc-icon orange">ENC</div>
+        <div class="lc-vert"></div>
+      </div>
+      <div class="lc-body">
+        <div class="lc-label">Step 3 — Encryption</div>
+        <h3>AES-256-GCM with 96-bit random nonce</h3>
+        <p>Plaintext encrypted as <code class="lc-code">nonce(12B) ‖ ciphertext+GCM-tag</code>. A fresh random nonce per write prevents ciphertext reuse. The GCM tag detects any tamper — decryption throws <code class="lc-code">InvalidTag</code> if the <code class="lc-code">user_sub</code> is wrong or the blob is modified.</p>
+      </div>
+    </div>
+
+    <div class="lc-step reveal" style="transition-delay:.21s">
+      <div class="lc-icon-col">
+        <div class="lc-icon dim">DB</div>
+        <div class="lc-vert"></div>
+      </div>
+      <div class="lc-body">
+        <div class="lc-label">Step 4 — Storage</div>
+        <h3>Encrypted blob stored in PostgreSQL</h3>
+        <p>Only the encrypted blob lands in <code class="lc-code">credential_store</code>. Row keyed by <code class="lc-code">(user_sub, service, tool_id)</code>. Plaintext never written to disk, never logged. Vault holds the master secret, never the per-credential key.</p>
+      </div>
+    </div>
+
+    <div class="lc-step reveal" style="transition-delay:.28s">
+      <div class="lc-icon-col">
+        <div class="lc-icon cyan">DIS</div>
+        <div class="lc-vert"></div>
+      </div>
+      <div class="lc-body">
+        <div class="lc-label">Step 5 — Dispatch (on tool call)</div>
+        <h3>Dispatcher reads injection_mode from tool_registry</h3>
+        <p>On every tool invocation, the dispatcher reads <code class="lc-code">injection_mode</code> from the tool's row in <code class="lc-code">tool_registry</code>, routes to the correct handler, and fetches + decrypts the credential scoped to the calling user's <code class="lc-code">sub</code>.</p>
+      </div>
+    </div>
+
+    <div class="lc-step reveal" style="transition-delay:.35s">
+      <div class="lc-icon-col">
+        <div class="lc-icon cyan">DEC</div>
+        <div class="lc-vert"></div>
+      </div>
+      <div class="lc-body">
+        <div class="lc-label">Step 6 — Decryption (in-memory only)</div>
+        <h3>Plaintext exists only for the duration of the request</h3>
+        <p>The broker decrypts the blob in memory. The <code class="lc-code">CredentialResult</code> object has a <code class="lc-code">.zero()</code> method that overwrites the token value in-place. Plaintext never written anywhere after this point.</p>
+      </div>
+    </div>
+
+    <div class="lc-step reveal" style="transition-delay:.42s">
+      <div class="lc-icon-col">
+        <div class="lc-icon green">INJ</div>
+      </div>
+      <div class="lc-body">
+        <div class="lc-label">Step 7 — Header injection</div>
+        <h3>Upstream call receives a single HTTP header</h3>
+        <p>The dispatcher returns <code class="lc-code">{ inject_header: "{inject_prefix} {token}" }</code> — for example <code class="lc-code">Authorization: Bearer eyJ…</code> or <code class="lc-code">X-Api-Key: sk-…</code>. This dict is merged into the upstream request. The MCP server never sees the credential store, Vault, or Keycloak.</p>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ── Admin Panel ── -->
+<section class="adminpanel" id="adminpanel">
+  <div class="section-header reveal">
+    <span class="section-tag">Admin Panel</span>
+    <h2>Credential management UI</h2>
+    <p><code class="lc-code">GET /admin/credentials</code> — htmx-driven. Requires <code class="lc-code">admin</code> role. Upload, rotate, revoke, and inspect per tool.</p>
+  </div>
+
+  <div class="admin-mockup reveal">
+    <!-- Top bar -->
+    <div class="admin-topbar">
+      <div class="admin-title">CREDENTIAL MANAGEMENT</div>
+      <div class="admin-tabs">
+        <div class="admin-tab active">Tools</div>
+        <div class="admin-tab">Audit Log</div>
+        <div class="admin-tab">Entra ID</div>
+      </div>
+    </div>
+
+    <div class="admin-body">
+      <!-- Toolbar -->
+      <div class="admin-toolbar">
+        <input class="admin-search" placeholder="filter tools…" readonly>
+        <div class="admin-btn primary">+ Upload Credential</div>
+      </div>
+
+      <!-- Tool table -->
+      <table class="admin-tbl">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Service</th>
+            <th>Injection Mode</th>
+            <th>Credential</th>
+            <th>Header</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><div class="tbl-name">github-search</div><div class="tbl-service">v1.2.0 · active</div></td>
+            <td><div class="tbl-service">github</div></td>
+            <td><span class="mode-tag service">service</span></td>
+            <td><div class="cred-status"><div class="cred-dot ok"></div><span style="color:var(--green)">stored</span></div></td>
+            <td><div class="tbl-service">Authorization: token</div></td>
+            <td><div class="tbl-actions"><div class="tbl-btn">Rotate</div><div class="tbl-btn danger">Revoke</div></div></td>
+          </tr>
+          <tr>
+            <td><div class="tbl-name">jira-search</div><div class="tbl-service">v2.0.1 · active</div></td>
+            <td><div class="tbl-service">jira-cloud</div></td>
+            <td><span class="mode-tag user">user</span></td>
+            <td><div class="cred-status"><div class="cred-dot ok"></div><span style="color:var(--green)">3 users</span></div></td>
+            <td><div class="tbl-service">Authorization: Bearer</div></td>
+            <td><div class="tbl-actions"><div class="tbl-btn">Upload for user…</div></div></td>
+          </tr>
+          <tr>
+            <td><div class="tbl-name">confluence-reader</div><div class="tbl-service">v1.0.0 · active</div></td>
+            <td><div class="tbl-service">confluence</div></td>
+            <td><span class="mode-tag sa">service_account</span></td>
+            <td><div class="cred-status"><div class="cred-dot ok"></div><span style="color:var(--green)">KC client set</span></div></td>
+            <td><div class="tbl-service">Authorization: Bearer</div></td>
+            <td><div class="tbl-actions"><div class="tbl-btn">Update secret</div></div></td>
+          </tr>
+          <tr>
+            <td><div class="tbl-name">gdrive-reader</div><div class="tbl-service">v1.1.0 · active</div></td>
+            <td><div class="tbl-service">google-drive</div></td>
+            <td><span class="mode-tag oauth">oauth_user_token</span></td>
+            <td><div class="cred-status"><div class="cred-dot na"></div><span>via session</span></div></td>
+            <td><div class="tbl-service">Authorization: Bearer</div></td>
+            <td><div class="tbl-actions"><div class="tbl-btn">Set audience</div></div></td>
+          </tr>
+          <tr>
+            <td><div class="tbl-name">weather-api</div><div class="tbl-service">v0.9.0 · active</div></td>
+            <td><div class="tbl-service">openweather</div></td>
+            <td><span class="mode-tag none">none</span></td>
+            <td><div class="cred-status"><div class="cred-dot na"></div><span>–</span></div></td>
+            <td><div class="tbl-service">–</div></td>
+            <td><div class="tbl-actions"><div class="tbl-btn">Set mode</div></div></td>
+          </tr>
+          <tr>
+            <td><div class="tbl-name">slack-poster</div><div class="tbl-service">v1.3.2 · active</div></td>
+            <td><div class="tbl-service">slack</div></td>
+            <td><span class="mode-tag service">service</span></td>
+            <td><div class="cred-status"><div class="cred-dot missing"></div><span style="color:var(--red)">missing</span></div></td>
+            <td><div class="tbl-service">Authorization: Bearer</div></td>
+            <td><div class="tbl-actions"><div class="tbl-btn primary" style="border-color:var(--orange);color:var(--orange);background:var(--orange-lo)">Upload now</div></div></td>
+          </tr>
+          <tr>
+            <td><div class="tbl-name">notes-store</div><div class="tbl-service">v1.0.0 · active</div></td>
+            <td><div class="tbl-service">redis-notes</div></td>
+            <td><span class="mode-tag user">user</span></td>
+            <td><div class="cred-status"><div class="cred-dot ok"></div><span style="color:var(--green)">4 users</span></div></td>
+            <td><div class="tbl-service">X-User-Sub</div></td>
+            <td><div class="tbl-actions"><div class="tbl-btn">Upload for user…</div></div></td>
+          </tr>
+          <tr>
+            <td>
+              <div class="tbl-name">self-service-mcp</div>
+              <div class="tbl-service">v1.0.0 · active</div>
+            </td>
+            <td><div class="tbl-service">internal</div></td>
+            <td><span class="mode-tag" style="color:#a78bfa;background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.25)">self-service</span></td>
+            <td><div class="cred-status"><div class="cred-dot na"></div><span>user-managed</span></div></td>
+            <td><div class="tbl-service">–</div></td>
+            <td>
+              <div class="tbl-actions">
+                <div class="tbl-btn" style="color:#a78bfa;border-color:rgba(167,139,250,.3)">Profiles</div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- Upload modal (shown inline) -->
+      <div class="upload-modal">
+        <div class="modal-bar">
+          <div class="modal-title">UPLOAD CREDENTIAL — slack-poster</div>
+          <div class="tbl-btn">✕ close</div>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <label>CREDENTIAL TYPE</label>
+            <select>
+              <option>api_key</option>
+              <option>oauth2_refresh</option>
+              <option>entra_client_secret</option>
+              <option>basic_auth</option>
+              <option>jwt_static</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>OWNER TYPE</label>
+            <select>
+              <option>service</option>
+              <option>user</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>USER SUB (if owner_type = user)</label>
+            <input placeholder="keycloak subject UUID" readonly>
+          </div>
+          <div class="field">
+            <label>DESCRIPTION (optional)</label>
+            <input placeholder="Slack bot token, workspace: acme-eng" readonly>
+          </div>
+          <div class="field wide">
+            <label>SECRET (plaintext — encrypted before storage)</label>
+            <input type="password" placeholder="xoxb-••••••••••••••••••••" readonly>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <div class="tbl-btn">Cancel</div>
+          <div class="admin-btn primary">Encrypt &amp; Store ↑</div>
+        </div>
+      </div>
+
+    </div><!-- /admin-body -->
+  </div><!-- /admin-mockup -->
+
+  <!-- Audit note -->
+  <div style="max-width:1050px;margin:1.25rem auto 0;display:flex;gap:.6rem;align-items:flex-start">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--orange)">⚠</span>
+    <p style="font-size:.8rem;color:var(--text-dim);font-family:'JetBrains Mono',monospace;line-height:1.6">
+      Every PUT, DELETE, and enrollment action emits an audit event to Loki before the response returns.
+      The admin panel itself is RBAC-gated (<code class="lc-code">admin</code> role via Keycloak).
+      Credential rotation replaces the encrypted blob — no plaintext diff is ever stored.
+    </p>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ── Secrets Per MCP ── -->
+<section class="secrets" id="secrets">
+  <div class="section-header reveal">
+    <span class="section-tag">Secrets Per MCP</span>
+    <h2>Two actors. Two flows.</h2>
+    <p>Service owners set a shared credential once. Users manage their own tokens independently. Neither can read the other's secrets — the crypto enforces it.</p>
+  </div>
+
+  <div class="actors-grid">
+
+    <!-- Service Owner -->
+    <div class="actor-card reveal" style="--actor-color: var(--cyan)">
+      <div class="actor-header">
+        <div class="actor-role">Service Owner / Admin</div>
+        <h3>Shared service secret</h3>
+        <p>One secret covers all callers of this MCP. Upload once — every user's request gets the same injected header. Rotation happens here too.</p>
+      </div>
+      <div class="actor-form">
+        <div class="actor-scope-note">
+<span class="hi">credential_store</span>
+  user_sub  = <span class="hi">__service__</span>   ← shared sentinel
+  tool_id   = echo-ping
+  encrypted = AES-256-GCM( HKDF(master, <span class="hi">__service__</span>) )
+  ──────────────────────────────────
+  All users of echo-ping get this credential.
+  No per-user row required.
+        </div>
+        <div class="field">
+          <label>MCP TARGET</label>
+          <select style="font-family:'JetBrains Mono',monospace;font-size:.72rem;padding:.45rem .7rem;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:2px;color:var(--text);width:100%;appearance:none;">
+            <option>echo-ping · service mode</option>
+            <option>slack-poster · service mode</option>
+            <option>github-search · service mode</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>CREDENTIAL TYPE</label>
+          <select style="font-family:'JetBrains Mono',monospace;font-size:.72rem;padding:.45rem .7rem;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:2px;color:var(--text);width:100%;appearance:none;">
+            <option>api_key</option>
+            <option>oauth2_client_secret</option>
+            <option>jwt_static</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>SECRET (plaintext — encrypted on submit)</label>
+          <input type="password" placeholder="sk-••••••••••••••••••••" readonly
+            style="font-family:'JetBrains Mono',monospace;font-size:.72rem;padding:.45rem .7rem;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:2px;color:var(--text);width:100%;outline:none;">
+        </div>
+      </div>
+      <div class="actor-footer">
+        <div class="actor-footer-note"><span style="color:var(--orange)">⚠</span> Audit event emitted synchronously</div>
+        <div class="admin-btn primary" style="cursor:default">Encrypt &amp; Store ↑</div>
+      </div>
+    </div>
+
+    <!-- End User -->
+    <div class="actor-card reveal" style="--actor-color: #a78bfa; transition-delay:.1s">
+      <div class="actor-header">
+        <div class="actor-role" style="--actor-color:#a78bfa">End User</div>
+        <h3>Personal token per MCP</h3>
+        <p>Each user stores their own PAT, API key, or OAuth token. Stored under their Keycloak <code class="lc-code">user_sub</code>. Alice's secret is invisible to Bob — the KEK is derived from the identity.</p>
+      </div>
+      <div class="actor-form">
+        <div class="actor-scope-note" style="--actor-color:#a78bfa">
+<span class="hi" style="color:#a78bfa">credential_store</span>
+  user_sub  = <span class="hi" style="color:#a78bfa">a3f8c1d2-7b4e-4f12 · (keycloak sub UUID)</span>
+  tool_id   = jira-search
+  encrypted = AES-256-GCM( HKDF(master, <span class="hi" style="color:#a78bfa">user-sub-uuid</span>) )
+  ──────────────────────────────────
+  Bob's row uses HKDF(master, <span class="hi" style="color:#a78bfa">bob-sub</span>).
+  Decrypting Alice's blob with Bob's KEK → InvalidTag.
+        </div>
+        <div class="field">
+          <label>MCP TARGET (user injection mode only)</label>
+          <select style="font-family:'JetBrains Mono',monospace;font-size:.72rem;padding:.45rem .7rem;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:2px;color:var(--text);width:100%;appearance:none;">
+            <option>jira-search · user mode</option>
+            <option>notes-store · user mode</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>YOUR TOKEN (PAT / API key)</label>
+          <input type="password" placeholder="jira-token-••••••••••••••" readonly
+            style="font-family:'JetBrains Mono',monospace;font-size:.72rem;padding:.45rem .7rem;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:2px;color:var(--text);width:100%;outline:none;">
+        </div>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.2rem">
+          <span class="chip" style="color:#a78bfa;background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.25)">keyed to your identity</span>
+          <span class="chip dim">no admin access needed</span>
+          <span class="chip dim">revocable by you</span>
+        </div>
+      </div>
+      <div class="actor-footer">
+        <div class="actor-footer-note" style="color:#a78bfa88">via <code class="lc-code">PUT /api/v1/credentials/me/{tool_id}</code></div>
+        <div class="admin-btn primary" style="cursor:default;--mode-color:#a78bfa;background:rgba(167,139,250,.1);color:#a78bfa;border-color:rgba(167,139,250,.3)">Save My Token ↑</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Isolation proof note -->
+  <div style="max-width:1050px;margin:2rem auto 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;">
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:1.25rem 1.5rem;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--cyan);letter-spacing:.12em;text-transform:uppercase;margin-bottom:.5rem">Crypto isolation guarantee</div>
+      <p style="font-size:.82rem;color:var(--text-dim);line-height:1.65">HKDF-SHA256 derives a unique Key Encryption Key per identity. The master secret + the identity sub are both required to decrypt. Users cannot read each other's secrets. Platform admins with Vault access can derive any KEK — Vault audit log + least-privilege are the operational controls.</p>
+    </div>
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:1.25rem 1.5rem;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--orange);letter-spacing:.12em;text-transform:uppercase;margin-bottom:.5rem">Injection at call time</div>
+      <p style="font-size:.82rem;color:var(--text-dim);line-height:1.65">At each MCP invocation the proxy reads <code class="lc-code">injection_mode</code> from the tool registry, decrypts the right credential (service or per-user), injects the header, then zeros the plaintext in memory.</p>
+    </div>
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:1.25rem 1.5rem;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:#a78bfa;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.5rem">Self-service MCP</div>
+      <p style="font-size:.82rem;color:var(--text-dim);line-height:1.65">Users can also manage their MCP access profiles via the <code class="lc-code">self-service-mcp</code> (port 8108) — a JSON-only MCP server with 7 tools: <code class="lc-code">list_available_mcps</code>, <code class="lc-code">enable_mcp</code>, <code class="lc-code">disable_mcp</code>, <code class="lc-code">get_profile</code>, <code class="lc-code">list_functions</code>, <code class="lc-code">enable_function</code>, <code class="lc-code">disable_function</code>. No bloat, no HTML.</p>
+    </div>
+  </div>
+
+</section>
+
+<div class="sep"></div>
+
+<!-- ── Layers ── -->
+<section class="layers" id="layers">
+  <div class="section-header reveal">
+    <span class="section-tag">Architecture</span>
+    <h2>Nine Layers</h2>
+    <p>Each layer owns a discrete security concern. No layer trusts the one above it.</p>
+  </div>
+
+  <div class="layers-grid" style="max-width:1100px;margin:0 auto;">
+
+    <div class="layer-card reveal">
+      <div class="layer-num">LAYER 01</div>
+      <div class="layer-title">API Gateway</div>
+      <div class="layer-desc">Nginx with mTLS termination, rate-limiting per client CN and IP, certificate CN header injection. Only entry point for external traffic.</div>
+      <span class="layer-status enforced">● enforced</span>
+    </div>
+
+    <div class="layer-card reveal" style="transition-delay:.05s">
+      <div class="layer-num">LAYER 02</div>
+      <div class="layer-title">Policy Engine (OPA)</div>
+      <div class="layer-desc">Rego policies — deny-by-default authz (INV-003), anomaly scoring, and static tool analysis. Evaluated on the REST invocation path.</div>
+      <span class="layer-status enforced">● enforced</span>
+    </div>
+
+    <div class="layer-card reveal" style="transition-delay:.1s">
+      <div class="layer-num">LAYER 03</div>
+      <div class="layer-title">Security Proxy</div>
+      <div class="layer-desc">FastAPI. Core pipeline: auth → RBAC → quarantine → OPA → credential injection. OIDC/PKCE S256, Keycloak, session JWT. CycloneDX SBOM per tool.</div>
+      <span class="layer-status enforced">● enforced</span>
+    </div>
+
+    <div class="layer-card reveal" style="transition-delay:.15s">
+      <div class="layer-num">LAYER 04</div>
+      <div class="layer-title">Credential Broker</div>
+      <div class="layer-desc">Two approaches — Approach A (AES-256-GCM/HKDF, PostgreSQL refresh-token store) and Approach B (OAuth provision with Redis token cache). Wired for service/user modes; service_account and oauth_user_token modes not yet implemented in the invocation pipeline.</div>
+      <span class="layer-status partial">◐ service/user wired</span>
+    </div>
+
+    <div class="layer-card reveal" style="transition-delay:.2s">
+      <div class="layer-num">LAYER 05</div>
+      <div class="layer-title">Business Services</div>
+      <div class="layer-desc">Invocation pipeline, tool manifest auditor (Ollama, advisory), anomaly detection (sliding-window heuristics), SBOM service, compliance checker.</div>
+      <span class="layer-status enforced">● enforced</span>
+    </div>
+
+    <div class="layer-card reveal" style="transition-delay:.25s">
+      <div class="layer-num">LAYER 06</div>
+      <div class="layer-title">Observability &amp; Audit</div>
+      <div class="layer-desc">mcp-audit-logger package: Loki emitter, redaction engine, audit event schema. SHA-256 hash/event. MinIO archival. Daily compliance checks (advisory).</div>
+      <span class="layer-status enforced">● enforced</span>
+    </div>
+
+    <div class="layer-card reveal" style="transition-delay:.3s">
+      <div class="layer-num">LAYER 07</div>
+      <div class="layer-title">Data &amp; Persistence</div>
+      <div class="layer-desc">PostgreSQL 16 with 20 applied migrations (V001–V020). Redis for role and anomaly caching. MinIO WORM for long-term audit archival. Vault for broker key material.</div>
+      <span class="layer-status enforced">● enforced</span>
+    </div>
+
+    <div class="layer-card reveal" style="transition-delay:.35s">
+      <div class="layer-num">LAYER 08</div>
+      <div class="layer-title">Test Suite</div>
+      <div class="layer-desc">440 tests across unit, integration, security (AI prompt-injection + sandbox escape), and performance. F-001 isolation gated in <code style="font-size:.78em;font-family:JetBrains Mono,monospace">make security-check</code>.</div>
+      <span class="layer-status enforced">● 440 tests</span>
+    </div>
+
+    <div class="layer-card reveal" style="transition-delay:.4s">
+      <div class="layer-num">LAYER 09</div>
+      <div class="layer-title">DevOps &amp; Infrastructure</div>
+      <div class="layer-desc">Four Compose stacks (prod, dev, lab, opa-signed). Rootless Podman. Gitea, Keycloak, Dex, NetBox in lab. Helm stubs. step-ca internal CA. Ship-check gate pre-publish.</div>
+      <span class="layer-status enforced">● lab proven</span>
+    </div>
+
+    <div class="layer-card reveal" style="transition-delay:.45s">
+      <div class="layer-num">LAYER 10</div>
+      <div class="layer-title">Self-Service MCP / Profile Engine</div>
+      <div class="layer-desc">FastMCP server (port 8108) exposing 7 tools for per-identity MCP permission management: <code style="font-size:.78em;font-family:JetBrains Mono,monospace">list_available_mcps</code>, <code style="font-size:.78em;font-family:JetBrains Mono,monospace">enable_mcp</code>, <code style="font-size:.78em;font-family:JetBrains Mono,monospace">disable_mcp</code>, <code style="font-size:.78em;font-family:JetBrains Mono,monospace">get_profile</code>, <code style="font-size:.78em;font-family:JetBrains Mono,monospace">list_functions</code>, <code style="font-size:.78em;font-family:JetBrains Mono,monospace">enable_function</code>, <code style="font-size:.78em;font-family:JetBrains Mono,monospace">disable_function</code>. Writes to <code style="font-size:.78em;font-family:JetBrains Mono,monospace">mcp_profiles</code> + append-only <code style="font-size:.78em;font-family:JetBrains Mono,monospace">mcp_profile_events</code> audit table. Identity from X-User-Sub (proxy-injected); admin manages any profile, agents manage only their own.</div>
+      <span class="layer-status partial">◐ OPA integration roadmap</span>
+    </div>
+
+  </div>
+</section>
+
+<div class="sep" style="margin-top:0"></div>
+
+<!-- ── Enforcement ── -->
+<section class="enforcement" id="enforcement">
+  <div class="section-header reveal">
+    <span class="section-tag">Honesty Notice</span>
+    <h2>Enforced today vs Roadmap</h2>
+    <p>This table is the source of truth. If it's not in the "Enforced" column, it's roadmap.</p>
+  </div>
+
+  <div class="enforcement-table reveal">
+    <div class="enf-row enf-header">
+      <div class="enf-cell">Area</div>
+      <div class="enf-cell">Enforced Today</div>
+      <div class="enf-cell">Roadmap / Not Yet Wired</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">Policy (OPA/Rego)</div>
+      <div class="enf-cell enf-enforced"><span class="tick">✓</span>Evaluated on REST invocation path</div>
+      <div class="enf-cell enf-roadmap"><span class="arrow">→</span>/mcp built-in tools bypass OPA; signed bundles are opt-in overlay</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">Identity</div>
+      <div class="enf-cell enf-enforced"><span class="tick">✓</span>mTLS, CN injection, nonce+PKCE enrollment</div>
+      <div class="enf-cell enf-roadmap"><span class="arrow">→</span>Proxy still trusts gateway-set header (defense-in-depth gap)</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">OIDC Login</div>
+      <div class="enf-cell enf-enforced"><span class="tick">✓</span>Keycloak PKCE S256, session JWT, Grafana SSO</div>
+      <div class="enf-cell enf-roadmap"><span class="arrow">→</span>Session revocation not enforced on every request</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">Credential Broker</div>
+      <div class="enf-cell enf-enforced"><span class="tick">✓</span>Crypto hardened — HKDF, AES-GCM, PKCE, Vault HTTPS; wired into invocation path for service + user modes</div>
+      <div class="enf-cell enf-roadmap"><span class="arrow">→</span>service_account and oauth_user_token injection modes raise "not yet implemented" in the invocation pipeline</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">Network Isolation</div>
+      <div class="enf-cell enf-enforced"><span class="tick">✓</span>F-001 proven in lab, regression-gated in CI</div>
+      <div class="enf-cell enf-roadmap">—</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">Audit</div>
+      <div class="enf-cell enf-enforced"><span class="tick">✓</span>SHA-256/event, redaction, Loki+Grafana, synchronous</div>
+      <div class="enf-cell enf-roadmap"><span class="arrow">→</span>Quarantine/error paths fail open; MinIO GOVERNANCE not tamper-proof</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">SBOM</div>
+      <div class="enf-cell enf-enforced"><span class="tick">✓</span>CycloneDX per tool</div>
+      <div class="enf-cell enf-roadmap"><span class="arrow">→</span>SPDX not implemented</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">Self-Service Secrets</div>
+      <div class="enf-cell enf-enforced"><span class="tick">✓</span>Service owner uploads shared secret; users upload per-user tokens; crypto-isolated by HKDF identity</div>
+      <div class="enf-cell enf-roadmap"><span class="arrow">→</span>UI surface for user self-service is MCP-only today; browser form is roadmap</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">MCP Profile Controls</div>
+      <div class="enf-cell enf-enforced"><span class="tick">✓</span>Per-identity enable/disable per MCP; allowed_functions list; proxy enforces at invocation time (Python-layer check)</div>
+      <div class="enf-cell enf-roadmap"><span class="arrow">→</span>OPA Rego rule reading mcp_profiles not yet wired · Profile inheritance / group profiles not designed · No browser UI (MCP interface only)</div>
+    </div>
+    <div class="enf-row">
+      <div class="enf-cell enf-area">Not Built</div>
+      <div class="enf-cell">—</div>
+      <div class="enf-cell enf-roadmap"><span class="arrow">→</span>Helm/K8s · learned anomaly baseline · Jira outbound · service_account + oauth_user_token injection modes</div>
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ── Stack ── -->
+<section class="stack" id="stack">
+  <div class="section-header reveal">
+    <span class="section-tag">Technology Stack</span>
+    <h2>The components</h2>
+  </div>
+
+  <div class="stack-grid">
+    <div class="stack-item reveal"><div class="stack-role">Gateway</div><div class="stack-name">Nginx + ModSecurity</div></div>
+    <div class="stack-item reveal" style="transition-delay:.04s"><div class="stack-role">Internal CA</div><div class="stack-name">step-ca</div></div>
+    <div class="stack-item reveal" style="transition-delay:.08s"><div class="stack-role">Proxy</div><div class="stack-name">FastAPI / Python 3.12</div></div>
+    <div class="stack-item reveal" style="transition-delay:.12s"><div class="stack-role">Policy</div><div class="stack-name">OPA + Rego</div></div>
+    <div class="stack-item reveal" style="transition-delay:.16s"><div class="stack-role">Local LLM</div><div class="stack-name">Ollama (advisory)</div></div>
+    <div class="stack-item reveal" style="transition-delay:.2s"><div class="stack-role">Database</div><div class="stack-name">PostgreSQL 16</div></div>
+    <div class="stack-item reveal" style="transition-delay:.24s"><div class="stack-role">Cache / Sessions</div><div class="stack-name">Redis 7</div></div>
+    <div class="stack-item reveal" style="transition-delay:.28s"><div class="stack-role">Identity</div><div class="stack-name">Keycloak 24</div></div>
+    <div class="stack-item reveal" style="transition-delay:.32s"><div class="stack-role">Identity (legacy)</div><div class="stack-name">Dex</div></div>
+    <div class="stack-item reveal" style="transition-delay:.36s"><div class="stack-role">SBOM</div><div class="stack-name">CycloneDX</div></div>
+    <div class="stack-item reveal" style="transition-delay:.4s"><div class="stack-role">Logs</div><div class="stack-name">Loki + Promtail</div></div>
+    <div class="stack-item reveal" style="transition-delay:.44s"><div class="stack-role">Dashboards</div><div class="stack-name">Grafana</div></div>
+    <div class="stack-item reveal" style="transition-delay:.48s"><div class="stack-role">Archive</div><div class="stack-name">MinIO (GOVERNANCE)</div></div>
+    <div class="stack-item reveal" style="transition-delay:.52s"><div class="stack-role">Secrets</div><div class="stack-name">HashiCorp Vault</div></div>
+    <div class="stack-item reveal" style="transition-delay:.56s"><div class="stack-role">Containers</div><div class="stack-name">Podman (rootless)</div></div>
+    <div class="stack-item reveal" style="transition-delay:.6s"><div class="stack-role">Schemas</div><div class="stack-name">Pydantic v2</div></div>
+  </div>
+</section>
+
+<!-- ── Footer ── -->
+<footer>
+  <div class="footer-left">
+    <span>MCP Security Platform</span> · Reference implementation · Not for production
+  </div>
+  <div class="footer-right">purplehootie · 2026</div>
+</footer>
+
+<script>
+/* ── Flow diagram — credential injection + backend services ── */
+(function() {
+  const canvas = document.getElementById('flow-canvas');
+  const dpr = window.devicePixelRatio || 1;
+
+  function resize() {
+    const w = canvas.parentElement.clientWidth;
+    const h = Math.max(320, Math.min(520, w * 0.56));
+    canvas.style.width  = w + 'px';
+    canvas.style.height = h + 'px';
+    canvas.width  = w * dpr;
+    canvas.height = h * dpr;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const CYAN   = '#00d4ff';
+  const ORANGE = '#ff8c42';
+  const GREEN  = '#00ff88';
+  const RED    = '#ff3d6b';
+  const PURPLE = '#a78bfa';
+  const BLUE   = '#60a5fa';
+  const GOLD   = '#fbbf24';
+  const GREY   = '#4a6a80';
+  const TEXT   = '#c4d8e8';
+  const DIM    = '#3d5a6c';
+  const BG     = '#050d17';
+
+  // ── Nodes — all positions as ratios ──
+  // Main pipeline (top row, y≈0.30)
+  // Backends (right cluster)
+  // Support layer (bottom row, y≈0.77)
+  const N = {
+    client:  { label:'AI Client',      sub:'mTLS cert',             color:CYAN,   xr:.04, yr:.30, r:30 },
+    nginx:   { label:'Nginx',           sub:'TLS term · rate-limit', color:CYAN,   xr:.21, yr:.30, r:30 },
+    proxy:   { label:'Security Proxy',  sub:'auth · RBAC · OPA',    color:CYAN,   xr:.43, yr:.30, r:34 },
+    mcp:     { label:'MCP Server',      sub:'network-isolated',      color:ORANGE, xr:.63, yr:.30, r:30 },
+    // backends
+    graph:   { label:'Microsoft Graph', sub:'Entra ID · client_credentials', color:PURPLE, xr:.87, yr:.14, r:26 },
+    jira:    { label:'Jira Cloud',      sub:'OAuth 2.0 · token exchange',   color:BLUE,   xr:.87, yr:.36, r:26 },
+    grafana: { label:'Grafana',         sub:'per-user session token',        color:GOLD,   xr:.87, yr:.57, r:26 },
+    // support layer
+    broker:  { label:'Cred Broker',     sub:'AES-GCM · HKDF-SHA256',color:ORANGE, xr:.43, yr:.78, r:26 },
+    opa:     { label:'OPA / Rego',      sub:'deny-by-default',      color:GOLD,   xr:.28, yr:.78, r:24 },
+    audit:   { label:'Audit',           sub:'SHA-256 / event',      color:GREY,   xr:.57, yr:.78, r:24 },
+  };
+
+  // Pixel position of a node
+  function npos(id, W, H) {
+    const n = N[id];
+    return n ? { x: n.xr * W, y: n.yr * H } : null;
+  }
+
+  // Lerp along the path between two nodes (bezier for diagonals)
+  function pathLerp(fId, tId, t, W, H) {
+    const a = npos(fId, W, H);
+    const b = npos(tId, W, H);
+    if (!a || !b) return null;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    if (Math.abs(dy) < H * 0.05 || Math.abs(dx) < W * 0.03) {
+      return { x: a.x + dx*t, y: a.y + dy*t };
+    }
+    // S-curve cubic bezier
+    const c1x = a.x + dx*0.5, c1y = a.y;
+    const c2x = a.x + dx*0.5, c2y = b.y;
+    const u = 1 - t;
+    return {
+      x: u*u*u*a.x + 3*u*u*t*c1x + 3*u*t*t*c2x + t*t*t*b.x,
+      y: u*u*u*a.y + 3*u*u*t*c1y + 3*u*t*t*c2y + t*t*t*b.y,
+    };
+  }
+
+  // ── Pulse registry ──
+  const pulses = {}; // nodeId → { alpha, decay }
+  function pulse(id, decay=0.022) { pulses[id] = { alpha:1, decay }; }
+
+  // ── Draw helpers ──
+
+  function drawEdge(ctx, fId, tId, W, H, { color='rgba(0,212,255,0.11)', lw=1.5, dash=false }={}) {
+    const a = npos(fId, W, H), b = npos(tId, W, H);
+    if (!a || !b) return;
+    ctx.save();
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    if (dash) ctx.setLineDash([4,8]); else ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y);
+    const dx = b.x-a.x, dy = b.y-a.y;
+    if (Math.abs(dy) < H*.05 || Math.abs(dx) < W*.03) {
+      ctx.lineTo(b.x, b.y);
+    } else {
+      ctx.bezierCurveTo(a.x+dx*.5, a.y, a.x+dx*.5, b.y, b.x, b.y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawEdgeLabel(ctx, fId, tId, text, W, H, color) {
+    const a = npos(fId, W, H), b = npos(tId, W, H);
+    if (!a || !b) return;
+    const mx = (a.x+b.x)/2 + (b.x>a.x ? 0 : 0);
+    const my = (a.y+b.y)/2;
+    const scale = Math.min(1, W/900);
+    const fs = Math.max(7, 8.5*scale);
+    ctx.save();
+    ctx.font = `${fs}px 'JetBrains Mono', monospace`;
+    const tw = ctx.measureText(text).width;
+    // Pill bg
+    ctx.fillStyle = 'rgba(5,13,23,0.88)';
+    ctx.beginPath();
+    ctx.roundRect(mx-tw/2-5, my-8, tw+10, 16, 3);
+    ctx.fill();
+    ctx.fillStyle = color;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, mx, my);
+    ctx.restore();
+  }
+
+  function drawNode(ctx, id, W, H) {
+    const n = N[id];
+    if (!n) return;
+    const scale = Math.min(1, W/900);
+    const x = n.xr*W, y = n.yr*H;
+    const r = n.r * scale;
+    const p = pulses[id];
+
+    // Pulse halo
+    if (p && p.alpha > 0) {
+      const g = ctx.createRadialGradient(x,y,r*.3,x,y,r*4.5);
+      const hex = Math.round(p.alpha*0.6*255).toString(16).padStart(2,'0');
+      g.addColorStop(0, n.color+hex);
+      g.addColorStop(1, 'transparent');
+      ctx.beginPath(); ctx.arc(x,y,r*4.5,0,Math.PI*2);
+      ctx.fillStyle = g; ctx.fill();
+    }
+
+    // Ambient glow
+    const ga = ctx.createRadialGradient(x,y,r*.2,x,y,r*2.4);
+    ga.addColorStop(0, n.color+'18'); ga.addColorStop(1,'transparent');
+    ctx.beginPath(); ctx.arc(x,y,r*2.4,0,Math.PI*2);
+    ctx.fillStyle = ga; ctx.fill();
+
+    // Ring
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+    ctx.fillStyle = BG; ctx.fill();
+    ctx.strokeStyle = n.color; ctx.lineWidth = 1.5*scale; ctx.stroke();
+
+    // Text
+    const fsMain = Math.max(8, 10*scale);
+    const fsSub  = Math.max(7,  8*scale);
+    ctx.fillStyle = TEXT;
+    ctx.font = `bold ${fsMain}px 'Syne', sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(n.label, x, y - 3.5*scale);
+    ctx.fillStyle = DIM;
+    ctx.font = `${fsSub}px 'JetBrains Mono', monospace`;
+    ctx.fillText(n.sub, x, y + 9*scale);
+  }
+
+  // Draw a moving packet dot + glow
+  function drawDot(ctx, px, py, color, sz) {
+    const g = ctx.createRadialGradient(px,py,0,px,py,sz*5);
+    g.addColorStop(0, color+'cc'); g.addColorStop(1,'transparent');
+    ctx.beginPath(); ctx.arc(px,py,sz*5,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+    ctx.beginPath(); ctx.arc(px,py,sz,  0,Math.PI*2); ctx.fillStyle=color; ctx.fill();
+  }
+
+  // ── Auth-type badge that rides with the packet ──
+  function drawRidingLabel(ctx, px, py, text, color, W) {
+    const scale = Math.min(1, W/900);
+    const fs = Math.max(7, 8*scale);
+    ctx.save();
+    ctx.font = `${fs}px 'JetBrains Mono', monospace`;
+    const tw = ctx.measureText(text).width;
+    ctx.fillStyle = 'rgba(5,13,23,0.82)';
+    ctx.beginPath(); ctx.roundRect(px-tw/2-4, py-18*scale, tw+8, 13, 2); ctx.fill();
+    ctx.fillStyle = color+'ee';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(text, px, py-12*scale);
+    ctx.restore();
+  }
+
+  // ── Packet system ──
+  const packets = [];
+  let frame = 0;
+  // Frame-deferred spawns — avoids setTimeout inside rAF
+  const deferred = []; // { atFrame, fn }
+
+  const BACKENDS = [
+    { id:'graph',   color:PURPLE, mode:'Entra client_credentials' },
+    { id:'jira',    color:BLUE,   mode:'Jira OAuth token' },
+    { id:'grafana', color:GOLD,   mode:'per-user token' },
+  ];
+
+  function spawnRequest() {
+    const allowed = Math.random() > 0.15;
+    const backend = BACKENDS[Math.floor(Math.random()*BACKENDS.length)];
+    const spd = 0.007 + Math.random()*0.004;
+    packets.push({
+      segs: [
+        { from:'client', to:'nginx', color:CYAN,  speed:spd },
+        { from:'nginx',  to:'proxy', color:CYAN,  speed:spd },
+        // proxy→mcp and mcp→backend added dynamically after cred-fetch wait
+      ],
+      cur: 0, t: 0,
+      allowed, backend, spd,
+      waitFrames: 0,      // pause counter at proxy
+      brokerDone: false,
+      phase: 'transit',   // 'transit' | 'waiting' | 'blocked-show'
+      blockedAge: 0,
+      id: frame + Math.random(),
+    });
+  }
+
+  function spawnSide(from, to, color, speed, back) {
+    const segs = [{ from, to, color, speed }];
+    if (back) segs.push({ from:to, to:from, color, speed:speed*1.1 });
+    packets.push({ segs, cur:0, t:0, isSide:true, id:frame+Math.random() });
+  }
+
+  // Seed a couple in-flight
+  for (let i=0; i<2; i++) {
+    spawnRequest();
+    const p = packets[packets.length-1];
+    p.cur = Math.floor(Math.random()*2);
+    p.t   = Math.random() * 0.6;
+  }
+
+  // ── Draw ──
+  function draw() {
+    const W = canvas.width/dpr, H = canvas.height/dpr;
+    const scale = Math.min(1, W/900);
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.save(); ctx.scale(dpr,dpr);
+
+    // Static edges
+    drawEdge(ctx,'client','nginx', W,H,{color:'rgba(0,212,255,0.14)'});
+    drawEdge(ctx,'nginx', 'proxy', W,H,{color:'rgba(0,212,255,0.14)'});
+    drawEdge(ctx,'proxy', 'mcp',   W,H,{color:'rgba(0,212,255,0.14)'});
+    drawEdge(ctx,'mcp','graph',    W,H,{color:PURPLE+'22'});
+    drawEdge(ctx,'mcp','jira',     W,H,{color:BLUE  +'22'});
+    drawEdge(ctx,'mcp','grafana',  W,H,{color:GOLD  +'22'});
+    drawEdge(ctx,'proxy','broker', W,H,{color:ORANGE+'22',dash:true});
+    drawEdge(ctx,'proxy','opa',    W,H,{color:GOLD  +'1e',dash:true});
+    drawEdge(ctx,'proxy','audit',  W,H,{color:GREY  +'1e',dash:true});
+
+    // Static labels
+    drawEdgeLabel(ctx,'mcp','graph',   'Entra client_credentials', W,H, PURPLE+'cc');
+    drawEdgeLabel(ctx,'mcp','jira',    'Jira OAuth 2.0',           W,H, BLUE  +'cc');
+    drawEdgeLabel(ctx,'mcp','grafana', 'per-user token',           W,H, GOLD  +'cc');
+    drawEdgeLabel(ctx,'proxy','broker','HKDF-SHA256 · decrypt',    W,H, ORANGE+'99');
+
+    // Nodes
+    Object.keys(N).forEach(id => drawNode(ctx, id, W, H));
+
+    // Packets
+    packets.forEach(pkt => {
+      // Blocked: show BLOCKED flash near proxy, no dot
+      if (pkt.phase === 'blocked-show') {
+        const alpha = Math.max(0, 1 - pkt.blockedAge/50);
+        if (alpha > 0) {
+          const pp = npos('proxy', W, H);
+          ctx.save();
+          ctx.font = `bold ${10*scale}px 'JetBrains Mono', monospace`;
+          ctx.fillStyle = `rgba(255,61,107,${alpha})`;
+          ctx.textAlign='center'; ctx.textBaseline='middle';
+          ctx.fillText('BLOCKED', pp.x, pp.y - 52*scale);
+          ctx.restore();
+        }
+        return;
+      }
+
+      // Waiting at proxy: pulse the proxy node, show a spinning indicator
+      if (pkt.phase === 'waiting') {
+        const pp = npos('proxy', W, H);
+        const r = N.proxy.r * scale;
+        const progress = 1 - pkt.waitFrames / pkt.waitTotal;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(pp.x, pp.y, r + 8*scale, -Math.PI/2, -Math.PI/2 + progress*Math.PI*2);
+        ctx.strokeStyle = ORANGE + 'cc';
+        ctx.lineWidth = 2*scale;
+        ctx.stroke();
+        ctx.restore();
+        return; // dot stays at proxy, shown as pulse halo
+      }
+
+      const seg = pkt.segs[pkt.cur];
+      if (!seg) return;
+      const pp = pathLerp(seg.from, seg.to, pkt.t, W, H);
+      if (!pp) return;
+
+      drawDot(ctx, pp.x, pp.y, seg.color, 4.5*scale);
+
+      if (seg.authLabel && pkt.t > 0.18 && pkt.t < 0.82)
+        drawRidingLabel(ctx, pp.x, pp.y, seg.authLabel, seg.color, W);
+      if (seg.label && pkt.t > 0.2 && pkt.t < 0.8)
+        drawRidingLabel(ctx, pp.x, pp.y, seg.label, GREEN, W);
+    });
+
+    // Corner watermark
+    ctx.fillStyle = 'rgba(61,90,108,0.45)';
+    ctx.font = `${8.5*scale}px 'JetBrains Mono', monospace`;
+    ctx.textAlign='left'; ctx.textBaseline='top';
+    ctx.fillText('// RUNTIME FLOW — IDENTITY · POLICY · CREDENTIAL INJECTION · BACKEND AUTH', 8*scale, 8*scale);
+
+    ctx.restore();
+    frame++;
+    Object.keys(pulses).forEach(id => {
+      pulses[id].alpha -= pulses[id].decay;
+      if (pulses[id].alpha <= 0) delete pulses[id];
+    });
+  }
+
+  // ── Tick ──
+  function tick() {
+    // Fire deferred spawns
+    for (let i = deferred.length-1; i >= 0; i--) {
+      if (frame >= deferred[i].atFrame) { deferred[i].fn(); deferred.splice(i,1); }
+    }
+
+    for (let i = packets.length-1; i >= 0; i--) {
+      const pkt = packets[i];
+
+      // ── Blocked: age out ──
+      if (pkt.phase === 'blocked-show') {
+        pkt.blockedAge++;
+        if (pkt.blockedAge > 55) packets.splice(i,1);
+        continue;
+      }
+
+      // ── Waiting at proxy during cred fetch ──
+      if (pkt.phase === 'waiting') {
+        pkt.waitFrames--;
+        if (pkt.waitFrames <= 0) {
+          // Cred fetch complete — push the enriched segments and resume
+          pkt.phase = 'transit';
+          pkt.segs.push(
+            { from:'proxy', to:'mcp',           color:GREEN,          speed:pkt.spd,      label:'+ cred injected' },
+            { from:'mcp',   to:pkt.backend.id,  color:pkt.backend.color, speed:pkt.spd*0.85, authLabel:pkt.backend.mode }
+          );
+          pkt.cur++;
+          pkt.t = 0;
+          // Audit fires when proxy→mcp starts
+          deferred.push({ atFrame: frame+2, fn:()=> spawnSide('proxy','audit',GREY,0.01,false) });
+        }
+        continue;
+      }
+
+      // ── Normal transit ──
+      const seg = pkt.segs[pkt.cur];
+      if (!seg) { packets.splice(i,1); continue; }
+
+      pkt.t += seg.speed;
+      if (pkt.t < 1) continue;
+
+      // Segment complete
+      pkt.t = 0;
+      pulse(seg.to);
+
+      // Arrive at proxy → start cred-fetch wait
+      if (!pkt.isSide && seg.to === 'proxy' && !pkt.brokerDone) {
+        pkt.brokerDone = true;
+        if (pkt.allowed) {
+          // spawn broker fetch + OPA check side packets
+          spawnSide('proxy','broker', ORANGE, 0.018, true);
+          deferred.push({ atFrame: frame+6, fn:()=> spawnSide('proxy','opa',GOLD,0.02,true) });
+          // pause main packet while those play out
+          const wait = 42;
+          pkt.waitTotal  = wait;
+          pkt.waitFrames = wait;
+          pkt.phase = 'waiting';
+          // don't advance cur yet — done inside the waiting handler above
+        } else {
+          // OPA denies
+          spawnSide('proxy','opa', RED, 0.02, false);
+          pkt.phase = 'blocked-show';
+          pkt.blockedAge = 0;
+        }
+        continue; // don't fall through to cur++
+      }
+
+      pkt.cur++;
+      if (pkt.cur >= pkt.segs.length) packets.splice(i,1);
+    }
+
+    if (frame % 80 === 0) spawnRequest();
+    draw();
+    requestAnimationFrame(tick);
+  }
+
+  tick();
+})();
+
+/* ── Hamburger nav toggle ── */
+(function() {
+  const burger = document.getElementById('nav-burger');
+  const links  = document.getElementById('nav-links');
+  if (!burger || !links) return;
+  burger.addEventListener('click', () => links.classList.toggle('open'));
+  links.querySelectorAll('a').forEach(a => a.addEventListener('click', () => links.classList.remove('open')));
+})();
+
+/* ── Active nav link on scroll ── */
+(function() {
+  const sections = document.querySelectorAll('section[id], div[id="flow"]');
+  const navLinks = document.querySelectorAll('.nav-links a[href^="#"]');
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        navLinks.forEach(a => a.classList.remove('active'));
+        const match = document.querySelector(`.nav-links a[href="#${e.target.id}"]`);
+        if (match) match.classList.add('active');
+      }
+    });
+  }, { threshold: 0.35 });
+  sections.forEach(s => obs.observe(s));
+})();
+
+/* ── Scroll reveal ── */
+(function() {
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        e.target.classList.add('visible');
+        obs.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.12 });
+
+  document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
+})();
+</script>
+
+</body>
+</html>
