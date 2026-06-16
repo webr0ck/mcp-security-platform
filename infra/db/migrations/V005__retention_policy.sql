@@ -192,7 +192,12 @@ REVOKE EXECUTE ON FUNCTION purge_old_audit_jobs(INTEGER)
 --   0 1 * * * psql -U mcp_app -d mcp_security -c "SELECT archive_old_audit_events();"
 --   5 1 * * * psql -U mcp_app -d mcp_security -c "SELECT purge_old_audit_jobs();"
 -- ---------------------------------------------------------------------------
-DO $$
+-- NOTE: outer block is tagged $do$ (not $$) because the cron.schedule() command
+-- strings below are themselves dollar-quoted with $$. A plain `DO $$ ... $$`
+-- outer block would be terminated early by the first inner $$, producing
+-- "syntax error at or near SELECT" and ABORTING the entire fresh-DB init (so
+-- V006+ never run). Distinct tags keep the nesting unambiguous.
+DO $do$
 BEGIN
     -- Check if pg_cron is installed before attempting to schedule
     IF EXISTS (
@@ -231,7 +236,7 @@ BEGIN
             '5 1 * * * psql -U mcp_app -d mcp_security -c "SELECT purge_old_audit_jobs();"';
     END IF;
 END
-$$;
+$do$;
 
 
 -- ---------------------------------------------------------------------------

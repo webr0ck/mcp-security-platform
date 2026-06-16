@@ -21,6 +21,7 @@ INSERT INTO server_registry
 SELECT v.name, v.upstream_url, 'approved', 'lab-seeder', 'none', 'session_suk',
        0, '10.89.0.0/16', false
 FROM (VALUES
+    ('lab-echo',         'http://lab-mcp-echo:8000/mcp'),
     ('lab-gitea',        'http://lab-mcp-gitea:8000/mcp'),
     ('lab-grafana-mcp',  'http://lab-mcp-grafana:8000/mcp'),
     ('lab-search',       'http://lab-mcp-search:8000/mcp'),
