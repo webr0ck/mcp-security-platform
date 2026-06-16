@@ -1,0 +1,67 @@
+# lab/dex/config.lab.yaml — rendered for LAB_HOST=203.0.113.10
+# This is the actual config mounted into the Dex container.
+# config.yaml is the template (with ${LAB_HOST} placeholders).
+# Regenerate after changing LAB_HOST or adding clients.
+
+issuer: http://203.0.113.10:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+logger:
+  level: debug
+  format: json
+
+oauth2:
+  skipApprovalScreen: true
+  responseTypes:
+    - code
+
+expiry:
+  deviceRequests: "5m"
+  signingKeys: "6h"
+  idTokens: "24h"
+  refreshTokens:
+    validIfNotUsedFor: "720h"
+    absoluteLifetime: "3960h"
+    disableRotation: false
+    reuseInterval: "3s"
+
+staticClients:
+  - id: mcp-proxy
+    secret: mcp-proxy-secret
+    redirectURIs:
+      - http://203.0.113.10:8000/auth/callback/dex
+      - http://localhost:8000/auth/callback/dex
+      - https://203.0.113.10:8443/auth/callback/dex
+    name: MCP Security Proxy
+    public: false
+
+  # public:true lets Dex accept any localhost redirect URI (RFC 8252 loopback)
+  # without strict redirect_uri matching — needed for Claude Code's dynamic port.
+  - id: claude-code
+    secret: ""
+    redirectURIs: []
+    name: Claude Code MCP Client
+    public: true
+
+enablePasswordDB: true
+
+# Static test users — bcrypt cost 10, password: labpassword
+# userID = email so JWT sub claim matches role_assignments.client_id
+staticPasswords:
+  - email: alice@corp
+    hash: "$2y$10$cWtDDZtQZci4Gi8A2yg4F.DS.7n9pqscMtrVvXglt9FAaBapjY2fS"
+    username: alice
+    userID: "alice@corp"
+  - email: bob@corp
+    hash: "$2y$10$cWtDDZtQZci4Gi8A2yg4F.DS.7n9pqscMtrVvXglt9FAaBapjY2fS"
+    username: bob
+    userID: "bob@corp"
+  - email: admin@corp
+    hash: "$2y$10$cWtDDZtQZci4Gi8A2yg4F.DS.7n9pqscMtrVvXglt9FAaBapjY2fS"
+    username: admin
+    userID: "admin@corp"
