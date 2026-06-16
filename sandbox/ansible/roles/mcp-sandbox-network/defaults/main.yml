@@ -1,0 +1,3 @@
+---
+podman_sandbox_network: mcp-sandbox-net
+sandbox_subnet: "10.100.0.0/24"

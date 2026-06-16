@@ -1,0 +1,57 @@
+---
+# mcp-sandbox-network: Create the isolated internal Podman network
+# This network has no default route to the internet (--internal flag).
+# All tasks are idempotent.
+
+- name: Check if sandbox network already exists
+  ansible.builtin.command: "podman network inspect {{ podman_sandbox_network }}"
+  register: network_inspect
+  changed_when: false
+  failed_when: false
+  tags: [network]
+
+- name: Create internal-only Podman sandbox network
+  ansible.builtin.command: >
+    podman network create
+    --internal
+    --subnet {{ sandbox_subnet }}
+    --driver bridge
+    {{ podman_sandbox_network }}
+  register: network_create
+  changed_when: network_create.rc == 0
+  failed_when: network_create.rc != 0
+  when: network_inspect.rc != 0
+  tags: [network]
+  # Idempotent: only runs when network_inspect failed (network does not exist)
+
+- name: Verify sandbox network is internal
+  ansible.builtin.command: "podman network inspect {{ podman_sandbox_network }}"
+  register: network_verify
+  changed_when: false
+  failed_when: network_verify.rc != 0
+  tags: [network, verify]
+
+- name: Parse network inspect output
+  ansible.builtin.set_fact:
+    network_config: "{{ network_verify.stdout | from_json }}"
+  tags: [network, verify]
+
+- name: Assert sandbox network has internal=true
+  ansible.builtin.assert:
+    that:
+      - network_config[0].internal == true
+    fail_msg: >
+      SECURITY FAILURE: Network '{{ podman_sandbox_network }}' does not have
+      internal=true. This network can reach the internet. Aborting.
+    success_msg: "Network '{{ podman_sandbox_network }}' is correctly configured as internal-only."
+  tags: [network, verify]
+
+- name: Assert sandbox network has correct subnet
+  ansible.builtin.assert:
+    that:
+      - network_config[0].subnets[0].subnet == sandbox_subnet
+    fail_msg: >
+      Network subnet mismatch. Expected {{ sandbox_subnet }},
+      got {{ network_config[0].subnets[0].subnet }}.
+    success_msg: "Network subnet {{ sandbox_subnet }} is correct."
+  tags: [network, verify]

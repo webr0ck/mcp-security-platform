@@ -1,0 +1,88 @@
+---
+# mcp-sandbox-seccomp: Deploy the restrictive seccomp profile for MCP sandbox containers.
+# The profile is a hardened allowlist that blocks ptrace, mount, kexec, BPF,
+# user namespace creation, and other dangerous syscalls.
+
+- name: Ensure seccomp profile directory exists
+  ansible.builtin.file:
+    path: "{{ seccomp_profile_dest | dirname }}"
+    state: directory
+    mode: "0700"
+  tags: [seccomp]
+
+- name: Deploy mcp-sandbox seccomp profile
+  ansible.builtin.copy:
+    src: "{{ seccomp_profile_src }}"
+    dest: "{{ seccomp_profile_dest }}"
+    mode: "0600"
+    backup: true
+  register: seccomp_deployed
+  tags: [seccomp]
+
+- name: Validate seccomp profile is valid JSON
+  ansible.builtin.command: "python3 -c \"import json, sys; json.load(open('{{ seccomp_profile_dest }}'))\""
+  changed_when: false
+  failed_when: false
+  register: seccomp_json_check
+  tags: [seccomp, verify]
+
+- name: Assert seccomp profile is valid JSON
+  ansible.builtin.assert:
+    that:
+      - seccomp_json_check.rc == 0
+    fail_msg: "Seccomp profile at {{ seccomp_profile_dest }} is not valid JSON. Deploy failed."
+    success_msg: "Seccomp profile is valid JSON."
+  tags: [seccomp, verify]
+
+- name: Assert seccomp profile has SCMP_ACT_ERRNO as defaultAction
+  ansible.builtin.shell: >
+    python3 -c "
+    import json
+    with open('{{ seccomp_profile_dest }}') as f:
+        data = json.load(f)
+    assert data.get('defaultAction') == 'SCMP_ACT_ERRNO', \
+        f'defaultAction is {data.get(\"defaultAction\")!r}, expected SCMP_ACT_ERRNO'
+    print('OK')
+    "
+  changed_when: false
+  register: seccomp_default_action_check
+  tags: [seccomp, verify]
+
+- name: Fail if seccomp defaultAction is not deny-by-default
+  ansible.builtin.assert:
+    that:
+      - seccomp_default_action_check.rc == 0
+    fail_msg: >
+      SECURITY FAILURE: seccomp profile does not default to SCMP_ACT_ERRNO.
+      This means unknown syscalls are ALLOWED. Refusing to proceed.
+    success_msg: "seccomp profile correctly defaults to SCMP_ACT_ERRNO (deny-by-default)."
+  tags: [seccomp, verify]
+
+- name: Assert ptrace is in the blocked syscalls list
+  ansible.builtin.shell: >
+    python3 -c "
+    import json
+    with open('{{ seccomp_profile_dest }}') as f:
+        data = json.load(f)
+    blocked = []
+    for rule in data.get('syscalls', []):
+        if rule.get('action') == 'SCMP_ACT_ERRNO':
+            blocked.extend(rule.get('names', []))
+    assert 'ptrace' in blocked, 'ptrace not found in blocked syscalls'
+    assert 'mount' in blocked, 'mount not found in blocked syscalls'
+    assert 'kexec_load' in blocked, 'kexec_load not found in blocked syscalls'
+    print('OK')
+    "
+  changed_when: false
+  register: seccomp_blocked_check
+  tags: [seccomp, verify]
+
+- name: Fail if critical syscalls are not blocked
+  ansible.builtin.assert:
+    that:
+      - seccomp_blocked_check.rc == 0
+    fail_msg: >
+      SECURITY FAILURE: seccomp profile does not block ptrace/mount/kexec_load.
+      Output: {{ seccomp_blocked_check.stderr }}
+    success_msg: "Critical syscalls (ptrace, mount, kexec_load) are correctly blocked."
+  tags: [seccomp, verify]

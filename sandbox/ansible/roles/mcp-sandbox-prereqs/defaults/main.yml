@@ -1,0 +1,46 @@
+---
+# mcp-sandbox-prereqs role defaults
+# Override via inventory group_vars or --extra-vars
+
+sandbox_user: mcp-sandbox
+sandbox_user_shell: /usr/sbin/nologin
+sandbox_user_comment: "MCP Sandbox isolated user — no login shell"
+
+# Package lists — detected OS family overrides these in tasks
+podman_packages_debian:
+  - podman
+  - slirp4netns
+  - uidmap
+  - fuse-overlayfs
+
+podman_packages_redhat:
+  - podman
+  - slirp4netns
+  - shadow-utils
+  - fuse-overlayfs
+
+podman_packages_macos:
+  - podman
+
+podman_compose_pip_package: podman-compose
+
+# subuid/subgid range for sandbox user
+subuid_start: 200000
+subuid_count: 65536
+subgid_start: 200000
+subgid_count: 65536
+
+# auditd rules file
+auditd_rules_file: /etc/audit/rules.d/mcp-sandbox.rules
+
+# containers.conf settings
+containers_conf_default_capabilities: "[]"
+
+# Smoke test — busybox image
+# For production use, pin to a digest:
+#   podman pull docker.io/busybox:1.36
+#   podman inspect --format='{{.Digest}}' docker.io/busybox:1.36
+# then set: busybox_image: "docker.io/busybox@sha256:<digest>"
+busybox_image: "docker.io/busybox:1.36"
+smoke_test_target_ip: "8.8.8.8"
+smoke_test_timeout: 5

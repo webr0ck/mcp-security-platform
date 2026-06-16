@@ -1,0 +1,392 @@
+---
+# =============================================================================
+# 04-run-dev-mcp-server.yml
+# =============================================================================
+# Builds (if needed) and starts the Film Advisor MCP server in the dev sandbox.
+# Waits for both services to be ready, then smoke-tests the full MCP protocol
+# flow (initialize → tools/list → tools/call) to confirm the server is functional.
+#
+# Prerequisites:
+#   01-prepare-environment.yml must have run at least once (network + seccomp).
+#
+# Usage:
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/04-run-dev-mcp-server.yml
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/04-run-dev-mcp-server.yml -e rebuild_image=true
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/04-run-dev-mcp-server.yml -e action=stop
+#
+# Variables:
+#   action          — start (default) | stop | restart
+#   rebuild_image   — true | false (default) — force image rebuild
+#   rest_host_port  — host port for Film Advisor REST API (default: 18080)
+#   mcp_host_port   — host port for MCP server (default: 18081)
+#   dev_memory      — container memory limit (default: 512m)
+#   dev_pids_limit  — container pids limit (default: 256)
+#   readiness_retries — times to poll /health (default: 30, 1s apart)
+#
+# Tags:
+#   build     — image build only
+#   start     — container start only
+#   verify    — health + MCP smoke tests only
+#   stop      — container stop + remove
+#
+# Ports:
+#   18080 → Film Advisor REST API (/health, /films, /recommend)
+#   18081 → MCP server (/health, /mcp)
+#   (18080/18081 avoids conflict with lab-netbox on 8080)
+
+- name: MCP Dev Sandbox — Film Advisor MCP Server
+  hosts: sandbox-host
+  gather_facts: true
+
+  vars:
+    env_action: start
+    rebuild_image: false
+    rest_host_port: 18080
+    mcp_host_port: 18081
+    dev_memory: 512m
+    dev_pids_limit: 256
+    readiness_retries: 30
+
+    container_name: mcp-dev-sandbox
+    image_name: "localhost/mcp-dev:latest"
+    # SB-001: isolated network prevents internet egress from the dev container.
+    # internal=true blocks all external routes; host port-mapping still works.
+    dev_network: mcp-dev-net
+    # SB-002: seccomp profile — same deny-by-default profile as the red-team sandbox.
+    # Deploy it first with playbook 01-prepare-environment.yml.
+    dev_seccomp_profile: "{{ seccomp_profile_dest }}"
+
+    # Paths relative to project root (two levels above sandbox/ansible/)
+    project_root: "{{ playbook_dir }}/../../.."
+    dev_dir: "{{ playbook_dir }}/../../../sandbox/dev"
+    workspace_dir: "{{ playbook_dir }}/../../../sandbox/dev/film-advisor"
+    dockerfile_path: "{{ playbook_dir }}/../../../sandbox/dev/Dockerfile.dev"
+
+  pre_tasks:
+    - name: Resolve paths to absolute form
+      ansible.builtin.set_fact:
+        abs_dev_dir: "{{ dev_dir | realpath }}"
+        abs_workspace_dir: "{{ workspace_dir | realpath }}"
+        abs_dockerfile_path: "{{ dockerfile_path | realpath }}"
+      tags: [always]
+
+    - name: Show configuration
+      ansible.builtin.debug:
+        msg:
+          - "Action:      {{ env_action }}"
+          - "Container:   {{ container_name }}"
+          - "Image:       {{ image_name }}"
+          - "Workspace:   {{ abs_workspace_dir }}"
+          - "REST API:    http://localhost:{{ rest_host_port }}"
+          - "MCP server:  http://localhost:{{ mcp_host_port }}/mcp"
+          - "Rebuild:     {{ rebuild_image }}"
+      tags: [always]
+
+    - name: Assert Dockerfile exists
+      ansible.builtin.stat:
+        path: "{{ abs_dockerfile_path }}"
+      register: dockerfile_stat
+      tags: [always]
+
+    - name: Fail if Dockerfile not found
+      ansible.builtin.assert:
+        that: dockerfile_stat.stat.exists
+        fail_msg: >
+          Dockerfile not found at {{ abs_dockerfile_path }}.
+          Run this playbook from sandbox/ansible/ or check the project layout.
+      tags: [always]
+
+  tasks:
+    # ─── Stop ─────────────────────────────────────────────────────────────────
+    - name: Stop and remove existing container
+      ansible.builtin.command: "podman rm -f {{ container_name }}"
+      register: rm_result
+      changed_when: rm_result.rc == 0
+      failed_when: false
+      when: env_action in ['stop', 'restart', 'start']
+      tags: [stop, start]
+
+    - name: End play for stop action
+      ansible.builtin.meta: end_play
+      when: env_action == 'stop'
+      tags: [stop]
+
+    # ─── Build ────────────────────────────────────────────────────────────────
+    - name: Check if image already exists
+      ansible.builtin.command: "podman image exists {{ image_name }}"
+      register: image_exists
+      changed_when: false
+      failed_when: false
+      tags: [build]
+
+    - name: Build dev image
+      ansible.builtin.command: >
+        podman build
+        -t {{ image_name }}
+        -f {{ abs_dockerfile_path }}
+        {{ abs_dev_dir }}
+      register: build_result
+      changed_when: true
+      when: rebuild_image | bool or image_exists.rc != 0
+      tags: [build]
+
+    - name: Show build output
+      ansible.builtin.debug:
+        msg: "{{ build_result.stdout_lines | default(['(skipped — image already exists)']) }}"
+      tags: [build]
+
+    # ─── Network (SB-001) ─────────────────────────────────────────────────────
+    - name: Check if isolated dev network exists
+      ansible.builtin.command: "podman network exists {{ dev_network }}"
+      register: dev_net_exists
+      changed_when: false
+      failed_when: false
+      tags: [start]
+
+    - name: Create isolated dev network (internal — no internet egress)
+      ansible.builtin.command: "podman network create --internal {{ dev_network }}"
+      when: dev_net_exists.rc != 0
+      changed_when: true
+      tags: [start]
+
+    # ─── Start ────────────────────────────────────────────────────────────────
+    - name: Check if seccomp profile exists (SB-002)
+      ansible.builtin.stat:
+        path: "{{ dev_seccomp_profile }}"
+      register: seccomp_stat
+      tags: [start]
+
+    - name: Warn if seccomp profile is missing
+      ansible.builtin.debug:
+        msg: >
+          WARNING (SB-002): seccomp profile not found at {{ dev_seccomp_profile }}.
+          Container will start without syscall filtering.
+          Run playbook 01-prepare-environment.yml first to deploy the profile.
+      when: not seccomp_stat.stat.exists
+      tags: [start]
+
+    - name: Start Film Advisor dev container
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['podman', 'run', '-d',
+             '--name=' ~ container_name,
+             '--network=' ~ dev_network,
+             '--cap-drop=ALL',
+             '--security-opt', 'no-new-privileges',
+             '--read-only',
+             '--tmpfs=/tmp:rw,noexec,nosuid,size=128m']
+            + (['--security-opt', 'seccomp=' ~ dev_seccomp_profile]
+               if seccomp_stat.stat.exists else [])
+            + ['-p', rest_host_port | string ~ ':8080',
+               '-p', mcp_host_port | string ~ ':8081',
+               '-v', abs_workspace_dir ~ ':/workspace:z',
+               '--memory=' ~ dev_memory,
+               '--pids-limit=' ~ dev_pids_limit,
+               '--env=DATABASE_URL=sqlite+aiosqlite:////workspace/films.db',
+               '--env=FILM_API_URL=http://localhost:8080',
+               image_name,
+               'bash', '/workspace/start.sh']
+          }}
+      register: start_result
+      changed_when: start_result.rc == 0
+      failed_when: start_result.rc != 0
+      tags: [start]
+
+    - name: Show container ID
+      ansible.builtin.debug:
+        msg: "Container started: {{ start_result.stdout | trim }}"
+      tags: [start]
+
+    # ─── Readiness wait ───────────────────────────────────────────────────────
+    - name: Wait for Film Advisor REST API (/health)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ rest_host_port }}/health"
+        method: GET
+        status_code: 200
+      register: rest_health
+      until: rest_health.status == 200
+      retries: "{{ readiness_retries }}"
+      delay: 1
+      tags: [start, verify]
+
+    - name: Wait for MCP server (/health)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ mcp_host_port }}/health"
+        method: GET
+        status_code: 200
+      register: mcp_health
+      until: mcp_health.status == 200
+      retries: "{{ readiness_retries }}"
+      delay: 1
+      tags: [start, verify]
+
+    # ─── MCP smoke test ───────────────────────────────────────────────────────
+    - name: "MCP smoke: initialize session"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ mcp_host_port }}/mcp"
+        method: POST
+        headers:
+          Content-Type: application/json
+          Accept: "application/json, text/event-stream"
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          id: 1
+          method: initialize
+          params:
+            protocolVersion: "2024-11-05"
+            capabilities: {}
+            clientInfo:
+              name: ansible-smoke
+              version: "1.0"
+        status_code: 200
+        return_content: true
+      register: mcp_init
+      tags: [verify]
+
+    - name: Extract MCP session ID from response headers
+      ansible.builtin.set_fact:
+        mcp_session_id: "{{ mcp_init.mcp_session_id | default(mcp_init.x_mcp_session_id) | default('') }}"
+      tags: [verify]
+
+    - name: Parse MCP initialize result from SSE body
+      ansible.builtin.set_fact:
+        mcp_init_result: >-
+          {{
+            mcp_init.content
+            | regex_findall('(?m)^data:(.+)$')
+            | map('from_json')
+            | list
+            | first
+            | default({})
+          }}
+      tags: [verify]
+
+    - name: Assert MCP initialize succeeded
+      ansible.builtin.assert:
+        that:
+          - mcp_init_result.result is defined
+          - mcp_init_result.result.protocolVersion == '2024-11-05'
+          - mcp_init_result.result.serverInfo.name is defined
+        fail_msg: >
+          MCP initialize failed. Response: {{ mcp_init.content[:500] }}
+        success_msg: >
+          PASS: MCP initialize — server={{ mcp_init_result.result.serverInfo.name }},
+          version={{ mcp_init_result.result.serverInfo.version }}
+      tags: [verify]
+
+    - name: "MCP smoke: list tools"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ mcp_host_port }}/mcp"
+        method: POST
+        headers:
+          Content-Type: application/json
+          Accept: "application/json, text/event-stream"
+          mcp-session-id: "{{ mcp_session_id }}"
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          id: 2
+          method: "tools/list"
+          params: {}
+        status_code: 200
+        return_content: true
+      register: mcp_tools
+      tags: [verify]
+
+    - name: Parse tools/list response
+      ansible.builtin.set_fact:
+        mcp_tools_result: >-
+          {{
+            mcp_tools.content
+            | regex_findall('(?m)^data:(.+)$')
+            | map('from_json')
+            | list
+            | first
+            | default({})
+          }}
+      tags: [verify]
+
+    - name: Assert tools/list returned at least one tool
+      ansible.builtin.assert:
+        that:
+          - mcp_tools_result.result is defined
+          - mcp_tools_result.result.tools | length > 0
+        fail_msg: >
+          MCP tools/list returned no tools. Response: {{ mcp_tools.content[:500] }}
+        success_msg: >
+          PASS: tools/list — {{ mcp_tools_result.result.tools | length }} tool(s) registered.
+      tags: [verify]
+
+    - name: "MCP smoke: call recommend_film tool"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ mcp_host_port }}/mcp"
+        method: POST
+        headers:
+          Content-Type: application/json
+          Accept: "application/json, text/event-stream"
+          mcp-session-id: "{{ mcp_session_id }}"
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          id: 3
+          method: "tools/call"
+          params:
+            name: recommend_film
+            arguments:
+              min_rating: 8.0
+        status_code: 200
+        return_content: true
+      register: mcp_tool_call
+      tags: [verify]
+
+    - name: Parse tools/call response
+      ansible.builtin.set_fact:
+        mcp_call_result: >-
+          {{
+            mcp_tool_call.content
+            | regex_findall('(?m)^data:(.+)$')
+            | map('from_json')
+            | list
+            | first
+            | default({})
+          }}
+      tags: [verify]
+
+    - name: Assert tools/call returned content
+      ansible.builtin.assert:
+        that:
+          - mcp_call_result.result is defined
+          - mcp_call_result.result.content | length > 0
+          - mcp_call_result.result.content[0].type == 'text'
+        fail_msg: >
+          MCP tools/call failed. Response: {{ mcp_tool_call.content[:500] }}
+        success_msg: >
+          PASS: recommend_film returned content ({{ mcp_call_result.result.content[0].text | length }} bytes).
+      tags: [verify]
+
+    # ─── Summary ──────────────────────────────────────────────────────────────
+    - name: Dev MCP server is up
+      ansible.builtin.debug:
+        msg:
+          - "==========================================================="
+          - "Film Advisor MCP server is running and verified."
+          - ""
+          - "  REST API  : http://localhost:{{ rest_host_port }}"
+          - "  MCP server: http://localhost:{{ mcp_host_port }}/mcp"
+          - "  Shell     : podman exec -it {{ container_name }} bash"
+          - "  Logs      : podman logs -f {{ container_name }}"
+          - ""
+          - "Registered tools:"
+          - >-
+            {{
+              mcp_tools_result.result.tools
+              | map(attribute='name')
+              | list
+              | join(', ')
+            }}
+          - ""
+          - "  Stop: ansible-playbook playbooks/04-run-dev-mcp-server.yml -e action=stop"
+          - "==========================================================="
+      tags: [always]

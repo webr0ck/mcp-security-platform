@@ -1,0 +1,8 @@
+---
+galaxy_info:
+  role_name: mcp-sandbox-seccomp
+  author: mcp-security-platform
+  description: Deploy the restrictive seccomp profile for MCP sandbox containers
+  min_ansible_version: "2.14"
+dependencies:
+  - role: mcp-sandbox-prereqs

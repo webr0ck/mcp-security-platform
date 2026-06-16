@@ -1,0 +1,490 @@
+---
+# =============================================================================
+# 05-run-test-env.yml
+# =============================================================================
+# Brings up the complete MCP sandbox test environment in one shot:
+#
+#   1. Prerequisite check  — network + seccomp profile present
+#   2. Dev MCP server      — Film Advisor REST API (18080) + MCP server (18081)
+#   3. Malicious MCP build — builds the attacker simulation image
+#   4. Red team test suite — runs sandbox/tests/red_team/run_all.sh
+#   5. Summary report      — pass/fail count, known platform limitations
+#
+# All containers are left running after the play so you can interact with them.
+# To tear down: ansible-playbook playbooks/05-run-test-env.yml -e action=stop
+#
+# Prerequisites:
+#   Run 01-prepare-environment.yml at least once before this playbook.
+#
+# Usage:
+#   # Full bring-up + test run
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/05-run-test-env.yml
+#
+#   # Skip dev server start (already running)
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/05-run-test-env.yml \
+#     -e start_dev_server=false
+#
+#   # Tests only (no container start)
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/05-run-test-env.yml \
+#     --tags tests
+#
+#   # Force rebuild all images before running
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/05-run-test-env.yml \
+#     -e rebuild_images=true
+#
+#   # Tear down everything
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/05-run-test-env.yml \
+#     -e action=stop
+#
+# Variables:
+#   action            — start (default) | stop
+#   start_dev_server  — true (default) | false — start the film advisor MCP server
+#   rebuild_images    — true | false (default) — rebuild all images from scratch
+#   rest_host_port    — host port for Film Advisor REST (default: 18080)
+#   mcp_host_port     — host port for MCP server (default: 18081)
+#   run_tests         — true (default) | false — run the red team bash test suite
+#   test_verbose      — true | false (default) — pass --verbose to run_all.sh
+#   test_no_cleanup   — true | false (default) — pass --no-cleanup to run_all.sh
+#
+# Tags:
+#   prereq    — prerequisite checks only
+#   dev       — dev server start/stop only
+#   malicious — malicious MCP build only
+#   tests     — red team test execution only
+
+- name: MCP Sandbox — Full Test Environment
+  hosts: sandbox-host
+  gather_facts: true
+
+  vars:
+    env_action: start
+    start_dev_server: true
+    rebuild_images: false
+    rest_host_port: 18080
+    mcp_host_port: 18081
+    run_tests: true
+    test_verbose: false
+    test_no_cleanup: false
+
+    dev_container_name: mcp-dev-sandbox
+    dev_image_name: "localhost/mcp-dev:latest"
+    malicious_image_name: "localhost/malicious-mcp:latest"
+
+    project_root: "{{ playbook_dir }}/../../.."
+    dev_dir: "{{ playbook_dir }}/../../../sandbox/dev"
+    workspace_dir: "{{ playbook_dir }}/../../../sandbox/dev/film-advisor"
+    dockerfile_dev: "{{ playbook_dir }}/../../../sandbox/dev/Dockerfile.dev"
+    malicious_dir: "{{ playbook_dir }}/../../../sandbox/containers/malicious-mcp"
+    tests_dir: "{{ playbook_dir }}/../../../sandbox/tests/red_team"
+
+  pre_tasks:
+    - name: Resolve absolute paths
+      ansible.builtin.set_fact:
+        abs_dev_dir: "{{ dev_dir | realpath }}"
+        abs_workspace_dir: "{{ workspace_dir | realpath }}"
+        abs_dockerfile_dev: "{{ dockerfile_dev | realpath }}"
+        abs_malicious_dir: "{{ malicious_dir | realpath }}"
+        abs_tests_dir: "{{ tests_dir | realpath }}"
+      tags: [always]
+
+    - name: Show environment configuration
+      ansible.builtin.debug:
+        msg:
+          - "Action:           {{ env_action }}"
+          - "Start dev server: {{ start_dev_server }}"
+          - "Rebuild images:   {{ rebuild_images }}"
+          - "Run tests:        {{ run_tests }}"
+          - "REST API:         http://localhost:{{ rest_host_port }}"
+          - "MCP server:       http://localhost:{{ mcp_host_port }}/mcp"
+          - "Tests dir:        {{ abs_tests_dir }}"
+      tags: [always]
+
+  tasks:
+    # =========================================================================
+    # STOP action — tear down all test environment containers
+    # =========================================================================
+    - name: Stop and remove dev container
+      ansible.builtin.command: "podman rm -f {{ dev_container_name }}"
+      register: rm_dev
+      changed_when: rm_dev.rc == 0
+      failed_when: false
+      when: env_action == 'stop'
+      tags: [dev]
+
+    - name: Remove malicious MCP image (if rebuilt)
+      ansible.builtin.command: "podman rmi {{ malicious_image_name }}"
+      register: rmi_malicious
+      changed_when: rmi_malicious.rc == 0
+      failed_when: false
+      when: env_action == 'stop'
+      tags: [malicious]
+
+    - name: Test environment stopped
+      ansible.builtin.debug:
+        msg:
+          - "Test environment containers stopped."
+          - "Networks and seccomp profiles are preserved."
+          - "Run 01-prepare-environment.yml --tags network to recreate network if needed."
+      when: env_action == 'stop'
+      tags: [always]
+
+    - name: End play for stop action
+      ansible.builtin.meta: end_play
+      when: env_action == 'stop'
+      tags: [always]
+
+    # =========================================================================
+    # Phase 1: Prerequisites check
+    # =========================================================================
+    - name: "PREREQ: Check sandbox network exists"
+      ansible.builtin.command: "podman network inspect {{ podman_sandbox_network }}"
+      register: network_check
+      changed_when: false
+      failed_when: false
+      tags: [prereq]
+
+    - name: "PREREQ: Assert sandbox network is present"
+      ansible.builtin.assert:
+        that: network_check.rc == 0
+        fail_msg: >
+          Sandbox network '{{ podman_sandbox_network }}' not found.
+          Run 01-prepare-environment.yml first:
+          ansible-playbook -i inventory/sandbox-hosts.yml playbooks/01-prepare-environment.yml
+        success_msg: "PASS: Sandbox network '{{ podman_sandbox_network }}' exists."
+      tags: [prereq]
+
+    - name: "PREREQ: Check seccomp profile exists"
+      ansible.builtin.stat:
+        path: "{{ seccomp_profile_dest }}"
+      register: seccomp_stat
+      tags: [prereq]
+
+    - name: "PREREQ: Assert seccomp profile is present"
+      ansible.builtin.assert:
+        that: seccomp_stat.stat.exists
+        fail_msg: >
+          Seccomp profile not found at {{ seccomp_profile_dest }}.
+          Run 01-prepare-environment.yml --tags seccomp first.
+        success_msg: "PASS: Seccomp profile present at {{ seccomp_profile_dest }}."
+      tags: [prereq]
+
+    - name: "PREREQ: Check Dockerfile.dev exists"
+      ansible.builtin.stat:
+        path: "{{ abs_dockerfile_dev }}"
+      register: dockerfile_stat
+      tags: [prereq, dev]
+
+    - name: "PREREQ: Assert Dockerfile.dev present"
+      ansible.builtin.assert:
+        that: dockerfile_stat.stat.exists
+        fail_msg: "Dockerfile not found at {{ abs_dockerfile_dev }}."
+        success_msg: "PASS: Dockerfile.dev found."
+      tags: [prereq, dev]
+
+    - name: "PREREQ: Check malicious MCP Dockerfile exists"
+      ansible.builtin.stat:
+        path: "{{ abs_malicious_dir }}/Dockerfile"
+      register: malicious_dockerfile_stat
+      tags: [prereq, malicious]
+
+    - name: "PREREQ: Assert malicious MCP Dockerfile present"
+      ansible.builtin.assert:
+        that: malicious_dockerfile_stat.stat.exists
+        fail_msg: "Malicious MCP Dockerfile not found at {{ abs_malicious_dir }}/Dockerfile."
+        success_msg: "PASS: Malicious MCP Dockerfile found."
+      tags: [prereq, malicious]
+
+    # =========================================================================
+    # Phase 2: Dev MCP server (Film Advisor)
+    # =========================================================================
+    - name: "DEV: Check if dev image exists"
+      ansible.builtin.command: "podman image exists {{ dev_image_name }}"
+      register: dev_image_exists
+      changed_when: false
+      failed_when: false
+      when: start_dev_server | bool
+      tags: [dev]
+
+    - name: "DEV: Build dev image"
+      ansible.builtin.command: >
+        podman build
+        -t {{ dev_image_name }}
+        -f {{ abs_dockerfile_dev }}
+        {{ abs_dev_dir }}
+      register: dev_build
+      changed_when: true
+      when:
+        - start_dev_server | bool
+        - rebuild_images | bool or dev_image_exists.rc != 0
+      tags: [dev]
+
+    - name: "DEV: Remove stale dev container"
+      ansible.builtin.command: "podman rm -f {{ dev_container_name }}"
+      changed_when: false
+      failed_when: false
+      when: start_dev_server | bool
+      tags: [dev]
+
+    - name: "DEV: Start Film Advisor dev container"
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - "-d"
+          - "--name={{ dev_container_name }}"
+          - "--cap-drop=ALL"
+          - "--security-opt"
+          - "no-new-privileges"
+          - "-p"
+          - "{{ rest_host_port }}:8080"
+          - "-p"
+          - "{{ mcp_host_port }}:8081"
+          - "-v"
+          - "{{ abs_workspace_dir }}:/workspace:z"
+          - "--memory=512m"
+          - "--pids-limit=256"
+          - "--env=DATABASE_URL=sqlite+aiosqlite:////workspace/films.db"
+          - "--env=FILM_API_URL=http://localhost:8080"
+          - "{{ dev_image_name }}"
+          - bash
+          - /workspace/start.sh
+      register: dev_start
+      changed_when: dev_start.rc == 0
+      failed_when: dev_start.rc != 0
+      when: start_dev_server | bool
+      tags: [dev]
+
+    - name: "DEV: Wait for REST API readiness"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ rest_host_port }}/health"
+        method: GET
+        status_code: 200
+      register: rest_health
+      until: rest_health.status == 200
+      retries: 30
+      delay: 1
+      when: start_dev_server | bool
+      tags: [dev]
+
+    - name: "DEV: Wait for MCP server readiness"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ mcp_host_port }}/health"
+        method: GET
+        status_code: 200
+      register: mcp_health
+      until: mcp_health.status == 200
+      retries: 30
+      delay: 1
+      when: start_dev_server | bool
+      tags: [dev]
+
+    - name: "DEV: MCP initialize smoke test"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ mcp_host_port }}/mcp"
+        method: POST
+        headers:
+          Content-Type: application/json
+          Accept: "application/json, text/event-stream"
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          id: 1
+          method: initialize
+          params:
+            protocolVersion: "2024-11-05"
+            capabilities: {}
+            clientInfo:
+              name: ansible-testenv
+              version: "1.0"
+        status_code: 200
+        return_content: true
+      register: mcp_init
+      when: start_dev_server | bool
+      tags: [dev]
+
+    - name: "DEV: Parse initialize result"
+      ansible.builtin.set_fact:
+        mcp_session_id: "{{ mcp_init.mcp_session_id | default('') }}"
+        mcp_init_parsed: >-
+          {{
+            mcp_init.content
+            | regex_findall('(?m)^data:(.+)$')
+            | map('from_json')
+            | list
+            | first
+            | default({})
+          }}
+      when: start_dev_server | bool
+      tags: [dev]
+
+    - name: "DEV: Assert MCP server is functional"
+      ansible.builtin.assert:
+        that:
+          - mcp_init_parsed.result is defined
+          - mcp_init_parsed.result.protocolVersion == '2024-11-05'
+        fail_msg: "MCP initialize failed: {{ mcp_init.content[:300] }}"
+        success_msg: >-
+          PASS: Film Advisor MCP server is functional
+          (server={{ mcp_init_parsed.result.serverInfo.name | default('unknown') }}).
+      when: start_dev_server | bool
+      tags: [dev]
+
+    # =========================================================================
+    # Phase 3: Malicious MCP server image
+    # =========================================================================
+    - name: "MALICIOUS: Check if malicious image exists"
+      ansible.builtin.command: "podman image exists {{ malicious_image_name }}"
+      register: malicious_image_exists
+      changed_when: false
+      failed_when: false
+      tags: [malicious]
+
+    - name: "MALICIOUS: Build malicious MCP server image"
+      ansible.builtin.command: >
+        podman build
+        -t {{ malicious_image_name }}
+        {{ abs_malicious_dir }}
+      register: malicious_build
+      changed_when: true
+      when: rebuild_images | bool or malicious_image_exists.rc != 0
+      tags: [malicious]
+
+    - name: "MALICIOUS: Image ready"
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'Built ' + malicious_image_name
+            if (malicious_build is defined and malicious_build.changed | default(false))
+            else malicious_image_name + ' already exists (use -e rebuild_images=true to rebuild)'
+          }}
+      tags: [malicious]
+
+    # =========================================================================
+    # Phase 4: Red team test suite
+    # =========================================================================
+    - name: "TESTS: Check run_all.sh exists"
+      ansible.builtin.stat:
+        path: "{{ abs_tests_dir }}/run_all.sh"
+      register: run_all_stat
+      when: run_tests | bool
+      tags: [tests]
+
+    - name: "TESTS: Assert test runner is present"
+      ansible.builtin.assert:
+        that: run_all_stat.stat.exists
+        fail_msg: "run_all.sh not found at {{ abs_tests_dir }}/run_all.sh"
+        success_msg: "PASS: run_all.sh found."
+      when: run_tests | bool
+      tags: [tests]
+
+    - name: "TESTS: Build test runner arguments"
+      ansible.builtin.set_fact:
+        test_args: >-
+          {{
+            (['--verbose'] if test_verbose | bool else []) +
+            (['--no-cleanup'] if test_no_cleanup | bool else [])
+          }}
+      when: run_tests | bool
+      tags: [tests]
+
+    - name: "TESTS: Run red team bash test suite"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['bash', abs_tests_dir + '/run_all.sh'] + test_args }}
+        chdir: "{{ abs_tests_dir }}"
+      register: test_run
+      changed_when: false
+      failed_when: false
+      environment:
+        SANDBOX_NETWORK: "{{ podman_sandbox_network }}"
+        PYTHON_IMAGE: "docker.io/python:3.12-slim"
+        SECCOMP_PROFILE: "{{ seccomp_profile_dest }}"
+      when: run_tests | bool
+      tags: [tests]
+      async: 600
+      poll: 10
+
+    - name: "TESTS: Show test output"
+      ansible.builtin.debug:
+        msg: "{{ test_run.stdout_lines | default([]) }}"
+      when:
+        - run_tests | bool
+        - test_run.stdout_lines is defined
+      tags: [tests]
+
+    - name: "TESTS: Show test stderr (warnings/findings)"
+      ansible.builtin.debug:
+        msg: "{{ test_run.stderr_lines | default([]) }}"
+      when:
+        - run_tests | bool
+        - test_run.stderr_lines is defined
+        - test_run.stderr | length > 0
+      tags: [tests]
+
+    - name: "TESTS: Count pass/fail from output"
+      ansible.builtin.set_fact:
+        tests_passed: "{{ test_run.stdout | regex_findall('(?m)^PASS') | length }}"
+        tests_failed: "{{ test_run.stdout | regex_findall('(?m)^FAIL') | length }}"
+        tests_warn: "{{ test_run.stdout | regex_findall('(?m)^WARN') | length }}"
+      when:
+        - run_tests | bool
+        - test_run is defined
+      tags: [tests]
+
+    - name: "TESTS: Assert all tests passed (or only known expected failures)"
+      ansible.builtin.assert:
+        that:
+          - tests_failed | int == 0 or
+            (tests_failed | int == 1 and
+             'test_network_isolation' in test_run.stdout and
+             'macOS' in test_run.stdout)
+        fail_msg: >
+          {{ tests_failed }} unexpected test failure(s).
+          Review output above. Known expected failure: test_network_isolation on macOS (FINDING-005).
+        success_msg: >
+          All tests passed ({{ tests_passed }} PASS, {{ tests_warn }} WARN).
+          Note: test_network_isolation may report 1 failure on macOS — this is FINDING-005 (expected).
+      when:
+        - run_tests | bool
+        - tests_failed is defined
+      tags: [tests]
+
+    # =========================================================================
+    # Phase 5: Summary
+    # =========================================================================
+    - name: Test environment summary
+      ansible.builtin.debug:
+        msg:
+          - "==========================================================="
+          - "MCP Sandbox Test Environment — Ready"
+          - ""
+          - "Services:"
+          - "  Film Advisor REST : http://localhost:{{ rest_host_port }}"
+          - "  MCP server (HTTP) : http://localhost:{{ mcp_host_port }}/mcp"
+          - "  Shell access      : podman exec -it {{ dev_container_name }} bash"
+          - "  MCP logs          : podman logs -f {{ dev_container_name }}"
+          - ""
+          - "Red Team Tests:"
+          - >-
+            {{
+              '  Passed: ' + (tests_passed | string) + '  Failed: ' + (tests_failed | string) + '  Warnings: ' + (tests_warn | string)
+              if (tests_passed is defined)
+              else '  (tests skipped — run_tests=false)'
+            }}
+          - ""
+          - "Known limitations:"
+          - "  FINDING-005: --internal network does not block egress on macOS"
+          - "    → Linux required for full network isolation"
+          - "  FINDING-004: Prompt injection via tool descriptions is LLM-layer"
+          - "    → Not blockable at container level"
+          - "  FINDING-001: Never inject real secrets as env vars"
+          - "    → Use Podman secrets (--secret) instead"
+          - ""
+          - "Next steps:"
+          - "  Register MCP server in proxy:"
+          - "    ansible-playbook playbooks/02-run-sandbox.yml \\"
+          - "      -e mcp_server_image=sandbox/containers/malicious-mcp"
+          - "  Tear down:"
+          - "    ansible-playbook playbooks/05-run-test-env.yml -e action=stop"
+          - "==========================================================="
+      tags: [always]

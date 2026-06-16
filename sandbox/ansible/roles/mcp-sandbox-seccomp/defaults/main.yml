@@ -1,0 +1,3 @@
+---
+seccomp_profile_src: "{{ playbook_dir }}/../../../files/seccomp/mcp-sandbox.json"
+seccomp_profile_dest: "{{ lookup('env', 'HOME') }}/.config/containers/seccomp/mcp-sandbox.json"

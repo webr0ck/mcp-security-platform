@@ -1,0 +1,11 @@
+---
+all:
+  hosts:
+    sandbox-host:
+      ansible_connection: local
+      ansible_user: "{{ lookup('env', 'USER') }}"
+      sandbox_user: mcp-sandbox
+      podman_sandbox_network: mcp-sandbox-net
+      sandbox_subnet: "10.100.0.0/24"
+      seccomp_profile_dest: "{{ lookup('env', 'HOME') }}/.config/containers/seccomp/mcp-sandbox.json"
+      containers_conf_dest: "{{ lookup('env', 'HOME') }}/.config/containers/containers.conf"

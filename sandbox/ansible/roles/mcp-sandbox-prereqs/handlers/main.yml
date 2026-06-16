@@ -1,0 +1,7 @@
+---
+- name: Reload auditd rules
+  become: true
+  ansible.builtin.command: augenrules --load
+  listen: reload auditd
+  changed_when: false
+  when: not ansible_check_mode

@@ -1,0 +1,34 @@
+FROM python:3.12-slim
+
+WORKDIR /workspace
+
+# System deps for SQLite (already included in python:slim) + curl for health checks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pre-install all Python dependencies so the container is self-contained
+# (no outbound pip needed at runtime — respects sandbox isolation)
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    sqlalchemy \
+    aiosqlite \
+    fastmcp \
+    httpx
+
+# SB-002: run as non-root. UID/GID 1001 — no special privileges required.
+# The workspace volume is bind-mounted at runtime; the host directory must be
+# accessible to UID 1001 (chown or run: user: in the container engine).
+RUN groupadd --gid 1001 appuser && \
+    useradd --uid 1001 --gid 1001 --no-create-home --shell /bin/bash appuser
+USER appuser
+
+# Workspace is mounted at runtime — nothing baked in
+ENV PYTHONUNBUFFERED=1
+ENV DATABASE_URL=sqlite+aiosqlite:///workspace/films.db
+
+EXPOSE 8080 8081
+
+CMD ["/bin/bash"]

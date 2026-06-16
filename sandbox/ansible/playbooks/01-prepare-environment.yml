@@ -1,0 +1,141 @@
+---
+# =============================================================================
+# 01-prepare-environment.yml
+# =============================================================================
+# Idempotent host preparation for the MCP sandbox.
+# Safe to re-run at any time — all tasks use proper Ansible module semantics
+# or explicit idempotency guards.
+#
+# Usage:
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/01-prepare-environment.yml
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/01-prepare-environment.yml --check   # dry-run
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/01-prepare-environment.yml --tags network
+#
+# Tags:
+#   install   — package installation + user + subuid/subgid
+#   network   — Podman network creation and verification
+#   seccomp   — seccomp profile + containers.conf deployment
+#   verify    — post-deployment smoke tests (--tags verify to re-run checks only)
+#
+# Root access: Only tasks marked `become: true` require root. These are:
+#   - OS package installation
+#   - OS user creation
+#   - /etc/subuid + /etc/subgid management
+#   - auditd rule deployment
+# All other tasks run as the invoking user.
+
+- name: MCP Sandbox — Prepare Host Environment
+  hosts: sandbox-host
+  gather_facts: true
+
+  pre_tasks:
+    - name: Check mode notice
+      ansible.builtin.debug:
+        msg: >
+          Running in CHECK MODE — no changes will be made.
+          Some verification tasks that require live state may report false failures.
+      when: ansible_check_mode
+      tags: [always]
+
+    - name: Assert minimum Ansible version
+      ansible.builtin.assert:
+        that:
+          - ansible_version.full is version('2.14', '>=')
+        fail_msg: "This playbook requires Ansible >= 2.14. Current: {{ ansible_version.full }}"
+        success_msg: "Ansible version {{ ansible_version.full }} is supported."
+      tags: [always]
+
+  roles:
+    - role: mcp-sandbox-prereqs
+      tags: [install, verify]
+    - role: mcp-sandbox-seccomp
+      tags: [seccomp, verify]
+    - role: mcp-sandbox-network
+      tags: [network, verify]
+
+  tasks:
+    # ─── Smoke test: verify internet egress is blocked ────────────────────────
+    - name: "[SMOKE] Pull busybox image for smoke test"
+      ansible.builtin.command: "podman pull {{ busybox_image }}"
+      register: busybox_pull
+      changed_when: "'Downloading' in busybox_pull.stdout or 'Writing' in busybox_pull.stdout"
+      failed_when: busybox_pull.rc != 0
+      when: not ansible_check_mode
+      tags: [verify]
+
+    - name: "[SMOKE] Start busybox container on sandbox network"
+      ansible.builtin.command: >
+        podman run --rm
+        --name mcp-sandbox-smoke-{{ ansible_date_time.epoch }}
+        --network {{ podman_sandbox_network }}
+        --cap-drop=ALL
+        --security-opt no-new-privileges
+        --security-opt seccomp={{ seccomp_profile_dest }}
+        --read-only
+        --tmpfs /tmp:rw,noexec,nosuid,size=10m
+        --memory=64m
+        --pids-limit=16
+        {{ busybox_image }}
+        sh -c "ping -c1 -W{{ smoke_test_timeout }} {{ smoke_test_target_ip }} > /tmp/ping.out 2>&1; echo exit:$?"
+      register: smoke_ping
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [verify]
+
+    - name: "[SMOKE] Assert internet (8.8.8.8) is NOT reachable from sandbox network"
+      ansible.builtin.assert:
+        that:
+          - "'exit:0' not in smoke_ping.stdout"
+        fail_msg: >
+          SECURITY FAILURE: Container on {{ podman_sandbox_network }} can reach
+          {{ smoke_test_target_ip }}. The --internal network flag is not working.
+          Output: {{ smoke_ping.stdout }}
+        success_msg: >
+          PASS: Container on {{ podman_sandbox_network }} cannot reach
+          {{ smoke_test_target_ip }}. Internet egress is correctly blocked.
+      when: not ansible_check_mode
+      tags: [verify]
+
+    - name: "[SMOKE] DNS resolution (google.com) must fail inside sandbox"
+      ansible.builtin.command: >
+        podman run --rm
+        --name mcp-sandbox-dns-{{ ansible_date_time.epoch }}
+        --network {{ podman_sandbox_network }}
+        --cap-drop=ALL
+        --security-opt no-new-privileges
+        --read-only
+        --tmpfs /tmp:rw,noexec,nosuid,size=10m
+        --memory=64m
+        --pids-limit=16
+        {{ busybox_image }}
+        sh -c "nslookup google.com > /tmp/dns.out 2>&1; echo exit:$?"
+      register: smoke_dns
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [verify]
+
+    - name: "[SMOKE] Assert DNS lookup fails inside sandbox"
+      ansible.builtin.assert:
+        that:
+          - "'exit:0' not in smoke_dns.stdout"
+        fail_msg: >
+          SECURITY FAILURE: DNS resolution succeeded inside sandbox network.
+          DNS server is reachable from the internal network.
+          Output: {{ smoke_dns.stdout }}
+        success_msg: "PASS: DNS resolution correctly fails inside sandbox network."
+      when: not ansible_check_mode
+      tags: [verify]
+
+    # ─── Summary ───────────────────────────────────────────────────────────────
+    - name: Environment preparation complete
+      ansible.builtin.debug:
+        msg:
+          - "MCP Sandbox host preparation complete."
+          - "Podman network: {{ podman_sandbox_network }} (internal-only, {{ sandbox_subnet }})"
+          - "Seccomp profile: {{ seccomp_profile_dest }}"
+          - "containers.conf: {{ lookup('env', 'HOME') }}/.config/containers/containers.conf"
+          - "Sandbox user: {{ sandbox_user }}"
+          - "Next step: ansible-playbook playbooks/02-run-sandbox.yml -e mcp_server_image=<image>"
+      tags: [always]

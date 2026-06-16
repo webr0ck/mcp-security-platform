@@ -1,0 +1,459 @@
+---
+# =============================================================================
+# 02-run-sandbox.yml
+# =============================================================================
+# Orchestrates a single isolated sandbox test run.
+# Spins up fresh containers, runs for test_timeout_seconds, captures all
+# artifacts, then destroys everything. No state persists between runs.
+#
+# Required variables:
+#   mcp_server_image   — OCI image ref (digest preferred) or path to Dockerfile dir
+#
+# Optional variables:
+#   agent_image            — MCP client/agent image (default: python:3.12-slim)
+#   test_timeout_seconds   — how long to let containers run (default: 120)
+#   sandbox_run_id         — UUID for this run (auto-generated if not provided)
+#   mcp_server_port        — port the MCP server listens on inside container (default: 8000)
+#
+# Usage:
+#   # Minimal — auto-generates run ID
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/02-run-sandbox.yml \
+#     -e mcp_server_image=sandbox/containers/malicious-mcp
+#
+#   # With explicit digest and run ID
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/02-run-sandbox.yml \
+#     -e mcp_server_image=ghcr.io/org/evil-mcp@sha256:abc123 \
+#     -e sandbox_run_id=my-test-run-001
+#
+#   # Dry-run (will skip container operations but validate variable resolution)
+#   ansible-playbook -i inventory/sandbox-hosts.yml playbooks/02-run-sandbox.yml \
+#     -e mcp_server_image=sandbox/containers/malicious-mcp --check
+#
+# Artifacts saved to: /tmp/mcp-sandbox-{{ sandbox_run_id }}/
+#   capture.pcap    — full packet capture of all container traffic
+#   server.log      — mcp-malicious-server stdout/stderr
+#   agent.log       — mcp-agent-victim stdout/stderr
+#   monitor.log     — tcpdump monitor container log
+#   run-metadata.json — run parameters and timing
+
+- name: MCP Sandbox — Run Isolated Test
+  hosts: sandbox-host
+  gather_facts: true
+
+  vars:
+    agent_image: "docker.io/python:3.12-slim"
+    test_timeout_seconds: 120
+    mcp_server_port: 8000
+    # SB-005: pinned to a specific tag. Update by running:
+    #   podman pull docker.io/nicolaka/netshoot:v0.14
+    #   podman inspect --format='{{index .RepoDigests 0}}' docker.io/nicolaka/netshoot:v0.14
+    # then replace the tag with the full @sha256: digest and commit.
+    # TODO @sha256: replace tag with immutable digest once digest is verified.
+    monitor_image: "docker.io/nicolaka/netshoot:v0.14"
+    # sandbox_run_id and mcp_server_image must be provided; mcp_server_image
+    # can be a local Dockerfile directory path or a registry image ref.
+
+  pre_tasks:
+    - name: Check mode notice
+      ansible.builtin.debug:
+        msg: "Running in CHECK MODE — container operations will be skipped."
+      when: ansible_check_mode
+      tags: [always]
+
+    - name: Assert mcp_server_image is defined
+      ansible.builtin.assert:
+        that:
+          - mcp_server_image is defined
+          - mcp_server_image | length > 0
+        fail_msg: >
+          mcp_server_image is required. Pass it with:
+          -e mcp_server_image=<image-or-dockerfile-path>
+      tags: [always]
+
+    - name: Generate sandbox_run_id if not provided
+      ansible.builtin.set_fact:
+        sandbox_run_id: "{{ lookup('community.general.random_string', length=12, special=false, upper=false) }}-{{ ansible_date_time.epoch }}"
+      when: sandbox_run_id is not defined
+      tags: [always]
+
+    - name: Set derived path and container name variables
+      ansible.builtin.set_fact:
+        artifact_dir: "/tmp/mcp-sandbox-{{ sandbox_run_id }}"
+        container_server: "mcp-malicious-server-{{ sandbox_run_id }}"
+        container_agent: "mcp-agent-victim-{{ sandbox_run_id }}"
+        container_monitor: "mcp-sandbox-monitor-{{ sandbox_run_id }}"
+        pcap_path: "/tmp/mcp-sandbox-{{ sandbox_run_id }}/capture.pcap"
+      tags: [always]
+
+    - name: Show run parameters
+      ansible.builtin.debug:
+        msg:
+          - "Run ID:              {{ sandbox_run_id }}"
+          - "Artifact dir:        {{ artifact_dir }}"
+          - "MCP server image:    {{ mcp_server_image }}"
+          - "Agent image:         {{ agent_image }}"
+          - "Timeout:             {{ test_timeout_seconds }}s"
+          - "Network:             {{ podman_sandbox_network }}"
+          - "Seccomp:             {{ seccomp_profile_dest }}"
+      tags: [always]
+
+  tasks:
+    # ─── Phase 1: Setup ────────────────────────────────────────────────────────
+
+    - name: "1/9 Create per-run artifact directory"
+      ansible.builtin.file:
+        path: "{{ artifact_dir }}"
+        state: directory
+        mode: "0700"
+      tags: [run]
+
+    - name: "1/9 Write run metadata JSON"
+      ansible.builtin.copy:
+        dest: "{{ artifact_dir }}/run-metadata.json"
+        content: |
+          {
+            "sandbox_run_id": "{{ sandbox_run_id }}",
+            "mcp_server_image": "{{ mcp_server_image }}",
+            "agent_image": "{{ agent_image }}",
+            "test_timeout_seconds": {{ test_timeout_seconds }},
+            "network": "{{ podman_sandbox_network }}",
+            "started_at": "{{ ansible_date_time.iso8601 }}",
+            "host": "{{ inventory_hostname }}",
+            "ansible_user": "{{ ansible_user }}"
+          }
+        mode: "0600"
+      tags: [run]
+
+    # ─── Phase 2: Build/pull images ────────────────────────────────────────────
+
+    - name: "2/9 Detect if mcp_server_image is a local Dockerfile directory"
+      ansible.builtin.stat:
+        path: "{{ mcp_server_image }}/Dockerfile"
+      register: dockerfile_stat
+      tags: [run]
+
+    - name: "2/9 Build MCP server image from local Dockerfile"
+      ansible.builtin.command: >
+        podman build
+        -t mcp-malicious-server-{{ sandbox_run_id }}
+        {{ mcp_server_image }}
+      register: build_result
+      changed_when: true
+      when:
+        - dockerfile_stat.stat.exists | default(false)
+        - not ansible_check_mode
+      tags: [run]
+
+    - name: "2/9 Pull MCP server image from registry"
+      ansible.builtin.command: "podman pull {{ mcp_server_image }}"
+      register: pull_result
+      changed_when: "'Downloading' in pull_result.stdout or 'Writing' in pull_result.stdout"
+      failed_when: pull_result.rc != 0
+      when:
+        - not (dockerfile_stat.stat.exists | default(false))
+        - not ansible_check_mode
+      tags: [run]
+
+    - name: Set effective server image reference
+      ansible.builtin.set_fact:
+        effective_server_image: >-
+          {{
+            'mcp-malicious-server-' ~ sandbox_run_id
+            if (dockerfile_stat.stat.exists | default(false))
+            else mcp_server_image
+          }}
+      tags: [run]
+
+    - name: "2/9 Pull monitor image"
+      ansible.builtin.command: "podman pull {{ monitor_image }}"
+      register: monitor_pull
+      changed_when: "'Downloading' in monitor_pull.stdout or 'Writing' in monitor_pull.stdout"
+      failed_when: monitor_pull.rc != 0
+      when: not ansible_check_mode
+      tags: [run]
+
+    - name: "2/9 Pull agent image"
+      ansible.builtin.command: "podman pull {{ agent_image }}"
+      register: agent_pull
+      changed_when: "'Downloading' in agent_pull.stdout or 'Writing' in agent_pull.stdout"
+      failed_when: agent_pull.rc != 0
+      when: not ansible_check_mode
+      tags: [run]
+
+    # ─── Phase 3: Start monitor ────────────────────────────────────────────────
+
+    - name: "3/9 Start network monitor container (tcpdump)"
+      ansible.builtin.command: >
+        podman run -d
+        --name {{ container_monitor }}
+        --network {{ podman_sandbox_network }}
+        --cap-drop=ALL
+        --cap-add=NET_RAW
+        --cap-add=NET_ADMIN
+        --security-opt no-new-privileges
+        --read-only
+        --tmpfs /tmp:rw,noexec,nosuid,size=256m
+        --memory=128m
+        --pids-limit=16
+        {{ monitor_image }}
+        tcpdump -i any -w /tmp/capture.pcap -s0 -n
+      register: monitor_start
+      changed_when: monitor_start.rc == 0
+      failed_when: monitor_start.rc != 0
+      when: not ansible_check_mode
+      tags: [run]
+
+    # ─── Phase 4: Start MCP server ─────────────────────────────────────────────
+
+    - name: "4/9 Start malicious MCP server container"
+      ansible.builtin.command: >
+        podman run -d
+        --name {{ container_server }}
+        --network {{ podman_sandbox_network }}
+        --no-hosts
+        --read-only
+        --tmpfs /tmp:rw,noexec,nosuid,size=64m
+        --cap-drop=ALL
+        --security-opt no-new-privileges
+        --security-opt seccomp={{ seccomp_profile_dest }}
+        --memory=256m
+        --cpus=0.5
+        --pids-limit=64
+        {{ effective_server_image }}
+      register: server_start
+      changed_when: server_start.rc == 0
+      failed_when: server_start.rc != 0
+      when: not ansible_check_mode
+      tags: [run]
+
+    - name: "4/9 Wait for MCP server to start"
+      ansible.builtin.pause:
+        seconds: 3
+      when: not ansible_check_mode
+      tags: [run]
+
+    - name: "4/9 Verify MCP server container is running"
+      ansible.builtin.command: "podman inspect --format='{{{{.State.Status}}}}' {{ container_server }}"
+      register: server_status
+      changed_when: false
+      failed_when: "'running' not in server_status.stdout"
+      when: not ansible_check_mode
+      tags: [run]
+
+    # ─── Phase 5: Start agent ──────────────────────────────────────────────────
+    # The agent script is written to the artifact dir on the host, then
+    # bind-mounted read-only into the container at /agent/run.py.
+    # This avoids embedding multi-line Python in a YAML command string.
+
+    - name: "5/9 Write agent script to artifact dir"
+      ansible.builtin.copy:
+        dest: "{{ artifact_dir }}/agent_run.py"
+        mode: "0644"
+        content: |
+          import json
+          import time
+          import os
+          import urllib.request
+
+          server = os.environ.get("MCP_SERVER_HOST", "mcp-server")
+          port = os.environ.get("MCP_SERVER_PORT", "8000")
+          base_url = "http://{}:{}".format(server, port)
+          sleep_secs = int(os.environ.get("AGENT_SLEEP", "30"))
+
+          print("[agent] Targeting " + base_url, flush=True)
+          time.sleep(2)
+
+          for method, params in [
+              ("initialize", {
+                  "protocolVersion": "2024-11-05",
+                  "capabilities": {},
+                  "clientInfo": {"name": "test-agent", "version": "0.1"},
+              }),
+              ("tools/list", {}),
+          ]:
+              try:
+                  body = json.dumps({
+                      "jsonrpc": "2.0", "id": 1,
+                      "method": method, "params": params,
+                  }).encode()
+                  req = urllib.request.Request(
+                      base_url + "/mcp", data=body,
+                      headers={"Content-Type": "application/json"},
+                  )
+                  resp = urllib.request.urlopen(req, timeout=10)
+                  print("[agent] " + method + ": " + resp.read().decode()[:300], flush=True)
+              except Exception as exc:
+                  print("[agent] " + method + " failed: " + str(exc), flush=True)
+
+          print("[agent] Run complete. Keeping alive...", flush=True)
+          time.sleep(sleep_secs)
+      when: not ansible_check_mode
+      tags: [run]
+
+    - name: "5/9 Start MCP agent (victim) container"
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - "-d"
+          - "--name={{ container_agent }}"
+          - "--network={{ podman_sandbox_network }}"
+          - --no-hosts
+          - --read-only
+          - "--tmpfs=/tmp:rw,noexec,nosuid,size=64m"
+          - --cap-drop=ALL
+          - --security-opt
+          - no-new-privileges
+          - --security-opt
+          - "seccomp={{ seccomp_profile_dest }}"
+          - --memory=256m
+          - --cpus=0.5
+          - --pids-limit=64
+          - "--env=MCP_SERVER_HOST={{ container_server }}"
+          - "--env=MCP_SERVER_PORT={{ mcp_server_port }}"
+          - "--env=AGENT_SLEEP={{ [test_timeout_seconds | int - 10, 5] | max }}"
+          - "--volume={{ artifact_dir }}/agent_run.py:/agent/run.py:ro,noexec"
+          - "{{ agent_image }}"
+          - python3
+          - /agent/run.py
+      register: agent_start
+      changed_when: agent_start.rc == 0
+      failed_when: agent_start.rc != 0
+      when: not ansible_check_mode
+      tags: [run]
+
+    # ─── Phase 6: Wait for test to complete ────────────────────────────────────
+
+    - name: "6/9 Wait {{ test_timeout_seconds }}s for test run to complete"
+      ansible.builtin.pause:
+        seconds: "{{ test_timeout_seconds }}"
+      when: not ansible_check_mode
+      tags: [run]
+
+    # ─── Phase 7: Collect artifacts ────────────────────────────────────────────
+
+    - name: "7/9 Stop all containers gracefully"
+      ansible.builtin.command: "podman stop --time 10 {{ item }}"
+      loop:
+        - "{{ container_agent }}"
+        - "{{ container_server }}"
+        - "{{ container_monitor }}"
+      register: stop_result
+      changed_when: stop_result.rc == 0
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [run, cleanup]
+
+    - name: "7/9 Collect server container logs"
+      ansible.builtin.command: "podman logs {{ container_server }}"
+      register: server_logs
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [run]
+
+    - name: "7/9 Save server logs to artifact dir"
+      ansible.builtin.copy:
+        dest: "{{ artifact_dir }}/server.log"
+        content: "{{ server_logs.stdout }}\n--- STDERR ---\n{{ server_logs.stderr }}"
+        mode: "0600"
+      when:
+        - not ansible_check_mode
+        - server_logs is defined
+      tags: [run]
+
+    - name: "7/9 Collect agent container logs"
+      ansible.builtin.command: "podman logs {{ container_agent }}"
+      register: agent_logs
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [run]
+
+    - name: "7/9 Save agent logs to artifact dir"
+      ansible.builtin.copy:
+        dest: "{{ artifact_dir }}/agent.log"
+        content: "{{ agent_logs.stdout }}\n--- STDERR ---\n{{ agent_logs.stderr }}"
+        mode: "0600"
+      when:
+        - not ansible_check_mode
+        - agent_logs is defined
+      tags: [run]
+
+    - name: "7/9 Copy pcap from monitor container"
+      ansible.builtin.command: >
+        podman cp {{ container_monitor }}:/tmp/capture.pcap {{ artifact_dir }}/capture.pcap
+      register: pcap_copy
+      changed_when: pcap_copy.rc == 0
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [run]
+
+    - name: "7/9 Collect monitor logs"
+      ansible.builtin.command: "podman logs {{ container_monitor }}"
+      register: monitor_logs
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [run]
+
+    - name: "7/9 Save monitor logs"
+      ansible.builtin.copy:
+        dest: "{{ artifact_dir }}/monitor.log"
+        content: "{{ monitor_logs.stdout }}\n--- STDERR ---\n{{ monitor_logs.stderr }}"
+        mode: "0600"
+      when:
+        - not ansible_check_mode
+        - monitor_logs is defined
+      tags: [run]
+
+    # ─── Phase 8: Cleanup ──────────────────────────────────────────────────────
+
+    - name: "8/9 Remove all containers for this run"
+      ansible.builtin.command: "podman rm -f {{ item }}"
+      loop:
+        - "{{ container_agent }}"
+        - "{{ container_server }}"
+        - "{{ container_monitor }}"
+      register: rm_result
+      changed_when: rm_result.rc == 0
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [run, cleanup]
+
+    - name: "8/9 Remove locally-built image (if we built it)"
+      ansible.builtin.command: "podman rmi mcp-malicious-server-{{ sandbox_run_id }}"
+      register: rmi_result
+      changed_when: rmi_result.rc == 0
+      failed_when: false
+      when:
+        - dockerfile_stat.stat.exists | default(false)
+        - not ansible_check_mode
+      tags: [run, cleanup]
+
+    # ─── Phase 9: Report ───────────────────────────────────────────────────────
+
+    - name: "9/9 List artifacts"
+      ansible.builtin.command: "ls -lh {{ artifact_dir }}"
+      register: artifact_list
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [run]
+
+    - name: "9/9 Run complete — artifact location"
+      ansible.builtin.debug:
+        msg:
+          - "======================================================="
+          - "Sandbox run complete: {{ sandbox_run_id }}"
+          - "Artifacts saved to: {{ artifact_dir }}"
+          - "{{ artifact_list.stdout_lines | default(['(check mode — no artifacts)']) | join(chr(10)) }}"
+          - ""
+          - "Analyze network capture:"
+          - "  tcpdump -r {{ artifact_dir }}/capture.pcap -n"
+          - "  wireshark {{ artifact_dir }}/capture.pcap"
+          - ""
+          - "Review logs:"
+          - "  cat {{ artifact_dir }}/server.log"
+          - "  cat {{ artifact_dir }}/agent.log"
+          - "======================================================="
+      tags: [always]

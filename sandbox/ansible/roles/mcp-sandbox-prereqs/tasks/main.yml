@@ -1,0 +1,245 @@
+---
+# mcp-sandbox-prereqs: Install Podman and configure host for rootless sandbox operation
+# All tasks are idempotent — safe to re-run.
+# Requires: Ansible 2.14+
+# become: true tasks are scoped only to OS-level operations (package install, user creation,
+#         subuid/subgid, auditd). Container config tasks run as the invoking user.
+
+- name: Gather OS facts
+  ansible.builtin.setup:
+    gather_subset:
+      - distribution
+      - os_family
+  tags: [install, always]
+
+# ─── Package installation ────────────────────────────────────────────────────
+
+- name: Install Podman and dependencies (Debian/Ubuntu)
+  become: true
+  ansible.builtin.apt:
+    name: "{{ podman_packages_debian }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+  tags: [install]
+
+- name: Install Podman and dependencies (RedHat/Fedora)
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ podman_packages_redhat }}"
+    state: present
+  when: ansible_os_family == "RedHat"
+  tags: [install]
+
+- name: Install Podman (macOS via Homebrew)
+  community.general.homebrew:
+    name: "{{ podman_packages_macos }}"
+    state: present
+  when: ansible_os_family == "Darwin"
+  tags: [install]
+
+- name: Install podman-compose via pip
+  ansible.builtin.pip:
+    name: "{{ podman_compose_pip_package }}"
+    state: present
+    extra_args: "--user"
+  tags: [install]
+
+- name: Verify podman is executable
+  ansible.builtin.command: podman --version
+  register: podman_version_check
+  changed_when: false
+  failed_when: podman_version_check.rc != 0
+  tags: [install, verify]
+
+- name: Show Podman version
+  ansible.builtin.debug:
+    msg: "Podman version: {{ podman_version_check.stdout }}"
+  tags: [install, verify]
+
+# ─── Sandbox OS user ─────────────────────────────────────────────────────────
+
+- name: Create mcp-sandbox OS user (no login shell)
+  become: true
+  ansible.builtin.user:
+    name: "{{ sandbox_user }}"
+    shell: "{{ sandbox_user_shell }}"
+    comment: "{{ sandbox_user_comment }}"
+    system: true
+    create_home: true
+    state: present
+  tags: [install]
+  # Idempotent: user module does nothing if user already exists with these attrs
+
+- name: Verify sandbox user exists
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ sandbox_user }}"
+  register: sandbox_user_entry
+  tags: [verify]
+
+# ─── subuid / subgid ─────────────────────────────────────────────────────────
+# Required for rootless container user namespace mapping.
+# We manage entries for BOTH the invoking user (so they can run the sandbox)
+# and the sandbox_user.
+
+- name: Ensure /etc/subuid has entry for sandbox_user
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/subuid
+    line: "{{ sandbox_user }}:{{ subuid_start }}:{{ subuid_count }}"
+    state: present
+    create: true
+    mode: "0644"
+  tags: [install]
+  when: ansible_os_family != "Darwin"
+
+- name: Ensure /etc/subgid has entry for sandbox_user
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/subgid
+    line: "{{ sandbox_user }}:{{ subgid_start }}:{{ subgid_count }}"
+    state: present
+    create: true
+    mode: "0644"
+  tags: [install]
+  when: ansible_os_family != "Darwin"
+
+- name: Ensure /etc/subuid has entry for invoking user
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/subuid
+    regexp: "^{{ ansible_user }}:"
+    line: "{{ ansible_user }}:{{ subuid_start | int + subuid_count | int }}:{{ subuid_count }}"
+    state: present
+    create: true
+    mode: "0644"
+  tags: [install]
+  when:
+    - ansible_os_family != "Darwin"
+    - ansible_user != sandbox_user
+
+- name: Ensure /etc/subgid has entry for invoking user
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/subgid
+    regexp: "^{{ ansible_user }}:"
+    line: "{{ ansible_user }}:{{ subgid_start | int + subgid_count | int }}:{{ subgid_count }}"
+    state: present
+    create: true
+    mode: "0644"
+  tags: [install]
+  when:
+    - ansible_os_family != "Darwin"
+    - ansible_user != sandbox_user
+
+- name: Verify subuid entry exists for sandbox user (Linux only)
+  ansible.builtin.command: "grep '^{{ sandbox_user }}:' /etc/subuid"
+  register: subuid_check
+  changed_when: false
+  failed_when: subuid_check.rc != 0
+  when: ansible_os_family != "Darwin"
+  tags: [verify]
+
+# ─── containers.conf ─────────────────────────────────────────────────────────
+
+- name: Ensure ~/.config/containers directory exists
+  ansible.builtin.file:
+    path: "{{ lookup('env', 'HOME') }}/.config/containers"
+    state: directory
+    mode: "0700"
+  tags: [install, seccomp]
+
+- name: Deploy containers.conf with hardened defaults
+  ansible.builtin.copy:
+    dest: "{{ lookup('env', 'HOME') }}/.config/containers/containers.conf"
+    content: |
+      # containers.conf — MCP Sandbox hardened defaults
+      # Managed by Ansible — local changes will be overwritten on next deploy.
+
+      [containers]
+      # Drop all capabilities by default; individual runs grant only what is needed
+      default_capabilities = []
+
+      # Apply restrictive seccomp profile to all containers
+      seccomp_profile = "{{ lookup('env', 'HOME') }}/.config/containers/seccomp/mcp-sandbox.json"
+
+      # Rootless networking via slirp4netns
+      network_backend = "netavark"
+
+      # No new privileges for any container
+      no_new_privileges = true
+
+      [engine]
+      # Use crun as the low-level OCI runtime (lighter than runc, supports rootless)
+      runtime = "crun"
+
+      events_logger = "file"
+    mode: "0600"
+    backup: true
+  tags: [install, seccomp]
+  # Idempotent: copy module checks content hash before writing
+
+# ─── auditd rules ─────────────────────────────────────────────────────────────
+
+- name: Check if auditd is installed
+  ansible.builtin.command: which auditctl
+  register: auditd_installed
+  changed_when: false
+  failed_when: false
+  tags: [install]
+
+- name: Deploy auditd rules for container event logging
+  become: true
+  ansible.builtin.copy:
+    dest: "{{ auditd_rules_file }}"
+    content: |
+      # MCP Sandbox auditd rules
+      # Log container-related syscalls and privilege operations
+
+      # Log all execve calls by the sandbox user (tracks what processes are spawned)
+      -a always,exit -F arch=b64 -S execve -F uid={{ sandbox_user_entry.ansible_facts.getent_passwd[sandbox_user][1] }} -k mcp_sandbox_exec
+
+      # Log mount/umount attempts (should never succeed in the sandbox)
+      -a always,exit -F arch=b64 -S mount -k mcp_sandbox_mount
+      -a always,exit -F arch=b64 -S umount2 -k mcp_sandbox_umount
+
+      # Log ptrace attempts
+      -a always,exit -F arch=b64 -S ptrace -k mcp_sandbox_ptrace
+
+      # Log namespace operations
+      -a always,exit -F arch=b64 -S unshare -k mcp_sandbox_unshare
+      -a always,exit -F arch=b64 -S setns -k mcp_sandbox_setns
+
+      # Log capability changes
+      -a always,exit -F arch=b64 -S capset -k mcp_sandbox_capset
+
+      # Log file creation in sensitive directories from any container cgroup
+      -w /etc/passwd -p wa -k mcp_sandbox_sensitive_file
+      -w /etc/shadow -p wa -k mcp_sandbox_sensitive_file
+      -w /etc/hosts -p wa -k mcp_sandbox_sensitive_file
+    mode: "0640"
+    backup: true
+  when:
+    - auditd_installed.rc == 0
+    - ansible_os_family != "Darwin"
+    - sandbox_user_entry is succeeded
+  notify: reload auditd
+  tags: [install]
+
+- name: Skip auditd config (auditd not installed or macOS)
+  ansible.builtin.debug:
+    msg: "Skipping auditd configuration — auditd not installed or running on macOS"
+  when: auditd_installed.rc != 0 or ansible_os_family == "Darwin"
+  tags: [install]
+
+# ─── Podman system migration (Linux) ─────────────────────────────────────────
+
+- name: Run podman system migrate (ensures rootless storage is initialized)
+  ansible.builtin.command: podman system migrate
+  register: podman_migrate
+  changed_when: "'migrated' in podman_migrate.stdout"
+  failed_when: podman_migrate.rc != 0
+  when: ansible_os_family != "Darwin"
+  tags: [install]

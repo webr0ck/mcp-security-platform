@@ -1,0 +1,26 @@
+---
+galaxy_info:
+  role_name: mcp-sandbox-prereqs
+  author: mcp-security-platform
+  description: Install and configure Podman + supporting tooling for the MCP sandbox
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - "22.04"
+        - "24.04"
+    - name: Fedora
+      versions:
+        - all
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+    - name: MacOSX
+      versions:
+        - all
+  categories:
+    - system
+    - containers
+
+dependencies: []
