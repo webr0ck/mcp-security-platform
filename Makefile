@@ -530,7 +530,7 @@ step-ca-init:
 	@echo "Then restart the gateway: docker compose restart gateway"
 
 sign-policy-bundle:
-	@scripts/sign_policy_bundle.sh
+	@set -a; [ -f .env ] && . ./.env; set +a; scripts/sign_policy_bundle.sh
 
 test-signed-bundle:
 	@scripts/test_signed_bundle.sh
