@@ -54,8 +54,12 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 if [[ -f "${PROJECT_ROOT}/.env.lab" ]]; then
     echo "[vault-init] Loading environment from ${PROJECT_ROOT}/.env.lab"
-    # shellcheck disable=SC2046
-    export $(grep -v '^#' "${PROJECT_ROOT}/.env.lab" | grep -v '^$' | xargs)
+    # Source so values containing spaces (e.g. multi-scope OIDC vars) and quotes
+    # are preserved. `export $(... | xargs)` word-splits such values and fails.
+    set -a
+    # shellcheck disable=SC1091
+    . "${PROJECT_ROOT}/.env.lab"
+    set +a
 fi
 
 # Re-export after potential .env.lab override
