@@ -24,7 +24,7 @@ podman machine start
 cp .env.lab.example .env.lab
 # Edit .env.lab — at minimum, set OIDC_ISSUER_URL to your machine's address:
 #   OIDC_ISSUER_URL=http://localhost:8082/realms/mcp   (if running on localhost)
-#   OIDC_ISSUER_URL=http://203.0.113.10:8082/realms/mcp  (if on LAN)
+#   OIDC_ISSUER_URL=http://<YOUR_LAN_IP>:8082/realms/mcp  (if on LAN)
 
 # 3. Start everything
 make -f Makefile.lab lab-up
@@ -331,7 +331,7 @@ echo "API Key: $API_KEY"
 
 That's it. When Claude Code first hits the MCP endpoint, it:
 1. Gets a `401` with `WWW-Authenticate: Bearer ... resource_metadata="http://localhost:8000/.well-known/oauth-protected-resource"`
-2. Fetches `/.well-known/oauth-protected-resource` → discovers `authorization_servers: ["http://203.0.113.10:8082/realms/mcp"]`
+2. Fetches `/.well-known/oauth-protected-resource` → discovers `authorization_servers: ["http://<YOUR_LAN_IP>:8082/realms/mcp"]`
 3. Fetches `/.well-known/oauth-authorization-server` (proxied from Keycloak) → gets all OAuth2 endpoints
 4. POSTs to `/oauth/register` → receives the static `claude-code` public-client ID (no secret)
 5. Opens the browser to `http://localhost:8082/realms/mcp/protocol/openid-connect/auth`

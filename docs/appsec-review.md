@@ -1,4 +1,11 @@
 # AppSec Review — MCP Security Platform
+
+> **⚠️ Historical document (2026-04-21).** This is a point-in-time audit kept as evidence of the
+> project's security-review process. It describes the codebase **as of the review date**. The
+> findings below (including F-001 and F-002) have since been remediated or are tracked as known
+> limitations — see [`../SECURITY.md`](../SECURITY.md) and the **Enforced today vs Roadmap** table
+> in the [README](../README.md) for current status. Do not treat the findings here as live.
+
 **Reviewer:** AppSec Engineering (Senior Application Security Engineer)
 **Date:** 2026-04-21
 **Platform Version:** 1.0.0

@@ -11,7 +11,7 @@ brew install mkcert
 mkcert -install                                        # trust the CA system-wide
 cd lab/nginx/lab-certs
 mkcert -cert-file server.crt -key-file server.key \
-  localhost 127.0.0.1 203.0.113.10
+  localhost 127.0.0.1 <YOUR_LAN_IP>
 ```
 
 After generating, restart the gateway:
