@@ -41,7 +41,7 @@ import httpx
 
 KC_STACK_RUNNING = os.environ.get("KC_STACK_RUNNING", "").lower() in ("1", "true", "yes")
 PROXY_BASE_URL = os.environ.get("PROXY_BASE_URL", "http://localhost:8000").rstrip("/")
-KC_URL = os.environ.get("KC_URL", "http://203.0.113.10:8082")
+KC_URL = os.environ.get("KC_URL", "http://localhost:8082")
 KC_REALM = os.environ.get("KC_REALM", "mcp")
 KC_TEST_USER = os.environ.get("KC_TEST_USER", "alice")
 KC_TEST_PASSWORD = os.environ.get("KC_TEST_PASSWORD", "")  # set via KC_TEST_PASSWORD env var
@@ -299,7 +299,7 @@ class TestAuthenticatedMcpAccess:
 #
 #   KC_STACK_RUNNING=1 \
 #   PROXY_BASE_URL=http://localhost:8000 \
-#   KC_URL=http://203.0.113.10:8082 \
+#   KC_URL=http://localhost:8082 \
 #   KC_TEST_USER=alice \
 #   KC_TEST_PASSWORD=<DEX_ALICE_PASSWORD from .env> \
 #   python -m pytest proxy/tests/integration/test_oauth_pkce_flow.py -v

@@ -55,7 +55,7 @@ NATIVE_AUTH = os.environ.get("NATIVE_AUTH", "").strip().lower() in (
 )
 # Public base URL of THIS resource as seen by the client (through the gateway).
 # Used as the `resource` identifier and to build the metadata URL in challenges.
-RESOURCE_URL = os.environ.get("M365_RESOURCE_URL", "http://203.0.113.10:8000/mcp")
+RESOURCE_URL = os.environ.get("M365_RESOURCE_URL", "http://localhost:8000/mcp")
 _PRM_PATH = "/.well-known/oauth-protected-resource"
 
 # ---------------------------------------------------------------------------

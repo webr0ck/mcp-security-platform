@@ -253,13 +253,13 @@ test-integration:
 		python -m pytest tests/integration/ -v --tb=short -m integration
 
 # Full automated OAuth flow tests — no browser, uses ROPC via lab-test client.
-# Requires: KC_STACK_RUNNING=1 and Keycloak reachable at KC_URL (defaults to 203.0.113.10:8082).
+# Requires: KC_STACK_RUNNING=1 and Keycloak reachable at KC_URL (defaults to localhost:8082).
 # KC_TEST_PASSWORD must be set (see DEX_ALICE_PASSWORD in .env).
 test-oauth:
 	@. ./.env && \
 	KC_STACK_RUNNING=1 \
 	PROXY_BASE_URL=http://localhost:8000 \
-	KC_URL=http://203.0.113.10:8082 \
+	KC_URL=http://localhost:8082 \
 	KC_TEST_USER=alice \
 	KC_TEST_PASSWORD="$${DEX_ALICE_PASSWORD}" \
 	python -m pytest proxy/tests/integration/test_oauth_pkce_flow.py -v --tb=short
@@ -273,7 +273,7 @@ test-oauth:
 test-lab-functional:
 	@. ./.env.lab && \
 	PROXY_URL=http://localhost:8000 \
-	KC_URL=http://203.0.113.10:8082 \
+	KC_URL=http://localhost:8082 \
 	KC_TEST_CLIENT=lab-test \
 	KC_TEST_SECRET="$${KC_LAB_TEST_SECRET:-lab-test-secret}" \
 	KC_SVC_CLIENT=svc-mcp-agent \

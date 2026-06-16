@@ -384,7 +384,7 @@ services:
       M365_USER: "${M365_USER:-}"
       REQUIRE_DELEGATED: "${REQUIRE_DELEGATED:-}"
       NATIVE_AUTH: "${NATIVE_AUTH:-}"
-      M365_RESOURCE_URL: "${M365_RESOURCE_URL:-http://203.0.113.10:8000/mcp}"
+      M365_RESOURCE_URL: "${M365_RESOURCE_URL:-http://localhost:8000/mcp}"
       # Route Entra/Graph egress through the allowlisting forward proxy (Task 2.4).
       HTTPS_PROXY: "http://lab-egress-proxy:3128"
       NO_PROXY: "lab-mcp-m365,localhost,127.0.0.1"

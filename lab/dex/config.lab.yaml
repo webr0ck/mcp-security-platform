@@ -1,9 +1,9 @@
-# lab/dex/config.lab.yaml — rendered for LAB_HOST=203.0.113.10
+# lab/dex/config.lab.yaml — rendered for LAB_HOST=localhost
 # This is the actual config mounted into the Dex container.
 # config.yaml is the template (with ${LAB_HOST} placeholders).
 # Regenerate after changing LAB_HOST or adding clients.
 
-issuer: http://203.0.113.10:5556/dex
+issuer: http://localhost:5556/dex
 
 storage:
   type: memory
@@ -34,9 +34,9 @@ staticClients:
   - id: mcp-proxy
     secret: mcp-proxy-secret
     redirectURIs:
-      - http://203.0.113.10:8000/auth/callback/dex
       - http://localhost:8000/auth/callback/dex
-      - https://203.0.113.10:8443/auth/callback/dex
+      - http://localhost:8000/auth/callback/dex
+      - https://localhost:8443/auth/callback/dex
     name: MCP Security Proxy
     public: false
 

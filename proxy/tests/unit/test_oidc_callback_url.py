@@ -115,7 +115,7 @@ def test_derive_callback_allow_list_accepts_listed_host():
     with patch("app.routers.oidc_browser.settings") as s:
         s.PROXY_BASE_URL = ""
         s.OIDC_TRUST_FORWARDED_HOST = True
-        s.PROXY_ALLOWED_HOSTS = "localhost:8000,203.0.113.10:8000,203.0.113.10:8000"
+        s.PROXY_ALLOWED_HOSTS = "localhost:8000,203.0.113.10:8000,198.51.100.10:8000"
         url = _derive_callback_url(req)
     assert url == "http://203.0.113.10:8000/api/v1/auth/oidc/callback"
 

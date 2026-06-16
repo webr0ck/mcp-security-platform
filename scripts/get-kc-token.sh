@@ -14,7 +14,7 @@
 set -euo pipefail
 
 USER="${1:-alice}"
-KC_URL="${KC_URL:-http://203.0.113.10:8082}"
+KC_URL="${KC_URL:-http://localhost:8082}"
 KC_REALM="${KC_REALM:-mcp}"
 KC_LAB_TEST_SECRET="${KC_LAB_TEST_SECRET:--lab-test-secret}"
 
