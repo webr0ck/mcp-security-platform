@@ -187,6 +187,8 @@ if __name__ == "__main__":
     transport = os.environ.get("TRANSPORT", "http")
 
     if transport == "http":
+        from mcp.server.transport_security import TransportSecuritySettings
+        mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
         app = mcp.streamable_http_app()
         app.add_middleware(_AuthHeaderMiddleware)
         uvicorn.run(app, host=host, port=port, log_level="info")

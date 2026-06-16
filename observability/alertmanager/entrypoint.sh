@@ -52,9 +52,9 @@ envsubst '${ALERT_WEBHOOK_URL} ${ALERT_WEBHOOK_URL_CRITICAL}' \
 # corresponding export above) before Alertmanager tries to load an invalid
 # config.
 # ---------------------------------------------------------------------------
-if grep -qE '\$\{[A-Z_]+\}' "${OUTFILE}"; then
+if grep -E '\$\{[A-Z_]+\}' "${OUTFILE}" | grep -qvE '^\s*#'; then
   echo "ERROR: rendered config still contains unresolved placeholders:" >&2
-  grep -nE '\$\{[A-Z_]+\}' "${OUTFILE}" >&2
+  grep -nE '\$\{[A-Z_]+\}' "${OUTFILE}" | grep -vE '^\s*[0-9]+\s*#' >&2
   exit 1
 fi
 

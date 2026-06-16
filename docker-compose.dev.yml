@@ -11,12 +11,19 @@
 #   4. Grafana: anonymous access enabled (no password prompt for dev dashboards)
 #   5. OPA: bundle signing disabled (ENVIRONMENT=development, per INV-012)
 #   6. Compliance checker: runs every minute instead of daily (faster feedback)
+#   7. Vault: dev mode (in-memory, auto-unsealed) — bypasses setcap (CAP_SETFCAP
+#      unavailable in rootless Podman user namespaces)
 #
 # NEVER use this file in staging or production.
 
 services:
 
   proxy:
+    # Vault dev mode: use http + fixed root token (matches vault service override below)
+    environment:
+      - VAULT_ADDR=http://mcp-vault:8200
+      - VAULT_TOKEN=root
+      - VAULT_CA_BUNDLE=
     # Override OPA dependency condition for dev/lab: OPA static binary has no
     # shell/curl for in-container health checks. Use service_started so compose
     # doesn't block on a health check that can never pass in this image.
@@ -37,6 +44,15 @@ services:
       - ./proxy:/app:cached
       # Also mount policies for development (already in base compose)
       - ./policies/rego:/app/policies:ro
+      # Repo-root-anchored mounts so filesystem unit tests resolve absolute
+      # paths. These tests compute `Path(__file__).parents[3]` expecting the
+      # host layout `<repo>/proxy/tests/unit/...`; the `./proxy:/app` bind
+      # collapses the `proxy/` level, so in-container parents[3] == `/`. Mount
+      # `policies/` and `infra/` at `/` so `/policies/...` and `/infra/...`
+      # resolve (test-only convenience; read-only).
+      - ./policies:/policies:ro
+      - ./infra:/infra:ro
+      - ./scripts:/scripts:ro
     environment:
       - ENVIRONMENT=development
       - LOG_LEVEL=DEBUG
@@ -89,18 +105,27 @@ services:
       - "--log-format=json"
       # Debug-level OPA logging shows every policy evaluation — useful for Rego dev
       - "--log-level=debug"
+      # INV-002: load OPA config for decision log masking (primary redaction layer).
+      - "--config-file=/opa-config/opa-config.yaml"
       - "--set=decision_logs.console=true"
       - "--bundle"
-      - "/policies"
+      # Mount to /rego-policies (not /policies) to avoid OCI sub-bind-mount conflict:
+      # prod compose mounts bundle.tar.gz INSIDE /policies, which fails when /policies
+      # is itself a bind-mount directory.  podman-compose merges volume lists, so we
+      # cannot remove the prod mount; instead we use a non-overlapping path here.
+      - "/rego-policies"
       # --watch: OPA automatically reloads when policy files change on disk
-      # This means policy edits take effect immediately in dev without restart.
       - "--watch"
       # Bundle signing DISABLED in development (per INV-012: development is exempt)
       # DO NOT add --verification-key or --signing-alg here
     volumes:
       # Unsigned read-only directory mount for hot-reload development.
-      # Overrides the signed bundle.tar.gz mount in docker-compose.yml.
-      - ./policies/rego:/policies:ro
+      # Uses /rego-policies to avoid collision with the prod bundle.tar.gz mount
+      # at /policies/bundle.tar.gz (podman-compose merges both volume lists).
+      - ./policies/rego:/rego-policies:ro
+      # INV-002: OPA config for decision log masking (primary redaction layer).
+      # Separate mount so the config file is available even with the bundle override.
+      - ./policies/rego/opa-config.yaml:/opa-config/opa-config.yaml:ro
 
   ollama:
     # Expose Ollama for direct model testing from host
@@ -136,6 +161,37 @@ services:
       - "9000:9000"
       # MinIO web console — useful for browsing WORM bucket contents in dev
       - "9001:9001"
+
+  vault:
+    # Rootless Podman cannot grant CAP_SETFCAP, which the Vault 1.17 Docker
+    # entrypoint requires to run `setcap cap_ipc_lock=+ep /bin/vault`.
+    # Dev mode: in-memory, auto-unsealed, no TLS, fixed root token.
+    # entrypoint + command together replace the prod command completely.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
+    # Drop all caps so rootless Podman doesn't attempt CAP_SETFCAP
+    cap_drop:
+      - ALL
+    volumes: []
+    tmpfs:
+      - /root:size=4m,mode=0700
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=root
+      - VAULT_ADDR=http://0.0.0.0:8200
+      - VAULT_DISABLE_MLOCK=1
+      - SKIP_CHOWN=1
+      - SKIP_SETCAP=1
+    healthcheck:
+      # String form matches prod type so podman-compose can merge (list+str errors).
+      # vault is in PATH; runs as /bin/sh -c "vault status ..."
+      test: "vault status -address=http://localhost:8200"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "8200:8200"
 
   compliance-checker:
     environment:

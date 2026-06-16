@@ -338,6 +338,7 @@ services:
     build: ./lab/mcp-servers/gitea
     image: lab-mcp-gitea:lab
     container_name: lab-mcp-gitea
+    pids_limit: 256  # override hardening default (64): FastMCP streamable_http worker threads
     ports:
       - "127.0.0.1:8102:8000"
     environment:
@@ -440,6 +441,7 @@ services:
     build: ./lab/mcp-servers/rag-assistant
     image: lab-rag-assistant:lab
     container_name: lab-rag-assistant
+    pids_limit: 256  # override hardening default (64): FastMCP streamable_http worker threads
     ports:
       - "127.0.0.1:8104:8000"
     environment:
@@ -500,6 +502,7 @@ services:
       context: ./lab/mcp-servers/notes
     image: lab-mcp-notes:lab
     container_name: lab-mcp-notes
+    pids_limit: 256  # override hardening default (64): FastMCP streamable_http worker threads
     ports:
       - "127.0.0.1:8106:8000"
     environment:
@@ -550,6 +553,7 @@ services:
       context: ./lab/mcp-servers/self-service
     image: lab-mcp-self-service:lab
     container_name: lab-mcp-self-service
+    pids_limit: 256  # override hardening default (64): FastMCP streamable_http worker threads
     ports:
       - "127.0.0.1:8108:8000"
     environment:
@@ -836,8 +840,14 @@ services:
       - "--log-format=json"
       - "--log-level=debug"
       - "--bundle"
-      - "/policies"
+      - "/rego-policies"
       - "--watch"
+    volumes:
+      # FIX: load unsigned rego dir from a non-overlapping path. /policies holds
+      # only bundle.tar.gz (prod mount), so --bundle /policies loaded nothing and
+      # defaulted roots to [""] (owns all paths) -> deny-all + grants PUT 400.
+      # rego/.manifest scopes roots to ["mcp"], leaving data.mcp_grants writable.
+      - ./policies/rego:/rego-policies:ro
 
   # ── Loki: expose for direct LogQL queries from host ───────────────────────
   loki:

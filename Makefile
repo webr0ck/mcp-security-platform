@@ -1,10 +1,10 @@
 .PHONY: help up down dev-up dev-down build logs shell proxy-shell db-shell \
-        test test-unit test-integration test-security test-perf test-all test-red-team lint \
+        test test-unit test-integration test-oauth test-lab-functional test-security test-perf test-all test-red-team lint \
         db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle test-signed-bundle \
         assign-role compliance-run sbom-verify onboard-server \
         security-check health smoke-test \
         dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
-        lab-init lab-init-force lab-up lab-down lab-down-volumes \
+        lab-init lab-init-force labup lab-up lab-down lab-down-volumes \
         clean
 
 # =============================================================================
@@ -42,8 +42,9 @@ help:
 	@echo "  make pull-model        Pull Ollama LLM model (llama3.2 by default)"
 	@echo ""
 	@echo "Service lifecycle:"
-	@echo "  make up                Start all services (production-like compose)"
+	@echo "  make up                Start all services, poll until healthy, show status"
 	@echo "  make down              Stop all services"
+	@echo "  make labup             Start lab stack, poll until healthy, show status"
 	@echo "  make dev-up            Start with dev overrides (hot-reload, debug ports)"
 	@echo "  make dev-down          Stop dev services"
 	@echo "  make build             Build all custom Docker images (no cache)"
@@ -105,9 +106,41 @@ help:
 
 up: dep-audit sign-policy-bundle
 	@echo "Starting MCP Security Platform..."
+	@install -d -m 0700 "$$HOME/.mcp" && umask 077 && printf '%s' "$${STEP_CA_PROVISIONER_PASSWORD:-dev-placeholder}" > "$$HOME/.mcp/step-ca-password"
 	$(COMPOSE) up -d
-	@echo "Services started. Use 'make logs' to follow output."
-	@echo "Use 'make health' to verify all services are healthy."
+	@echo ""
+	@echo "Waiting for core services to become healthy (max 2m30s)..."
+	@n=0; max=30; \
+	while [ $$n -lt $$max ]; do \
+		n=$$((n+1)); \
+		proxy=$$(curl -sf http://localhost:8000/health/ready  2>/dev/null && echo "ok" || echo "-"); \
+		gateway=$$(curl -so /dev/null -w "%{http_code}" http://localhost/ 2>/dev/null | grep -qE "^[23]" && echo "ok" || echo "-"); \
+		opa=$$(curl -sf http://localhost:8181/health          2>/dev/null && echo "ok" || echo "-"); \
+		grafana=$$(curl -sf http://localhost:3000/api/health  2>/dev/null && echo "ok" || echo "-"); \
+		printf "\r  proxy=%-4s  gateway=%-4s  opa=%-4s  grafana=%-4s  (%d/%d, %ds)" \
+			"$$proxy" "$$gateway" "$$opa" "$$grafana" $$n $$max $$((n*5)); \
+		if [ "$$proxy" = "ok" ] && [ "$$opa" = "ok" ]; then \
+			printf "\n\nCore services healthy.\n"; break; \
+		fi; \
+		if [ $$n -ge $$max ]; then \
+			printf "\n\nWARN: timeout — not all core services healthy after $$(( max * 5 ))s.\n"; \
+			printf "Run: make health   for details\n"; break; \
+		fi; \
+		sleep 5; \
+	done
+	@echo ""
+	@echo "--- Service status ---"
+	@podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | grep -E "(NAMES|mcp-|proxy|gateway|opa|grafana|loki|minio|vault|redis|ollama|step)" || $(COMPOSE) ps 2>/dev/null
+	@echo ""
+	@echo "Endpoints:"
+	@echo "  Proxy API: http://localhost:8000"
+	@echo "  Gateway:   http://localhost (port 80)"
+	@echo "  Grafana:   http://localhost:3000"
+	@echo "  MinIO:     http://localhost:9001"
+	@echo ""
+	@echo "  make logs SVC=proxy   — tail a service"
+	@echo "  make health           — detailed health check"
+	@echo "  make proxy-shell      — open proxy shell"
 
 down:
 	$(COMPOSE) down
@@ -115,6 +148,8 @@ down:
 dev-up: dep-audit
 	@echo "Starting MCP Security Platform (development mode)..."
 	@echo "Dev features: hot-reload, debug ports, OPA watch mode, Grafana anon access"
+	@# podman-compose does not support environment-sourced secrets; write to private file (mode 0600).
+	@install -d -m 0700 "$$HOME/.mcp" && umask 077 && printf '%s' "$${STEP_CA_PROVISIONER_PASSWORD:-dev-placeholder}" > "$$HOME/.mcp/step-ca-password"
 	$(COMPOSE_DEV) up -d
 	@echo ""
 	@echo "Dev endpoints:"
@@ -135,6 +170,8 @@ lab-init:
 lab-init-force:
 	@scripts/lab-init.sh --force
 
+labup: lab-up
+
 lab-up:
 	@[ -f .env.lab ] || scripts/lab-init.sh
 	@echo "Starting MCP Security Platform (lab mode)..."
@@ -144,10 +181,10 @@ lab-up:
 	@n=0; max=90; \
 	while [ $$n -lt $$max ]; do \
 		n=$$((n+1)); \
-		kc=$$(curl -sf http://localhost:8082/health/ready      2>/dev/null && echo "ok" || echo "-"); \
-		proxy=$$(curl -sf http://localhost:8000/health/ready   2>/dev/null && echo "ok" || echo "-"); \
+		kc=$$(curl -sf http://localhost:8082/health/ready                     2>/dev/null && echo "ok" || echo "-"); \
+		proxy=$$(curl -sf http://localhost:8000/health/ready                  2>/dev/null && echo "ok" || echo "-"); \
 		vault=$$(curl -sf "http://localhost:8201/v1/sys/health?standbyok=true" 2>/dev/null && echo "ok" || echo "-"); \
-		grafana=$$(curl -sf http://localhost:3001/api/health   2>/dev/null && echo "ok" || echo "-"); \
+		grafana=$$(curl -sf http://localhost:3001/api/health                  2>/dev/null && echo "ok" || echo "-"); \
 		printf "\r  keycloak=%-4s  proxy=%-4s  vault=%-4s  grafana=%-4s  (%d/%d, %ds)" \
 			"$$kc" "$$proxy" "$$vault" "$$grafana" $$n $$max $$((n*5)); \
 		if [ "$$kc" = "ok" ] && [ "$$proxy" = "ok" ] && [ "$$vault" = "ok" ] && [ "$$grafana" = "ok" ]; then \
@@ -160,11 +197,18 @@ lab-up:
 		sleep 5; \
 	done
 	@echo ""
+	@echo "--- Service status ---"
+	@podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | grep -E "(NAMES|mcp-|proxy|gateway|opa|grafana|loki|minio|vault|redis|ollama|step|keycloak|dex|gitea|netbox|seeder|egress|rag|echo|notes)" || $(COMPOSE_LAB) ps 2>/dev/null
+	@echo ""
+	@echo "Endpoints:"
 	@echo "  Proxy:    http://localhost:8000"
 	@echo "  Gateway:  http://localhost:8088 / https://localhost:8443"
 	@echo "  Keycloak: http://localhost:8082"
 	@echo "  Vault:    http://localhost:8201"
 	@echo "  Grafana:  http://localhost:3001"
+	@echo ""
+	@echo "  make logs SVC=proxy   — tail a service"
+	@echo "  make proxy-shell      — open proxy shell"
 
 lab-down:
 	$(COMPOSE_LAB) down --remove-orphans
@@ -207,6 +251,37 @@ test-unit:
 test-integration:
 	$(COMPOSE) exec $(PROXY_CONTAINER) \
 		python -m pytest tests/integration/ -v --tb=short -m integration
+
+# Full automated OAuth flow tests — no browser, uses ROPC via lab-test client.
+# Requires: KC_STACK_RUNNING=1 and Keycloak reachable at KC_URL (defaults to 203.0.113.10:8082).
+# KC_TEST_PASSWORD must be set (see DEX_ALICE_PASSWORD in .env).
+test-oauth:
+	@. ./.env && \
+	KC_STACK_RUNNING=1 \
+	PROXY_BASE_URL=http://localhost:8000 \
+	KC_URL=http://203.0.113.10:8082 \
+	KC_TEST_USER=alice \
+	KC_TEST_PASSWORD="$${DEX_ALICE_PASSWORD}" \
+	python -m pytest proxy/tests/integration/test_oauth_pkce_flow.py -v --tb=short
+
+# Lab end-to-end functional + invoke-path gate-chain regression.
+# Runs OUTSIDE the proxy container (uses `podman exec` for the network-reachability
+# probe and hits the proxy/Keycloak over published ports). Requires the lab stack
+# up (`make lab-up`). Catches the failure class where a broken invoke path
+# (network split, SSRF DNS-rebind, missing entitlement) still returns HTTP 200 —
+# see lab/tests/functional_test.py::TestInvokePathGateChain. Run every time.
+test-lab-functional:
+	@. ./.env.lab && \
+	PROXY_URL=http://localhost:8000 \
+	KC_URL=http://203.0.113.10:8082 \
+	KC_TEST_CLIENT=lab-test \
+	KC_TEST_SECRET="$${KC_LAB_TEST_SECRET:-lab-test-secret}" \
+	KC_SVC_CLIENT=svc-mcp-agent \
+	KC_SVC_SECRET="$${KC_SVC_MCP_AGENT_SECRET:-svc-mcp-agent-secret}" \
+	ALICE_PASSWORD="$${DEX_ALICE_PASSWORD}" \
+	BOB_PASSWORD="$${DEX_BOB_PASSWORD}" \
+	CAROL_PASSWORD="$${DEX_CAROL_PASSWORD:-labpassword}" \
+	python3 -m pytest lab/tests/functional_test.py -v --tb=short
 
 # Run only security tests ([TAMPER] + AI attack surface + sandbox escape)
 test-security:

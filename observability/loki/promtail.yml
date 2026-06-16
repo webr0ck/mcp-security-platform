@@ -90,6 +90,18 @@ scrape_configs:
           outcome:      # ALLOW, DENY, ERROR — always low cardinality
           level:        # info, warning, error, critical
 
+      # Derive log_type=audit for lines that carry an event_type field.
+      # Alert rules query {job="mcp-proxy", log_type="audit"} to isolate the
+      # structured audit stream from any unstructured proxy stdout noise.
+      # The template emits "audit" when event_type was extracted (non-empty),
+      # and empty string otherwise; empty label values are dropped by Loki.
+      - template:
+          source: event_type
+          template: '{{ if .Value }}audit{{ end }}'
+          output: log_type
+      - labels:
+          log_type:     # "audit" for structured audit events; absent for other lines
+
       # Drop health check poll noise from the log stream
       # (proxy emits a log line for every /health/ready probe from Nginx)
       - drop:
@@ -206,9 +218,12 @@ scrape_configs:
       # with the literal string "[REDACTED:params]" so the line can be ingested
       # without exposing raw tool arguments.
       #
-      # The regex targets "params": followed by any value up to the first
-      # top-level comma or closing brace that ends the params block.
-      # We use a non-greedy match on the JSON value content.
+      # NOTE: This Promtail replace stage is DEFENSE-IN-DEPTH only.
+      # The PRIMARY masking layer is OPA-side via decision_logs.mask_paths in
+      # policies/rego/opa-config.yaml, which redacts /input/params and
+      # /input/arguments before the log line is emitted. This regex is retained
+      # as a secondary catch in case the OPA config is absent or bypassed, but
+      # it is non-recursive and will not handle deeply nested JSON correctly.
       # -----------------------------------------------------------------------
       - replace:
           expression: '"params"\s*:\s*(\{[^}]*\}|"[^"]*"|\[[^\]]*\]|[^,}]+)'

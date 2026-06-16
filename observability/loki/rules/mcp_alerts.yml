@@ -9,7 +9,7 @@
 # Alerts fire to Alertmanager at http://alertmanager:9093.
 #
 # Logsource mapping: audit events are JSON lines emitted to stdout by the
-# proxy container, collected by Promtail with label {job="mcp-audit"}.
+# proxy container, collected by Promtail with label {job="mcp-proxy", log_type="audit"}.
 #
 # Field reference: event_type, outcome, client_id, tool_name, tool_id,
 #                  anomaly_score, deny_reasons (see detections/README.md)
@@ -25,7 +25,7 @@ groups:
       - alert: MCPToolInvocationDenied
         expr: |
           count_over_time(
-            {job="mcp-audit"}
+            {job="mcp-proxy", log_type="audit"}
             | json
             | event_type = "TOOL_INVOCATION"
             | outcome = "deny"
@@ -46,7 +46,7 @@ groups:
         expr: |
           sum by (client_id) (
             count_over_time(
-              {job="mcp-audit"}
+              {job="mcp-proxy", log_type="audit"}
               | json
               | event_type = "TOOL_INVOCATION"
               | outcome = "deny"
@@ -67,7 +67,7 @@ groups:
       - alert: MCPHighAnomalyScore
         expr: |
           count_over_time(
-            {job="mcp-audit"}
+            {job="mcp-proxy", log_type="audit"}
             | json
             | event_type = "TOOL_INVOCATION"
             | outcome = "allow"
@@ -88,7 +88,7 @@ groups:
       - alert: MCPHighAnomalyDenied
         expr: |
           count_over_time(
-            {job="mcp-audit"}
+            {job="mcp-proxy", log_type="audit"}
             | json
             | event_type = "TOOL_INVOCATION"
             | outcome = "deny"
@@ -109,7 +109,7 @@ groups:
       - alert: MCPCredentialChange
         expr: |
           count_over_time(
-            {job="mcp-audit"}
+            {job="mcp-proxy", log_type="audit"}
             | json
             | event_type =~ "CREDENTIAL_UPLOADED|CREDENTIAL_REVOKED|CREDENTIAL_MODE_CHANGED|API_KEY_CREATED|API_KEY_REVOKED"
             [5m]
@@ -128,7 +128,7 @@ groups:
       - alert: MCPQuarantinedToolAccess
         expr: |
           count_over_time(
-            {job="mcp-audit"}
+            {job="mcp-proxy", log_type="audit"}
             | json
             | event_type = "TOOL_INVOCATION"
             | outcome = "deny"
@@ -150,7 +150,7 @@ groups:
         expr: |
           sum by (client_id, tool_name) (
             count_over_time(
-              {job="mcp-audit"}
+              {job="mcp-proxy", log_type="audit"}
               | json
               | event_type = "TOOL_INVOCATION"
               | outcome = "allow"
@@ -171,7 +171,7 @@ groups:
       - alert: MCPToolLifecycleEvent
         expr: |
           count_over_time(
-            {job="mcp-audit"}
+            {job="mcp-proxy", log_type="audit"}
             | json
             | event_type =~ "TOOL_REGISTERED|TOOL_STATUS_CHANGED|TOOL_DELETED"
             [5m]

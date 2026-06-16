@@ -66,7 +66,7 @@ INSERT INTO tool_registry (
     'http://lab-mcp-m365:8000/mcp',
     'active', 'medium', 35,
     '["Accesses M365 tenant data via app-only token","Mail.Read scope can read all mailboxes"]'::jsonb,
-    'lab-seeder', null, null, 'none', null, null
+    'lab-seeder', 'm365', 'A', 'entra_user_token', 'Authorization', 'Bearer '
 )
 ON CONFLICT (name, version) DO UPDATE SET
     upstream_url        = EXCLUDED.upstream_url,

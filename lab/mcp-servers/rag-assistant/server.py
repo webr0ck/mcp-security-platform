@@ -62,6 +62,7 @@ def _safe_dir(env_var: str, default: str) -> Path:
 
 # Only DOCS_DIR is indexed — never KB_DIR (contains internal security findings).
 DOCS_DIR = _safe_dir("DOCS_DIR", "/app/docs")
+KB_DIR = _safe_dir("KB_DIR", "/app/kb")   # defined for rel_path cleanup; not indexed
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "5"))
 SNIPPET_CHARS = int(os.environ.get("SNIPPET_CHARS", "400"))
 
@@ -482,5 +483,7 @@ if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8000"))
 
+    from mcp.server.transport_security import TransportSecuritySettings
+    mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     app = mcp.streamable_http_app()
     uvicorn.run(app, host=host, port=port, log_level="info")

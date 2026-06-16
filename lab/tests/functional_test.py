@@ -18,7 +18,9 @@ Run:
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import time
 import pytest
 import httpx
@@ -124,6 +126,45 @@ def _invoke_tool(token: str, tool_name: str, arguments: dict, timeout: float = 2
         timeout=timeout,
     )
     return {"status_code": call_resp.status_code, "body": call_resp.json() if call_resp.text else {}, "session_id": session_id}
+
+
+# Tool-level failure sentinels. The MCP transport returns HTTP 200 even when the
+# invoke fails deep in the gate chain (DNS resolution, SSRF/DNS-rebind guard,
+# server entitlement, OPA) — the failure is reported as a JSON-RPC `error` or as
+# an error string inside `result.content`. A QA test that only checks
+# `status_code == 200` is therefore BLIND to a totally broken tool path. These
+# substrings are the observed failure markers across the gate chain.
+_INVOKE_FAILURE_SENTINELS = (
+    "Tool invocation failed",          # generic dispatcher failure (wraps the below)
+    "DNS resolution failed",           # proxy not on the upstream's network (network split)
+    "DNS-rebind",                      # SSRF rebind guard: private IP for a public-registered upstream
+    "upstream_revalidation_failed",    # revalidate_upstream_ip_at_invoke deny
+    "not entitled",                    # server entitlement gate (tool linked to server, no grant)
+    "Access denied",                   # entitlement / OPA deny
+    "internal error",                  # swallowed exception in invoke_tool
+    "Unknown tool",                    # platform tool-name ↔ upstream tool-name mismatch
+)
+
+
+def _assert_invoke_ok(result: dict, tool_name: str) -> dict:
+    """Assert a tool invocation SUCCEEDED end-to-end through the whole gate chain.
+
+    Unlike a bare ``status_code == 200`` check, this inspects the JSON-RPC body
+    because the transport returns 200 even when the call failed at the
+    network / SSRF-rebind / entitlement / OPA layer. Returns the parsed result
+    content on success so callers can make further assertions.
+    """
+    assert result["status_code"] == 200, f"{tool_name}: HTTP {result['status_code']} — {result}"
+    body = result.get("body") or {}
+    assert "error" not in body, f"{tool_name}: JSON-RPC error in response — {body['error']}"
+    inner = body.get("result", {})
+    text_blob = json.dumps(inner)
+    for sentinel in _INVOKE_FAILURE_SENTINELS:
+        assert sentinel.lower() not in text_blob.lower(), (
+            f"{tool_name}: gate-chain failure leaked through HTTP 200 — "
+            f"matched sentinel {sentinel!r} in result: {text_blob[:300]}"
+        )
+    return inner
 
 
 def _list_tools(token: str) -> list:
@@ -486,6 +527,94 @@ class TestToolRegistry:
         assert t.get("status") == "active"
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Invoke-path gate-chain regression  (debug 2026-06-14)
+#
+# Root cause history: a user hit "401 after authentication" + tools not working.
+# Investigation found TWO independent classes of failure that the old QA suite
+# could NOT see, because every one of them still returns HTTP 200:
+#
+#   1. proxy detached from the MCP-server podman networks (started via dev-up
+#      instead of the lab compose) → DNS resolution failed at invoke time.
+#   2. lab seed data never wired the secured invoke path: upstreams registered
+#      as PUBLIC but resolving to private podman IPs (SSRF DNS-rebind deny),
+#      tool_registry.server_id NULL, no entitlement / server_role_grant,
+#      server status != approved.
+#
+# The old `test_*_invoke_*` asserted only `status_code == 200`, so all of the
+# above passed QA while the tools were 100% broken. These tests close that gap
+# and MUST run every time (wired into `make test-lab-functional`).
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestInvokePathGateChain:
+    """Catches gate-chain breakage that hides behind an HTTP 200 envelope."""
+
+    def test_proxy_can_resolve_all_registered_upstreams(self):
+        """Network-split guard: the proxy container MUST be able to DNS-resolve
+        every registered upstream host. Catches the dev-up/lab-compose network
+        mismatch BEFORE it shows up as an opaque -32603 at invoke time.
+
+        Upstream hosts are sourced from the DB (the public /api/v1/tools API
+        intentionally does not leak internal hostnames), so the probe stays
+        accurate as servers are added."""
+        import urllib.parse
+        sql = (
+            "SELECT DISTINCT upstream_url FROM tool_registry WHERE upstream_url IS NOT NULL "
+            "UNION SELECT DISTINCT upstream_url FROM server_registry WHERE upstream_url IS NOT NULL;"
+        )
+        q = subprocess.run(
+            ["podman", "exec", "mcp-db", "sh", "-c",
+             f'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c "{sql}"'],
+            capture_output=True, text=True,
+        )
+        if q.returncode != 0:
+            pytest.skip(f"cannot read registry from DB: {q.stderr.strip()}")
+        hosts = set()
+        for line in q.stdout.splitlines():
+            host = urllib.parse.urlparse(line.strip()).hostname
+            # Only internal lab hostnames (no dot) are expected to be resolvable
+            # from inside the proxy network; skip public/demo placeholders.
+            if host and "." not in host and host not in ("localhost",):
+                hosts.add(host)
+
+        # Restrict to hosts that are ACTUALLY running containers. The registry
+        # also holds demo/test placeholder rows (e.g. 'test-server') that have no
+        # backing container — those are not network-split failures. Intersecting
+        # with `podman ps` means we flag only the real case: a running MCP server
+        # that the proxy genuinely cannot reach.
+        running = subprocess.run(
+            ["podman", "ps", "--format", "{{.Names}}"], capture_output=True, text=True,
+        )
+        running_names = set(running.stdout.split())
+        hosts &= running_names
+        if not hosts:
+            pytest.skip("no running internal upstream hosts registered")
+        unresolved = []
+        for host in sorted(hosts):
+            r = subprocess.run(
+                ["podman", "exec", "mcp-proxy", "python3", "-c",
+                 f"import socket;socket.gethostbyname('{host}')"],
+                capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                unresolved.append(host)
+        assert not unresolved, (
+            f"proxy cannot resolve upstream host(s) {unresolved} — the proxy is "
+            f"likely not attached to the lab MCP networks. Recreate it with the "
+            f"lab compose: `make lab-up` (or "
+            f"`podman-compose -f docker-compose.yml -f podman-compose.lab.yml up -d --no-deps proxy`)."
+        )
+
+    def test_alice_invoke_echo_ping_succeeds_end_to_end(self, alice_token):
+        """Strict success: HTTP 200 AND no JSON-RPC / gate-chain error in body."""
+        result = _invoke_tool(alice_token, "echo-ping", {"message": "qa-regression"})
+        _assert_invoke_ok(result, "echo-ping")
+
+    def test_alice_invoke_search_kb_succeeds_end_to_end(self, alice_token):
+        result = _invoke_tool(alice_token, "search-kb", {"query": "mcp", "limit": 3})
+        _assert_invoke_ok(result, "search-kb")
+
+
 if __name__ == "__main__":
-    import subprocess, sys
+    import sys
     subprocess.run([sys.executable, "-m", "pytest", __file__, "-v", "--tb=short"], check=True)

@@ -4,6 +4,9 @@
   "displayName": "MCP Security Platform",
   "loginWithEmailAllowed": true,
   "sslRequired": "none",
+  "attributes": {
+    "frontendUrl": "${LAB_HOST_URL:http://203.0.113.10:8082}"
+  },
   "accessTokenLifespan": 900,
   "refreshTokenMaxReuse": 0,
   "ssoSessionMaxLifespan": 86400,
@@ -97,8 +100,24 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "attributes": {
-        "pkce.code.challenge.method": "S256"
-      }
+        "pkce.code.challenge.method": "S256",
+        "access.token.lifespan": "86400"
+      },
+      "defaultClientScopes": ["openid", "profile", "email", "roles"],
+      "optionalClientScopes": ["offline_access"],
+      "protocolMappers": [
+        {
+          "name": "mcp-proxy-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "mcp-proxy",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     },
     {
       "clientId": "grafana",
@@ -134,7 +153,7 @@
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
-      "secret": "${KC_LAB_TEST_SECRET:-lab-test-secret}",
+      "secret": "${KC_LAB_TEST_SECRET:lab-test-secret}",
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": true,
@@ -144,7 +163,20 @@
         "access.token.lifespan": "3600"
       },
       "defaultClientScopes": ["openid", "profile", "email", "roles"],
-      "optionalClientScopes": ["offline_access"]
+      "optionalClientScopes": ["offline_access"],
+      "protocolMappers": [
+        {
+          "name": "audience-mcp-proxy",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "mcp-proxy",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     },
     {
       "clientId": "svc-mcp-agent",
@@ -152,7 +184,7 @@
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
-      "secret": "${KC_SVC_MCP_AGENT_SECRET:-svc-mcp-agent-secret}",
+      "secret": "${KC_SVC_MCP_AGENT_SECRET:svc-mcp-agent-secret}",
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,

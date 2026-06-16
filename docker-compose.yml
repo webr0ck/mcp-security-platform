@@ -840,8 +840,9 @@ services:
 
 # Docker Secrets — secret values are injected as files, not plain env vars (INV-008)
 # step_ca_password: the provisioner password for step-ca ACME provisioner
+# Written to ~/.mcp/step-ca-password (mode 0600, dir 0700) by `make up` / `make dev-up`
+# from STEP_CA_PROVISIONER_PASSWORD in .env. Using file: source (not environment:) for
+# podman-compose compatibility — v1.6+ does not support the environment source for runtime secrets.
 secrets:
   step_ca_password:
-    # Docker Compose reads the secret value from this environment variable.
-    # The actual value lives only in .env (gitignored), never in this file.
-    environment: STEP_CA_PROVISIONER_PASSWORD
+    file: ${HOME}/.mcp/step-ca-password
