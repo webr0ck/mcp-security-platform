@@ -56,6 +56,27 @@ VAULT_TOKEN = os.environ.get("VAULT_TOKEN", "lab-root-token")
 BROKER_MASTER_SECRET_PATH = os.environ.get(
     "BROKER_MASTER_SECRET_PATH", "secret/data/mcp/broker-master"
 )
+# Persisted master secret value (lab resilience). The lab runs Vault in dev
+# mode (in-memory), so a Vault restart wipes the master secret. Persisting the
+# value to .env.lab and restoring the SAME value on re-seed keeps every
+# credential_store blob decryptable — re-seeding must be idempotent and
+# NON-rotating. Empty on first run; seed.py generates + persists it.
+# Explicit opt-in required to MINT a fresh master when credential_store already
+# holds rows — a fresh master orphans every existing ciphertext. Off by default
+# so an accidental re-seed can never silently rotate the KEK and destroy creds.
+# (The lab Vault is now PERSISTENT, so the master is normally just reused from
+# Vault across restarts; this guard only matters if the vault-data volume is lost.)
+FORCE_ROTATE_MASTER = os.environ.get("FORCE_ROTATE_MASTER", "").lower() in ("1", "true", "yes")
+
+# Path the seeder writes generated secrets back to. In the repo checkout this
+# resolves to the repo-root .env.lab; INSIDE the seeder container seed.py lives
+# at /app/seed.py so the same expression resolves to /.env.lab — which is not
+# bind-mounted, so write-backs would silently vanish. compose sets
+# ENV_LAB_WRITE_PATH to the bind-mounted host file so persistence actually works.
+ENV_LAB_PATH = os.environ.get(
+    "ENV_LAB_WRITE_PATH",
+    str(Path(__file__).parent.parent.parent / ".env.lab"),
+)
 
 LAB_GRAFANA_URL = os.environ.get("LAB_GRAFANA_URL", "http://lab-grafana:3000")
 LAB_GRAFANA_ADMIN_PASSWORD = os.environ.get("LAB_GRAFANA_ADMIN_PASSWORD", "labpassword")
@@ -137,11 +158,19 @@ async def wait_for_vault(max_wait: int = 60) -> None:
     raise RuntimeError(f"Vault did not become ready within {max_wait}s.")
 
 
-def setup_vault_secret() -> str:
+def setup_vault_secret(existing_cred_rows: int = 0) -> str:
     """
     Enable KV v2 at 'secret/' if needed. Read existing master secret if present,
     only generate a new one on first run. Returning the same secret across runs
     ensures credential_store blobs remain decryptable.
+
+    With the persistent lab Vault, the master is normally reused from Vault on
+    every run. A fresh master is generated only when Vault genuinely has none
+    (first run / lost volume).
+
+    existing_cred_rows: rows already in credential_store. Used to REFUSE minting a
+    fresh master (which would orphan those rows) unless FORCE_ROTATE_MASTER is set.
+    Pass -1 for "unknown" (e.g. DB error) — treated the same as ">0" (fail-closed).
 
     Returns the hex master secret value.
     """
@@ -169,8 +198,14 @@ def setup_vault_secret() -> str:
     kv_path = BROKER_MASTER_SECRET_PATH.removeprefix("secret/data/")
 
     # Read existing secret first — only write a new one if the path is empty.
-    # Overwriting on every seeder run would invalidate all credential_store blobs
-    # that were encrypted against the previous master secret.
+    # The lab now runs a PERSISTENT Vault (file storage), so a master written on
+    # first run survives restarts and is simply reused here. The KEK therefore
+    # lives only inside Vault's encrypted barrier — never as plaintext on disk.
+    #
+    # IMPORTANT: distinguish "secret genuinely absent" (safe to generate) from
+    # "Vault read failed" (must NOT silently fall through to generation — that
+    # could mint a fresh KEK and orphan existing ciphertext). Only InvalidPath /
+    # 404 is treated as "absent"; any other error re-raises (fail-closed).
     try:
         existing = client.secrets.kv.v2.read_secret_version(
             path=kv_path,
@@ -181,16 +216,39 @@ def setup_vault_secret() -> str:
         if master_value:
             log.info("Broker master secret already exists in Vault — reusing")
             return master_value
-    except Exception:
-        pass  # Not found or deleted — fall through to generate a new one
+        # Path exists but has no master_secret field — treat as absent, fall through.
+    except hvac.exceptions.InvalidPath:
+        pass  # KV path not found → genuinely first run; safe to generate below.
 
+    # No master in Vault. With persistent storage this should only happen on a
+    # genuine first run (empty vault-data volume). If credential_store already has
+    # rows, the volume was wiped/corrupted and generating a fresh KEK would orphan
+    # them — refuse unless an operator explicitly opts into rotation. Fail-CLOSED:
+    # an unknown row count (caller passes -1 on DB error) is treated as "assume
+    # populated", never as "safe to rotate".
+    if existing_cred_rows != 0 and not FORCE_ROTATE_MASTER:
+        raise RuntimeError(
+            f"Refusing to generate a fresh broker master secret: credential_store "
+            f"has {existing_cred_rows} row(s) (or the count is unknown) that were "
+            f"encrypted under a master that is no longer in Vault. Generating a new "
+            f"master would orphan them. Investigate why the persistent vault-data "
+            f"volume lost the secret, or set FORCE_ROTATE_MASTER=true to intentionally "
+            f"rotate and re-enroll all credentials."
+        )
     master_value = os.urandom(32).hex()
     client.secrets.kv.v2.create_or_update_secret(
         path=kv_path,
         secret={"master_secret": master_value},
         mount_point="secret",
     )
-    log.info("Broker master secret written to Vault at %s", BROKER_MASTER_SECRET_PATH)
+    if existing_cred_rows != 0:
+        log.warning(
+            "Broker master secret ROTATED (FORCE_ROTATE_MASTER). The %s pre-existing "
+            "credential_store row(s) are now orphaned and must be re-enrolled.",
+            existing_cred_rows,
+        )
+    else:
+        log.info("Broker master secret GENERATED fresh (empty credential_store).")
     return master_value
 
 
@@ -797,11 +855,22 @@ async def main() -> None:
     log.info("Waiting for Vault...")
     await wait_for_vault(max_wait=60)
 
-    # 3. Write broker master secret to Vault (idempotent — reads existing if present)
+    # 3. Write broker master secret to Vault (idempotent — reads existing if present).
+    # Pass the current credential_store row count so a fresh-master mint is refused
+    # when it would orphan existing ciphertext (unless FORCE_ROTATE_MASTER is set).
     log.info("Setting up broker master secret in Vault...")
     master_hex: Optional[str] = None
     try:
-        master_hex = setup_vault_secret()
+        try:
+            cred_rows = int(await conn.fetchval("SELECT COUNT(*) FROM credential_store") or 0)
+        except asyncpg.UndefinedTableError:
+            cred_rows = 0  # table genuinely doesn't exist yet → truly fresh DB, safe.
+        except Exception as exc:
+            # Fail-CLOSED: a transient DB error must NOT be read as "0 rows" (which
+            # would let a fresh-KEK mint orphan real credentials). -1 = "unknown".
+            log.warning("credential_store COUNT failed (%s); treating row count as UNKNOWN", exc)
+            cred_rows = -1
+        master_hex = setup_vault_secret(existing_cred_rows=cred_rows)
         results["vault"] = "OK"
     except Exception as exc:
         log.error("Vault secret write failed: %s", exc)
@@ -859,8 +928,7 @@ async def main() -> None:
     if grafana_token:
         # Grafana MCP server reads GRAFANA_SERVICE_ACCOUNT_TOKEN from env.
         # Write the token back to .env.lab so the next 'podman-compose up' picks it up.
-        env_lab = str(Path(__file__).parent.parent.parent / ".env.lab")
-        _write_env_var(env_lab, "GRAFANA_SERVICE_ACCOUNT_TOKEN", grafana_token)
+        _write_env_var(ENV_LAB_PATH, "GRAFANA_SERVICE_ACCOUNT_TOKEN", grafana_token)
         results["grafana_env"] = "OK (written to .env.lab)"
 
     # 7. Create NetBox API token
@@ -872,8 +940,7 @@ async def main() -> None:
         else "FAILED"
     )
     if netbox_token:
-        env_lab = str(Path(__file__).parent.parent.parent / ".env.lab")
-        _write_env_var(env_lab, "NETBOX_TOKEN", netbox_token)
+        _write_env_var(ENV_LAB_PATH, "NETBOX_TOKEN", netbox_token)
         results["netbox_env"] = "OK (written to .env.lab)"
 
     # 7b. Seed M365 client secret into credential_store (Task 2.5)
@@ -891,8 +958,7 @@ async def main() -> None:
     await conn3.close()
     results["self_service_key"] = "OK" if self_service_key else "FAILED"
     if self_service_key:
-        env_lab = str(Path(__file__).parent.parent.parent / ".env.lab")
-        _write_env_var(env_lab, "SELF_SERVICE_API_KEY", self_service_key)
+        _write_env_var(ENV_LAB_PATH, "SELF_SERVICE_API_KEY", self_service_key)
         results["self_service_env"] = "OK (written to .env.lab)"
 
     # 9. Create Gitea API token
@@ -900,8 +966,7 @@ async def main() -> None:
     gitea_token = await create_gitea_token()
     results["gitea"] = "OK" if gitea_token else "FAILED"
     if gitea_token:
-        env_lab = str(Path(__file__).parent.parent.parent / ".env.lab")
-        _write_env_var(env_lab, "GITEA_ADMIN_TOKEN", gitea_token)
+        _write_env_var(ENV_LAB_PATH, "GITEA_ADMIN_TOKEN", gitea_token)
         results["gitea_env"] = "OK (written to .env.lab)"
         # Gitea MCP server supports header-based injection; store in credential_store.
         if master_hex and results.get("tools_sql") == "OK":

@@ -682,31 +682,47 @@ services:
   # overlay flips Vault into dev mode and exposes the API port to the host.
   # NEVER apply this overlay in production.
   vault:
+    # PERSISTENT lab Vault (replaces the old in-memory `-dev` mode). File storage on
+    # the vault-data volume means the encrypted barrier — including the broker master
+    # secret (KEK) — survives restarts, so the KEK never has to be persisted as
+    # plaintext on disk. auto-unseal.sh self-heals (init-if-needed + unseal) on every
+    # (re)start. See lab/vault/auto-unseal.sh and lab/vault/local.hcl for the model.
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: "${VAULT_TOKEN:-lab-root-token}"
-      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
-      # Clear the production VAULT_LOCAL_CONFIG inherited from the base compose
-      # so the dev-mode command isn't told to look at a JSON config it doesn't use.
+      VAULT_ADDR: "http://127.0.0.1:8200"
+      # Fixed bootstrap token minted by the wrapper so the proxy/seeder authenticate
+      # with a static literal. Only valid against a live, unsealed Vault (not offline
+      # key material). Reuses the existing VAULT_TOKEN literal.
+      VAULT_BOOTSTRAP_TOKEN: "${VAULT_TOKEN:-lab-root-token}"
+      VAULT_CONFIG_FILE: "/vault/lab/local.hcl"
+      # Clear the production VAULT_LOCAL_CONFIG inherited from base — the wrapper
+      # points Vault at the bind-mounted HCL config instead.
       VAULT_LOCAL_CONFIG: ""
-    # rootless Podman: bypass docker-entrypoint.sh which calls `setcap` — that
-    # operation is unsupported in rootless mode and causes a crash loop.
-    # Run vault directly; dev mode disables mlock automatically (no IPC_LOCK needed).
-    entrypoint: ["vault", "server", "-dev"]
+      VAULT_DISABLE_MLOCK: "1"
+    # rootless Podman: run our wrapper directly (bypasses docker-entrypoint.sh's
+    # setcap, unsupported in rootless user namespaces). disable_mlock in the HCL
+    # config means mlock/setcap is never needed.
+    entrypoint: ["/usr/local/bin/vault-auto-unseal.sh"]
     command: []
     read_only: false
     security_opt:
       - no-new-privileges:false
+    volumes:
+      - vault-data:/vault/data
+      - ./lab/vault/local.hcl:/vault/lab/local.hcl:ro
+      - ./lab/vault/auto-unseal.sh:/usr/local/bin/vault-auto-unseal.sh:ro
     ports:
       # Remapped to 8201 — port 8200 is used by isl-vault from intentional-secrets-lab
       - "8201:8200"
     healthcheck:
-      # String form so podman-compose replaces (not concatenates) the base compose's vault healthcheck.
-      # Dev mode uses plain HTTP; the base compose checks HTTPS TLS, which doesn't apply here.
-      test: "CMD-SHELL wget -qO- http://127.0.0.1:8200/v1/sys/health > /dev/null 2>&1"
+      # Healthy ONLY when initialised AND unsealed (sys/health returns 200 only then),
+      # so dependents (seeder) wait for the wrapper to finish unsealing. Plain HTTP.
+      # NOTE: podman-compose auto-wraps a string test in CMD-SHELL, so the string must
+      # NOT include its own CMD-SHELL prefix (doing so double-wraps → always exit 1).
+      test: "wget -qO- http://127.0.0.1:8200/v1/sys/health > /dev/null 2>&1"
       interval: 10s
       timeout: 5s
-      retries: 6
-      start_period: 15s
+      retries: 12
+      start_period: 20s
 
   # ── Promtail: Podman/macOS compatibility override ────────────────────────────
   # Production promtail.yml uses docker_sd_configs which require
@@ -882,8 +898,16 @@ services:
     env_file:
       - .env
       - .env.lab
+    # Bind-mount the host .env.lab so the seeder's secret write-backs (broker
+    # master, grafana/gitea/self-service tokens) PERSIST to the host file rather
+    # than vanishing into the container FS. Without this, a dev-mode Vault wipe
+    # could not be recovered because the persisted master would be lost too.
+    volumes:
+      - ./.env.lab:/app/.env.lab
     environment:
       VAULT_ADDR: http://mcp-vault:8200
+      # Write secret-backfills to the bind-mounted host file (see volumes above).
+      ENV_LAB_WRITE_PATH: /app/.env.lab
       LAB_GRAFANA_URL: http://lab-grafana:3000
       LAB_NETBOX_URL: http://lab-netbox:8080
       LAB_GITEA_URL: http://lab-gitea:3000
