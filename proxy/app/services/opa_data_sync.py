@@ -86,9 +86,17 @@ def build_grants_data(grant_rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     for row in grant_rows:
         client_id = row["client_id"]
+        # asyncpg returns JSONB columns as raw JSON strings, not decoded Python objects.
+        # Parse them here; if already a list (e.g. in tests), pass through as-is.
+        def _as_list(v: Any) -> list:
+            if isinstance(v, str):
+                import json as _json
+                return _json.loads(v)
+            return list(v) if v is not None else []
+
         grants[client_id] = {
-            "allowed_tools": list(row["allowed_tools"]),
-            "allowed_tags": list(row["allowed_tags"]),
+            "allowed_tools": _as_list(row["allowed_tools"]),
+            "allowed_tags": _as_list(row["allowed_tags"]),
             "max_risk_level": row["max_risk_level"],
         }
 

@@ -934,6 +934,18 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
         if isinstance(exc, TaintFloorDenyError):
             logger.info("invoke_tool denied (taint floor) tool=%s client=%s", tool_name, client_id)
             return {"type": "text", "text": "Access denied: session restricted by trust policy"}
+        from app.credential_broker.dispatcher import CredentialEnrollmentRequiredError
+        if isinstance(exc, CredentialEnrollmentRequiredError):
+            logger.info("invoke_tool needs enrollment tool=%s client=%s service=%s",
+                        tool_name, client_id, exc.service)
+            return {"type": "text", "text": (
+                f"\U0001F510 Login required for '{exc.service}'.\n\n"
+                f"This tool acts on your behalf, but your {exc.service} account "
+                f"isn't connected yet.\n\n"
+                f"\U0001F449 Open this link in your browser (while signed in to the "
+                f"proxy) to log in:\n    {exc.enrollment_url}\n\n"
+                f"After you finish sign-in/consent, retry this tool call."
+            )}
         logger.exception("invoke_tool pipeline error for %s", tool_name)
         return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}
 

@@ -301,9 +301,15 @@ async def _inject_user_credential(
         ) from exc
 
     if not plaintext:
-        raise CredentialInjectionError(
-            f"No user credential found for sub={user_sub} service={service_name}; "
-            "refusing to forward unauthenticated request"
+        # Fail-closed with an ACTIONABLE enrollment link instead of a cryptic
+        # "internal error". Mirrors _inject_entra_user_token's enrollment raise so
+        # the MCP layer can surface a "log in first" message to the caller.
+        from app.core.config import get_settings
+        base = get_settings().PROXY_BASE_URL.rstrip("/")
+        enrollment_url = f"{base}/auth/enroll/{service_name}"
+        raise CredentialEnrollmentRequiredError(
+            service=service_name,
+            enrollment_url=enrollment_url,
         )
     token = plaintext.strip()
     return {inject_header: f"{inject_prefix} {token}".strip()}
