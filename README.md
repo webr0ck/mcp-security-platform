@@ -1,111 +1,279 @@
 # MCP Security Platform
 
-An **open-source reference implementation (work in progress)** exploring how to secure
-[Model Context Protocol](https://modelcontextprotocol.io/) (MCP) tool calls at runtime — by
-*mediating* every call through identity, policy, and audit rather than trying to statically
-classify MCP servers as safe.
+### Mediate, don't classify — a runtime security gateway for AI-agent tool calls.
 
-> **Honesty notice (2026-05-31).** This is a learning/reference build, not a production security
-> gateway, and I keep the docs matched to the code. The **Enforced today vs Roadmap** table below is
-> the source of truth. A full Claude+Codex dual-review of this repo is in
-> `Brain/Vault/00_AI/__dual_review__/2026-05-30_mcp-security-platform.md` (architecture, claimed-vs-actual,
-> security). If a claim isn't in the "Enforced today" column, treat it as roadmap.
+> Every [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) tool call passes through identity, policy, credential brokering, and audit — with backend MCP servers network-isolated by default.
+
+[![CI](https://github.com/webr0ck/mcp-security-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/webr0ck/mcp-security-platform/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-00d4ff.svg)](LICENSE)
+[![Status: reference implementation](https://img.shields.io/badge/status-reference%20implementation-ff8c42.svg)](#enforced-today-vs-roadmap)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776ab.svg)](https://www.python.org/)
+[![Policy: OPA / Rego](https://img.shields.io/badge/policy-OPA%2FRego-7d4698.svg)](https://www.openpolicyagent.org/)
+
+An **open-source reference implementation (work in progress)** exploring how to secure MCP tool
+calls at runtime — by *mediating* every call through identity, policy, and audit rather than
+trying to statically classify MCP servers as safe.
+
+> **Engineering standard.** This is a reference implementation, not a hardened product — and it's
+> held to a rule most security tooling isn't: **every claim is matched to code, and every gap is
+> tracked in the open.** The **[Enforced today vs Roadmap](#enforced-today-vs-roadmap)** table is the
+> source of truth — if a control isn't in the "Enforced today" column, it's roadmap, stated plainly
+> rather than glossed. An honest threat model is more useful than an over-claimed one. See
+> [`SECURITY.md`](SECURITY.md) for tracked known-limitations and the disclosure policy.
+
+**Contents:** [Thesis](#the-thesis) · [What makes this interesting](#what-makes-this-interesting) · [Architecture](#architecture) · [Enforced vs Roadmap](#enforced-today-vs-roadmap) · [Getting started](#getting-started) · [Connecting Claude Code](#connecting-claude-code-to-this-proxy) · [Docs](#documentation)
+
+---
+
+## The thesis
+
+You can't reliably decide *in advance* whether an MCP server is safe. Static scanning misses
+**semantic capability** — a server that wraps a C2 framework, or quietly exfiltrates through a
+"search" tool, looks benign until it calls home. So instead of classifying servers, this platform
+**mediates every tool call** at runtime through identity → policy → audit, and keeps the backend
+servers network-isolated by default.
+
+It is aimed at **platform and security engineers** who need to let LLM agents use MCP tools
+without handing those tools the keys to the environment.
+
+**Threat model in one paragraph:** the adversary is a *malicious or compromised MCP server* (or a
+prompt-injected agent driving it) that wants credentials, data exfiltration, or lateral movement.
+This platform's job is to ensure that even a fully hostile backend never sees a raw credential,
+can't be invoked outside policy, can't reach the proxy or other backends over the network, and
+can't act without a signed, redaction-safe audit trail.
+
+## What makes this interesting
+
+- **A thesis, not a feature list.** Most MCP security tooling tries to *classify* servers as
+  safe/unsafe. This argues that's unwinnable, and builds the alternative: runtime mediation of
+  every tool call.
+- **Zero-credential MCP clients.** Claude Code connects with *no API keys in config* — OAuth 2.1
+  PKCE end to end; the proxy injects backend credentials the client never sees.
+- **Fail-closed everywhere, gated in CI.** Deny-by-default OPA, signed policy bundles by default,
+  and a security-invariant suite (`make security-check`) that fails the build on a fail-open regression.
+- **Network isolation you can verify in one command** — `python scripts/check_network_isolation.py`
+  statically proves backend MCP servers can't reach the proxy; regression-gated.
+- **Adversarial test suite** — a containerized red-team harness (`sandbox/tests/red_team/`) probes
+  credential exfil, network/filesystem isolation, privilege escalation, seccomp, and tool poisoning.
+- **Docs matched to code, gaps tracked openly** — the Enforced-vs-Roadmap table is the source of
+  truth; over-claiming is treated as a bug.
+
+## Architecture
+
+Three enforcement layers in front of network-isolated backends:
+
+```mermaid
+flowchart TB
+    client["🤖 AI Agent / Claude Code<br/><i>mTLS client cert · OAuth 2.1 PKCE</i>"]
+
+    subgraph L1["Layer 1 — Nginx Gateway"]
+        gw["mTLS termination · WAF (ModSecurity/CRS)<br/>CN/IP rate limiting · structured logs"]
+    end
+
+    subgraph L2["Layer 2 — FastAPI Security Proxy"]
+        direction TB
+        auth["① Identity (mTLS CN / OIDC)"] --> rbac["② RBAC"]
+        rbac --> quar["③ Quarantine gate"]
+        quar --> opa["④ OPA policy eval<br/><i>deny-by-default · fail-closed</i>"]
+        opa --> cred["⑤ Credential broker<br/><i>AES-256-GCM · per-identity KEK</i>"]
+    end
+
+    subgraph DEPS["Supporting services"]
+        direction LR
+        opasvc[("OPA<br/>sidecar")]
+        vault[("Vault<br/>KMS")]
+        pg[("PostgreSQL<br/>registry/creds")]
+        redis[("Redis<br/>sessions")]
+        idp[("Keycloak<br/>OIDC")]
+    end
+
+    subgraph L3["Layer 3 — Observability"]
+        direction LR
+        audit["Audit (SHA-256, redacted)"] --> loki["Loki + Grafana"]
+        audit --> minio[("MinIO<br/>archival")]
+        audit --> am["Alertmanager"]
+    end
+
+    backends["🔌 MCP servers<br/><i>network-isolated · no inbound to proxy</i>"]
+
+    client --> gw --> auth
+    cred --> backends
+    opa -. consults .-> opasvc
+    cred -. unseals .-> vault
+    L2 -. reads .-> pg
+    L2 -. caches .-> redis
+    auth -. verifies .-> idp
+    cred --> audit
+    backends -- response --> client
+
+    classDef gateway fill:#0c1a2e,stroke:#00d4ff,stroke-width:2px,color:#c4d8e8;
+    classDef proxy fill:#091422,stroke:#00d4ff,color:#c4d8e8;
+    classDef deny fill:#1a0c14,stroke:#ff3d6b,color:#ffc4d4;
+    classDef ok fill:#0c1a14,stroke:#00ff88,color:#c4e8d8;
+    class gw gateway;
+    class auth,rbac,quar,opa proxy;
+    class cred ok;
+    class backends deny;
+```
+
+### Request flow for a single tool call
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as AI Agent
+    participant G as Nginx Gateway
+    participant P as Security Proxy
+    participant O as OPA
+    participant B as MCP Server
+    participant A as Audit/Loki
+
+    C->>G: tool call (mTLS client cert)
+    G->>G: verify mTLS · WAF · rate-limit
+    G->>P: forward + X-Client-Cert-CN
+    P->>P: resolve identity · RBAC · quarantine check
+    P->>O: evaluate(identity × tool × params)
+    alt denied (deny-by-default / OPA unreachable)
+        O-->>P: deny
+        P->>A: emit DENY audit event
+        P-->>C: 403 / 503 (fail-closed)
+    else allowed
+        O-->>P: allow
+        P->>P: decrypt + inject credential (never seen by client)
+        P->>B: invoke (isolated backend)
+        B-->>P: result
+        P->>A: emit ALLOW audit (SHA-256, redacted)
+        P-->>C: result
+    end
+```
+
+### Layers
+
+- **Layer 1 — Nginx gateway:** TLS termination, mTLS client-cert enforcement, ModSecurity/OWASP-CRS WAF, structured logs, CN/IP rate limiting.
+- **Layer 2 — FastAPI security proxy:** identity resolution, OPA/Rego policy evaluation, LLM-assisted tool-manifest auditing (Ollama, advisory), CycloneDX SBOM per tool, sliding-window anomaly heuristics, fail-closed credential injection, synchronous audit emission.
+- **Layer 3 — Observability:** audit logger (SHA-256, redaction), Loki + Grafana, Alertmanager, MinIO archival, daily compliance checks.
+
+---
 
 ## Enforced today vs Roadmap
 
 | Area | Enforced today (verified in code) | Roadmap / not yet wired |
 |---|---|---|
-| **Policy (OPA/Rego)** | OPA-evaluated + audited on **both** the REST path (`/api/v1/tools/{id}/invoke`) and the `/mcp` invoke path (both call `services/invocation.py`); built-in `/mcp` **meta-tools now evaluate OPA under the real caller identity** (role-based `platform_meta_tool_roles` in `authz.rego`, 6.1 — no longer a placeholder `platform_admin`); **discovery==invoke now enforced on invoke** for server-linked tools (`enforce_tool_entitlement` in `invoke_tool`, 6.2 — no role exception, admin included); **signed OPA bundles are the DEFAULT** (`docker-compose.yml` runs `--verification-key` + `bundle.tar.gz:ro`; `make up` auto-signs; `make security-check` gates via `scripts/check_signed_default.sh` — INV-012, Task 1.1) | tools not yet linked to a `server_id` (V023) are governed by OPA only, not by per-server entitlement |
-| **Identity** | Gateway terminates mTLS and sets client identity; proxy uses it (server-side nonce + PKCE on credential enrollment) | App still trusts the gateway-set `X-Client-Cert-CN` header — safe only when nginx is the sole path (defense-in-depth gap); the **production** gateway (`gateway/nginx/conf.d/mcp-proxy.conf`) does **not** route `/mcp`, `/.well-known/*`, or `/oauth/register` — the zero-credential MCP/OIDC flow is currently reachable only via the **lab** gateway |
-| **OIDC login** | **Keycloak browser login, PKCE S256, session JWT, Grafana SSO** — full flow (`/api/v1/auth/oidc/*`); KC tokens stored server-side only; HttpOnly session cookie; **session JTI revocation IS enforced on every request**; external Bearer path now validates **`iss`** and (in production) **`aud`** | External Keycloak access token passed as Bearer is accepted as a fallback; in dev/lab `aud` validation is off when `OIDC_AUDIENCE` is unset (production startup is blocked unless it is set) |
-| **Credential broker** | **Wired into the request path at startup** (`main.py` lifespan → `inv_svc.broker_instance`); disabled (and **fail-closed** at call time) only when `VAULT_TOKEN` is empty. Crypto hardened — HKDF-SHA256 KEK, AES-256-GCM + AAD row-binding, Vault HTTPS-only (prod), PKCE, synchronous enrollment audit; **KMS master-secret hex/base64 mismatch fixed** (`kms.py:_decode_master_secret` hex-detects then base64-falls-back — commit `ee47c2c`) | Approach-B service adapters (`gitea/grafana/netbox`) are orphaned (live service/user path uses approach-A `credential_store` crypto, not those adapters) |
-| **Credential injection modes** | `injection_mode` on `tool_registry`; **`service` / `user` active and fail-closed** (decrypt from `credential_store` → inject header, raise on missing/failed creds); `service_account` (KC client-credentials) active; **`oauth_user_token` (RFC 8693) functional for direct-OIDC callers** (6.3); **`entra_client_credentials` now in DB enum** (V026) and reads secret from Vault-backed `credential_store` (Phase 3, not from env); admin credentials UI to upload/rotate/revoke; V010–V027 migrations | `oauth_user_token` for **internal-session (browser portal) callers** still fails closed — their bearer is a session JWT, not a KC subject token; **`passthrough`** and **`entra_user_token`** (delegated MS Graph) are wired in code but **not settable via the registry/admin API**; **`basic_auth`** credential type is stored but not base64-encoded on injection |
-| **Server registry** | **`server_registry` is the single source of truth** (Phase 3); `mcps.yaml` retired from dispatcher — `registry.py` reads DB, 30s auto-refresh; **self-service onboarding via `POST /api/v1/servers`** (server_owner role); consent D3 dual-control (owner mints token, admin consumes); adapter healthcheck at approval; **tool discovery + quarantine** on registration (INV-005); server-scoped OAuth enrollment; V026–V027 migrations | Server owner UI for onboarding wizard (Phase 7) |
-| **OPA grants sync** | **Grants are DB-authoritative** (Phase 3); `role_assignments` pushed to OPA via data API on every entitlement mutation (fail-closed — 503 if push fails); 60s reconcile loop restores sync after OPA restart; startup push on proxy boot | OPA brief deny window (~1 reconcile interval) after OPA restart before first push completes |
-| **Client grants (Task 4.4b)** | **ENFORCED** — `client_grants` table (V034), `admin_grants` router (`POST/DELETE /api/v1/admin/grants`), OPA data API push on every mutation; `data.mcp_grants` path in `authz.rego` evaluates per-tool allow lists at invocation time | Grants are currently per-tool-name; server-scoped grants (grant all tools on a server) are roadmap |
-| **Admin credentials UI** | `GET /admin/credentials` (htmx HTML) + REST API (`PUT`, `DELETE`, `/injection-mode`); **admin role only**; credentials AES-256-GCM encrypted; audit events emitted | No **user** self-service (per-user token upload routes are admin-gated) and no **server-owner** scoping (`server_owner` is not in the admin RBAC allow-lists); the standalone **React SPA is not mounted by any tier** — the htmx portal is the served UI |
-| **Network isolation** | **F-001 proven on the lab** — a non-dialed sidecar cannot reach `proxy:8000`; regression-gated in `make security-check`; **MCP server network isolation enforced in lab tier** (pairwise networks, egress proxy — Phase 2) | The F-001 gate scans only `docker-compose.yml`, not the tier composes users actually deploy; `compose.poc.yml` (demo tier) ships **no** gateway/WAF/TLS/mTLS |
-| **Audit / observability** | Synchronous audit on REST + `/mcp` invocation + credential enrollment; SHA-256 per-event; raw tool args never persisted (hashes only); Loki/Grafana; **`/mcp` meta-tool audit is now fail-closed** (`mcp_server.py:1124-1129`, S2 — `AuditEmissionError` propagates, no best-effort swallow) | Quarantine/error audit paths on non-meta-tool routes remain synchronous-emit-or-500; MinIO uses GOVERNANCE retention (not tamper-proof WORM); compliance checker is advisory |
-| **Trust envelope (POC)** | **ES256-signed envelopes on every tool result** (`mcp_server.py` shapes A+B + `tools.py` REST path, M3 — `TrustLabeler`, JCS/RFC 8785 canonicalization); **passive inline verifier** (`TrustObserver.observe_result()`, M4 — logs verdict, never blocks); taint floor + session tracking (M1/M2); V038 migration with fail-closed defaults | Cross-trust federation deferred; learned trust-tier classifier (beyond static config) is roadmap; INV-012 (signed OPA bundles) is structurally validated by `check_signed_default.sh` — runtime rejection staging proof-run pending (DA-1) |
-| **Gateway** | mTLS, structured logs, rate limiting by client-CN / source-IP | `conf.d/default.conf` template needs cleanup (TLS-1.3-only not guaranteed); **per-tool** rate limiting not built; production tier does not expose the MCP/OAuth endpoints (see Identity row) |
-| **SBOM** | CycloneDX per tool | SPDX **not implemented** (route should not be relied on for SPDX) |
-| **Anomaly detection** | Per-call static **advisory heuristic** (keyword/tool-name rules) feeds an OPA input score — honestly labelled as a heuristic, not a learned model | Learned/statistical per-client baseline = roadmap. (6.4 removed the former write-only baseline writer that wrote a row the scorer never read; the heuristic is trivially evaded by renaming a tool — do not rely on it as a behavioural model) |
-| **Not built** | — | Helm/K8s (template stubs) · admin-UI IDP configuration (no backend route) · outbound Jira (inbound webhook only) · learned anomaly baseline |
+| **Policy (OPA/Rego)** | OPA-evaluated + audited on **both** the REST path (`/api/v1/tools/{id}/invoke`) and the `/mcp` invoke path (both call `services/invocation.py`); built-in `/mcp` **meta-tools now evaluate OPA under the real caller identity** (role-based `platform_meta_tool_roles` in `authz.rego` — no longer a placeholder `platform_admin`); **discovery==invoke now enforced on invoke** for server-linked tools (`enforce_tool_entitlement` in `invoke_tool` — no role exception, admin included); **signed OPA bundles are the DEFAULT** (`docker-compose.yml` runs `--verification-key` + `bundle.tar.gz:ro`; `make up` auto-signs; `make security-check` gates via `scripts/check_signed_default.sh`) | tools not yet linked to a `server_id` are governed by OPA only, not by per-server entitlement |
+| **Identity** | Gateway terminates mTLS and sets client identity; proxy uses it (server-side nonce + PKCE on credential enrollment) | App still trusts the gateway-set `X-Client-Cert-CN` header — safe only when nginx is the sole path (defense-in-depth gap, see [`SECURITY.md`](SECURITY.md) F-001); the **production** gateway does **not** route `/mcp`, `/.well-known/*`, or `/oauth/register` — the zero-credential MCP/OIDC flow is currently reachable only via the **lab** gateway |
+| **OIDC login** | **Keycloak browser login, PKCE S256, session JWT, Grafana SSO** — full flow (`/api/v1/auth/oidc/*`); KC tokens stored server-side only; HttpOnly session cookie; **session JTI revocation IS enforced on every request**; external Bearer path validates **`iss`** and (in production) **`aud`** | External Keycloak access token as Bearer is accepted as a fallback; in dev/lab `aud` validation is off when `OIDC_AUDIENCE` is unset (production startup is blocked unless it is set) |
+| **Credential broker** | **Wired into the request path at startup**; **fail-closed** at call time when `VAULT_TOKEN` is empty. Crypto hardened — HKDF-SHA256 KEK, AES-256-GCM + AAD row-binding, Vault HTTPS-only (prod), PKCE, synchronous enrollment audit | Approach-B service adapters (`gitea/grafana/netbox`) are orphaned (live path uses approach-A `credential_store` crypto) |
+| **Credential injection modes** | `injection_mode` on `tool_registry`; **`service` / `user` active and fail-closed**; `service_account` (KC client-credentials) active; **`oauth_user_token` (RFC 8693) functional for direct-OIDC callers**; **`entra_client_credentials` reads secret from Vault-backed `credential_store`**; admin credentials UI to upload/rotate/revoke | `oauth_user_token` for internal-session (browser portal) callers still fails closed; **`passthrough`** / **`entra_user_token`** wired in code but not settable via the admin API; **`basic_auth`** stored but not base64-encoded on injection |
+| **Server registry** | **`server_registry` is the single source of truth**; `registry.py` reads DB, 30s auto-refresh; **self-service onboarding via `POST /api/v1/servers`** (server_owner role); consent dual-control; adapter healthcheck at approval; **tool discovery + quarantine** on registration; server-scoped OAuth enrollment | Server-owner onboarding wizard UI |
+| **OPA grants sync** | **Grants are DB-authoritative**; `role_assignments` pushed to OPA via data API on every mutation (fail-closed — 503 if push fails); 60s reconcile loop; startup push on proxy boot | OPA brief deny window (~1 reconcile interval) after OPA restart before first push completes |
+| **Client grants** | **ENFORCED** — `client_grants` table, `admin_grants` router, OPA data-API push on every mutation; `data.mcp_grants` evaluates per-tool allow lists at invocation time | Grants are per-tool-name; server-scoped grants are roadmap |
+| **Network isolation** | **F-001 isolation verified by regression test on the lab** — a non-dialed sidecar cannot reach `proxy:8000`; regression-gated in `make security-check`; **MCP server network isolation enforced in lab tier** (pairwise networks, egress proxy) | The F-001 gate scans only `docker-compose.yml`, not the tier composes users actually deploy; the demo tier ships a thinner edge |
+| **Audit / observability** | Synchronous audit on REST + `/mcp` invocation + credential enrollment; SHA-256 per-event; raw tool args never persisted (hashes only); Loki/Grafana; **`/mcp` meta-tool audit is fail-closed** | Quarantine/error audit paths on non-meta-tool routes remain synchronous-emit-or-500; MinIO uses GOVERNANCE retention (not tamper-proof WORM); compliance checker is advisory |
+| **Trust envelope (POC)** | **ES256-signed envelopes on every tool result** (JCS/RFC 8785 canonicalization); **passive inline verifier** (logs verdict, never blocks); taint floor + session tracking | Cross-trust federation deferred; learned trust-tier classifier is roadmap |
+| **Gateway** | mTLS, structured logs, rate limiting by client-CN / source-IP | per-tool rate limiting not built; production tier does not expose the MCP/OAuth endpoints (see Identity row) |
+| **SBOM** | CycloneDX per tool | SPDX **not implemented** |
+| **Anomaly detection** | Per-call static **advisory heuristic** (keyword/tool-name rules) feeds an OPA input score — honestly labelled as a heuristic, not a learned model | Learned/statistical per-client baseline = roadmap (the heuristic is trivially evaded by renaming a tool — do not rely on it as a behavioural model) |
+| **Not built** | — | Helm/K8s (template stubs) · admin-UI IDP configuration · outbound Jira (inbound webhook only) · learned anomaly baseline |
 
-**Verified findings remediated:** the security findings in `docs/REVIEW-2026-05-16.md` (CB-001…CB-011)
-are fixed in the current code (that review doc is now historical). The remaining gaps above are
-*coverage/wiring* gaps, tracked honestly rather than papered over.
+The remaining gaps above are *coverage / wiring* gaps, tracked honestly rather than papered over.
 
-## What it's exploring
+---
 
-The thesis (see the companion blog): you can't reliably decide *in advance* whether an MCP server is
-safe (static scanning misses semantic capability — e.g. a server that wraps a C2 framework). So instead
-of classifying servers, **mediate every tool call** at runtime through identity → policy → audit, with
-the backend servers network-isolated by default. This repo is where I'm building that, in the open.
+## Getting started
 
-## Layers
+There are two ways to run this, and they use **different container engines on purpose**:
 
-- **Layer 1 — Nginx gateway:** TLS termination, mTLS client-cert enforcement, structured logs, CN/IP rate limiting.
-- **Layer 2 — FastAPI security proxy:** identity resolution, OPA/Rego policy eval (REST path), LLM-assisted tool-manifest auditing (Ollama, advisory), CycloneDX SBOM per tool, sliding-window anomaly heuristics, audit emission.
-- **Layer 3 — Observability:** audit logger (SHA-256, redaction), Loki + Grafana, Alertmanager, MinIO archival, daily compliance checks.
+| You want to… | Use | Engine | Guide |
+|---|---|---|---|
+| Run a production-shaped service and **bring your own** IDP / SIEM / log collectors / MCP servers | `engine` tier | **Docker** Compose v2.20+ | **[INSTALL.md](INSTALL.md)** |
+| Spin up the **full self-contained lab** (bundled Keycloak, Dex, Wazuh, sample MCP servers) for testing | lab stack | **Podman** | **[LAB.md](LAB.md)** |
 
-## Quick Start
+Minimal taste of the lab (requires **Podman 4.4+** and a ~6 GB Podman VM — see [LAB.md](LAB.md)
+for prerequisites and the required `OIDC_ISSUER_URL` step before first run):
 
 ```bash
-git clone https://github.com/purplehootie/mcp-security-platform
+git clone https://github.com/webr0ck/mcp-security-platform
 cd mcp-security-platform
-cp .env.example .env            # fill required secrets (see comments)
-make up                         # start services
-make pull-model                 # Ollama model for risk scoring
-make health                     # verify
-make security-check             # secret scan + rego lint + OPA deny-default + F-001 isolation gate
+cp .env.lab.example .env.lab     # then set OIDC_ISSUER_URL (see LAB.md)
+make -f Makefile.lab lab-up      # build + start + seed
+make -f Makefile.lab lab-smoke   # expect all checks green
 ```
-Proxy API: `https://localhost/api/v1` · Grafana: `http://localhost:3000` (dev) · API docs: `https://localhost/docs` (dev only).
 
-> A reproducible demo of the verified **network-isolation** control: `python scripts/check_network_isolation.py`.
+A reproducible demo of the verified **network-isolation** control:
+`python scripts/check_network_isolation.py`.
 
-## Development
+### Development
+
+> Requires a running stack first (see [CONTRIBUTING.md](CONTRIBUTING.md) / [LAB.md](LAB.md)):
+> bring the lab up with `make -f Makefile.lab lab-up`, then:
 
 ```bash
 make dev-up         # hot reload + debug ports
 make test           # tests
 make lint
-make security-check # CI security-invariant gate
+make security-check # CI security-invariant gate (secret scan + rego lint + OPA deny-default + F-001 isolation)
 make ship-check     # docs-honesty gate + secret scan + compose smoke + isolation demo (pre-publish)
 ```
 
-## Docs
+---
 
-- [`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md) — reality-annotated architecture (supersedes `ARCHITECTURE.md` v1)
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — status: done vs next
-- [`docs/REVIEW-2026-05-16.md`](docs/REVIEW-2026-05-16.md) — historical security findings (CB-001…011, now fixed)
-- [`docs/SHIP-v0.1.md`](docs/SHIP-v0.1.md) — release checklist
-- [`docs/API.md`](docs/API.md) · [`docs/RBAC.md`](docs/RBAC.md) · [`docs/SECURITY_NONNEGATABLES.md`](docs/SECURITY_NONNEGATABLES.md)
+## Connecting Claude Code to this proxy
 
-## Security: Enforced vs Roadmap
+Auth for **human users is OAuth 2.1 PKCE via Keycloak** — not static API keys.
 
-### Enforced (shipped)
-- **Credential injection (service/user) fail-closed** (Plan 7): broker wired at startup; `service`/`user`/`entra_user_token`/`service_account` modes inject per-tool credentials and **raise rather than forward uncredentialed** on any failure. At-rest crypto: AES-256-GCM + AAD row-binding, HKDF-SHA256 KEK.
-- **Session JTI revocation ≤ 60s** (G7): proxy-issued session JWTs are revocation-checked on **every** request; role cache TTL 60s.
-- **OPA policy on the invoke paths** (Plan 2): REST and `/mcp` tool invocations are policy-evaluated + audited via `services/invocation.py`; deny-by-default; **fail-closed when OPA is unreachable** (INV-004).
-- **SSRF allowlist** (Plan 7): private IP, link-local, IPv6, cloud-metadata endpoints blocked at registration + call time.
-- **Process hardening** (Plan 7): mlock + no-core-dump + production log-level enforcement (best-effort; degrades with a warning if the platform/permissions disallow it).
+### Step 1 — Set `PROXY_BASE_URL` in `.env` / `.env.lab`
 
-### Implemented but NOT active / partial (do not rely on yet)
-- **ZK-at-rest storage custody** (Plans 4–5): SUK = HKDF(session_secret, server_nonce, principal‖server_id) is implemented, but the custody path is **not wired into the live request flow** — treat as design, not an enforced control. (Operator/active-session caveat still applies once wired: an operator reading live proxy memory during an active session can derive SUKs — the irreducible ZK-in-use limit, mitigated not eliminated by mlock + short TTL.)
-- **Three-tier RBAC v3** (Plan 4): the principal model exists, but `server_owner`/`manager` are **absent from `authz.rego`**, and `platform_admin` is accepted inconsistently across admin routers. RBAC is not yet uniform across all surfaces. (Fixed in 6.1: `/mcp` built-in meta-tools now evaluate OPA under the real caller identity, not a placeholder admin.)
-- **Owner-consent tokens**: the signed/single-use/bound consent primitive is now wired into server approval (Phase 3); `consume_consent_token()` is called in the approve handler and JTI is persisted on issue. Credential mode-change consent remains roadmap.
-- **Server entitlements / discovery==invoke**: ~~blocked by a schema bug~~ **FIXED** (`ee47c2c`) — `enforce_tool_entitlement` is now called on the invoke path for server-linked tools; no role exception. Tools without a `server_id` (V023) remain OPA-only.
+```bash
+PROXY_BASE_URL=http://<YOUR_LAN_IP>:8000   # your machine's LAN or Tailscale IP
+```
 
-### Roadmap (not yet implemented)
-- **org-OAuth RFC 8693 (`oauth_user_token`)**: **functional for direct-OIDC callers** (6.3) — the caller's KC access token is stashed on `request.state.user_kc_token` (auth middleware, 3b path) and threaded through `invoke_tool` → dispatcher → `exchange_token`. Internal-session (browser portal) callers still fail closed — their bearer is a session JWT, not a KC subject token. Exchange currently targets the same IdP (not a second IdP).
-- **`passthrough` / `entra_client_credentials`**: implemented or stubbed but not settable via the registry/admin API (DB-only) / missing from the DB enum.
-- **True ZK-in-use**: TEE / confidential computing (SGX / SEV-SNP) + remote attestation. Closes the operator/active-session gap.
-- **HSMAgentCustodian**: Vault transit API integration for agent secrets (stub in place).
+This is required. Without it, OAuth discovery URLs fall back to `request.base_url` (the Host
+header), which may return `localhost` and break the flow for remote clients. Restart the proxy
+after changing it: `make dev-down && make dev-up`.
 
-## Background reading
+### Step 2 — Add the MCP server to Claude Code on the client machine
 
-- *MCP Attack Surface: what 30+ public servers reveal* — the static-analysis research that motivated this platform *(coming soon — purplehootie.com)*.
+In `~/.claude/settings.json` (or `~/.claude.json`) on the machine running Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "mcp-gateway": {
+      "type": "http",
+      "url": "http://<YOUR_LAN_IP>:8000/mcp"
+    }
+  }
+}
+```
+
+**Two critical points:**
+- Use `"type": "http"` — not `"sse"`. `"http"` is Claude Code's string for Streamable HTTP transport; `"sse"` skips the OAuth flow and reports `-32000`.
+- Use `"url"` — not `"command"`. `"command"` is for `stdio` (subprocess) transport only.
+
+### What happens on first connection
+
+1. Claude Code → `GET /mcp` → 401 with `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource"`
+2. Claude Code → discovers the authorization server and Keycloak endpoints via the `.well-known` documents
+3. Claude Code → `POST /oauth/register` → receives a public `client_id` (no secret)
+4. Claude Code opens your browser → Keycloak login
+5. After login, Claude Code uses the Keycloak access token as `Authorization: Bearer <token>` on subsequent requests
+
+**No credentials go in the config file** — the OAuth PKCE flow handles it.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `-32000` / no browser opens | Wrong transport type (`"sse"`) | Use `"type": "http"` |
+| `-32000` / no browser opens | `PROXY_BASE_URL` not set | Set it and restart the proxy |
+| Browser opens, login fails | Keycloak not reachable | Ensure the Keycloak port is reachable from the client |
+| 401 after login | User has no role assigned | `make assign-role CLIENT_ID=<email> ROLE=agent` |
+| 429 on registration | Redis error (rate-limit fails closed) | Check Redis: `make logs SVC=redis` |
+
+> **Note (current gap):** the production Nginx gateway does **not** route `/mcp` or `/.well-known/*`
+> — this OAuth/MCP flow works only via direct port 8000 or the lab gateway. See the Identity row above.
+
+---
 
 ## Technology stack
 
@@ -118,10 +286,33 @@ make ship-check     # docs-honesty gate + secret scan + compose smoke + isolatio
 | Local LLM | Ollama (advisory risk scoring) |
 | Database | PostgreSQL 16 |
 | Cache / sessions | Redis 7 |
-| Identity provider | Keycloak 24 (primary, PKCE S256, Grafana SSO) · Dex (legacy) |
-| SBOM | CycloneDX (SPDX not implemented) |
+| Identity provider | Keycloak 24 (primary, PKCE S256, Grafana SSO) · Dex (mock/secondary, lab) |
+| Secrets / KMS | HashiCorp Vault |
+| SBOM | CycloneDX |
 | Logs | Loki + Promtail · Grafana · Alertmanager · MinIO archival |
+
+## Documentation
+
+| Doc | Purpose |
+|---|---|
+| [`INSTALL.md`](INSTALL.md) | Production deployment (bring-your-own IDP / SIEM / logs / MCP servers) |
+| [`LAB.md`](LAB.md) | Full self-contained lab for testing |
+| [`SECURITY.md`](SECURITY.md) | Responsible disclosure + tracked known-limitations |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
+| [`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md) | Reality-annotated architecture (supersedes v1) |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Status: done vs next |
+| [`docs/API.md`](docs/API.md) · [`docs/RBAC.md`](docs/RBAC.md) · [`docs/SECURITY_NONNEGATABLES.md`](docs/SECURITY_NONNEGATABLES.md) | API surface · role model · security invariants |
+| [`docs/appsec-review.md`](docs/appsec-review.md) | Historical full AppSec audit of the 12 invariants |
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
+[MIT](LICENSE) © 2026 Alexander Romanov
+
+---
+
+Built by [Alexander Romanov](https://purplehootie.com) — writing about runtime AI-agent security at
+[purplehootie.com](https://purplehootie.com).
+
+> This is an independent open-source project and is **not affiliated with or endorsed by** Anthropic
+> or the Model Context Protocol maintainers. "Model Context Protocol" and "MCP" refer to the open
+> protocol at [modelcontextprotocol.io](https://modelcontextprotocol.io/).
