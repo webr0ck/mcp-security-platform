@@ -512,3 +512,145 @@ async def test_plaintext_token_session_is_revoked_on_refresh():
     assert "revoked_at" in revoke_params, (
         "Revocation UPDATE missing 'revoked_at' field."
     )
+
+
+# ---------------------------------------------------------------------------
+# N6: Session revocation missing Redis compensating write
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_logout_db_failure_triggers_redis_compensating_write():
+    """
+    N6 (MEDIUM): When the DB revocation write fails during logout, the Redis
+    compensating marker must still be written (SETEX revoked_jti:{jti} …).
+
+    The logout handler already writes Redis unconditionally (after the try/except
+    DB block), so this test confirms that the Redis write is NOT conditional on
+    DB success — i.e. setex is called even when the DB raises.
+    """
+    import math
+    jti = str(uuid.uuid4())
+    exp = int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())
+    claims = {"sub": _SUBJECT, "jti": jti, "exp": exp}
+
+    # DB always raises
+    fake_db = AsyncMock()
+    fake_db.execute = AsyncMock(side_effect=RuntimeError("DB down"))
+    fake_db.commit = AsyncMock()
+    fake_db.__aenter__ = AsyncMock(return_value=fake_db)
+    fake_db.__aexit__ = AsyncMock(return_value=False)
+
+    mock_redis = AsyncMock()
+    mock_redis.setex = AsyncMock()
+
+    mock_pool = MagicMock()
+    mock_pool.client = mock_redis
+
+    with (
+        patch("app.routers.oidc_browser._decode_session_jwt", return_value=claims),
+        patch("app.core.database.AsyncSessionLocal", return_value=fake_db),
+        patch("app.core.redis_client.redis_pool", mock_pool),
+    ):
+        from app.routers.oidc_browser import oidc_logout
+        from starlette.requests import Request as StarletteRequest
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/oidc/logout",
+            "headers": [(b"authorization", f"Bearer valid_jwt".encode())],
+            "query_string": b"",
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+        request = StarletteRequest(scope)
+        response = await oidc_logout(request, mcp_session="valid_jwt")
+
+    # Response must still succeed (logout is best-effort on DB failure)
+    assert response.status_code == 200
+
+    # Redis setex must have been called with the correct key
+    mock_redis.setex.assert_called_once()
+    call_args = mock_redis.setex.call_args
+    redis_key = call_args[0][0] if call_args[0] else call_args.kwargs.get("name", "")
+    assert redis_key == f"revoked_jti:{jti}", (
+        f"Expected Redis key 'revoked_jti:{jti}', got '{redis_key}'. "
+        "Redis compensating write not called on logout DB failure."
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_decrypt_else_revoke_db_failure_triggers_redis_compensating_write():
+    """
+    N6 (MEDIUM): When the DB revocation write fails during decrypt-else-revoke
+    (token_refresh path), a Redis compensating marker must be written to close
+    the TOCTOU window: SETEX revoked_jti:{jti} must be called.
+    """
+    jti = str(uuid.uuid4())
+    exp = int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())
+    claims = {"sub": _SUBJECT, "jti": jti, "exp": exp}
+
+    # Row with a plaintext (unencrypted) refresh token — triggers decrypt-else-revoke
+    plaintext_rt = "not_encrypted_refresh_token"
+    db_row = _make_db_row(kc_refresh_token=plaintext_rt)
+
+    # First execute returns the row (SELECT); second execute raises (revoke UPDATE fails)
+    select_result = MagicMock()
+    select_result.fetchone.return_value = db_row
+
+    call_count = 0
+
+    async def _fake_execute(sql_text, params=None):
+        nonlocal call_count
+        call_count += 1
+        if params and "revoked_at" in (params or {}):
+            raise RuntimeError("DB revocation write failed")
+        return select_result
+
+    fake_db = AsyncMock()
+    fake_db.execute = _fake_execute
+    fake_db.commit = AsyncMock()
+    fake_db.__aenter__ = AsyncMock(return_value=fake_db)
+    fake_db.__aexit__ = AsyncMock(return_value=False)
+
+    mock_redis = AsyncMock()
+    mock_redis.setex = AsyncMock()
+
+    mock_pool = MagicMock()
+    mock_pool.client = mock_redis
+
+    with (
+        patch("app.routers.oidc_browser._decode_session_jwt", return_value=claims),
+        patch("app.credential_broker.kms.load_master_secret_standalone",
+              new=AsyncMock(return_value=_MASTER_BYTES)),
+        patch("app.core.database.AsyncSessionLocal", return_value=fake_db),
+        patch("app.core.redis_client.redis_pool", mock_pool),
+    ):
+        from app.routers.oidc_browser import token_refresh
+        from starlette.requests import Request as StarletteRequest
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/oidc/token/refresh",
+            "headers": [(b"authorization", b"Bearer valid_jwt")],
+            "query_string": b"",
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+        request = StarletteRequest(scope)
+        response = await token_refresh(request, mcp_session="valid_jwt")
+
+    # Response must be 401 (session revoked, force re-login)
+    assert response.status_code == 401
+
+    # Redis setex must have been called with the correct key
+    mock_redis.setex.assert_called_once()
+    call_args = mock_redis.setex.call_args
+    redis_key = call_args[0][0] if call_args[0] else call_args.kwargs.get("name", "")
+    assert redis_key == f"revoked_jti:{jti}", (
+        f"Expected Redis key 'revoked_jti:{jti}', got '{redis_key}'. "
+        "Redis compensating write missing from decrypt-else-revoke DB failure path (N6)."
+    )

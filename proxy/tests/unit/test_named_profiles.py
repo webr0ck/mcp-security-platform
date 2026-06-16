@@ -372,7 +372,7 @@ class TestRegisteredToolsProfileMcpBindings:
 
         with (
             patch("app.core.database.AsyncSessionLocal", MagicMock(return_value=mock_db)),
-            patch("app.routers.mcp_server._load_grants_data", return_value=(grants_data, {})),
+            patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=(grants_data, {}))),
             patch("app.routers.mcp_server._lookup_profile_mcp_binding", side_effect=mock_lookup_binding),
             patch("app.routers.mcp_server._TOOLS", []),
         ):
@@ -417,7 +417,7 @@ class TestRegisteredToolsProfileMcpBindings:
 
         with (
             patch("app.core.database.AsyncSessionLocal", MagicMock(return_value=mock_db)),
-            patch("app.routers.mcp_server._load_grants_data", return_value=(grants_data, {})),
+            patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=(grants_data, {}))),
             patch("app.routers.mcp_server._lookup_profile_mcp_binding", side_effect=mock_lookup_binding),
             patch("app.routers.mcp_server._lookup_profile_row", new_callable=AsyncMock, return_value=None),
             patch("app.routers.mcp_server._TOOLS", []),

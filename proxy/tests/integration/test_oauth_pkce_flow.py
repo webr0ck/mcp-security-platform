@@ -41,11 +41,14 @@ import httpx
 
 KC_STACK_RUNNING = os.environ.get("KC_STACK_RUNNING", "").lower() in ("1", "true", "yes")
 PROXY_BASE_URL = os.environ.get("PROXY_BASE_URL", "http://localhost:8000").rstrip("/")
-KC_URL = os.environ.get("KC_URL", "http://localhost:8082")
+KC_URL = os.environ.get("KC_URL", "http://203.0.113.10:8082")
 KC_REALM = os.environ.get("KC_REALM", "mcp")
-KC_TEST_USER = os.environ.get("KC_TEST_USER", "testuser")
-KC_TEST_PASSWORD = os.environ.get("KC_TEST_PASSWORD", "testpass")
-KC_CLIENT_ID = "claude-code"
+KC_TEST_USER = os.environ.get("KC_TEST_USER", "alice")
+KC_TEST_PASSWORD = os.environ.get("KC_TEST_PASSWORD", "")  # set via KC_TEST_PASSWORD env var
+# lab-test is the ROPC client (directAccessGrantsEnabled=true); claude-code is PKCE-only (public)
+KC_ROPC_CLIENT = "lab-test"
+KC_ROPC_SECRET = os.environ.get("KC_LAB_TEST_SECRET", "-lab-test-secret")
+KC_CLIENT_ID = "claude-code"  # used in discovery chain tests only
 
 
 def skip_unless_kc(fn):
@@ -71,20 +74,34 @@ def _token_endpoint() -> str:
     return f"{KC_URL}/realms/{KC_REALM}/protocol/openid-connect/token"
 
 
-def _ropc_token(scope: str = "openid profile email roles") -> dict:
-    """Fetch a token via ROPC — automation stand-in for the browser login step."""
+def _ropc_token(scope: str = "openid profile email roles", username: str | None = None, password: str | None = None) -> dict:
+    """Fetch a token via ROPC using lab-test client (automation stand-in for browser login).
+
+    Uses lab-test client (directAccessGrantsEnabled=true) — NOT claude-code (PKCE-only).
+    KC_URL must match OIDC_ISSUER_URL so that iss claim passes proxy validation.
+    """
     resp = httpx.post(
         _token_endpoint(),
         data={
             "grant_type": "password",
-            "client_id": KC_CLIENT_ID,
-            "username": KC_TEST_USER,
-            "password": KC_TEST_PASSWORD,
+            "client_id": KC_ROPC_CLIENT,
+            "client_secret": KC_ROPC_SECRET,
+            "username": username or KC_TEST_USER,
+            "password": password or KC_TEST_PASSWORD,
             "scope": scope,
         },
     )
     assert resp.status_code == 200, f"ROPC failed: {resp.text}"
     return resp.json()
+
+
+def _token_claims(token_str: str) -> dict:
+    """Decode JWT payload without signature verification (test utility only)."""
+    import base64 as _b64
+    import json as _json
+    payload_b64 = token_str.split(".")[1]
+    padding = 4 - len(payload_b64) % 4
+    return _json.loads(_b64.urlsafe_b64decode(payload_b64 + "=" * padding))
 
 
 # ---------------------------------------------------------------------------
@@ -165,13 +182,29 @@ class TestTokenAcquisition:
     @skip_unless_kc
     def test_ropc_token_includes_realm_roles(self):
         tokens = _ropc_token(scope="openid roles")
-        import base64, json as _json
-        # Decode JWT body without verifying sig (we only care about claim presence)
-        payload_b64 = tokens["access_token"].split(".")[1]
-        padding = 4 - len(payload_b64) % 4
-        payload = _json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * padding))
+        payload = _token_claims(tokens["access_token"])
         # Keycloak puts realm roles under realm_access.roles
         assert "realm_access" in payload or "roles" in payload
+
+    @skip_unless_kc
+    def test_ropc_token_audience_includes_mcp_proxy(self):
+        """lab-test client must have audience-mcp-proxy mapper wired."""
+        tokens = _ropc_token()
+        payload = _token_claims(tokens["access_token"])
+        aud = payload.get("aud", "")
+        aud_list = [aud] if isinstance(aud, str) else aud
+        assert "mcp-proxy" in aud_list, f"aud does not include mcp-proxy: {aud}"
+
+    @skip_unless_kc
+    def test_ropc_token_issuer_matches_oidc_config(self):
+        """iss in token must match OIDC_ISSUER_URL so proxy validation passes."""
+        tokens = _ropc_token()
+        payload = _token_claims(tokens["access_token"])
+        expected_iss = f"{KC_URL}/realms/{KC_REALM}"
+        assert payload.get("iss") == expected_iss, (
+            f"Issuer mismatch: token has '{payload.get('iss')}', expected '{expected_iss}'. "
+            f"Ensure KC_URL matches OIDC_ISSUER_URL and Keycloak frontendUrl is set."
+        )
 
     @skip_unless_kc
     def test_pkce_verifier_challenge_pair_valid(self):
@@ -222,18 +255,64 @@ class TestAuthenticatedMcpAccess:
         )
         assert r.status_code == 401
 
+    @skip_unless_kc
+    def test_alice_sees_meta_tools_and_registry(self):
+        """Admin alice must see all 5 meta-tools plus at least some registry tools."""
+        tokens = _ropc_token()
+        r = httpx.post(
+            f"{PROXY_BASE_URL}/mcp",
+            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+            json={"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+        )
+        assert r.status_code == 200
+        tools = r.json().get("result", {}).get("tools", [])
+        names = {t["name"] for t in tools}
+        meta_tools = {"platform_info", "security_pulse_summary", "list_registered_tools",
+                      "enrollment_status", "invoke_tool"}
+        assert meta_tools.issubset(names), f"Missing meta-tools: {meta_tools - names}"
+        assert len(tools) >= 15, f"Expected ≥15 tools for alice admin, got {len(tools)}"
+
+    @skip_unless_kc
+    def test_refresh_token_flow(self):
+        """ROPC should return a refresh_token; using it must yield a fresh access_token."""
+        tokens = _ropc_token(scope="openid roles offline_access")
+        refresh_token = tokens.get("refresh_token")
+        assert refresh_token, "No refresh_token in ROPC response (add offline_access scope)"
+
+        r = httpx.post(
+            _token_endpoint(),
+            data={
+                "grant_type": "refresh_token",
+                "client_id": KC_ROPC_CLIENT,
+                "client_secret": KC_ROPC_SECRET,
+                "refresh_token": refresh_token,
+            },
+        )
+        assert r.status_code == 200, f"Token refresh failed: {r.text}"
+        refreshed = r.json()
+        assert "access_token" in refreshed
+        assert refreshed["access_token"] != tokens["access_token"], "Refresh should yield new token"
+
 
 # ---------------------------------------------------------------------------
-# How to run with Keycloak live:
+# How to run with Keycloak live (full automated OAuth test — no browser):
 #
 #   KC_STACK_RUNNING=1 \
 #   PROXY_BASE_URL=http://localhost:8000 \
-#   KC_URL=http://localhost:8082 \
-#   KC_TEST_USER=<user> KC_TEST_PASSWORD=<pass> \
+#   KC_URL=http://203.0.113.10:8082 \
+#   KC_TEST_USER=alice \
+#   KC_TEST_PASSWORD=<DEX_ALICE_PASSWORD from .env> \
 #   python -m pytest proxy/tests/integration/test_oauth_pkce_flow.py -v
 #
-# Create the test user in Keycloak admin console:
-#   Realm: mcp → Users → Add user → testuser
-#   Set password (non-temporary) → Credentials tab
-#   Ensure "claude-code" client has "Direct Access Grants" enabled
+# KC_URL must be the same address used in OIDC_ISSUER_URL (.env) so that the
+# iss claim in ROPC tokens matches what the proxy validates against.
+#
+# Shortcut via Makefile:
+#   make test-oauth     (sets the right env vars from .env automatically)
+#
+# How ROPC automation works:
+#   - lab-test client (directAccessGrantsEnabled=true) issues tokens directly.
+#   - This replaces the browser PKCE popup for CI/automated tests.
+#   - The claude-code public client (PKCE-only) is still used in production flows.
+#   - NEVER add directAccessGrantsEnabled to claude-code or mcp-proxy clients.
 # ---------------------------------------------------------------------------

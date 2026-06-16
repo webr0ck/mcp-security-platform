@@ -160,7 +160,7 @@ async def test_entitled_server_a_only_sees_a_tools():
 
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", side_effect=fake_check), \
-         patch("app.routers.mcp_server._load_grants_data", return_value=({}, {})), \
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
          patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
@@ -205,7 +205,7 @@ async def test_profile_disabled_mcp_hidden():
 
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", side_effect=fake_check), \
-         patch("app.routers.mcp_server._load_grants_data", return_value=({}, {})), \
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
          patch("app.routers.mcp_server._lookup_profile_row", side_effect=fake_profile_lookup):
 
         result = await _registered_tools_for_client(
@@ -239,7 +239,7 @@ async def test_admin_filtered_same_as_regular_user():
 
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", side_effect=fake_check), \
-         patch("app.routers.mcp_server._load_grants_data", return_value=({}, {})), \
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
          patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
@@ -270,9 +270,9 @@ async def test_null_server_id_tool_grants_visible():
 
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", new=AsyncMock()) as mock_ent, \
-         patch("app.routers.mcp_server._load_grants_data", return_value=(
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=(
              {"alice": {"allowed_tools": ["tool-unlinked"], "allowed_tags": []}}, {}
-         )), \
+         ))), \
          patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
@@ -302,7 +302,7 @@ async def test_null_server_id_tool_no_grant_invisible():
 
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", new=AsyncMock()), \
-         patch("app.routers.mcp_server._load_grants_data", return_value=({}, {})), \
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
          patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
@@ -336,7 +336,7 @@ async def test_discovery_equals_invoke_set():
 
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", side_effect=fake_check), \
-         patch("app.routers.mcp_server._load_grants_data", return_value=({}, {})), \
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
          patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
@@ -349,3 +349,143 @@ async def test_discovery_equals_invoke_set():
     discoverable = {t["name"] for t in result}
     assert "tool-alpha" in discoverable, "invokable tool must be discoverable"
     assert "tool-gamma" not in discoverable, "non-invokable tool must not be discoverable"
+
+
+# ---------------------------------------------------------------------------
+# N4 tests: _load_grants_data DB-backed implementation
+# ---------------------------------------------------------------------------
+
+class _FakeGrantsRow:
+    """Minimal mapping-like fake row for client_grants SELECT results."""
+
+    def __init__(self, allowed_tools, allowed_tags, max_risk_level) -> None:
+        self._data = {
+            "allowed_tools": allowed_tools,
+            "allowed_tags": allowed_tags,
+            "max_risk_level": max_risk_level,
+        }
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+
+class _FakeSingleRowMappings:
+    def __init__(self, row) -> None:
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeSingleRowResult:
+    def __init__(self, row) -> None:
+        self._row = row
+
+    def mappings(self):
+        return _FakeSingleRowMappings(self._row)
+
+
+class _FakeSingleRowSession:
+    """Async context-manager session that returns a single pre-configured row."""
+
+    def __init__(self, row) -> None:
+        self._row = row
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        pass
+
+    async def execute(self, *_a, **_kw):
+        return _FakeSingleRowResult(self._row)
+
+
+@pytest.mark.asyncio
+async def test_load_grants_data_db_hit_returns_correct_shape_and_writes_cache():
+    """
+    N4: _load_grants_data queries DB and returns the correct dict shape.
+    Also verifies that a write-through to Redis is attempted on DB success.
+    """
+    from app.routers.mcp_server import _load_grants_data
+
+    db_row = _FakeGrantsRow(
+        allowed_tools=["tool-alpha", "tool-beta"],
+        allowed_tags=["lab", "testing"],
+        max_risk_level="medium",
+    )
+
+    mock_redis = AsyncMock()
+    mock_redis.setex = AsyncMock()
+
+    with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSingleRowSession(db_row)), \
+         patch("app.routers.mcp_server._load_tools_meta", return_value={"tool-alpha": {"tags": ["lab"]}}), \
+         patch("app.core.redis_client.redis_pool") as mock_pool:
+
+        mock_pool.client = mock_redis
+
+        grants, tools_meta = await _load_grants_data("alice")
+
+    # Assert correct dict shape returned.
+    assert "alice" in grants, "grants dict must be keyed by client_id"
+    client_grant = grants["alice"]
+    assert client_grant["allowed_tools"] == ["tool-alpha", "tool-beta"]
+    assert client_grant["allowed_tags"] == ["lab", "testing"]
+    assert client_grant["max_risk_level"] == "medium"
+
+    # Assert tools_meta is passed through from _load_tools_meta.
+    assert tools_meta == {"tool-alpha": {"tags": ["lab"]}}
+
+    # Assert Redis write-through was called with correct key and TTL.
+    mock_redis.setex.assert_awaited_once()
+    call_args = mock_redis.setex.call_args
+    assert call_args[0][0] == "grants_snapshot:alice", "cache key must be grants_snapshot:{client_id}"
+    assert call_args[0][1] == 60, "TTL must be 60 seconds"
+
+
+@pytest.mark.asyncio
+async def test_load_grants_data_db_error_falls_back_to_redis_cache():
+    """
+    N4: When DB raises an exception, _load_grants_data returns the cached snapshot
+    from Redis without raising, and does not return empty grants.
+    """
+    from app.routers.mcp_server import _load_grants_data
+
+    cached_grants = {
+        "bob": {
+            "allowed_tools": ["tool-gamma"],
+            "allowed_tags": ["testing"],
+            "max_risk_level": "low",
+        }
+    }
+
+    mock_redis = AsyncMock()
+    mock_redis.get = AsyncMock(return_value=json.dumps(cached_grants))
+
+    class _FailingSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def execute(self, *_a, **_kw):
+            raise RuntimeError("DB connection refused")
+
+    with patch("app.core.database.AsyncSessionLocal", return_value=_FailingSession()), \
+         patch("app.routers.mcp_server._load_tools_meta", return_value={}), \
+         patch("app.core.redis_client.redis_pool") as mock_pool:
+
+        mock_pool.client = mock_redis
+
+        grants, tools_meta = await _load_grants_data("bob")
+
+    # Assert cached value returned, not empty dict.
+    assert "bob" in grants, "cached grants must be returned on DB failure"
+    assert grants["bob"]["allowed_tools"] == ["tool-gamma"]
+
+    # Assert Redis get was called with correct cache key.
+    mock_redis.get.assert_awaited_once_with("grants_snapshot:bob")

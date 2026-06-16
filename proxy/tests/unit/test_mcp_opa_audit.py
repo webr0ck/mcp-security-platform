@@ -292,6 +292,63 @@ async def test_dispatch_tools_call_opa_deny_emits_audit():
 
 
 @pytest.mark.unit
+async def test_dispatch_meta_tool_audit_failure_fails_closed():
+    """INV-001 (SR-2): if the meta-tool audit emission fails, _dispatch must
+    propagate AuditEmissionError (→ AuditMiddleware converts to HTTP 500),
+    NEVER silently return a JSON-RPC result/deny with no durable audit record.
+    The underlying _emit_audit_event is forced to fail here.
+    """
+    from app.services.invocation import AuditEmissionError
+
+    request = _make_request(client_id="bob", roles=["analyst"])
+    mock_eval = AsyncMock(return_value={"allow": False, "reasons": ["x"]})
+    failing_emit = AsyncMock(side_effect=AuditEmissionError("audit store down"))
+
+    body = {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {"name": "platform_info", "arguments": {}},
+    }
+
+    with patch("app.services.policy.evaluate_policy", mock_eval), \
+         patch("app.services.invocation._emit_audit_event", failing_emit):
+        from app.routers.mcp_server import _dispatch
+        with pytest.raises(AuditEmissionError):
+            await _dispatch(body, request)
+
+
+@pytest.mark.unit
+async def test_dispatch_meta_tool_allow_audit_failure_fails_closed():
+    """INV-001 (SR-2): the meta-tool ALLOW branch must ALSO fail-closed. The
+    audit emit happens after the (read-only) handler runs and sits inside the
+    handler try/except — a swallowed AuditEmissionError there would return a
+    JSON-RPC 200 error with no durable audit record. The error must propagate
+    (→ AuditMiddleware 500) instead.
+    """
+    from app.services.invocation import AuditEmissionError
+
+    request = _make_request(client_id="alice", roles=["analyst"])
+    mock_eval = AsyncMock(return_value={"allow": True, "reasons": []})
+    failing_emit = AsyncMock(side_effect=AuditEmissionError("audit store down"))
+    fake_handler = MagicMock(return_value={"type": "text", "text": "{}"})
+
+    body = {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {"name": "platform_info", "arguments": {}},
+    }
+
+    with patch("app.services.policy.evaluate_policy", mock_eval), \
+         patch("app.services.invocation._emit_audit_event", failing_emit), \
+         patch("app.routers.mcp_server._TOOL_HANDLERS", {"platform_info": fake_handler}):
+        from app.routers.mcp_server import _dispatch
+        with pytest.raises(AuditEmissionError):
+            await _dispatch(body, request)
+
+
+@pytest.mark.unit
 async def test_dispatch_tools_call_invoke_tool_skips_opa():
     """
     When _dispatch handles tools/call with name='invoke_tool':

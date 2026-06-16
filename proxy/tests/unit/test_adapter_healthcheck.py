@@ -193,7 +193,7 @@ class TestApprovalFlowHealthcheck:
                             if "upstream_url, owner_sub, adapter_name" in query_str:
                                 # SELECT upstream_url, owner_sub, adapter_name
                                 result = MagicMock()
-                                result.fetchone.return_value = ("https://gitea.example.com", "owner123", "gitea")
+                                result.fetchone.return_value = ("https://gitea.example.com", "owner123", "gitea", None)
                                 return result
                             elif "UPDATE" in query_str:
                                 result = MagicMock()
@@ -250,7 +250,7 @@ class TestApprovalFlowHealthcheck:
                             if "upstream_url, owner_sub, adapter_name" in query_str:
                                 # SELECT upstream_url, owner_sub, adapter_name
                                 result = MagicMock()
-                                result.fetchone.return_value = ("https://gitea.example.com", "owner123", "gitea")
+                                result.fetchone.return_value = ("https://gitea.example.com", "owner123", "gitea", None)
                                 return result
                             return MagicMock()
 
@@ -297,7 +297,7 @@ class TestApprovalFlowHealthcheck:
                                 # SELECT upstream_url, owner_sub, adapter_name
                                 # Return None for adapter_name to simulate no adapter
                                 result = MagicMock()
-                                result.fetchone.return_value = ("https://example.com", "owner123", None)
+                                result.fetchone.return_value = ("https://example.com", "owner123", None, None)
                                 return result
                             elif "UPDATE" in query_str:
                                 result = MagicMock()
