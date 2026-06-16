@@ -104,6 +104,10 @@ help:
 
 # ─── Service lifecycle ────────────────────────────────────────────────────────
 
+# ⚠️  'make up' starts ONLY the base stack (docker-compose.yml) — no IdP, no lab
+#     MCP servers. It is NOT a production target and NOT the lab.
+#       • Production: docker compose -f compose.{engine,standard,poc}.yml up -d  (see INSTALL.md)
+#       • Lab:        make lab-up                                                (see LAB.md)
 up: dep-audit sign-policy-bundle
 	@echo "Starting MCP Security Platform..."
 	@install -d -m 0700 "$$HOME/.mcp" && umask 077 && printf '%s' "$${STEP_CA_PROVISIONER_PASSWORD:-dev-placeholder}" > "$$HOME/.mcp/step-ca-password"

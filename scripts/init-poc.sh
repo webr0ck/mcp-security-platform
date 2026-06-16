@@ -6,34 +6,20 @@
 set -euo pipefail
 
 ENV_FILE="${ENV_FILE:-.env}"
+_INIT_TAG="init-poc"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "[init-poc] ERROR: $ENV_FILE not found." >&2
   exit 1
 fi
 
-# Source standard-tier secrets first
-bash "$(dirname "$0")/init-standard.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-_gen20() {
-  local p
-  p=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*_+=' </dev/urandom 2>/dev/null | head -c20 || true)
-  if [[ ${#p} -lt 20 ]]; then
-    echo "[init-poc] ERROR: /dev/urandom unavailable — cannot generate secure passwords" >&2
-    exit 1
-  fi
-  echo "$p"
-}
+# Generate standard-tier secrets first (ADMIN_PASSWORD, Keycloak admin + client secrets).
+bash "${SCRIPT_DIR}/init-standard.sh"
 
-_ensure_var() {
-  local var="$1" val="$2"
-  if grep -qE "^${var}=.+" "$ENV_FILE" 2>/dev/null; then
-    echo "[init-poc] $var already set — skipping."
-  else
-    echo "${var}=${val}" >> "$ENV_FILE"
-    echo "[init-poc] $var generated."
-  fi
-}
+# shellcheck source=scripts/_init-lib.sh
+source "${SCRIPT_DIR}/_init-lib.sh"
 
 _ensure_var "WAZUH_INDEXER_PASSWORD" "$(_gen20)"
 _ensure_var "POC_ALICE_PASSWORD"     "$(_gen20)"

@@ -12,20 +12,20 @@
 set -euo pipefail
 
 ENV_FILE="${ENV_FILE:-.env}"
+_INIT_TAG="init-engine"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "[init-engine] ERROR: $ENV_FILE not found. Copy deployments/engine/.env.example to .env first." >&2
   exit 1
 fi
 
+# shellcheck source=scripts/_init-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_init-lib.sh"
+
 if grep -qE "^ADMIN_PASSWORD=.+" "$ENV_FILE" 2>/dev/null; then
   echo "[init-engine] ADMIN_PASSWORD already set in $ENV_FILE — skipping generation."
 else
-  ADMIN_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*_+=' </dev/urandom 2>/dev/null | head -c20 || true)
-  if [[ ${#ADMIN_PASSWORD} -lt 20 ]]; then
-    echo "[init-engine] ERROR: Failed to generate secure password from /dev/urandom. Is /dev/urandom available?" >&2
-    exit 1
-  fi
+  ADMIN_PASSWORD="$(_gen20)"
   echo "ADMIN_PASSWORD=${ADMIN_PASSWORD}" >> "$ENV_FILE"
   echo ""
   echo "╔══════════════════════════════════════════════════════════════╗"
