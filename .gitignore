@@ -29,3 +29,6 @@ out/
 lab/logs/
 # lab secrets (step-ca CA password etc.) — never commit
 lab/step-ca-password
+
+# Large stress-test artifact (regeneratable) — keep out of git
+lab/stress/results.json
