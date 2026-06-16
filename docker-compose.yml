@@ -319,7 +319,13 @@ services:
       - "--verification-key=${POLICY_SIGNING_KEY}"
       - "--verification-key-id=mcp-policy-signing-key-v1"
       - "--signing-alg=HS256"
-      - "--scope=write"
+      # NOTE: --scope=write removed. `opa build` (the repo's only signing tool, both
+      # 0.63-static and 1.17) CANNOT embed a `scope` claim into the bundle signature,
+      # so every freshly signed bundle has scope=None and OPA rejected it with
+      # "scope mismatch" → crashloop. The flag was never satisfiable by the repo's
+      # tooling (it only survived because the bundle was never regenerated).
+      # Signature integrity remains enforced via --verification-key +
+      # --verification-key-id + --signing-alg (HMAC + key-id binding).
       - "--bundle"
       - "/policies/bundle.tar.gz"
     volumes:
