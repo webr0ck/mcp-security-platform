@@ -704,10 +704,17 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             logger.info("MCP invoke denied (taint floor) tool=%s client=%s", name, client_id)
             return _err(req_id, -32003, "Access denied: session restricted by trust policy")
         if isinstance(exc, CredentialEnrollmentRequiredError):
+            # Surface the enrollment URL IN THE MESSAGE (not just data): standard
+            # MCP clients render the JSON-RPC error message but often ignore `data`,
+            # so the actionable link must be inline for the user to click it.
             return _err(
                 req_id,
                 -32010,
-                f"OAuth enrollment required for '{exc.service}'",
+                (
+                    f"OAuth enrollment required for '{exc.service}'. Open this URL in your "
+                    f"browser while signed in to the proxy, then retry the tool: "
+                    f"{exc.enrollment_url}"
+                ),
                 data={
                     "service": exc.service,
                     "enrollment_url": exc.enrollment_url,
