@@ -866,6 +866,17 @@ async def _handle_list_registered_tools(args: dict, request: Request) -> dict:
 
 
 
+def _invoke_lookup_name(tool_name: str, method: str, arguments: dict) -> str | None:
+    """The registry row to authorize/dispatch against. For tools/call the
+    effective tool is the sub-tool in arguments.name (so per-tool quarantine/
+    OPA apply); a missing sub-tool name is invalid. For other methods it is the
+    named tool/alias itself."""
+    if method == "tools/call":
+        sub = (arguments or {}).get("name", "")
+        return sub.strip() or None
+    return (tool_name or "").strip() or None
+
+
 async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
     """
     Route a tool invocation through the full security pipeline:
@@ -883,20 +894,24 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
     if not tool_name:
         return {"type": "text", "text": "tool_name is required"}
 
+    lookup_name = _invoke_lookup_name(tool_name, method, arguments)
+    if not lookup_name:
+        return {"type": "text", "text": "tools/call requires arguments.name (the tool to invoke)"}
+
     # Look up tool_record from the DB
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 text("SELECT * FROM tool_registry WHERE name = :name AND status NOT IN ('deprecated', 'quarantined') AND deleted_at IS NULL LIMIT 1"),
-                {"name": tool_name},
+                {"name": lookup_name},
             )
             row = result.mappings().fetchone()
     except Exception as exc:
-        logger.error("DB error looking up tool %s: %s", tool_name, exc)
+        logger.error("DB error looking up tool %s: %s", lookup_name, exc)
         return {"type": "text", "text": "Tool lookup failed (internal error). Check server logs."}
 
     if row is None:
-        return {"type": "text", "text": f"Tool '{tool_name}' not found in registry"}
+        return {"type": "text", "text": f"Tool '{lookup_name}' not found in registry"}
 
     tool_record = dict(row)
 
