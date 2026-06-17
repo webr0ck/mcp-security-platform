@@ -60,6 +60,16 @@ export const oidc = {
   test: () => request<{ ok: boolean; detail: string }>('/api/v1/auth/oidc/test'),
 }
 
+// ── Request limits ────────────────────────────────────────────────────────────
+export const limits = {
+  list: () => request<{ limits: import('@/types').LimitRow[]; count: number }>('/api/v1/admin/limits'),
+  get: (id: string) => request<import('@/types').LimitRow>(`/api/v1/admin/limits/${encodeURIComponent(id)}`),
+  put: (id: string, body: { rate_limit: number | null; anomaly_sensitivity: 'normal' | 'lenient' | 'off' }) =>
+    request(`/api/v1/admin/limits/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  reset: (id: string, target: 'rate' | 'anomaly' | 'both') =>
+    request(`/api/v1/admin/limits/${encodeURIComponent(id)}/reset`, { method: 'POST', body: JSON.stringify({ target }) }),
+}
+
 // ── Policy ────────────────────────────────────────────────────────────────────
 export const policy = {
   eval: (input: Record<string, unknown>) =>

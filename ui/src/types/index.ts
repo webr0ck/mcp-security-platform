@@ -74,3 +74,17 @@ export interface WizardStep {
   title: string
   description: string
 }
+
+export interface LimitRow {
+  client_id: string
+  rate: { count: number; limit: number; is_override: boolean }
+  anomaly: {
+    window_calls?: number
+    score?: number
+    cutoff: number
+    sensitivity: 'normal' | 'lenient' | 'off'
+  }
+  blocked_by?: 'none' | 'rate' | 'anomaly' | 'both'
+  updated_by?: string | null
+  updated_at?: string | null
+}

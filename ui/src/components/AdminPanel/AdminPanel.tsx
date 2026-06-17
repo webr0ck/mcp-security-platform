@@ -4,6 +4,7 @@ import { Badge } from '../common/Badge'
 import { Card } from '../common/Card'
 import { oidc as oidcApi } from '@/services/api'
 import type { OIDCConfig, MCPServer } from '@/types'
+import { LimitsPanel } from './LimitsPanel'
 import './AdminPanel.css'
 
 const MOCK_SERVERS: MCPServer[] = [
@@ -18,7 +19,7 @@ const DEFAULT_OIDC: OIDCConfig = {
   audience: '', role_claim_path: 'roles', redirect_uri: '',
 }
 
-type Tab = 'oidc' | 'servers' | 'credentials'
+type Tab = 'oidc' | 'servers' | 'credentials' | 'limits'
 
 export function AdminPanel() {
   const [tab, setTab] = useState<Tab>('oidc')
@@ -52,13 +53,13 @@ export function AdminPanel() {
       </header>
 
       <div className="admin__tabs">
-        {(['oidc','servers','credentials'] as Tab[]).map(t => (
+        {(['oidc','servers','credentials','limits'] as Tab[]).map(t => (
           <button
             key={t}
             className={`admin__tab ${tab === t ? 'admin__tab--active' : ''}`}
             onClick={() => setTab(t)}
           >
-            {t === 'oidc' ? 'Identity (OIDC)' : t === 'servers' ? 'MCP Servers' : 'Credentials'}
+            {t === 'oidc' ? 'Identity (OIDC)' : t === 'servers' ? 'MCP Servers' : t === 'credentials' ? 'Credentials' : 'Request Limits'}
           </button>
         ))}
       </div>
@@ -68,6 +69,7 @@ export function AdminPanel() {
       )}
       {tab === 'servers' && <ServerRegistry servers={MOCK_SERVERS} />}
       {tab === 'credentials' && <CredentialsPanel />}
+      {tab === 'limits' && <LimitsPanel />}
     </div>
   )
 }
