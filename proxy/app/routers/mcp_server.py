@@ -1267,7 +1267,12 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
     # theoretical case where client_id is None so no request can slip through unlimited.
     client_id = getattr(request.state, "client_id", None)
     rl_key_id = client_id or (request.client.host if request.client else "unknown")
-    allowed = await _check_rate_limit(rl_key_id)
+    from app.core.config import get_settings, get_rate_limit_for_roles
+    from app.services.limits import get_rate_limit
+    _roles = getattr(request.state, "client_roles", [])
+    _role_default = get_rate_limit_for_roles(_roles, get_settings())
+    _limit = await get_rate_limit(rl_key_id, role_default=_role_default)
+    allowed = await _check_rate_limit(rl_key_id, limit=_limit)
     if not allowed:
         return JSONResponse(
             {"error": {"code": "RATE_LIMITED", "message": "Too many requests"}},

@@ -465,6 +465,12 @@ async def invoke_tool(
     # -------------------------------------------------------------------------
     # Step 3: OPA policy evaluation (INV-003, INV-004)
     # -------------------------------------------------------------------------
+    try:
+        from app.services.limits import get_anomaly_cutoff
+        anomaly_cutoff = await get_anomaly_cutoff(client_id)
+    except Exception as exc:
+        logger.error("anomaly_cutoff lookup failed for %s, defaulting 0.85: %s", client_id, exc)
+        anomaly_cutoff = 0.85
     opa_input = {
         "client_id": client_id,
         "client_roles": client_roles,
@@ -481,6 +487,7 @@ async def invoke_tool(
         "owner_max_risk_level": owner_max_risk_level,
         "params": params,
         "anomaly_score": anomaly_score,
+        "anomaly_cutoff": anomaly_cutoff,
         "is_testing": is_testing,
         "profile": profile_data,
         "tool_function_name": function_name,
