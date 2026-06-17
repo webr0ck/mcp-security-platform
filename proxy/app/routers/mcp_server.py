@@ -66,6 +66,17 @@ class _ProfileLookupUnavailable(Exception):
 
 _MAX_BATCH_SIZE = 20  # MCP spec doesn't define a limit; 20 is generous for real clients
 
+# tools/list catalogue query for standard MCP clients. Rows flagged
+# metadata.hidden=true (legacy server-alias rows) stay callable via the
+# invoke_tool meta-tool but are excluded from tools/list discovery.
+REGISTERED_TOOLS_QUERY = (
+    "SELECT name, description, schema, tags, server_id "
+    "FROM tool_registry "
+    "WHERE status = 'active' AND deleted_at IS NULL "
+    "AND COALESCE(metadata->>'hidden', 'false') <> 'true' "
+    "ORDER BY name"
+)
+
 _INVOKE_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("MCP_INVOKE_CONCURRENCY", "10")))  # max concurrent invoke_tool calls
 
 # MCP-006: when the rate-limit backend (Redis) is unavailable, fail CLOSED by
@@ -549,11 +560,7 @@ async def _registered_tools_for_client(
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                text(
-                    "SELECT name, description, schema, tags, server_id "
-                    "FROM tool_registry "
-                    "WHERE status = 'active' AND deleted_at IS NULL ORDER BY name"
-                )
+                text(REGISTERED_TOOLS_QUERY)
             )
             rows = result.mappings().fetchall()
     except Exception as exc:
