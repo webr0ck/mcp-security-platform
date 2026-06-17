@@ -625,6 +625,17 @@ async def _registered_tools_for_client(
     return tools
 
 
+def _absolute_enrollment_url(request: Request, exc: Any) -> str:
+    """Absolute ``/auth/enroll/<service>`` URL pointing at the host the user reached
+    the gateway on (so the link is clickable and matches the OAuth callback host).
+    Falls back to the dispatcher-provided value if host derivation fails."""
+    try:
+        from app.core.public_url import derive_public_base_url
+        return derive_public_base_url(request).rstrip("/") + f"/auth/enroll/{exc.service}"
+    except Exception:
+        return getattr(exc, "enrollment_url", "") or f"/auth/enroll/{getattr(exc, 'service', '')}"
+
+
 async def _route_to_registry(name: str, args: dict, request: Request, req_id: Any) -> dict:
     """Route a direct tools/call for a registry tool through the full security pipeline."""
     from uuid import uuid4
@@ -704,23 +715,26 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             logger.info("MCP invoke denied (taint floor) tool=%s client=%s", name, client_id)
             return _err(req_id, -32003, "Access denied: session restricted by trust policy")
         if isinstance(exc, CredentialEnrollmentRequiredError):
-            # Surface the enrollment URL IN THE MESSAGE (not just data): standard
-            # MCP clients render the JSON-RPC error message but often ignore `data`,
-            # so the actionable link must be inline for the user to click it.
+            # Surface an ABSOLUTE enrollment URL IN THE MESSAGE (not just data):
+            # standard MCP clients render the JSON-RPC error message but often ignore
+            # `data`, so the actionable link must be inline. The host is derived from
+            # the request so the link points at whatever address the user reached the
+            # gateway on (and matches the OAuth callback host).
+            enroll_url = _absolute_enrollment_url(request, exc)
             return _err(
                 req_id,
                 -32010,
                 (
                     f"OAuth enrollment required for '{exc.service}'. Open this URL in your "
                     f"browser while signed in to the proxy, then retry the tool: "
-                    f"{exc.enrollment_url}"
+                    f"{enroll_url}"
                 ),
                 data={
                     "service": exc.service,
-                    "enrollment_url": exc.enrollment_url,
+                    "enrollment_url": enroll_url,
                     "action": "open_browser",
                     "instructions": (
-                        f"Open {exc.enrollment_url} in your browser while authenticated "
+                        f"Open {enroll_url} in your browser while authenticated "
                         "to the proxy. After completing consent, retry this tool call."
                     ),
                 },
@@ -992,12 +1006,13 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
         if isinstance(exc, CredentialEnrollmentRequiredError):
             logger.info("invoke_tool needs enrollment tool=%s client=%s service=%s",
                         tool_name, client_id, exc.service)
+            enroll_url = _absolute_enrollment_url(request, exc)
             return {"type": "text", "text": (
                 f"\U0001F510 Login required for '{exc.service}'.\n\n"
                 f"This tool acts on your behalf, but your {exc.service} account "
                 f"isn't connected yet.\n\n"
                 f"\U0001F449 Open this link in your browser (while signed in to the "
-                f"proxy) to log in:\n    {exc.enrollment_url}\n\n"
+                f"proxy) to log in:\n    {enroll_url}\n\n"
                 f"After you finish sign-in/consent, retry this tool call."
             )}
         from app.credential_broker.dispatcher import ServiceCredentialMissingError
