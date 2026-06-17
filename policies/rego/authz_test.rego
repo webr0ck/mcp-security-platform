@@ -2,6 +2,7 @@ package mcp.authz_test
 
 import rego.v1
 import data.mcp.authz.allow
+import data.mcp.authz.anomaly_threshold_exceeded
 
 # =============================================================================
 # Phase 2.1 — server_owner / manager role: OPA invoke rules
@@ -316,4 +317,24 @@ test_new_pattern_persona_override_denied if {
 		"anomaly_score": 0.0,
 		"is_testing": false,
 	}
+}
+
+# =============================================================================
+# Anomaly cutoff — per-client threshold via input.anomaly_cutoff (default 0.85)
+# =============================================================================
+
+test_anomaly_default_cutoff_blocks_over_085 if {
+	anomaly_threshold_exceeded with input as {"anomaly_score": 0.90}
+}
+
+test_anomaly_default_cutoff_allows_under_085 if {
+	not anomaly_threshold_exceeded with input as {"anomaly_score": 0.80}
+}
+
+test_anomaly_lenient_cutoff if {
+	not anomaly_threshold_exceeded with input as {"anomaly_score": 0.90, "anomaly_cutoff": 0.95}
+}
+
+test_anomaly_off_never_blocks if {
+	not anomaly_threshold_exceeded with input as {"anomaly_score": 0.95, "anomaly_cutoff": 2.0}
 }

@@ -232,8 +232,12 @@ risk_level_within_threshold if {
 # Missing max_risk_level now falls through to deny (INV-003, FIND-005 fix).
 # Every grant object must declare max_risk_level explicitly.
 
+default anomaly_cutoff := 0.85
+
+anomaly_cutoff := input.anomaly_cutoff if is_number(input.anomaly_cutoff)
+
 anomaly_threshold_exceeded if {
-    input.anomaly_score > 0.85
+    input.anomaly_score > anomaly_cutoff
 }
 
 tool_allowed_for_client(client_id, tool_name) if {
