@@ -5,6 +5,7 @@
         security-check health smoke-test \
         dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
         lab-init lab-init-force labup lab-up lab-down lab-down-volumes \
+        lab-migrate-per-tool-dry lab-migrate-per-tool-activate lab-migrate-per-tool lab-migrate-validate \
         clean
 
 # =============================================================================
@@ -219,6 +220,30 @@ lab-down:
 
 lab-down-volumes:
 	$(COMPOSE_LAB) down --remove-orphans --volumes
+
+# ─── Per-tool registry migration (lab) ────────────────────────────────────────
+# Expands per-server alias rows into one registry row per discovered tool.
+# Idempotent + additive: routine syncs quarantine new tool names for review;
+# --activate-discovered activates EVERY tool found this run (bootstrap only).
+# See docs/runbook.md → "Per-tool registry expansion (lab)".
+
+lab-migrate-per-tool-dry: ## Preview per-tool expansion (no writes)
+	python3 scripts/discover_and_register_tools.py --dry-run
+
+lab-migrate-per-tool-activate: ## Expand + ACTIVATE all discovered tools (run after reviewing --dry-run)
+	LAB_MIGRATION_CONFIRM=1 python3 scripts/discover_and_register_tools.py --activate-discovered
+	@$(MAKE) lab-migrate-validate
+
+lab-migrate-per-tool: ## Routine sync: NEW tools land QUARANTINED for review
+	LAB_MIGRATION_CONFIRM=1 python3 scripts/discover_and_register_tools.py
+	@$(MAKE) lab-migrate-validate
+
+lab-migrate-validate: ## Fail if any active per-tool row lacks server_id (entitlement would no-op)
+	@docker exec -e DOCKER_HOST="$$(podman machine inspect --format 'unix://{{.ConnectionInfo.PodmanSocket.Path}}')" -i mcp-db \
+	  psql -U mcp_app -d mcp_security -tAc \
+	  "SELECT count(*) FROM tool_registry WHERE status='active' AND deleted_at IS NULL AND COALESCE(metadata->>'kind','')='per-tool' AND server_id IS NULL" \
+	  | grep -qx 0 || (echo "FAIL: active per-tool rows with NULL server_id"; exit 1)
+	@echo "validate OK: every active per-tool row has server_id"
 
 build: dep-audit
 	$(COMPOSE) build --no-cache proxy compliance-checker
