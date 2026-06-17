@@ -706,6 +706,57 @@ class TestPerToolDispatch:
                   "WHERE name='slow_tool' AND metadata->>'kind'='per-tool';")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Admin per-client rate-limit edit + unblock (Task 7)
+#
+# Proves an admin can set a per-client rate-limit override via the admin_limits
+# router, see the override + blocked_by status in the detail view, find it in the
+# list, and reset/unblock both the rate and anomaly Redis counters. alice carries
+# the `admin` role in the lab (confirmed: GET /api/v1/admin/limits → 200, not 403).
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestAdminLimits:
+    def test_admin_set_rate_limit_then_unblock(self, alice_token):
+        h = _auth_headers(alice_token)
+        cid = "lab-test"
+        # set a tiny rate limit override
+        r = httpx.put(f"{PROXY_URL}/api/v1/admin/limits/{cid}", headers=h, timeout=15,
+                      json={"rate_limit": 5, "anomaly_sensitivity": "normal"})
+        assert r.status_code in (200, 201), r.text
+        # detail shows the override + blocked_by present
+        d = httpx.get(f"{PROXY_URL}/api/v1/admin/limits/{cid}", headers=h, timeout=15)
+        assert d.status_code == 200, d.text
+        body = d.json()
+        assert body["rate"]["limit"] == 5 and body["rate"]["is_override"] is True
+        assert "blocked_by" in body
+        # list includes it
+        lst = httpx.get(f"{PROXY_URL}/api/v1/admin/limits", headers=h, timeout=15).json()
+        assert any(row["client_id"] == cid for row in lst["limits"])
+        # reset / unblock
+        rr = httpx.post(f"{PROXY_URL}/api/v1/admin/limits/{cid}/reset", headers=h, timeout=15,
+                        json={"target": "both"})
+        assert rr.status_code == 200, rr.text
+        assert "rate" in rr.json()["cleared"] and "anomaly" in rr.json()["cleared"]
+        # cleanup: clear the override
+        httpx.put(f"{PROXY_URL}/api/v1/admin/limits/{cid}", headers=h, timeout=15,
+                  json={"rate_limit": None, "anomaly_sensitivity": "normal"})
+
+    def test_non_admin_forbidden(self):
+        """carol has no admin role in the lab — admin endpoints must return 403.
+
+        Obtains carol's token directly (not via the session fixture) so a
+        missing/unseeded carol KC password skips this assertion rather than
+        erroring the whole class; the admin-edit happy path above is the
+        load-bearing deliverable."""
+        try:
+            tok = _get_user_token("carol", CAROL_PASSWORD)
+        except AssertionError:
+            pytest.skip("carol KC credentials not provisioned in this lab")
+        r = httpx.get(f"{PROXY_URL}/api/v1/admin/limits",
+                      headers=_auth_headers(tok), timeout=15)
+        assert r.status_code == 403, f"expected 403 for non-admin, got {r.status_code}: {r.text}"
+
+
 if __name__ == "__main__":
     import sys
     subprocess.run([sys.executable, "-m", "pytest", __file__, "-v", "--tb=short"], check=True)
