@@ -598,6 +598,21 @@ def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
 
 
+def get_rate_limit_for_roles(roles: list[str], settings: "Settings") -> int:
+    """Most-permissive per-role rate limit (requests/min). Fallback: most restrictive."""
+    role_map = {
+        "admin": settings.RATE_LIMIT_ADMIN,
+        "platform_admin": settings.RATE_LIMIT_ADMIN,
+        "agent": settings.RATE_LIMIT_AGENT,
+        "auditor": settings.RATE_LIMIT_AUDITOR,
+        "viewer": settings.RATE_LIMIT_READONLY,
+    }
+    if not roles:
+        return settings.RATE_LIMIT_READONLY
+    return max((role_map.get(r, settings.RATE_LIMIT_READONLY) for r in roles),
+               default=settings.RATE_LIMIT_READONLY)
+
+
 def __getattr__(name: str) -> object:
     if name == "settings":
         return get_settings()
