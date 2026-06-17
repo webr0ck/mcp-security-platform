@@ -615,6 +615,90 @@ class TestInvokePathGateChain:
         _assert_invoke_ok(result, "search-kb")
 
 
+def _mcp_session_headers(token: str, timeout: float = 20) -> dict:
+    headers = {**_auth_headers(token), "Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream"}
+    init = httpx.post(f"{PROXY_URL}/mcp", headers=headers, timeout=timeout,
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                         "clientInfo": {"name": "functional-test", "version": "1.0"}}})
+    sid = init.headers.get("mcp-session-id") or init.headers.get("MCP-Session-Id", "")
+    return {**headers, "MCP-Session-Id": sid} if sid else headers
+
+
+def _mcp_tools_list(token: str, timeout: float = 20) -> list[dict]:
+    """tools/list via the /mcp path (the one the hidden filter patches)."""
+    headers = _mcp_session_headers(token, timeout)
+    r = httpx.post(f"{PROXY_URL}/mcp", headers=headers, timeout=timeout,
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+    return (r.json().get("result") or {}).get("tools", [])
+
+
+def _direct_call(token: str, tool_name: str, arguments: dict, timeout: float = 20) -> dict:
+    headers = _mcp_session_headers(token, timeout)
+    r = httpx.post(f"{PROXY_URL}/mcp", headers=headers, timeout=timeout,
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+              "params": {"name": tool_name, "arguments": arguments}})
+    return {"status_code": r.status_code, "body": r.json() if r.text else {}}
+
+
+def _psql(sql: str) -> str:
+    """Run SQL in the lab DB (used to set up the quarantine-bypass test)."""
+    docker_host = subprocess.run(
+        ["podman", "machine", "inspect", "--format",
+         "unix://{{.ConnectionInfo.PodmanSocket.Path}}"],
+        capture_output=True, text=True).stdout.strip()
+    return subprocess.run(
+        ["docker", "exec", "-i", "mcp-db", "psql", "-U", "mcp_app", "-d", "mcp_security",
+         "-tAc", sql],
+        capture_output=True, text=True,
+        env={**os.environ, "DOCKER_HOST": docker_host}).stdout.strip()
+
+
+class TestPerToolDispatch:
+    def test_bare_tool_call_ping_succeeds(self, alice_token):
+        r = _direct_call(alice_token, "ping", {})
+        assert r["status_code"] == 200, r
+        assert "error" not in r["body"], r["body"].get("error")
+        blob = json.dumps(r["body"].get("result", {})).lower()
+        assert "unknown tool" not in blob and "not found in registry" not in blob, blob[:300]
+
+    def test_mcp_tools_list_hides_aliases_shows_real_tools(self, alice_token):
+        names = {t["name"] for t in _mcp_tools_list(alice_token)}
+        assert "ping" in names and "search" in names
+        assert "echo-ping" not in names and "search-kb" not in names
+
+    def test_invoke_tool_by_alias_tools_list_still_works(self, alice_token):
+        r = _invoke_tool(alice_token, "echo-ping", {})  # no method -> tools/list
+        assert r["status_code"] == 200, r
+        assert "not found in registry" not in json.dumps(r.get("body", {})).lower()
+
+    def test_invoke_tool_cannot_bypass_quarantine(self, alice_token):
+        """A quarantined per-tool row must NOT be invokable via invoke_tool tools/call
+        through its (still-callable) alias. Requires the slow_tool per-tool row to exist
+        (post-migration). Calls the invoke_tool platform tool DIRECTLY so method/tool_name/
+        arguments are siblings - the shape _handle_invoke_tool_real actually parses (the
+        _invoke_tool helper would nest them one level too deep)."""
+        changed = _psql("UPDATE tool_registry SET status='quarantined' "
+                        "WHERE name='slow_tool' AND metadata->>'kind'='per-tool' "
+                        "RETURNING name;")
+        assert changed.strip() == "slow_tool", (
+            "precondition failed: no active per-tool 'slow_tool' row to quarantine - "
+            "run the migration (Task 7) before this test")
+        try:
+            r = _direct_call(alice_token, "invoke_tool", {
+                "tool_name": "echo-ping",          # the still-callable (hidden) alias
+                "method": "tools/call",
+                "arguments": {"name": "slow_tool", "arguments": {"delay_ms": 1}},
+            })
+            blob = json.dumps(r.get("body", {})).lower()
+            assert ("quarantin" in blob or "not found in registry" in blob
+                    or "not callable" in blob), f"bypass not blocked: {blob[:300]}"
+        finally:
+            _psql("UPDATE tool_registry SET status='active' "
+                  "WHERE name='slow_tool' AND metadata->>'kind'='per-tool';")
+
+
 if __name__ == "__main__":
     import sys
     subprocess.run([sys.executable, "-m", "pytest", __file__, "-v", "--tb=short"], check=True)
