@@ -32,3 +32,17 @@ def test_per_tool_insert_uses_requested_status():
         upstream_url="http://lab-mcp-grafana:8000/mcp", new_tool_status="quarantined",
     )
     assert "'quarantined'" in sql
+
+
+def test_status_for_tool_is_flag_driven():
+    assert discover_mod.status_for_tool(activate=True) == "active"
+    assert discover_mod.status_for_tool(activate=False) == "quarantined"
+
+
+def test_hide_alias_sql_defers_until_active_per_tool_exists():
+    sql = discover_mod.hide_alias_sql("http://lab-mcp-echo:8000/mcp")
+    assert "UPDATE tool_registry" in sql
+    assert "'hidden'" in sql and "true" in sql
+    assert "deleted_at" not in sql.split("WHERE")[0]   # not soft-deleting
+    assert "status" not in sql.split("WHERE")[0]       # not changing alias status
+    assert "EXISTS" in sql and "status = 'active'" in sql and "'per-tool'" in sql

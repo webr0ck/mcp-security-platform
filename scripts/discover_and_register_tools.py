@@ -143,9 +143,38 @@ def _sql_str(v: str | None) -> str:
     return "'" + v.replace("'", "''") + "'"
 
 
-def _sql_array(items: list[str]) -> str:
-    escaped = ", ".join("'" + t.replace("'", "''") + "'" for t in items)
-    return f"ARRAY[{escaped}]::text[]"
+def status_for_tool(activate: bool) -> str:
+    """Routine syncs quarantine new tools (pending review); an operator who has
+    reviewed the dry-run passes --activate-discovered to activate this run."""
+    return "active" if activate else "quarantined"
+
+
+def hide_alias_sql(upstream_url: str) -> str:
+    """Hide the alias from tools/list WITHOUT changing status or soft-deleting it
+    (stays invoke_tool-callable). Deferred: only hides once an ACTIVE per-tool row
+    exists, so a server is never left with zero visible tools."""
+    return f"""
+UPDATE tool_registry
+SET metadata = COALESCE(metadata, '{{}}'::jsonb) || jsonb_build_object('hidden', true),
+    updated_at = NOW()
+WHERE upstream_url = {_sql_str(upstream_url)}
+  AND deleted_at IS NULL
+  AND COALESCE(metadata->>'kind', '') <> 'per-tool'
+  AND EXISTS (
+      SELECT 1 FROM tool_registry pt
+      WHERE pt.upstream_url = {_sql_str(upstream_url)}
+        AND pt.status = 'active' AND pt.deleted_at IS NULL
+        AND COALESCE(pt.metadata->>'kind', '') = 'per-tool'
+  );"""
+
+
+def assert_lab_optin() -> None:
+    """This script sets status without the SBOM gate, so it is lab-only. Require
+    an explicit opt-in env var; the DB target is hardcoded to the mcp-db container
+    (run_sql), which is the lab Postgres."""
+    import os
+    if os.environ.get("LAB_MIGRATION_CONFIRM") != "1":
+        sys.exit("REFUSING: set LAB_MIGRATION_CONFIRM=1 to run the lab-only per-tool migration.")
 
 
 def per_tool_upsert_sql(tool: dict, upstream_url: str, new_tool_status: str) -> str:
@@ -225,6 +254,8 @@ def main() -> None:
                         help="Print what would be done without writing to DB")
     parser.add_argument("--server", metavar="KEY",
                         help="Process only this server (e.g. lab-echo)")
+    parser.add_argument("--activate-discovered", action="store_true",
+                        help="Activate already-known/discovered tool names (new names otherwise start quarantined)")
     args = parser.parse_args()
 
     servers = SERVERS
@@ -265,43 +296,25 @@ def main() -> None:
               f"{len(discovered)} server(s). Re-run without --dry-run to apply.")
         return
 
+    assert_lab_optin()
+
     print("\n--- Upserting tools via docker exec mcp-db psql ---")
     for server, tools in discovered:
+        url = server["internal_url"]
+        # Routine runs insert per-tool rows as 'quarantined', so hide_alias_sql is a
+        # no-op until an operator does an --activate-discovered run (which makes a
+        # per-tool row 'active').
+        st = status_for_tool(args.activate_discovered)
         print(f"\n{server['key']}:")
         for tool in tools:
-            # NOTE: Task 4 rewires this loop (status logic, alias-hide, lab guard).
-            # Minimal call-site for now so per-tool rows inherit alias config.
-            sql = per_tool_upsert_sql(tool, server["internal_url"], "active")
-            ok, output = run_sql(sql)
-            if ok:
-                total_ok += 1
-                action = "UPDATE" if "UPDATE" in output else "INSERT"
-                print(f"  {'~' if action == 'UPDATE' else '+'} {tool['name']}@1.0.0")
-            else:
-                total_skipped += 1
-                print(f"  ! {tool['name']}: ERROR — {output[:120]}")
-
-    # Patch legacy rows: any tool_registry row whose injection_mode is still
-    # 'none' but has a service_name or approach-B credential_approach should
-    # be upgraded so the broker can inject credentials.
-    print("\n--- Patching legacy rows with wrong injection_mode ---")
-    patch_sql = """
-UPDATE tool_registry SET
-    injection_mode = CASE
-        WHEN service_name IS NOT NULL
-             AND (credential_approach = 'B' OR inject_header IS NOT NULL)
-             THEN 'service'::injection_mode_enum
-        WHEN credential_approach = 'A'
-             THEN 'user'::injection_mode_enum
-        ELSE injection_mode
-    END,
-    updated_at = NOW()
-WHERE injection_mode = 'none'
-  AND deleted_at IS NULL
-  AND (service_name IS NOT NULL OR credential_approach IS NOT NULL);
-"""
-    ok, output = run_sql(patch_sql)
-    print(f"  {'OK' if ok else 'ERROR'}: {output or 'no legacy rows'}")
+            ok, output = run_sql(per_tool_upsert_sql(tool, url, st))
+            print(f"  {'+' if ok else '!'} {tool['name']}@1.0.0 [{st}]"
+                  + ("" if ok else f" ERROR {output[:120]}"))
+            total_ok += int(ok); total_skipped += int(not ok)
+        if tools:
+            ok, output = run_sql(hide_alias_sql(url))   # no-op until an active per-tool row exists
+            print(f"  · hide-alias {server['key']}: {'OK' if ok else 'ERROR ' + output[:120]}")
+            total_skipped += int(not ok)   # a failed hide counts toward the error tally
 
     print(f"\n{'='*50}")
     print(f"Done.  ok={total_ok}  errors={total_skipped}")
