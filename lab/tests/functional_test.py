@@ -649,8 +649,10 @@ def _psql(sql: str) -> str:
          "unix://{{.ConnectionInfo.PodmanSocket.Path}}"],
         capture_output=True, text=True).stdout.strip()
     return subprocess.run(
+        # -q suppresses psql's command-status tag (e.g. "UPDATE 1") so a
+        # RETURNING query yields only the row value(s).
         ["docker", "exec", "-i", "mcp-db", "psql", "-U", "mcp_app", "-d", "mcp_security",
-         "-tAc", sql],
+         "-qtAc", sql],
         capture_output=True, text=True,
         env={**os.environ, "DOCKER_HOST": docker_host}).stdout.strip()
 
