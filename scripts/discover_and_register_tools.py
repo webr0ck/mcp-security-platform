@@ -225,7 +225,7 @@ ON CONFLICT (name, version) DO UPDATE SET
     inject_prefix  = EXCLUDED.inject_prefix,
     credential_id  = EXCLUDED.credential_id,
     metadata       = EXCLUDED.metadata,
-    status         = CASE WHEN EXCLUDED.status = 'active' THEN 'active' ELSE tool_registry.status END,
+    status         = CASE WHEN EXCLUDED.status = 'active' AND tool_registry.status <> 'deprecated' THEN 'active' ELSE tool_registry.status END,
     updated_at     = NOW();
 """
 

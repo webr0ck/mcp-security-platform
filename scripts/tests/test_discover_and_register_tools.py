@@ -22,7 +22,7 @@ def test_per_tool_insert_inherits_alias_config_via_subselect():
     assert "http://lab-mcp-echo:8000/mcp" in sql
     assert "ON CONFLICT (name, version)" in sql
     assert "per-tool" in sql
-    assert "CASE WHEN EXCLUDED.status = 'active' THEN 'active'" in sql
+    assert "CASE WHEN EXCLUDED.status = 'active' AND tool_registry.status <> 'deprecated' THEN 'active'" in sql
     assert "ELSE tool_registry.status END" in sql
 
 

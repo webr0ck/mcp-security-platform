@@ -671,7 +671,12 @@ class TestPerToolDispatch:
     def test_invoke_tool_by_alias_tools_list_still_works(self, alice_token):
         r = _invoke_tool(alice_token, "echo-ping", {})  # no method -> tools/list
         assert r["status_code"] == 200, r
-        assert "not found in registry" not in json.dumps(r.get("body", {})).lower()
+        blob = json.dumps(r.get("body", {})).lower()
+        assert "not found in registry" not in blob, blob[:300]
+        # must actually route to the upstream and return that server's tool list
+        # (echo exposes ping/echo_args/whoami/slow_tool/bulk_compute)
+        assert "ping" in blob or "echo_args" in blob or "whoami" in blob, (
+            f"alias invoke_tool did not return upstream tools/list content: {blob[:300]}")
 
     def test_invoke_tool_cannot_bypass_quarantine(self, alice_token):
         """A quarantined per-tool row must NOT be invokable via invoke_tool tools/call
