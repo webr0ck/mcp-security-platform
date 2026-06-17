@@ -31,119 +31,21 @@ import subprocess
 # ---------------------------------------------------------------------------
 # host_port:    port reachable from the Mac (podman-compose.lab.yml port mapping)
 # internal_url: URL the proxy uses inside the container network (upstream_url in DB)
-# injection_mode / service_name / inject_header / inject_prefix: credential config
+#
+# All per-server credential/entitlement/risk config now lives on the existing
+# alias row in tool_registry and is INHERITED by per-tool rows via
+# per_tool_upsert_sql — it is NOT duplicated here (see Task 3 migration).
 # ---------------------------------------------------------------------------
 SERVERS: list[dict[str, Any]] = [
-    {
-        "key": "lab-grafana",
-        "host_port": 8100,
-        "internal_url": "http://lab-mcp-grafana:8000/mcp",
-        "injection_mode": "service",
-        "service_name": "grafana",
-        "inject_header": "Authorization",
-        "inject_prefix": "Bearer ",
-        "risk_level": "low",
-        "risk_score": 10,
-        "tags": ["grafana", "observability", "lab"],
-    },
-    {
-        "key": "lab-netbox",
-        "host_port": 8101,
-        "internal_url": "http://mcp-netbox:8000/mcp",
-        "injection_mode": "service",
-        "service_name": "netbox",
-        "inject_header": "Authorization",
-        "inject_prefix": "Token ",
-        "risk_level": "low",
-        "risk_score": 10,
-        "tags": ["netbox", "dcim", "lab"],
-    },
-    {
-        "key": "lab-gitea",
-        "host_port": 8102,
-        "internal_url": "http://lab-mcp-gitea:8000/mcp",
-        "injection_mode": "service",
-        "service_name": "gitea",
-        "inject_header": "Authorization",
-        "inject_prefix": "token ",
-        "risk_level": "low",
-        "risk_score": 10,
-        "tags": ["gitea", "scm", "lab"],
-    },
-    {
-        "key": "lab-m365",
-        "host_port": 8103,
-        "internal_url": "http://lab-mcp-m365:8000/mcp",
-        "injection_mode": "none",
-        "service_name": None,
-        "inject_header": None,
-        "inject_prefix": None,
-        "risk_level": "medium",
-        "risk_score": 35,
-        "tags": ["m365", "microsoft", "lab"],
-    },
-    {
-        "key": "lab-rag-assistant",
-        "host_port": 8104,
-        "internal_url": "http://lab-rag-assistant:8000/mcp",
-        "injection_mode": "none",
-        "service_name": None,
-        "inject_header": None,
-        "inject_prefix": None,
-        "risk_level": "medium",
-        "risk_score": 30,
-        "tags": ["rag", "docs", "lab"],
-    },
-    {
-        "key": "lab-echo",
-        "host_port": 8105,
-        "internal_url": "http://lab-mcp-echo:8000/mcp",
-        "injection_mode": "none",
-        "service_name": None,
-        "inject_header": None,
-        "inject_prefix": None,
-        "risk_level": "low",
-        "risk_score": 5,
-        "tags": ["echo", "testing", "lab"],
-    },
-    {
-        "key": "lab-notes",
-        "host_port": 8106,
-        "internal_url": "http://lab-mcp-notes:8000/mcp",
-        # X-User-Sub comes from forward_base_headers in invocation.py — broker not involved
-        "injection_mode": "none",
-        "service_name": None,
-        "inject_header": None,
-        "inject_prefix": None,
-        "risk_level": "low",
-        "risk_score": 15,
-        "tags": ["notes", "per-user", "lab"],
-    },
-    {
-        "key": "lab-search",
-        "host_port": 8107,
-        "internal_url": "http://lab-mcp-search:8000/mcp",
-        "injection_mode": "none",
-        "service_name": None,
-        "inject_header": None,
-        "inject_prefix": None,
-        "risk_level": "low",
-        "risk_score": 10,
-        "tags": ["search", "kb", "lab"],
-    },
-    {
-        "key": "lab-self-service",
-        "host_port": 8108,
-        "internal_url": "http://lab-mcp-self-service:8000/mcp",
-        # X-User-Sub + X-User-Role from forward_base_headers
-        "injection_mode": "none",
-        "service_name": None,
-        "inject_header": None,
-        "inject_prefix": None,
-        "risk_level": "low",
-        "risk_score": 10,
-        "tags": ["self-service", "rbac", "lab"],
-    },
+    {"key": "lab-grafana", "host_port": 8100, "internal_url": "http://lab-mcp-grafana:8000/mcp"},
+    {"key": "lab-netbox", "host_port": 8101, "internal_url": "http://mcp-netbox:8000/mcp"},
+    {"key": "lab-gitea", "host_port": 8102, "internal_url": "http://lab-mcp-gitea:8000/mcp"},
+    {"key": "lab-m365", "host_port": 8103, "internal_url": "http://lab-mcp-m365:8000/mcp"},
+    {"key": "lab-rag-assistant", "host_port": 8104, "internal_url": "http://lab-rag-assistant:8000/mcp"},
+    {"key": "lab-echo", "host_port": 8105, "internal_url": "http://lab-mcp-echo:8000/mcp"},
+    {"key": "lab-notes", "host_port": 8106, "internal_url": "http://lab-mcp-notes:8000/mcp"},
+    {"key": "lab-search", "host_port": 8107, "internal_url": "http://lab-mcp-search:8000/mcp"},
+    {"key": "lab-self-service", "host_port": 8108, "internal_url": "http://lab-mcp-self-service:8000/mcp"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -246,45 +148,57 @@ def _sql_array(items: list[str]) -> str:
     return f"ARRAY[{escaped}]::text[]"
 
 
-def tool_upsert_sql(tool: dict, server: dict) -> str:
-    """Generate idempotent SQL for one tool (INSERT ... ON CONFLICT UPDATE)."""
+def per_tool_upsert_sql(tool: dict, upstream_url: str, new_tool_status: str) -> str:
+    """One per-tool row. name/version/description/schema/status literal; ALL
+    per-server config inherited from the alias row (matched by upstream_url) so
+    credential/entitlement config never drifts. ON CONFLICT promotes
+    quarantined->active on an activate run and never downgrades an active row."""
     name = tool["name"]
     version = "1.0.0"
-    description = (tool.get("description") or f"{name} tool from {server['key']}").replace("'", "''")
-    schema_json = json.dumps(tool.get("inputSchema") or {"type": "object", "properties": {}}).replace("'", "''")
-    upstream_url = server["internal_url"]
-    injection_mode = server["injection_mode"]
-    service_name = server["service_name"]
-    inject_header = server["inject_header"]
-    inject_prefix = server["inject_prefix"]
-    risk_level = server["risk_level"]
-    risk_score = server["risk_score"]
-    tags = server["tags"] + [name]
-
+    description = tool.get("description") or f"{name} ({upstream_url})"
+    schema_json = json.dumps(tool.get("inputSchema") or {"type": "object", "properties": {}})
     return f"""
 INSERT INTO tool_registry (
-    tool_id, name, version, description, schema, upstream_url,
-    status, risk_level, risk_score, risk_reasons,
+    tool_id, name, version, description, schema, status,
+    upstream_url, server_id, risk_level, risk_score, risk_reasons,
     injection_mode, service_name, inject_header, inject_prefix,
-    tags, metadata, registered_by, created_at, updated_at
-) VALUES (
-    gen_random_uuid(), {_sql_str(name)}, {_sql_str(version)},
-    '{description}', '{schema_json}'::jsonb, {_sql_str(upstream_url)},
-    'active', {_sql_str(risk_level)}, {risk_score}, '[]'::jsonb,
-    {_sql_str(injection_mode)}, {_sql_str(service_name)},
-    {_sql_str(inject_header)}, {_sql_str(inject_prefix)},
-    {_sql_array(tags)}, '{{}}'::jsonb, 'discover-script', NOW(), NOW()
+    credential_id, credential_approach,
+    kc_client_id, kc_token_audience, entra_tenant_id, entra_client_id, entra_scope,
+    required_integrity, sensitivity_label,
+    source_repo, source_commit, tags, metadata, registered_by, created_at, updated_at
 )
+SELECT
+    gen_random_uuid(), {_sql_str(name)}, {_sql_str(version)},
+    {_sql_str(description)}, {_sql_str(schema_json)}::jsonb, {_sql_str(new_tool_status)},
+    alias.upstream_url, alias.server_id, alias.risk_level, alias.risk_score, '[]'::jsonb,
+    alias.injection_mode, alias.service_name, alias.inject_header, alias.inject_prefix,
+    alias.credential_id, alias.credential_approach,
+    alias.kc_client_id, alias.kc_token_audience, alias.entra_tenant_id, alias.entra_client_id, alias.entra_scope,
+    alias.required_integrity, alias.sensitivity_label,
+    alias.source_repo, alias.source_commit,
+    COALESCE(alias.tags, '{{}}'::text[]) || ARRAY[{_sql_str(name)}]::text[],
+    jsonb_build_object('kind', 'per-tool', 'expanded_from', alias.name),
+    'per-tool-migration', NOW(), NOW()
+FROM tool_registry alias
+WHERE alias.upstream_url = {_sql_str(upstream_url)}
+  AND alias.deleted_at IS NULL
+  AND COALESCE(alias.metadata->>'kind', '') <> 'per-tool'
+ORDER BY alias.created_at
+LIMIT 1
 ON CONFLICT (name, version) DO UPDATE SET
     description    = EXCLUDED.description,
     schema         = EXCLUDED.schema,
     upstream_url   = EXCLUDED.upstream_url,
+    server_id      = EXCLUDED.server_id,
     injection_mode = EXCLUDED.injection_mode,
     service_name   = EXCLUDED.service_name,
     inject_header  = EXCLUDED.inject_header,
     inject_prefix  = EXCLUDED.inject_prefix,
-    tags           = EXCLUDED.tags,
-    updated_at     = NOW();"""
+    credential_id  = EXCLUDED.credential_id,
+    metadata       = EXCLUDED.metadata,
+    status         = CASE WHEN EXCLUDED.status = 'active' THEN 'active' ELSE tool_registry.status END,
+    updated_at     = NOW();
+"""
 
 
 def run_sql(sql: str) -> tuple[bool, str]:
@@ -346,7 +260,7 @@ def main() -> None:
             print(f"\n{server['key']} ({len(tools)} tools):")
             for tool in tools:
                 print(f"    {tool['name']}@1.0.0 → {server['internal_url']} "
-                      f"(injection_mode={server['injection_mode']})")
+                      f"(config inherited from alias row)")
         print(f"\nWould process {sum(len(t) for _, t in discovered)} tools across "
               f"{len(discovered)} server(s). Re-run without --dry-run to apply.")
         return
@@ -355,7 +269,9 @@ def main() -> None:
     for server, tools in discovered:
         print(f"\n{server['key']}:")
         for tool in tools:
-            sql = tool_upsert_sql(tool, server)
+            # NOTE: Task 4 rewires this loop (status logic, alias-hide, lab guard).
+            # Minimal call-site for now so per-tool rows inherit alias config.
+            sql = per_tool_upsert_sql(tool, server["internal_url"], "active")
             ok, output = run_sql(sql)
             if ok:
                 total_ok += 1
