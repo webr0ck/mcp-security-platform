@@ -7,6 +7,7 @@ Enforced-vs-Roadmap table.
 
 | File | Why archived |
 |---|---|
-| `ARCHITECTURE-v1.md` | v1.0.0 architecture — explicitly superseded by `ARCHITECTURE-v2.md`; omits the credential broker, Vault, `credential_store`, and OAuth router. |
+| `ARCHITECTURE-v1.md` | v1.0.0 architecture — omits the credential broker, Vault, `credential_store`, and OAuth router. Superseded. |
+| `ARCHITECTURE-v2.md` | v2.0.0 "reality-annotated" remediation review (2026-05-16). A useful design-history snapshot, but framed around the pre-hardening defect state (CB-001/CB-002/F-002). Superseded by the clean `../ARCHITECTURE.md` (v3). |
 | `REVIEW-2026-05-16.md` | Dated AppSec review snapshot. Its CRITICAL/HIGH findings have since been fixed and tested (tracked in `ARCHITECTURE-v2.md` Phase 0). |
 | `SHIP-v0.1.md` | One-time v0.1 ship checklist. Superseded by `make ship-check` (`scripts/ship-check.sh`). |

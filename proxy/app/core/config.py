@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     #
     # Operational consequence: tool registration is unavailable during Ollama
     # outages when this is True.  Tool *invocations* are unaffected — only
-    # registration blocks.  See docs/ARCHITECTURE-v2.md §5.2.
+    # registration blocks.  See docs/ARCHITECTURE.md §5.4.
     REQUIRE_LLM_AUDIT: bool = False
 
     # PRD-0001 M2 — B-coarse taint floor (RFC-0001 §8.1). When True, a session
@@ -514,7 +514,7 @@ class Settings(BaseSettings):
         #
         # Operational consequence: tool registration is unavailable during Ollama
         # outages in production.  Tool invocations are NOT affected.
-        # See docs/ARCHITECTURE-v2.md §5.2 for runbook guidance.
+        # See docs/ARCHITECTURE.md §5.4 for runbook guidance.
         if not self.REQUIRE_LLM_AUDIT:
             raise ValueError(
                 "Production startup blocked: REQUIRE_LLM_AUDIT must be True in "

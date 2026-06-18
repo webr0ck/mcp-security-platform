@@ -73,7 +73,7 @@ Mirror §3 in CI. Required jobs: unit, integration (must actually run — fix th
 Every PR that changes behavior must update affected docs in the same PR. The doc-consistency lint enforces:
 - No doc may describe a feature without a code referent. New/changed capability claims include an inline `(file:line)` or are placed under an explicit **"Planned — not built"** heading.
 - Removing/disabling a feature removes its claims in the same PR.
-- A subsystem added to `proxy/app/` or `infra/db/migrations/` must appear in `ARCHITECTURE-v2.md` §2/§3 and, if security-relevant, in `SECURITY_NONNEGATABLES.md`.
+- A subsystem added to `proxy/app/` or `infra/db/migrations/` must appear in `ARCHITECTURE.md` §2/§3 and, if security-relevant, in `SECURITY_NONNEGATABLES.md`.
 - No marketing/statistical claim without a citable source.
 - `SECURITY_NONNEGATABLES.md` "Enforcement:" clauses must name a test/job that exists and actually asserts the claim (verified by the lint cross-checking the path).
 

@@ -3,7 +3,7 @@
 This file is the **map of the codebase**. It tells an AI agent (Claude Code, Cursor, Copilot, Aider, etc.)
 or a new contributor where things live, how to build and test, and the rules that must not be broken.
 It is intentionally short and factual. For the *why* (the thesis and threat model) read [`README.md`](README.md);
-for the *as-built* design read [`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md).
+for the *as-built* design read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 > **Prime directive:** this is a **reference implementation held to an honesty rule** — every claim in
 > the docs is matched to code, and the [Enforced today vs Roadmap](README.md#enforced-today-vs-roadmap)
@@ -90,7 +90,7 @@ make security-check                   # secret scan + rego lint + OPA deny-defau
 make ship-check                       # docs-honesty + secret scan + compose smoke (pre-publish gate)
 
 # A verifiable control demo (no full stack needed)
-python scripts/check_network_isolation.py   # statically proves backends can't reach the proxy
+python scripts/check_network_isolation.py   # statically checks the topology keeps backends off the proxy's network
 ```
 
 Production-shaped tiers run on Docker — see [`INSTALL.md`](INSTALL.md). The lab runs on Podman — see [`LAB.md`](LAB.md).
@@ -123,11 +123,11 @@ Then register it (`scripts/onboard_server.py` or `POST /api/v1/servers`). Full w
 | Doc | Status |
 |---|---|
 | [`README.md`](README.md) | thesis, threat model, **Enforced-vs-Roadmap table = source of truth** |
-| [`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md) | architecture **design narrative** (supersedes v1). For *current* control status trust the README table + ROADMAP, not this doc's per-section annotations (see its banner) |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | **canonical** as-built architecture (current at HEAD). README table + ROADMAP remain authoritative for per-control status |
 | [`docs/API.md`](docs/API.md) · [`docs/RBAC.md`](docs/RBAC.md) | API surface · role model |
 | [`docs/SECURITY_NONNEGATABLES.md`](docs/SECURITY_NONNEGATABLES.md) | the security invariants CI enforces |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | done vs next |
 | [`SECURITY.md`](SECURITY.md) | disclosure policy + tracked known-limitations |
 | [`docs/archive/`](docs/archive/) | superseded/historical docs — **do not rely on these** |
 
-> `docs/archive/ARCHITECTURE-v1.md` (v1) is **superseded**; prefer `ARCHITECTURE-v2.md`.
+> `docs/archive/ARCHITECTURE-v1.md` (v1) is **superseded**; prefer `ARCHITECTURE.md`.

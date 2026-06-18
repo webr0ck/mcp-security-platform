@@ -301,7 +301,7 @@ In `~/.claude/settings.json` (or `~/.claude.json`) on the machine running Claude
 | [`LAB.md`](LAB.md) | Full self-contained lab for testing |
 | [`SECURITY.md`](SECURITY.md) | Responsible disclosure + tracked known-limitations |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
-| [`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md) | Architecture design narrative (supersedes v1). For **current** control status, this table and `ROADMAP.md` are authoritative — see the doc's banner. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Canonical as-built architecture (current at HEAD). This table + `ROADMAP.md` remain authoritative for per-control status. |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Status: done vs next |
 | [`docs/API.md`](docs/API.md) · [`docs/RBAC.md`](docs/RBAC.md) · [`docs/SECURITY_NONNEGATABLES.md`](docs/SECURITY_NONNEGATABLES.md) | API surface · role model · security invariants |
 | [`docs/appsec-review.md`](docs/appsec-review.md) | Historical full AppSec audit of the 12 invariants |

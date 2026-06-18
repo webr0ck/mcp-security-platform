@@ -8,7 +8,7 @@ deeper design and reference docs.
 
 | Doc | Purpose |
 |---|---|
-| [`ARCHITECTURE-v2.md`](ARCHITECTURE-v2.md) | **Canonical** as-built architecture, reality-annotated per component |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | **Canonical** as-built architecture, reality-annotated per component |
 | [`ARCHITECTURE-delegated-auth.md`](ARCHITECTURE-delegated-auth.md) | Delegated downstream-auth subsystem (User → IdP → Gateway → Entra → Graph) |
 | [`db.md`](db.md) | Database schema reference |
 | [`RBAC.md`](RBAC.md) | Role model and permission matrix |

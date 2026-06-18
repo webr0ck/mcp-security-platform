@@ -9,7 +9,7 @@ hr(){ printf '── %s %s\n' "$1" "──────────────�
 
 hr "1. Docs-honesty gate (README — the public face)"
 # Scoped to README.md: the primary public-facing doc. The reality-annotated docs
-# (ARCHITECTURE-v2 / ROADMAP / SHIP) are ALLOWED to enumerate what's not built, so they're
+# (ARCHITECTURE / ROADMAP / SHIP) are ALLOWED to enumerate what's not built, so they're
 # out of scope. Patterns are affirmative over-claims + brand leaks that must NOT appear.
 PATTERNS='alexromanov|for every tool call|intercepts all MCP|\+ ?SPDX|SPDX 2\.3|\b92%|Lilith-zero|MCP Spine|Vectimus|compliance-grade'
 if [ -f README.md ]; then

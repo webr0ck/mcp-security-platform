@@ -34,7 +34,7 @@ There is no bug-bounty program; this is a personal open-source project.
 Because this is a reference implementation, several controls are **partial or roadmap** and are
 documented openly rather than papered over. The items below are the security-relevant ones; the
 full status matrix is in the README and the design rationale is in
-[`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md) and the historical audit
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the historical audit
 [`docs/appsec-review.md`](docs/appsec-review.md).
 
 | ID | Area | Limitation | Mitigation / status |

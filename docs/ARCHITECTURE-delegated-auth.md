@@ -2,7 +2,7 @@
 
 **Version:** 1.0.0
 **Date:** 2026-06-09
-**Status:** Canonical for the delegated-auth subsystem. Extends `docs/ARCHITECTURE-v2.md` §2/§3. Companion PRD: `docs/PRD-delegated-downstream-auth.md`.
+**Status:** Canonical for the delegated-auth subsystem. Extends `docs/ARCHITECTURE.md` §5 (credential flows) / §6 (policy). Companion PRD: `docs/PRD-delegated-downstream-auth.md`.
 
 Status legend: ✅ implemented & wired · 🟡 partial/overclaimed · 🔴 stub/missing · 🆕 exists in code, undocumented · ⚠️ security note.
 

@@ -538,6 +538,6 @@ podman logs <container-name> --tail 30
 | [SECURITY.md](SECURITY.md) | Security model, threat boundaries, responsible disclosure |
 | [README.md](README.md) | Platform overview, architecture summary, feature matrix |
 | [docs/LAB-HOWTO.md](docs/LAB-HOWTO.md) | Detailed lab how-to: Keycloak admin tasks, credential injection per mode, admin credentials UI, OAuth session lifecycle |
-| [docs/ARCHITECTURE-v2.md](docs/ARCHITECTURE-v2.md) | Reality-annotated architecture (supersedes v1) |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Reality-annotated architecture (supersedes v1) |
 | [docs/RBAC.md](docs/RBAC.md) | Role model, assignment API, OPA policy details |
 | [docs/API.md](docs/API.md) | Full proxy REST API reference |
