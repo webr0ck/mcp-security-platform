@@ -1,45 +1,55 @@
 """
 Echo MCP Server — lab stress-test and auth-verification target.
 
+Built on the mcphub_sdk PlatformMCPServer as the SDK's proof-of-concept:
+the SDK supplies stateless_http, the identity/credential context middleware,
+the /health route, DNS-rebind disable, and the uvicorn run loop — so this file
+is pure tool logic with no transport/middleware boilerplate.
+
+Echo is a liveness/debug server. It does NOT need per-user identity to function,
+so it runs with require_proxy=False: a direct (un-proxied) call must never 403,
+because echo is the canary used to confirm the gateway path is alive. When the
+gateway DOES inject X-User-Sub (the normal invoke path), identity() reflects the
+real caller; otherwise it reads the safe default "anonymous".
+
 Tools:
-  ping          — liveness check; returns server name + timestamp
-  echo_args     — reflects back every argument passed (for schema verification)
-  whoami        — returns the credential headers visible to the server
+  ping          — liveness check; returns server name, caller identity, timestamp
+  echo_args     — reflects back every argument passed, hashed (schema verification)
+  whoami        — reports caller identity + a REDACTED preview of the injected
+                  credential (never the raw token — spec H8)
   slow_tool     — sleeps for a configurable duration (tests timeout handling)
   bulk_compute  — pure-CPU Fibonacci (tests concurrency limits under load)
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
-import time
-import asyncio
 from datetime import datetime, timezone
 
-import uvicorn
-from mcp.server.fastmcp import FastMCP
+from mcphub_sdk import PlatformMCPServer, credential, identity
 
 SERVER_NAME = os.environ.get("SERVER_NAME", "echo-mcp")
-HOST = os.environ.get("HOST", "0.0.0.0")
-PORT = int(os.environ.get("PORT", "8000"))
 
-mcp = FastMCP(SERVER_NAME)
-
-# Store last-seen auth headers so whoami can report them
-_last_auth: dict = {}
+# require_proxy=False: echo is a debug/liveness canary and must never 403 on an
+# un-proxied call. identity() still reflects the real caller when the gateway
+# injects X-User-Sub, and falls back to "anonymous" otherwise.
+srv = PlatformMCPServer(SERVER_NAME, require_proxy=False)
 
 
-@mcp.tool()
+@srv.tool()
 async def ping() -> dict:
-    """Liveness check — returns server identity and current timestamp."""
+    """Liveness check — returns server identity, caller, and current timestamp."""
+    who = identity()
     return {
         "server": SERVER_NAME,
         "status": "ok",
+        "caller_sub": who.sub,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 
 
-@mcp.tool()
+@srv.tool()
 async def echo_args(message: str = "", count: int = 1, tag: str = "") -> dict:
     """Reflect back the supplied arguments, hashed for integrity verification."""
     payload = f"{message}:{count}:{tag}"
@@ -52,33 +62,40 @@ async def echo_args(message: str = "", count: int = 1, tag: str = "") -> dict:
     }
 
 
-@mcp.tool()
+@srv.tool()
 async def whoami() -> dict:
     """
-    Returns the Authorization header value the server received (redacted).
-    Used to verify credential injection is working correctly.
+    Report the caller's proxy-injected identity plus a REDACTED preview of the
+    injected credential. Used to verify identity + credential injection.
+
+    SECURITY (spec H8): never returns the raw credential — only present/absent,
+    length, and a first-8/last-4 masked preview.
     """
-    auth = _last_auth.get("authorization", "")
-    scheme = ""
-    masked = "(none)"
-    if auth:
-        parts = auth.split(" ", 1)
-        scheme = parts[0] if parts else ""
-        token = parts[1] if len(parts) > 1 else ""
-        # Show only first 8 + last 4 chars of the token
+    who = identity()
+    token = credential()  # injected Authorization token (prefix-stripped) or None
+
+    has_cred = bool(token)
+    if token:
         if len(token) > 12:
-            masked = f"{token[:8]}...{token[-4:]}"
+            preview = f"{token[:8]}...{token[-4:]}"
         else:
-            masked = "***"
+            preview = "***"
+        token_len = len(token)
+    else:
+        preview = "(none)"
+        token_len = 0
+
     return {
         "server": SERVER_NAME,
-        "auth_scheme": scheme,
-        "token_preview": masked,
-        "has_auth": bool(auth),
+        "sub": who.sub,
+        "role": who.role,
+        "has_credential": has_cred,
+        "credential_len": token_len,
+        "credential_preview": preview,
     }
 
 
-@mcp.tool()
+@srv.tool()
 async def slow_tool(delay_ms: int = 100) -> dict:
     """Sleep for delay_ms milliseconds. Tests proxy timeout handling."""
     delay_ms = max(0, min(delay_ms, 5000))  # cap at 5s
@@ -86,7 +103,7 @@ async def slow_tool(delay_ms: int = 100) -> dict:
     return {"slept_ms": delay_ms, "server": SERVER_NAME}
 
 
-@mcp.tool()
+@srv.tool()
 async def bulk_compute(n: int = 20) -> dict:
     """Compute Fibonacci(n) iteratively. Tests CPU-bound concurrency."""
     n = max(0, min(n, 40))  # cap at fib(40) to prevent DoS
@@ -97,8 +114,4 @@ async def bulk_compute(n: int = 20) -> dict:
 
 
 if __name__ == "__main__":
-    # Disable DNS rebinding protection for lab (internal network only, no browser access)
-    from mcp.server.transport_security import TransportSecuritySettings
-    mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    app = mcp.streamable_http_app()
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    srv.run()
