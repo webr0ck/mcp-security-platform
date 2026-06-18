@@ -592,6 +592,41 @@ async def token(request: Request):
     if grant_type == "urn:ietf:params:oauth:grant-type:device_code":
         return await _handle_device_token(request, form, client_id)
 
+    # ── Client Credentials Grant (RFC 6749 §4.4) — app-only token for M365 mock ─
+    if grant_type == "client_credentials":
+        scope = str(form.get("scope", "https://graph.microsoft.com/.default"))
+        client_secret = str(form.get("client_secret", ""))
+        # Lab: accept any non-empty client_secret (no real validation needed)
+        if not client_id:
+            return JSONResponse({"error": "invalid_client", "error_description": "client_id required"}, status_code=400)
+        now = int(time.time())
+        jti = secrets.token_urlsafe(16)
+        from jose import jwt as jose_jwt
+        private_pem = _private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        claims = {
+            "iss": ISSUER,
+            "sub": client_id,
+            "aud": "https://graph.microsoft.com",
+            "iat": now,
+            "exp": now + TOKEN_TTL,
+            "jti": jti,
+            "appid": client_id,
+            "roles": ["Application"],
+        }
+        access_token = jose_jwt.encode(claims, private_pem, algorithm="RS256", headers={"kid": _KID})
+        _issued_tokens[jti] = client_id
+        logger.info("client_credentials token issued: client_id=%s scope=%s", client_id, scope)
+        return JSONResponse({
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": TOKEN_TTL,
+            "scope": scope,
+        })
+
     if grant_type != "authorization_code":
         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 

@@ -33,7 +33,7 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("m365-mcp")
 
-GRAPH = "https://graph.microsoft.com/v1.0"
+GRAPH = os.environ.get("M365_GRAPH_BASE", "https://graph.microsoft.com/v1.0").rstrip("/")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
@@ -102,6 +102,11 @@ def _is_delegated() -> bool:
     return bool(_injected_token())
 
 AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID") or os.environ.get("ENTRA_TENANT_ID", "")
+_DEFAULT_TOKEN_URL = (
+    f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
+    if AZURE_TENANT_ID else "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+)
+M365_TOKEN_URL = os.environ.get("M365_TOKEN_URL", _DEFAULT_TOKEN_URL)
 AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID") or os.environ.get("ENTRA_CLIENT_ID", "")
 # Task 2.5: AZURE_CLIENT_SECRET is NOT read from env (env var removed from compose).
 # The credential broker injects it at call time via a custom Authorization header scheme.
@@ -172,7 +177,7 @@ async def _get_app_token() -> str:
 
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
-            f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token",
+            M365_TOKEN_URL,
             data={
                 "grant_type": "client_credentials",
                 "client_id": AZURE_CLIENT_ID,

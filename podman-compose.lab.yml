@@ -385,9 +385,13 @@ services:
       REQUIRE_DELEGATED: "${REQUIRE_DELEGATED:-}"
       NATIVE_AUTH: "${NATIVE_AUTH:-}"
       M365_RESOURCE_URL: "${M365_RESOURCE_URL:-http://localhost:8000/mcp}"
+      # AZURE_MODE=mock: redirect token + Graph calls to lab stubs (PRD-0002 case 1)
+      M365_TOKEN_URL: "${M365_TOKEN_URL:-}"
+      M365_GRAPH_BASE: "${M365_GRAPH_BASE:-}"
       # Route Entra/Graph egress through the allowlisting forward proxy (Task 2.4).
+      # NO_PROXY must include mock stub hostnames so they bypass the squid proxy.
       HTTPS_PROXY: "http://lab-egress-proxy:3128"
-      NO_PROXY: "lab-mcp-m365,localhost,127.0.0.1"
+      NO_PROXY: "lab-mcp-m365,lab-mock-idp,lab-mock-graph,localhost,127.0.0.1"
     networks:
       - mcp-m365-net    # pairwise net with proxy only; replaces internal-net
       - mcp-egress-net  # egress-only path to lab-egress-proxy
@@ -761,6 +765,7 @@ services:
     networks:
       - lab-net
       - gateway-net   # lets the proxy reach lab-mock-idp by name for JWKS / token verification
+      - mcp-m365-net  # reachable from lab-mcp-m365 when AZURE_MODE=mock (M365_TOKEN_URL)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8888/health')"]
       interval: 10s
@@ -916,6 +921,19 @@ services:
       DB_HOST: mcp-db
       DB_NAME: mcp_security
       DB_USER: mcp_app
+
+  # ── Mock Graph API — stub for AZURE_MODE=mock (PRD-0002 case 1) ─────────────
+  lab-mock-graph:
+    build:
+      context: ./lab/mock-graph
+      dockerfile: Dockerfile
+    container_name: lab-mock-graph
+    networks:
+      - lab-net
+      - mcp-m365-net   # reachable from lab-mcp-m365 when AZURE_MODE=mock
+    restart: unless-stopped
+    profiles:
+      - mock
 
 # ── Named volumes ────────────────────────────────────────────────────────────
 volumes:
