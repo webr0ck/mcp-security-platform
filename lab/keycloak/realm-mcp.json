@@ -20,6 +20,7 @@
   "passwordPolicy": "",
   "clients": [
     {
+      "id": "00000001-0000-0000-0000-000000000001",
       "clientId": "mcp-proxy",
       "name": "MCP Security Proxy",
       "enabled": true,
@@ -219,6 +220,30 @@
           }
         }
       ]
+    },
+    {
+      "id": "00000002-0000-0000-0000-000000000001",
+      "clientId": "lab-tickets",
+      "name": "Lab Tickets Service",
+      "description": "Case-4 token-exchange target resource server (PRD-0002)",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "lab-tickets-secret",
+      "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": true,
+      "redirectUris": ["http://localhost:9000/*"],
+      "webOrigins": [],
+      "protocol": "openid-connect",
+      "attributes": {},
+      "authorizationSettings": {
+        "allowRemoteResourceManagement": false,
+        "policyEnforcementMode": "ENFORCING",
+        "resources": [],
+        "policies": [],
+        "scopes": [],
+        "decisionStrategy": "UNANIMOUS"
+      }
     }
   ],
   "roles": {

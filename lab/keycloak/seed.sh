@@ -167,4 +167,93 @@ else
     echo "mcp-proxy-audience scope already exists"
 fi
 
+# ── Case-4 token exchange: enable fine-grained permissions for lab-tickets ────
+# Requires admin-fine-grained-authz feature enabled in KC start command.
+# We call management/permissions to create the token-exchange scope permission
+# under realm-management's resource server, then wire a client policy allowing
+# mcp-proxy to perform the exchange.
+LAB_TICKETS_ID=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
+    "${KC_URL}/admin/realms/${REALM}/clients?clientId=lab-tickets" \
+    | jq -r '.[0].id // empty')
+
+if [ -n "${LAB_TICKETS_ID}" ]; then
+    # Enable management permissions for lab-tickets — KC creates the resource + scope permission
+    MGMT_RESP=$(curl -s -X PUT -H "Authorization: Bearer ${TOKEN}" \
+        -H "Content-Type: application/json" \
+        "${KC_URL}/admin/realms/${REALM}/clients/${LAB_TICKETS_ID}/management/permissions" \
+        -d '{"enabled": true}')
+    TOKEN_EXCHANGE_PERM_ID=$(echo "${MGMT_RESP}" | jq -r '.scopePermissions["token-exchange"] // empty')
+    echo "Token-exchange permission ID: ${TOKEN_EXCHANGE_PERM_ID}"
+
+    if [ -n "${TOKEN_EXCHANGE_PERM_ID}" ]; then
+        # Get realm-management client UUID
+        RM_ID=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
+            "${KC_URL}/admin/realms/${REALM}/clients?clientId=realm-management" \
+            | jq -r '.[0].id // empty')
+
+        # Get mcp-proxy client UUID
+        MCP_PROXY_ID=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
+            "${KC_URL}/admin/realms/${REALM}/clients?clientId=mcp-proxy" \
+            | jq -r '.[0].id // empty')
+
+        # Get token-exchange scope ID from realm-management resource server
+        TE_SCOPE_ID=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
+            "${KC_URL}/admin/realms/${REALM}/clients/${RM_ID}/authz/resource-server/scope" \
+            | jq -r '.[] | select(.name=="token-exchange") | .id')
+
+        # Get the resource ID for lab-tickets from realm-management resource server
+        RESOURCE_ID=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
+            "${KC_URL}/admin/realms/${REALM}/clients/${RM_ID}/authz/resource-server/resource" \
+            | jq -r ".[] | select(.name==\"client.resource.${LAB_TICKETS_ID}\") | ._id")
+
+        # Check if client policy already exists
+        EXISTING_POLICY=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
+            "${KC_URL}/admin/realms/${REALM}/clients/${RM_ID}/authz/resource-server/policy" \
+            | jq -r '.[] | select(.name=="mcp-proxy.token-exchange.client.policy") | .id')
+
+        if [ -z "${EXISTING_POLICY}" ]; then
+            EXISTING_POLICY=$(curl -s -X POST \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "Content-Type: application/json" \
+                "${KC_URL}/admin/realms/${REALM}/clients/${RM_ID}/authz/resource-server/policy/client" \
+                -d "{
+                  \"name\": \"mcp-proxy.token-exchange.client.policy\",
+                  \"description\": \"Allow mcp-proxy to perform token exchange to lab-tickets\",
+                  \"type\": \"client\",
+                  \"logic\": \"POSITIVE\",
+                  \"decisionStrategy\": \"UNANIMOUS\",
+                  \"clients\": [\"${MCP_PROXY_ID}\"]
+                }" | jq -r '.id // empty')
+            echo "Created mcp-proxy client policy: ${EXISTING_POLICY}"
+        else
+            echo "mcp-proxy client policy already exists: ${EXISTING_POLICY}"
+        fi
+
+        # Wire the client policy to the token-exchange permission
+        if [ -n "${EXISTING_POLICY}" ] && [ -n "${RESOURCE_ID}" ] && [ -n "${TE_SCOPE_ID}" ]; then
+            curl -s -X PUT \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "Content-Type: application/json" \
+                "${KC_URL}/admin/realms/${REALM}/clients/${RM_ID}/authz/resource-server/permission/scope/${TOKEN_EXCHANGE_PERM_ID}" \
+                -d "{
+                  \"id\": \"${TOKEN_EXCHANGE_PERM_ID}\",
+                  \"name\": \"token-exchange.permission.client.${LAB_TICKETS_ID}\",
+                  \"type\": \"scope\",
+                  \"logic\": \"POSITIVE\",
+                  \"decisionStrategy\": \"AFFIRMATIVE\",
+                  \"resources\": [\"${RESOURCE_ID}\"],
+                  \"scopes\": [\"${TE_SCOPE_ID}\"],
+                  \"policies\": [\"${EXISTING_POLICY}\"]
+                }" > /dev/null
+            echo "Wired mcp-proxy policy to token-exchange permission for lab-tickets"
+        else
+            echo "WARNING: Could not wire token-exchange permission (missing IDs: policy=${EXISTING_POLICY} resource=${RESOURCE_ID} scope=${TE_SCOPE_ID})"
+        fi
+    else
+        echo "WARNING: Could not enable management permissions for lab-tickets: ${MGMT_RESP}"
+    fi
+else
+    echo "lab-tickets client not found — skipping token-exchange permission setup"
+fi
+
 echo "Keycloak seeding complete."
