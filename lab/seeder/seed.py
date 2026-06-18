@@ -926,10 +926,22 @@ async def main() -> None:
     grafana_token = await create_grafana_token()
     results["grafana"] = "OK" if grafana_token else "FAILED or skipped"
     if grafana_token:
-        # Grafana MCP server reads GRAFANA_SERVICE_ACCOUNT_TOKEN from env.
-        # Write the token back to .env.lab so the next 'podman-compose up' picks it up.
+        # Case 2 (PRD-0002): our own mcp-servers/grafana/server.py reads the
+        # broker-injected Authorization header — the token is stored in
+        # credential_store and injected at call time. Still write to .env.lab
+        # as a fallback reference, but the compose env no longer carries it.
         _write_env_var(ENV_LAB_PATH, "GRAFANA_SERVICE_ACCOUNT_TOKEN", grafana_token)
         results["grafana_env"] = "OK (written to .env.lab)"
+        # Store in credential_store so the broker can inject it at call time.
+        if master_hex and results.get("tools_sql") == "OK":
+            try:
+                conn2 = await wait_for_postgres(max_wait=10)
+                await store_service_credential(conn2, master_hex, "grafana", "grafana-query", grafana_token)
+                await conn2.close()
+                results["grafana_cred_store"] = "OK"
+            except Exception as exc:
+                log.error("Grafana credential_store write failed: %s", exc)
+                results["grafana_cred_store"] = f"FAILED: {exc}"
 
     # 7. Create NetBox API token
     log.info("Creating NetBox API token...")

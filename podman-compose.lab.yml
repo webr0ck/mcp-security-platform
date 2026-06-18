@@ -232,26 +232,20 @@ services:
       start_period: 90s
     restart: unless-stopped
 
-  # ── Grafana MCP Server — points to real Grafana instance ────────────────────
-  # Set GRAFANA_URL and GRAFANA_SERVICE_ACCOUNT_TOKEN in .env.lab
+  # ── Grafana MCP Server — Case 2: broker injects SA token via Authorization header ──
+  # Our own server.py reads the broker-injected Authorization header (service mode,
+  # PRD-0002). No GRAFANA_SERVICE_ACCOUNT_TOKEN in env — token comes from broker.
   lab-mcp-grafana:
     <<: *mcp-hardening
-    # user: override — mcp-grafana binary runs as root by default; override to 65534 (nobody)
-    # TODO: confirm grafana/mcp-grafana supports non-root before removing user override
-    user: "65534:65534"
-    # 0.4.2 no longer exists on DockerHub; use latest stable for lab.
-    image: grafana/mcp-grafana:0.14.0
+    build:
+      context: ./lab/mcp-servers/grafana
     container_name: lab-mcp-grafana
-    command:
-      - "-transport"
-      - "streamable-http"
-      - "-address"
-      - "0.0.0.0:8000"
     ports:
       - "127.0.0.1:8100:8000"
     environment:
-      GRAFANA_URL: "${GRAFANA_URL}"
-      GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
+      GRAFANA_URL: "http://lab-grafana:3000"
+      HOST: "0.0.0.0"
+      PORT: "8000"
     depends_on:
       lab-grafana:
         condition: service_healthy
@@ -259,8 +253,7 @@ services:
       - lab-net
       - mcp-grafana-net   # pairwise net with proxy only; replaces internal-net
     healthcheck:
-      # grafana/mcp-grafana image has no python3/curl/wget — use bash /dev/tcp (/bin/sh lacks it)
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8000 2>/dev/null && exec 3>&-'"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/mcp')\" 2>/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5

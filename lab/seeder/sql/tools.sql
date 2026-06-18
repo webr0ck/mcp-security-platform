@@ -8,9 +8,9 @@
 -- and V010 (injection_mode) migrations to have run.
 -- =============================================================================
 
--- ── Grafana — no proxy injection; grafana/mcp-grafana reads GRAFANA_SERVICE_ACCOUNT_TOKEN env ──
--- Third-party image: cannot read injected Authorization header. Token is set in
--- compose env (GRAFANA_SERVICE_ACCOUNT_TOKEN) by the lab seeder.
+-- ── Grafana — broker injects SA token via Authorization header (Case 2, service mode) ──
+-- Our own mcp-servers/grafana/server.py reads the Authorization header injected
+-- by the broker at call time. Token is stored in credential_store, not in compose env.
 INSERT INTO tool_registry (
     tool_id, name, version, description, schema, upstream_url,
     status, risk_level, risk_score, risk_reasons,
@@ -23,7 +23,7 @@ INSERT INTO tool_registry (
     '{"type":"object","properties":{"query":{"type":"string"}}}'::jsonb,
     'http://lab-mcp-grafana:8000/mcp',
     'active', 'low', 10, '[]'::jsonb,
-    'lab-seeder', null, null, 'none', null, null
+    'lab-seeder', 'grafana', null, 'service', 'Authorization', 'Bearer'
 ),
 -- ── NetBox — no proxy injection; netbox-mcp-server reads NETBOX_TOKEN env ────────────────────
 -- Third-party library: cannot read injected Authorization header. Token is set in
