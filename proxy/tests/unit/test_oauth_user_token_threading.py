@@ -122,12 +122,16 @@ async def test_dispatcher_oauth_user_token_uses_caller_token_as_subject():
         "injection_mode": "oauth_user_token",
         "inject_header": "Authorization",
         "inject_prefix": "Bearer",
-        "kc_token_audience": "https://graph.example",
+        "kc_token_audience": "lab-tickets",
     }
 
     with patch("app.credential_broker.keycloak_client.exchange_token",
                AsyncMock(side_effect=fake_exchange)), \
-         patch("app.services.invocation.broker_instance", MagicMock()):
+         patch("app.services.invocation.broker_instance", MagicMock()), \
+         patch("app.credential_broker.keycloak_client.get_public_key_for_token",
+               AsyncMock(return_value="mock-key")), \
+         patch("app.credential_broker.token_assert.assert_exchanged_token", return_value=None), \
+         patch("jwt.decode", return_value={"sub": "alice"}):
         headers = await disp.dispatch_credential_injection(
             tool_record=tool_record,
             client_id="alice@corp",
@@ -135,7 +139,7 @@ async def test_dispatcher_oauth_user_token_uses_caller_token_as_subject():
         )
 
     assert captured["subject_token"] == "caller-kc-access-token"
-    assert captured["audience"] == "https://graph.example"
+    assert captured["audience"] == "lab-tickets"
     assert headers["Authorization"] == "Bearer exchanged-token"
 
 

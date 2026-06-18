@@ -185,3 +185,23 @@ async def discover_jwks_uri() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Failed to fetch JWKS from %s: %s", oidc_config_url, exc)
         return {"keys": []}
+
+
+async def get_public_key_for_token(token: str):
+    """
+    Fetch KC JWKS and return the RSA public key matching the token's kid header.
+    Used by S-5 to verify exchanged tokens before trusting any claim.
+    """
+    from jwt.algorithms import RSAAlgorithm
+    import json as _json
+    import jwt as _jwt
+
+    jwks = await discover_jwks_uri()
+    keys = jwks.get("keys", [])
+
+    header = _jwt.get_unverified_header(token)
+    kid = header.get("kid")
+    matching = [k for k in keys if k.get("kid") == kid] if kid else keys
+    if not matching:
+        raise ValueError(f"No JWKS key matching kid={kid!r}")
+    return RSAAlgorithm.from_jwk(_json.dumps(matching[0]))

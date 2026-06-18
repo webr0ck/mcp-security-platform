@@ -424,10 +424,40 @@ async def _inject_kc_token_exchange(
             f"{tool_record.get('tool_id')}; refusing to forward unauthenticated request"
         )
 
+    # S-6(b): proxy-side audience allowlist — a malicious/buggy DB row cannot
+    # widen the mint even if the KC realm policy regresses.
+    _ALLOWED_EXCHANGE_AUDIENCES = frozenset({"lab-tickets"})
+    if audience not in _ALLOWED_EXCHANGE_AUDIENCES:
+        raise CredentialInjectionError(
+            f"kc_token_exchange mode: audience {audience!r} not in allowlist "
+            f"{sorted(_ALLOWED_EXCHANGE_AUDIENCES)}"
+        )
+
     exchanged = await exchange_token(
         subject_token=user_kc_token,
         audience=audience,
     )
+
+    # S-5: JWKS-verify the exchanged token before trusting any claim.
+    import jwt as _jwt
+    from app.credential_broker.token_assert import assert_exchanged_token, ExchangedTokenError
+    from app.credential_broker.keycloak_client import get_public_key_for_token
+
+    if exchanged:
+        caller_sub = _jwt.decode(user_kc_token, options={"verify_signature": False}).get("sub", "")
+        try:
+            public_key = await get_public_key_for_token(exchanged)
+            assert_exchanged_token(
+                exchanged,
+                expected_sub=caller_sub,
+                expected_aud=audience,
+                public_key=public_key,
+            )
+        except ExchangedTokenError as exc:
+            raise CredentialInjectionError(f"exchanged token failed S-5 assertion: {exc}") from exc
+        except Exception as exc:
+            raise CredentialInjectionError(f"S-5 JWKS fetch failed: {exc}") from exc
+
     if not exchanged:
         raise CredentialInjectionError(
             f"kc_token_exchange mode: Keycloak token exchange returned no token for tool "
