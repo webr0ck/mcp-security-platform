@@ -25,9 +25,9 @@ INSERT INTO tool_registry (
     'active', 'low', 10, '[]'::jsonb,
     'lab-seeder', 'grafana', null, 'service', 'Authorization', 'Bearer'
 ),
--- ── NetBox — no proxy injection; netbox-mcp-server reads NETBOX_TOKEN env ────────────────────
--- Third-party library: cannot read injected Authorization header. Token is set in
--- compose env (NETBOX_TOKEN) by the lab seeder.
+-- ── NetBox — per-user broker-injected token (Case 3, PRD-0002, user mode) ────────────────────
+-- Our own mcp-servers/netbox/server.py reads the Authorization header injected
+-- by the broker at call time. Each user's token is stored in credential_store (owner_type='user').
 (
     gen_random_uuid(),
     'netbox-query', '1.0.0',
@@ -35,7 +35,7 @@ INSERT INTO tool_registry (
     '{"type":"object","properties":{"resource":{"type":"string"}}}'::jsonb,
     'http://mcp-netbox:8000/mcp',
     'active', 'low', 10, '[]'::jsonb,
-    'lab-seeder', null, null, 'none', null, null
+    'lab-seeder', 'netbox', null, 'user', 'Authorization', 'Token'
 ),
 -- ── Dex — per-user OAuth2 token (Approach A) ──────────────────────────────────
 (

@@ -686,6 +686,95 @@ async def seed_m365_credential(conn: asyncpg.Connection, master_hex: str) -> boo
         return False
 
 
+async def seed_netbox_user_credentials(conn: asyncpg.Connection, master_hex: str) -> dict:
+    """
+    Create per-user NetBox API tokens for alice/bob/carol and store them
+    in credential_store keyed by KC sub (user mode, Case 3, PRD-0002).
+    """
+    if not LAB_NETBOX_ADMIN_TOKEN:
+        log.warning("LAB_NETBOX_ADMIN_TOKEN not set — skipping NetBox per-user token seeding")
+        return {"netbox_users": "SKIPPED"}
+
+    # Get the netbox-query tool_id
+    row = await conn.fetchrow(
+        "SELECT tool_id FROM tool_registry WHERE name=$1 AND deleted_at IS NULL",
+        "netbox-query",
+    )
+    if not row:
+        log.error("netbox-query tool not found in registry")
+        return {"netbox_users": "FAILED (tool not found)"}
+    tool_id = str(row["tool_id"])
+
+    # Get KC admin token to look up user subs
+    kc_user_subs: dict[str, str] = {}  # username -> kc_sub
+    try:
+        async with httpx.AsyncClient(timeout=10, base_url=KC_ADMIN_URL) as client:
+            resp = await client.post(
+                "/realms/master/protocol/openid-connect/token",
+                data={"client_id": "admin-cli", "grant_type": "password",
+                      "username": "admin", "password": KC_ADMIN_PASSWORD},
+            )
+            if resp.status_code == 200:
+                admin_token = resp.json()["access_token"]
+                headers = {"Authorization": f"Bearer {admin_token}"}
+                users_resp = await client.get("/admin/realms/mcp/users", headers=headers)
+                if users_resp.status_code == 200:
+                    for u in users_resp.json():
+                        if u["username"] in KC_EXPECTED_USERS:
+                            kc_user_subs[u["username"]] = u["id"]
+    except Exception as exc:
+        log.warning("KC lookup failed for NetBox user seeding: %s", exc)
+
+    # Create per-user NetBox tokens
+    results = {}
+    master_bytes = bytes.fromhex(master_hex)
+
+    async with httpx.AsyncClient(timeout=15, base_url=LAB_NETBOX_URL) as nb_client:
+        for username in KC_EXPECTED_USERS:
+            kc_sub = kc_user_subs.get(username, f"lab-user-{username}")
+
+            # Create a NetBox API token for this user
+            nb_headers = {
+                "Authorization": f"Token {LAB_NETBOX_ADMIN_TOKEN}",
+                "Content-Type": "application/json",
+            }
+            try:
+                create_resp = await nb_client.post(
+                    "/api/users/tokens/",
+                    headers=nb_headers,
+                    json={"description": f"lab-{username}-prd0002", "write_enabled": False},
+                )
+                if create_resp.status_code not in (200, 201):
+                    log.warning("NetBox token creation for %s failed: %s", username, create_resp.status_code)
+                    results[f"netbox_{username}"] = f"FAILED ({create_resp.status_code})"
+                    continue
+                nb_token = create_resp.json().get("key", "")
+            except Exception as exc:
+                log.warning("NetBox token creation for %s error: %s", username, exc)
+                results[f"netbox_{username}"] = f"ERROR ({exc})"
+                continue
+
+            # Store in credential_store keyed by kc_sub
+            blob = _encrypt_credential(
+                nb_token, kc_sub, master_bytes,
+                service="netbox", tool_id=tool_id, owner_type="user",
+            )
+            await conn.execute(
+                """
+                INSERT INTO credential_store
+                    (user_sub, service, tool_id, owner_type, credential_type, encrypted_blob)
+                VALUES ($1, 'netbox', $2::uuid, 'user', 'api_key', $3)
+                ON CONFLICT (user_sub, service) WHERE owner_type = 'user'
+                DO UPDATE SET encrypted_blob = EXCLUDED.encrypted_blob, updated_at = now()
+                """,
+                kc_sub, tool_id, blob,
+            )
+            log.info("NetBox per-user token stored: user=%s kc_sub=%s", username, kc_sub)
+            results[f"netbox_{username}"] = "OK"
+
+    return results
+
+
 async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     """
     Generate (or retrieve) a service API key for lab-mcp-self-service.
@@ -962,6 +1051,14 @@ async def main() -> None:
         m365_ok = await seed_m365_credential(conn_m365, master_hex)
         await conn_m365.close()
         results["m365_cred_store"] = "OK" if m365_ok else "SKIPPED (AZURE_CLIENT_SECRET not set)"
+
+    # 7c. Seed NetBox per-user tokens into credential_store (Case 3, PRD-0002, Task 8)
+    if master_hex and results.get("tools_sql") == "OK":
+        log.info("Seeding NetBox per-user tokens into credential_store...")
+        conn_nb = await wait_for_postgres(max_wait=10)
+        nb_results = await seed_netbox_user_credentials(conn_nb, master_hex)
+        await conn_nb.close()
+        results.update(nb_results)
 
     # 8. Seed self-service MCP API key (Task 2.2b / Task 2.5)
     log.info("Seeding lab-self-service API key...")

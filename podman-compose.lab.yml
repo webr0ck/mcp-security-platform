@@ -260,22 +260,23 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # ── NetBox MCP Server — points to real NetBox instance ──────────────────────
-  # Set NETBOX_URL and NETBOX_TOKEN in .env.lab
+  # ── NetBox MCP Server — per-user broker-injected token (Case 3, PRD-0002) ───
+  # Our own server.py reads Authorization header injected by the broker at call
+  # time (user mode). No static NETBOX_TOKEN env — tokens are per-user in DB.
   mcp-netbox:
     <<: *mcp-hardening
-    build: ./lab/mcp-servers/netbox
+    build:
+      context: ./lab/mcp-servers/netbox
+      dockerfile: Dockerfile
     image: mcp-netbox-server:lab
     container_name: mcp-netbox
     ports:
       - "127.0.0.1:8101:8000"
     environment:
-      NETBOX_URL: "${NETBOX_URL}"
-      NETBOX_TOKEN: "${NETBOX_TOKEN}"
+      NETBOX_URL: "http://lab-netbox:8080"
       TRANSPORT: "http"
       HOST: "0.0.0.0"
       PORT: "8000"
-      VERIFY_SSL: "false"
     depends_on:
       lab-netbox:
         condition: service_healthy
