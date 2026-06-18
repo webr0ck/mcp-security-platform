@@ -41,9 +41,9 @@ PORT = int(os.environ.get("PORT", "8000"))
 # app-only token if the gateway did not inject a per-user delegated token.
 # This prevents the server from silently acting as the APPLICATION (and reading
 # the fixed M365_USER mailbox) when an operator believes delegated mode is active.
-REQUIRE_DELEGATED = os.environ.get("REQUIRE_DELEGATED", "").strip().lower() in (
-    "1", "true", "yes", "on",
-)
+# S-1 (PRD-0002): default to True. Must be explicitly disabled for app-only testing.
+_rd = os.environ.get("REQUIRE_DELEGATED", "true").strip().lower()
+REQUIRE_DELEGATED = _rd not in ("0", "false", "no", "off")
 
 # Case-3 "native passthrough" (3b): when true, this server behaves as an OAuth
 # 2.0 PROTECTED RESOURCE (RFC 9728). A tools/call without a usable bearer token

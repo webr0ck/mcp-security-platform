@@ -255,6 +255,13 @@ async def dispatch_credential_injection(
             )
 
         case InjectionMode.ENTRA_USER_TOKEN:
+            # S-1: fail-closed — a delegated tool MUST have a user KC token.
+            # Without it we cannot identify the caller; never fall back to app-only.
+            if not client_id:
+                raise CredentialInjectionError(
+                    f"entra_user_token mode: no authenticated user sub for tool "
+                    f"{tool_record.get('tool_id')}; refusing to forward (S-1 fail-closed)"
+                )
             return await _inject_entra_user_token(
                 user_sub=client_id,
                 service_name=service_name,
