@@ -458,6 +458,21 @@ security-check:
 	fi; \
 	\
 	echo ""; \
+	echo "--- H3: Semgrep — MCP identity-as-tool-param antipattern ---"; \
+	if which semgrep > /dev/null 2>&1; then \
+		if semgrep --config policies/semgrep.yml --error lab/mcp-servers/ 2>&1; then \
+			echo "PASS: H3 no identity-as-tool-param found in lab/mcp-servers/"; \
+		else \
+			echo "FAIL: H3 semgrep found identity-as-tool-param — tool accepts caller identity as a parameter (CWE-639)"; \
+			FAILURES=$$((FAILURES+1)); \
+		fi; \
+	else \
+		echo "FAIL: H3 semgrep not installed — gate fails closed"; \
+		echo "      Install: pip install semgrep"; \
+		FAILURES=$$((FAILURES+1)); \
+	fi; \
+	\
+	echo ""; \
 	if [ "$$FAILURES" -gt 0 ]; then \
 		echo "════════════════════════════════════════════════════════"; \
 		echo "RESULT: $$FAILURES check(s) FAILED"; \

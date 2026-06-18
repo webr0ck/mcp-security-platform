@@ -1,0 +1,67 @@
+rules:
+  # ─── H3: MCP identity-as-tool-parameter antipattern ────────────────────────
+  # An MCP tool must NEVER accept caller identity as a function parameter.
+  # Clients control parameter values and can forge any identity they choose.
+  # Identity MUST be sourced exclusively from the proxy-injected X-User-Sub
+  # header via identity() / ContextVar middleware (spec H3, FO-1 CRITICAL).
+  #
+  # Catches any @<anything>.tool()-decorated function — sync or async — whose
+  # parameter list includes a name from the known-bad identity namespace:
+  #   user_sub, caller_sub, caller_id, principal_id, principal,
+  #   user_id, acting_user
+  #
+  # Four variants cover the Python parameter forms:
+  #   (a) bare:          def f(..., user_sub, ...)
+  #   (b) defaulted:     def f(..., user_sub="anonymous", ...)
+  #   (c) typed:         def f(..., user_sub: str, ...)
+  #   (d) typed+default: def f(..., user_sub: str = "anonymous", ...)
+  #
+  # CWE-639: Authorization Bypass Through User-Controlled Key
+  # Ref: docs/superpowers/specs/2026-06-18-mcphub-sdk-design.md §H3
+
+  - id: mcp-identity-as-tool-param
+    languages: [python]
+    severity: ERROR
+    message: >
+      MCP tool '$F' accepts caller identity as parameter '$PARAM' — clients can
+      forge it. Source identity from identity()/X-User-Sub (mcphub_sdk), never
+      a tool argument. See spec H3 and docs/superpowers/specs/2026-06-18-mcphub-sdk-design.md.
+    metadata:
+      category: security
+      cwe: "CWE-639"
+      confidence: HIGH
+      references:
+        - https://github.com/modelcontextprotocol/specification
+    patterns:
+      - pattern-either:
+          # (a) bare parameter: def f(..., user_sub, ...)
+          - pattern: |
+              @$DEC.tool(...)
+              async def $F(..., $PARAM, ...): ...
+          - pattern: |
+              @$DEC.tool(...)
+              def $F(..., $PARAM, ...): ...
+          # (b) defaulted parameter: def f(..., user_sub="anonymous", ...)
+          - pattern: |
+              @$DEC.tool(...)
+              async def $F(..., $PARAM=$DEFAULT, ...): ...
+          - pattern: |
+              @$DEC.tool(...)
+              def $F(..., $PARAM=$DEFAULT, ...): ...
+          # (c) typed parameter: def f(..., user_sub: str, ...)
+          - pattern: |
+              @$DEC.tool(...)
+              async def $F(..., $PARAM: $TYPE, ...): ...
+          - pattern: |
+              @$DEC.tool(...)
+              def $F(..., $PARAM: $TYPE, ...): ...
+          # (d) typed + defaulted: def f(..., user_sub: str = "anonymous", ...)
+          - pattern: |
+              @$DEC.tool(...)
+              async def $F(..., $PARAM: $TYPE = $DEFAULT, ...): ...
+          - pattern: |
+              @$DEC.tool(...)
+              def $F(..., $PARAM: $TYPE = $DEFAULT, ...): ...
+      - metavariable-regex:
+          metavariable: $PARAM
+          regex: ^(user_sub|caller_sub|caller_id|principal_id|principal|user_id|acting_user)$
