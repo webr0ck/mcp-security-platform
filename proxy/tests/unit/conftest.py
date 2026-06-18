@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 _DEFAULTS = {
+    "ENVIRONMENT": "development",
     "DB_PASSWORD": "test",
     "REDIS_PASSWORD": "test",
     "PROXY_SECRET_KEY": "test",
