@@ -6,6 +6,7 @@
         dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
         lab-init lab-init-force labup lab-up lab-down lab-down-volumes \
         lab-migrate-per-tool-dry lab-migrate-per-tool-activate lab-migrate-per-tool lab-migrate-validate \
+        sdk-base \
         clean
 
 # =============================================================================
@@ -578,6 +579,32 @@ pull-model:
 	@echo "This downloads ~2GB and may take several minutes."
 	$(COMPOSE) exec ollama ollama pull $(OLLAMA_MODEL)
 	@echo "Model $(OLLAMA_MODEL) ready for risk scoring."
+
+# ─── SDK base image ───────────────────────────────────────────────────────────
+#
+# H4/H7: builds mcphub-sdk:base — the digest-pinned non-root Python base image
+# that all SDK-scaffolded MCP servers use as their FROM.
+#
+# Build order for a fresh host:
+#   make sdk-base            # build mcphub-sdk:base (run once, or after SDK changes)
+#   podman-compose build     # build individual FROM mcphub-sdk:base server images
+#   make lab-up              # start the lab stack
+#
+# sdk-base is NOT wired as a prerequisite of lab-up / build to avoid adding a
+# mandatory podman build step to every lab start.  Run it manually when:
+#   • deploying to a fresh host for the first time
+#   • the SDK package (sdk/mcphub-sdk/) or its Dockerfile.base changes
+#   • rotating the pinned python:3.12-slim digest
+
+sdk-base: ## Build mcphub-sdk:base (digest-pinned SDK base image for all scaffolded servers)
+	@grep -q 'FROM python:3.12-slim@sha256:' sdk/mcphub-sdk/Dockerfile.base || \
+	  (echo "FAIL: sdk/mcphub-sdk/Dockerfile.base must pin the base image by @sha256 digest (H4)"; exit 1)
+	@echo "==> Digest-gate passed: FROM line carries @sha256 pin"
+	@echo "==> Building mcphub-sdk:base from sdk/mcphub-sdk/..."
+	podman build -t mcphub-sdk:base -f sdk/mcphub-sdk/Dockerfile.base sdk/mcphub-sdk
+	@echo ""
+	@echo "==> mcphub-sdk:base built. Verify with:"
+	@echo "      podman images | grep mcphub-sdk"
 
 # ─── RBAC management ──────────────────────────────────────────────────────────
 

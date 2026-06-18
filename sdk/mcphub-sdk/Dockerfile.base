@@ -1,0 +1,47 @@
+# mcphub-sdk:base — digest-pinned base image for all SDK-scaffolded MCP servers
+#
+# H4: FROM must always be pinned by @sha256 digest (mutable tags like :3.12-slim are
+# not allowed — make sdk-base enforces this with a pre-build grep gate).
+#
+# Resolved 2026-06-18:
+#   podman pull python:3.12-slim
+#   podman inspect --format '{{index .RepoDigests 0}}' python:3.12-slim
+#   → docker.io/library/python@sha256:c2d8472b831337ab296a8ce652e1ba786e9e3034fc445dc58b50a7f5251f0003
+#
+# To update the pin (when rotating to a newer python:3.12-slim release):
+#   1. podman pull python:3.12-slim
+#   2. podman inspect --format '{{index .RepoDigests 0}}' python:3.12-slim
+#   3. Replace the sha256 below with the new digest
+#   4. Re-run: make sdk-base
+#   5. Rebuild all FROM mcphub-sdk:base server images
+FROM python:3.12-slim@sha256:c2d8472b831337ab296a8ce652e1ba786e9e3034fc445dc58b50a7f5251f0003
+
+# Non-root user — uid/gid 1001, matching all lab MCP server Dockerfiles
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid appgroup --no-create-home appuser
+
+WORKDIR /app
+
+# Install mcphub_sdk and its declared dependencies (mcp, uvicorn, httpx, starlette).
+# Build context = sdk/mcphub-sdk/ so pyproject.toml and the package are at root.
+# hatchling is the build backend declared in pyproject.toml.
+COPY --chown=appuser:appgroup pyproject.toml ./
+COPY --chown=appuser:appgroup mcphub_sdk/ ./mcphub_sdk/
+
+RUN pip install --no-cache-dir hatchling && \
+    pip install --no-cache-dir .
+
+USER appuser
+
+# Scaffolded servers override these via their own ENV/CMD.
+# Presence here makes mcphub_sdk.server.PlatformMCPServer.run() work without
+# further configuration in simple single-server deployments.
+ENV HOST=0.0.0.0
+ENV PORT=8000
+
+EXPOSE 8000
+
+# No CMD / ENTRYPOINT: this is a base image.
+# Scaffolded servers add:
+#   COPY --chown=appuser:appgroup server.py .
+#   CMD ["python", "server.py"]
