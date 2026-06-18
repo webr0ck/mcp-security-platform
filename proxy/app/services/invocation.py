@@ -868,6 +868,24 @@ async def invoke_tool(
         session_jti=session_jti,
     )
 
+    # PRD-0002 §5.1: emit uniform trace spine fields (captured by Loki for Grafana pivot)
+    _tf = _compute_trace_fields(
+        injection_mode=tool_record.get("injection_mode", "none"),
+        user_sub=client_id,
+        tool_name=tool_name,
+    )
+    logger.info(
+        "tool_call_trace",
+        extra={
+            "trace_id": request_id,
+            "audit_id": audit_id,
+            **_tf,
+            "tool_id": str(tool_id),
+            "latency_ms": latency_ms,
+            "decision": "allow",
+        },
+    )
+
     # -------------------------------------------------------------------------
     # Step 6: Return proxied response
     # -------------------------------------------------------------------------
@@ -1079,6 +1097,53 @@ async def _mcp_initialize(
     }, headers=notify_headers)
 
     return session_id
+
+
+def _compute_trace_fields(
+    injection_mode: str,
+    user_sub: str,
+    tool_name: str,
+) -> dict[str, Any]:
+    """
+    PRD-0002 §5.1 trace spine: compute the five uniform audit fields for a tool call.
+    Used in invoke_tool() to emit a structured trace log entry on every invocation.
+    """
+    # idp_topology: which IdP issued the upstream credential
+    if injection_mode in ("entra_client_credentials", "entra_user_token"):
+        idp_topology = "second"
+    elif injection_mode in ("kc_token_exchange", "oauth_user_token"):
+        idp_topology = "same"
+    else:
+        idp_topology = "none"
+
+    # attribution_preserved: True when the upstream request is traceable to the end user
+    attribution_preserved = injection_mode in ("user", "kc_token_exchange", "oauth_user_token")
+
+    # upstream_principal: who is acting at the upstream system
+    if injection_mode in ("entra_client_credentials",):
+        upstream_principal = "__app__"
+    elif attribution_preserved:
+        upstream_principal = user_sub  # per-user token
+    else:
+        upstream_principal = "__service__"
+
+    # case_id: the PRD-0002 case number (None for modes not in the four-auth POC)
+    _case_map = {
+        "entra_client_credentials": 1,
+        "service": 2,
+        "user": 3,
+        "kc_token_exchange": 4,
+        "oauth_user_token": 4,  # alias
+    }
+    case_id = _case_map.get(injection_mode)
+
+    return {
+        "case_id": case_id,
+        "injection_mode": injection_mode,
+        "upstream_principal": upstream_principal,
+        "attribution_preserved": attribution_preserved,
+        "idp_topology": idp_topology,
+    }
 
 
 def _compute_hmac_signature(sha256_hash: str, event: Any) -> str | None:
