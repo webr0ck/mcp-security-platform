@@ -563,6 +563,30 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _enforce_token_exchange_audience(self) -> "Settings":
+        """
+        S-2 (PRD-0002): when KC token exchange is enabled, OIDC_AUDIENCE must be
+        a single, non-blank value REGARDLESS of ENVIRONMENT. The existing
+        production/staging audience validators skip development, which is exactly
+        the lab profile where case 4 (token exchange) runs — leaving an
+        audience-confusion fail-open. This closes it.
+        """
+        if not (self.OIDC_ENABLED and self.KC_TOKEN_EXCHANGE_ENABLED):
+            return self
+        aud = self.OIDC_AUDIENCE.strip()
+        if not aud:
+            raise ValueError(
+                "Startup blocked: KC_TOKEN_EXCHANGE_ENABLED=true requires a non-blank "
+                "OIDC_AUDIENCE (single value) so verify_aud is enforced even in development."
+            )
+        if "," in aud or " " in aud:
+            raise ValueError(
+                "Startup blocked: OIDC_AUDIENCE must be a single audience when token "
+                f"exchange is enabled; got multi-value {aud!r}."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _enforce_vault_tls(self) -> "Settings":
         """
         CB-002: the Vault master secret protects every credential at rest.
