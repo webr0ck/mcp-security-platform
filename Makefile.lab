@@ -9,7 +9,7 @@ LAB_COMPOSE = podman-compose \
 
 .PHONY: lab-setup lab-up lab-down lab-reset lab-rebuild lab-init lab-test lab-smoke \
         lab-logs lab-dex-logs lab-ps lab-entra-check lab-vault-init \
-        lab-proxy-shell lab-netbox-shell help
+        lab-proxy-shell lab-netbox-shell smoke-four incidents help
 
 ## lab-setup       Zero-to-usable: start stack, migrate DB, provision tokens, seed, smoke test
 lab-setup:
@@ -36,8 +36,8 @@ lab-reset:
 
 ## lab-rebuild      Rebuild and restart only changed services, then re-seed
 lab-rebuild:
-	$(LAB_COMPOSE) build proxy lab-grafana lab-netbox lab-seeder
-	$(LAB_COMPOSE) up -d --no-deps proxy lab-grafana lab-netbox
+	$(LAB_COMPOSE) build proxy lab-mcp-grafana mcp-netbox lab-mcp-m365 lab-seeder
+	$(LAB_COMPOSE) up -d --no-deps proxy lab-mcp-grafana mcp-netbox lab-mcp-m365
 	$(LAB_COMPOSE) run --rm lab-seeder
 
 ## lab-init         Initialise Vault then run the seeder container
@@ -52,6 +52,17 @@ lab-test:
 ## lab-smoke        Run the smoke-test script against live endpoints
 lab-smoke:
 	bash lab/scripts/lab-smoke.sh
+
+## smoke-four       PRD-0002 P0 acceptance test — verify 3/4 auth cases registered
+smoke-four:
+	bash lab/scripts/smoke_four_cases.sh
+
+## incidents        (stub) Query recent audit incidents from the DB (P1)
+incidents:
+	@echo "incidents: stub — full incident query lands in P1"
+	@podman exec mcp-db psql -U mcp -d mcp -c \
+	  "SELECT tool_id, outcome, created_at FROM audit_log WHERE outcome != 'allow' ORDER BY created_at DESC LIMIT 20;" \
+	  2>/dev/null || echo "  (DB not reachable — start the lab stack first)"
 
 ## lab-logs         Follow logs for core lab services
 lab-logs:
