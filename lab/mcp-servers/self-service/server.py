@@ -93,7 +93,14 @@ class _IdentityMiddleware(BaseHTTPMiddleware):
             _ctx_caller_role.reset(tok_role)
 
 
-mcp = FastMCP("self-service-mcp")
+# stateless_http=True is REQUIRED so the identity ContextVars set by
+# _IdentityMiddleware (from the proxy-injected X-User-Sub/X-User-Role headers)
+# reach the tool handlers. In the default stateful streamable-http mode, tools
+# run in a long-lived session-init task group and the per-request ContextVar
+# never propagates — tools would always read the "anonymous"/"agent" defaults
+# (symptom: get_profile -> 401 "no identity resolved"). Stateless mode runs each
+# request in its own task spawned from the request context.
+mcp = FastMCP("self-service-mcp", stateless_http=True)
 
 # ── proxy profile API client ──────────────────────────────────────────────────
 
