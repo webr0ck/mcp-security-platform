@@ -16,7 +16,7 @@ A CI gate (`make security-check`) enforces the machine-verifiable invariants. Hu
 
 ## Enforcement reality (2026-05-16)
 
-The per-INV "Enforcement:" lines below describe the *intended* control. Audited actual state (see `REVIEW-2026-05-16.md` §2):
+The per-INV "Enforcement:" lines below describe the *intended* control. Audited actual state (see `archive/REVIEW-2026-05-16.md` §2):
 
 | INV | Actually enforced by automation? |
 |---|---|

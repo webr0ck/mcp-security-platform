@@ -59,7 +59,7 @@ Every INV from `docs/SECURITY_NONNEGATABLES.md` mapped to test file(s) and test 
 | INV-005 | (integration) | `integration/test_mcp_server_chain.py` | `test_quarantined_tool_blocked_no_upstream_call` | Yes |
 | INV-006 | SBOM signature required | `security/test_ai_attacks.py` | `test_tamper_sbom_invalid_signature_detected`, `test_tamper_sbom_missing_signature_cannot_activate_tool` | Yes |
 | INV-006 | (library level) | `unit/test_sbom.py` | All | Yes |
-| INV-007 | Audit log WORM (MinIO Object Lock) | No automated test — aspirational per REVIEW-2026-05-16.md | Gap: ROADMAP P2.4 | No |
+| INV-007 | Audit log WORM (MinIO Object Lock) | No automated test — aspirational per archive/REVIEW-2026-05-16.md | Gap: ROADMAP P2.4 | No |
 | INV-008 | No secrets in code | `make security-check` (trufflehog) | N/A — tooling gate | Yes |
 | INV-009 | mTLS enforced for agent endpoints | `unit/test_auth_middleware.py` | `test_missing_cn_no_auth_returns_401`, `test_401_includes_www_authenticate_header` | Yes |
 | INV-009 | (integration) | `integration/test_rbac.py` | `test_unauthenticated_returns_401[POST /tools/{id}/invoke]` | Yes |

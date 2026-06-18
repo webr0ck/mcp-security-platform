@@ -40,7 +40,7 @@ without handing those tools the keys to the environment.
 prompt-injected agent driving it) that wants credentials, data exfiltration, or lateral movement.
 This platform's job is to ensure that even a fully hostile backend never sees a raw credential,
 can't be invoked outside policy, can't reach the proxy or other backends over the network, and
-can't act without a signed, redaction-safe audit trail.
+can't act without a hash-chained, redaction-safe audit trail (HMAC-signed in production).
 
 ## What makes this interesting
 
@@ -52,7 +52,9 @@ can't act without a signed, redaction-safe audit trail.
 - **Fail-closed everywhere, gated in CI.** Deny-by-default OPA, signed policy bundles by default,
   and a security-invariant suite (`make security-check`) that fails the build on a fail-open regression.
 - **Network isolation you can verify in one command** — `python scripts/check_network_isolation.py`
-  statically proves backend MCP servers can't reach the proxy; regression-gated.
+  statically verifies the compose topology keeps backend MCP servers off the proxy's network
+  (a membership check, daemon-free); regression-gated across every tier in `make security-check`.
+  Runtime unreachability is proven separately by the red-team harness.
 - **Adversarial test suite** — a containerized red-team harness (`sandbox/tests/red_team/`) probes
   credential exfil, network/filesystem isolation, privilege escalation, seccomp, and tool poisoning.
 - **Docs matched to code, gaps tracked openly** — the Enforced-vs-Roadmap table is the source of
@@ -163,11 +165,11 @@ sequenceDiagram
 | **Identity** | Gateway terminates mTLS and sets client identity; proxy uses it (server-side nonce + PKCE on credential enrollment) | App still trusts the gateway-set `X-Client-Cert-CN` header — safe only when nginx is the sole path (defense-in-depth gap, see [`SECURITY.md`](SECURITY.md) F-001); the **production** gateway does **not** route `/mcp`, `/.well-known/*`, or `/oauth/register` — the zero-credential MCP/OIDC flow is currently reachable only via the **lab** gateway |
 | **OIDC login** | **Keycloak browser login, PKCE S256, session JWT, Grafana SSO** — full flow (`/api/v1/auth/oidc/*`); KC tokens stored server-side only; HttpOnly session cookie; **session JTI revocation IS enforced on every request**; external Bearer path validates **`iss`** and (in production) **`aud`** | External Keycloak access token as Bearer is accepted as a fallback; in dev/lab `aud` validation is off when `OIDC_AUDIENCE` is unset (production startup is blocked unless it is set) |
 | **Credential broker** | **Wired into the request path at startup**; **fail-closed** at call time when `VAULT_TOKEN` is empty. Crypto hardened — HKDF-SHA256 KEK, AES-256-GCM + AAD row-binding, Vault HTTPS-only (prod), PKCE, synchronous enrollment audit | Approach-B service adapters (`gitea/grafana/netbox`) are orphaned (live path uses approach-A `credential_store` crypto) |
-| **Credential injection modes** | `injection_mode` on `tool_registry`; **`service` / `user` active and fail-closed**; `service_account` (KC client-credentials) active; **`oauth_user_token` (RFC 8693) functional for direct-OIDC callers**; **`entra_client_credentials` reads secret from Vault-backed `credential_store`**; admin credentials UI to upload/rotate/revoke | `oauth_user_token` for internal-session (browser portal) callers still fails closed; **`passthrough`** / **`entra_user_token`** wired in code but not settable via the admin API; **`basic_auth`** stored but not base64-encoded on injection |
+| **Credential injection modes** | `injection_mode` on `tool_registry`; **`service` / `user` active and fail-closed**; `service_account` (KC client-credentials) active; **`oauth_user_token` (RFC 8693) functional for direct-OIDC callers**; **`entra_client_credentials` reads secret from Vault-backed `credential_store`**; admin credentials UI to upload/rotate/revoke | `oauth_user_token` for internal-session (browser portal) callers still fails closed; **`passthrough`** / **`entra_user_token`** wired in code but not settable via the admin API; **`basic_auth`** is a storable credential type but has no injection-mode handler — selecting it fails closed |
 | **Server registry** | **`server_registry` is the single source of truth**; `registry.py` reads DB, 30s auto-refresh; **self-service onboarding via `POST /api/v1/servers`** (server_owner role); consent dual-control; adapter healthcheck at approval; **tool discovery + quarantine** on registration; server-scoped OAuth enrollment | Server-owner onboarding wizard UI |
-| **OPA grants sync** | **Grants are DB-authoritative**; `role_assignments` pushed to OPA via data API on every mutation (fail-closed — 503 if push fails); 60s reconcile loop; startup push on proxy boot | OPA brief deny window (~1 reconcile interval) after OPA restart before first push completes |
+| **OPA grants sync** | **Grants are DB-authoritative**; `client_grants` pushed to OPA via data API on every mutation (fail-closed — 503 if push fails); 60s reconcile loop; startup push on proxy boot (RBAC `role_assignments` is a separate table consumed by middleware, not pushed to OPA) | OPA brief deny window (~1 reconcile interval) after OPA restart before first push completes |
 | **Client grants** | **ENFORCED** — `client_grants` table, `admin_grants` router, OPA data-API push on every mutation; `data.mcp_grants` evaluates per-tool allow lists at invocation time | Grants are per-tool-name; server-scoped grants are roadmap |
-| **Network isolation** | **F-001 isolation verified by regression test on the lab** — a non-dialed sidecar cannot reach `proxy:8000`; regression-gated in `make security-check`; **MCP server network isolation enforced in lab tier** (pairwise networks, egress proxy) | The F-001 gate scans only `docker-compose.yml`, not the tier composes users actually deploy; the demo tier ships a thinner edge |
+| **Network isolation** | **F-001 isolation proven by a static compose-topology gate across all five tiers** (`docker-compose.yml`, lab, POC, `engine`, `standard`) — MCP/sidecar services share no network with the proxy, so a non-dialed sidecar has no route to `proxy:8000` (pairwise networks, egress proxy); regression-gated in `make security-check` | The gate proves topology *membership* statically, not a live network-namespace assertion; **runtime** reachability is exercised by the red-team harness (`sandbox/tests/red_team/`), which is run on-demand, not in CI |
 | **Audit / observability** | Synchronous audit on REST + `/mcp` invocation + credential enrollment; SHA-256 per-event; raw tool args never persisted (hashes only); Loki/Grafana; **`/mcp` meta-tool audit is fail-closed** | Quarantine/error audit paths on non-meta-tool routes remain synchronous-emit-or-500; MinIO uses GOVERNANCE retention (not tamper-proof WORM); compliance checker is advisory |
 | **Trust envelope (POC)** | **ES256-signed envelopes on every tool result** (JCS/RFC 8785 canonicalization); **passive inline verifier** (logs verdict, never blocks); taint floor + session tracking | Cross-trust federation deferred; learned trust-tier classifier is roadmap |
 | **Gateway** | mTLS, structured logs, rate limiting by client-CN / source-IP | per-tool rate limiting not built; production tier does not expose the MCP/OAuth endpoints (see Identity row) |
@@ -299,10 +301,13 @@ In `~/.claude/settings.json` (or `~/.claude.json`) on the machine running Claude
 | [`LAB.md`](LAB.md) | Full self-contained lab for testing |
 | [`SECURITY.md`](SECURITY.md) | Responsible disclosure + tracked known-limitations |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
-| [`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md) | Reality-annotated architecture (supersedes v1) |
+| [`docs/ARCHITECTURE-v2.md`](docs/ARCHITECTURE-v2.md) | Architecture design narrative (supersedes v1). For **current** control status, this table and `ROADMAP.md` are authoritative — see the doc's banner. |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Status: done vs next |
 | [`docs/API.md`](docs/API.md) · [`docs/RBAC.md`](docs/RBAC.md) · [`docs/SECURITY_NONNEGATABLES.md`](docs/SECURITY_NONNEGATABLES.md) | API surface · role model · security invariants |
 | [`docs/appsec-review.md`](docs/appsec-review.md) | Historical full AppSec audit of the 12 invariants |
+| [`docs/README.md`](docs/README.md) | Index of all design, security, and reference docs |
+| [`AGENTS.md`](AGENTS.md) | Repo map & conventions for AI coding agents and new contributors |
+| [`design.html`](design.html) | Interactive single-page design overview (open in a browser, or via GitHub Pages) |
 
 ## License
 

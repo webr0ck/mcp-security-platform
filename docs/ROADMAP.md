@@ -1,6 +1,6 @@
 # MCP Security Platform — Roadmap & Challenges
 
-**Date:** 2026-05-16 · Driven by `REVIEW-2026-05-16.md` and `ARCHITECTURE-v2.md`.
+**Date:** 2026-05-16 · Driven by `archive/REVIEW-2026-05-16.md` and `ARCHITECTURE-v2.md`.
 
 Principle: **no new features until the platform is honest and not exploitable.** A security platform that is itself insecure or oversold is worse than none — it manufactures false confidence (the exact failure mode INV-001 was written to prevent).
 
@@ -48,7 +48,7 @@ Exit criteria met: every P0 finding fixed, each with a passing regression test; 
 
 Exit criteria: every claim in every doc maps to verified file:line, or is deleted, or moved to "Planned (not built)".
 
-- 1.1 Replace `ARCHITECTURE.md` with `ARCHITECTURE-v2.md` content (or redirect it); never let a doc call itself "single source of truth" while omitting a shipped subsystem again.
+- 1.1 Replace `archive/ARCHITECTURE-v1.md` with `ARCHITECTURE-v2.md` content (or redirect it); never let a doc call itself "single source of truth" while omitting a shipped subsystem again.
 - 1.2 Remove or implement: SPDX SBOM, outbound Jira, Helm/K8s, OIDC, per-tool rate limiting, learned anomaly baseline. Default action = **remove the claim**; reintroduce only when built (Phase 3).
 - 1.3 Remove unsourced "92% / 20%" stat and the competitor differentiator table, or cite a verifiable public source.
 - 1.4 Fix every broken cross-reference: `ci/test-jobs/security.yml` (missing), `tests/fixtures/integration_seed.sql` (missing), `test_audit_completeness_opa_down.py` (missing), INV-001's wrong test path. Either create the files or fix the references — the integration CI job currently fails at the seed step.

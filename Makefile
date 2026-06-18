@@ -2,7 +2,7 @@
         test test-unit test-integration test-oauth test-lab-functional test-security test-perf test-all test-red-team lint \
         db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle test-signed-bundle \
         assign-role compliance-run sbom-verify onboard-server \
-        security-check health smoke-test \
+        security-check health smoke-test ship-check demo \
         dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
         lab-init lab-init-force labup lab-up lab-down lab-down-volumes \
         lab-migrate-per-tool-dry lab-migrate-per-tool-activate lab-migrate-per-tool lab-migrate-validate \
@@ -432,7 +432,7 @@ security-check:
 	fi; \
 	\
 	echo "--- F-001: proxy + MCP server network isolation (all compose tiers) ---"; \
-	if python3 scripts/check_network_isolation.py docker-compose.yml podman-compose.lab.yml compose.poc.yml; then \
+	if python3 scripts/check_network_isolation.py docker-compose.yml podman-compose.lab.yml compose.poc.yml compose.engine.yml compose.standard.yml; then \
 		echo "PASS: F-001 network isolation"; \
 	else \
 		echo "FAIL: F-001 network isolation"; \
@@ -712,6 +712,9 @@ clean:
 
 ship-check: ## Pre-publish gate (docs-honesty + secret scan + compose smoke)
 	@bash scripts/ship-check.sh
+
+demo: ## 60-second no-full-stack demo of the verifiable network-isolation control
+	@bash scripts/demo.sh
 
 # ─── Security guard ───────────────────────────────────────────────────────────
 # RT-001 prevention: never serve the repo root via Python's HTTP server.

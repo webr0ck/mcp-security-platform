@@ -69,7 +69,11 @@ PLATFORM_BACKEND_NETS = frozenset({
 # Only the proxy legitimately uses GATEWAY_SHARED_SECRET to validate the
 # X-Forwarded-Client-CN header in _is_trusted_proxy (proxy/app/middleware/auth.py).
 # All other services must scope env vars explicitly via environment: keys.
-_GATEWAY_SECRET_ALLOWED_SERVICES: frozenset[str] = frozenset({"proxy"})
+#
+# `lab-seeder` is a waived exception (see docs/waivers/WAIVER-002-lab-seeder-env-scope.md):
+# a lab-only, run-once bootstrap container that needs broad env (DB/Vault/Keycloak/lab-service
+# creds) and never reads GATEWAY_SHARED_SECRET. It is not part of any production tier.
+_GATEWAY_SECRET_ALLOWED_SERVICES: frozenset[str] = frozenset({"proxy", "lab-seeder"})
 
 # ── Platform-privileged credential env var prefixes/names ────────────────────
 _CREDENTIAL_PREFIXES = ("POSTGRES_", "PGPASSWORD")

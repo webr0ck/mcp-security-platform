@@ -2,17 +2,26 @@
 
 **Version:** 2.0.0
 **Date:** 2026-05-16
-**Status:** Canonical. Supersedes `docs/ARCHITECTURE.md` v1.0.0 (stale: omits the credential broker, Vault, `credential_store`, OAuth router).
 
-This document describes the system **as it actually is** (verified at source) and the **secure target state** (what must change before production). Every component is annotated with its real implementation status so this document cannot drift back into aspiration.
+> ⚠️ **Read this first — partial drift.** This is the **design narrative** for the architecture. Its
+> §0 status summary is current, but some **component-status annotations in later sections (§2 diagram,
+> §5.3, §6 threat model T7/T8, §6.1, §8) still describe the *pre-Phase-0* defect state** (CB-001,
+> CB-002, F-002, OIDC-501) which has since been **fixed**. For the authoritative **current** control
+> status, the source of truth is the **[README Enforced-vs-Roadmap table](../README.md#enforced-today-vs-roadmap)**
+> and **[ROADMAP.md](ROADMAP.md)** — not the per-section annotations below. Inline corrections are marked
+> **[FIXED — see §0]**.
 
-Status legend: ✅ implemented & wired · 🟡 partial/overclaimed · 🔴 stub/missing · 🆕 exists in code, was undocumented · ⚠️ security defect (see REVIEW-2026-05-16.md)
+**Status:** Design narrative. Current control status lives in the README table + ROADMAP (see banner). Supersedes `docs/archive/ARCHITECTURE-v1.md` v1.0.0 (which omits the credential broker, Vault, `credential_store`, OAuth router).
+
+This document describes the system design and the **secure target state**. Where a section still shows a defect as open, treat the README table / ROADMAP as authoritative.
+
+Status legend: ✅ implemented & wired · 🟡 partial/overclaimed · 🔴 stub/missing · 🆕 exists in code, was undocumented · ⚠️ security defect (see archive/REVIEW-2026-05-16.md)
 
 ---
 
 ## 0. Current security status (2026-05-16)
 
-**Phase 0 (security unblock): ✅ COMPLETE.** All CRITICAL/HIGH findings from `REVIEW-2026-05-16.md` are fixed and tested (79 unit + 9 MCP-client tests). The two CRITICALs (CB-001 broker identity collapse, CB-002 plaintext Vault key) and the HIGHs (CB-003/004/005, F-001, F-002 mechanism) are closed. **F-001 was additionally proven at runtime on the live podman lab** — a non-dialed sidecar that previously reached `proxy:8000` is now refused, with the proxy still healthy.
+**Phase 0 (security unblock): ✅ COMPLETE.** All CRITICAL/HIGH findings from `archive/REVIEW-2026-05-16.md` are fixed and tested (see [ROADMAP.md](ROADMAP.md) STATUS DASHBOARD for the current test count — the single source for that figure). The two CRITICALs (CB-001 broker identity collapse, CB-002 plaintext Vault key) and the HIGHs (CB-003/004/005, F-001, F-002 mechanism) are closed. **F-001 was additionally proven at runtime on the live podman lab** — a non-dialed sidecar that previously reached `proxy:8000` is now refused, with the proxy still healthy.
 
 **Phase 1–3 complete (2026-06-10):** Signed OPA bundles default (INV-012), dispatcher fail-closed, JTI deny-on-error; server_owner persona + OPA authz.rego; entitlement CRUD + consent wiring; self-service server onboarding (POST /api/v1/servers); DB-driven server registry (mcps.yaml retired — dispatcher reads server_registry, 30s refresh); 4 integration modes wired (oauth_user_token, entra_client_credentials, user, service_account); OPA grants sync — role_assignments pushed via data API on mutation + 60s reconcile.
 
@@ -195,8 +204,8 @@ v1 §7 stands, with these added/corrected entries:
 
 | Threat | Status |
 |---|---|
-| **T7 — Broker identity collapse** (CB-001): attacker enrolls under collapsed `"unknown"` identity, overwrites victim refresh tokens, shares KEK. | **Active critical defect.** Mitigation = §4.2 item 2. |
-| **T8 — Master-key network sniff** (CB-002): cleartext Vault transport exposes the master that decrypts all stored credentials. | **Active critical defect.** Mitigation = §4.2 item 3. |
+| **T7 — Broker identity collapse** (CB-001): attacker enrolls under collapsed `"unknown"` identity, overwrites victim refresh tokens, shares KEK. | **[FIXED — see §0]** Closed in Phase 0 (0.1): broker identity derives from `request.state.client_id`, never a raw header (`proxy/app/credential_broker/`, tests in `test_oauth_router.py`). Row retained for provenance. |
+| **T8 — Master-key network sniff** (CB-002): cleartext Vault transport exposes the master that decrypts all stored credentials. | **[FIXED — see §0]** Closed in Phase 0 (0.2): `VAULT_ADDR` defaults `https://` and `http://` is rejected outside development (`config.py:311,570`; `test_vault_tls_enforcement.py`). Row retained for provenance. |
 | T3 (audit log tampering) overstated | MinIO GOVERNANCE mode is bypassable with a privileged key; it is **not** MFA-WORM. Either move to COMPLIANCE mode or correct the claim. |
 | T5 (policy bypass) | F-002 OPEN — no runtime bundle-signature verification anywhere. |
 
@@ -245,7 +254,7 @@ All secrets via env/Vault. **Add to `.env.example`:** every broker variable (`VA
 
 ## 8. What is NOT real (must be deleted from docs or built)
 
-SPDX SBOM 🔴 · outbound Jira issue creation 🔴 · Helm/K8s deployment (empty templates) 🔴 · OIDC (501) 🔴 · per-tool rate limiting 🟡 · learned anomaly baseline 🔴 · "92%/20%" stat & competitor table (unsourced). Until built, the v1 architecture's claims about these are hallucinations and must be removed (see ROADMAP P1).
+SPDX SBOM 🔴 · outbound Jira issue creation 🔴 · Helm/K8s deployment (empty templates) 🔴 · per-tool rate limiting 🟡 · learned anomaly baseline 🔴 · "92%/20%" stat & competitor table (unsourced). Until built, the v1 architecture's claims about these are hallucinations and must be removed (see ROADMAP P1). **(OIDC browser login removed from this list — it ships: Keycloak PKCE S256 + session JWT, `oidc_browser.py`, returns 501 only when `OIDC_ENABLED` is false. See README Enforced table.)**
 
 ---
 

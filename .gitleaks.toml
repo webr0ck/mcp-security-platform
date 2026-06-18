@@ -1,0 +1,37 @@
+# gitleaks configuration — https://github.com/gitleaks/gitleaks
+#
+# This repo's real secret gate is trufflehog --only-verified (see scripts/ship-check.sh and
+# the INV-008 gate in `make security-check`), which finds ZERO verified secrets in history.
+# gitleaks is stricter (pattern-based) and flags test fixtures and CI-only placeholders. The
+# allowlist below documents each known-benign match so the public gate is green AND auditable —
+# every entry says *why* it is not a real secret. Nothing here is a live credential.
+#
+# Run:  gitleaks detect --no-banner --redact
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-benign matches: redaction test fixtures, test JWTs, CI-only placeholders, doc examples"
+
+paths = [
+  # Redaction unit tests deliberately feed fake secrets and assert they are scrubbed.
+  '''proxy/tests/unit/test_redaction\.py''',
+  '''observability/mcp-audit-logger/tests/test_redaction\.py''',
+  # Security/audit tests use synthetic JWTs and tokens as fixtures.
+  '''proxy/tests/.*test_.*\.py''',
+  # Lab sample server ships an example `curl` snippet (documentation string), not a credential.
+  '''lab/mcp-servers/rag-assistant/server\.py''',
+  # Archived historical doc (superseded), not shipped guidance.
+  '''docs/archive/.*''',
+]
+
+regexes = [
+  # CI signing keys in .github/workflows/ci.yml are explicitly labelled "CI-only random values —
+  # not used in production" and are obviously sized placeholders, e.g. ci-test-policy-signing-key-32byte.
+  '''ci-(test|smoke)-[a-z0-9-]+''',
+  # Canonical AWS documentation example access key (not a real key).
+  '''AKIAIOSFODNN7EXAMPLE''',
+  # Synthetic private-key fixture used by redaction tests (literal "...PRIVATE KEY----- abc").
+  '''-----BEGIN [A-Z ]*PRIVATE KEY----- ?(abc|MII[A-Za-z0-9+/]{0,20})''',
+]
