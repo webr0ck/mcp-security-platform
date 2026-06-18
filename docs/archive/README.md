@@ -2,7 +2,7 @@
 
 These documents are **superseded or point-in-time snapshots**. They are kept for provenance and to
 show how the design evolved, but they do **not** describe the current system. For the current state
-see [`../ARCHITECTURE-v2.md`](../ARCHITECTURE-v2.md) and the root [`README.md`](../../README.md)
+see [`../ARCHITECTURE.md`](../ARCHITECTURE.md) and the root [`README.md`](../../README.md)
 Enforced-vs-Roadmap table.
 
 | File | Why archived |
