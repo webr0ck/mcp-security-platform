@@ -490,20 +490,22 @@ class Settings(BaseSettings):
                 "production. Set SESSION_COOKIE_SECURE=true in your environment."
             )
 
-        # AUTH-F7: emit a loud ERROR log when GATEWAY_SHARED_SECRET is empty in
-        # production.  An empty secret means the proxy accepts any X-Client-Cert-CN
-        # header without validating it came from the trusted Nginx gateway, so mTLS
-        # CN authentication is silently disabled.  We do NOT block startup (the
-        # proxy can still operate with API-key-only auth) but the misconfiguration
-        # must never be silent.
+        # AUTH-F7 / F-001: the gateway shared secret is what makes the
+        # X-Client-Cert-CN identity header trustworthy.  Nginx injects it via
+        # `proxy_set_header X-Gateway-Secret <secret>` and `_is_trusted_proxy`
+        # rejects any request that doesn't present it (fail-closed).  An empty
+        # secret in production would silently disable that check — mTLS CN auth
+        # would accept no identity and a direct-to-proxy caller's forged header
+        # would be the only thing standing between it and a CN.  Refuse to start
+        # rather than boot fail-open (project invariant: no fail-open path).
         if not self.GATEWAY_SHARED_SECRET.strip():
-            logger.error(
-                "SECURITY WARNING: GATEWAY_SHARED_SECRET is empty in production. "
-                "The X-Client-Cert-CN mTLS CN authentication path is disabled — "
-                "any caller can supply an arbitrary CN header and it will be ignored "
-                "rather than validated against the gateway. "
-                "Set GATEWAY_SHARED_SECRET to the same value configured in Nginx "
-                "proxy_set_header X-Gateway-Secret."
+            raise ValueError(
+                "Production startup blocked: GATEWAY_SHARED_SECRET is empty. It must "
+                "match the value Nginx injects as the `X-Gateway-Secret` header so the "
+                "proxy can verify that `X-Client-Cert-CN` identity headers originate "
+                "from the gateway (F-001). Without it the mTLS CN auth path is silently "
+                "disabled. Generate one with: "
+                "python3 -c \"import secrets; print(secrets.token_hex(32))\""
             )
 
         # DET-F1 / INV-005: REQUIRE_LLM_AUDIT must be True in production.

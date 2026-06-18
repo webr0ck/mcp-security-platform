@@ -3,8 +3,10 @@ Unit tests — Task 1.8: Staging-environment enforcement parity + gateway secret
 
 AUTH-F5: staging must enforce OIDC_AUDIENCE and SESSION_COOKIE_SECURE parity
          with production.
-AUTH-F7: ENVIRONMENT=production + empty GATEWAY_SHARED_SECRET → ERROR log at
-         startup (mTLS CN auth silently disabled is not acceptable silently).
+AUTH-F7 / F-001: ENVIRONMENT=production + empty GATEWAY_SHARED_SECRET → startup
+         is BLOCKED (raises). The gateway secret is what makes X-Client-Cert-CN
+         identity trustworthy; an empty secret would silently disable that check,
+         so production fails closed rather than booting fail-open.
 AUTH-F1 residual: INV-012 signed-bundle gate already covers compose.standard.yml
          and compose.engine.yml — verified by test_inv012_signed_bundle_gate_covers_all_tiers
          (structural assertion, no subprocess needed).
@@ -14,7 +16,6 @@ Run from proxy/:
 """
 from __future__ import annotations
 
-import logging
 import os
 
 import pytest
@@ -174,93 +175,65 @@ class TestStagingSessionCookieSecure:
 
 
 # ===========================================================================
-# AUTH-F7 — Gateway secret ERROR log in production
+# AUTH-F7 / F-001 — Gateway secret REQUIRED in production (fail-closed)
 # ===========================================================================
 
-class TestGatewaySecretProductionLog:
-    """ENVIRONMENT=production + empty GATEWAY_SHARED_SECRET must emit ERROR log."""
+class TestGatewaySecretProductionFailClosed:
+    """ENVIRONMENT=production + empty GATEWAY_SHARED_SECRET must BLOCK startup.
 
-    def test_empty_gateway_secret_logs_error_in_production(self, caplog):
-        """Empty GATEWAY_SHARED_SECRET in production emits ERROR, does not block startup."""
-        with caplog.at_level(logging.ERROR, logger="app.core.config"):
-            s = _make_settings(
-                **{**_PRODUCTION_BASE, "GATEWAY_SHARED_SECRET": ""},
-            )
-        # Startup must succeed (it is a WARNING, not a hard block).
-        assert s.ENVIRONMENT == "production"
-        # The ERROR must be logged.
-        error_records = [
-            r for r in caplog.records
-            if r.levelno >= logging.ERROR and "GATEWAY_SHARED_SECRET" in r.message
-        ]
-        assert error_records, (
-            "Expected at least one ERROR-level log record mentioning "
-            "GATEWAY_SHARED_SECRET when it is empty in production. "
-            f"Records seen: {[r.message for r in caplog.records]}"
-        )
+    The gateway shared secret is what lets the proxy verify that an
+    X-Client-Cert-CN identity header originated from Nginx (F-001). An empty
+    secret in production would silently disable that check, so startup must
+    fail closed (raise) rather than boot with mTLS CN auth disabled.
+    """
 
-    def test_empty_gateway_secret_message_mentions_mtls_disabled(self, caplog):
-        """The ERROR message must explain that mTLS CN auth is disabled."""
-        with caplog.at_level(logging.ERROR, logger="app.core.config"):
+    def test_empty_gateway_secret_blocks_production(self):
+        """Empty GATEWAY_SHARED_SECRET in production must raise, not boot."""
+        with pytest.raises(
+            ValueError,
+            match="(?i)production startup blocked.*GATEWAY_SHARED_SECRET",
+        ):
             _make_settings(
                 **{**_PRODUCTION_BASE, "GATEWAY_SHARED_SECRET": ""},
             )
-        error_messages = " ".join(
-            r.message for r in caplog.records if r.levelno >= logging.ERROR
-        )
-        assert "mTLS" in error_messages or "CN" in error_messages or "disabled" in error_messages, (
-            "ERROR message should mention that mTLS CN auth is disabled. "
-            f"Actual messages: {error_messages}"
-        )
 
-    def test_set_gateway_secret_does_not_log_error_in_production(self, caplog):
-        """A non-empty GATEWAY_SHARED_SECRET must not trigger the error log."""
-        with caplog.at_level(logging.ERROR, logger="app.core.config"):
+    def test_block_message_explains_f001_reason(self):
+        """The block message must explain the F-001 identity-trust reason."""
+        with pytest.raises(ValueError) as exc_info:
             _make_settings(
-                **{**_PRODUCTION_BASE, "GATEWAY_SHARED_SECRET": "my-real-secret"},
+                **{**_PRODUCTION_BASE, "GATEWAY_SHARED_SECRET": ""},
             )
-        error_records = [
-            r for r in caplog.records
-            if r.levelno >= logging.ERROR and "GATEWAY_SHARED_SECRET" in r.message
-        ]
-        assert not error_records, (
-            "No ERROR log should be emitted when GATEWAY_SHARED_SECRET is set. "
-            f"Unexpected records: {[r.message for r in error_records]}"
-        )
+        msg = str(exc_info.value)
+        assert (
+            "F-001" in msg
+            or "X-Gateway-Secret" in msg
+            or "X-Client-Cert-CN" in msg
+        ), f"Block message should explain the F-001 identity-trust reason. Got: {msg}"
 
-    def test_empty_gateway_secret_does_not_log_error_in_development(self, caplog):
-        """Development intentionally omits GATEWAY_SHARED_SECRET; no ERROR should fire."""
-        with caplog.at_level(logging.ERROR, logger="app.core.config"):
-            _make_settings(
-                ENVIRONMENT="development",
-                GATEWAY_SHARED_SECRET="",
-            )
-        error_records = [
-            r for r in caplog.records
-            if r.levelno >= logging.ERROR and "GATEWAY_SHARED_SECRET" in r.message
-        ]
-        assert not error_records, (
-            "No GATEWAY_SHARED_SECRET ERROR should be logged in development. "
-            f"Records: {[r.message for r in error_records]}"
+    def test_set_gateway_secret_boots_in_production(self):
+        """A non-empty GATEWAY_SHARED_SECRET must let production boot cleanly."""
+        s = _make_settings(
+            **{**_PRODUCTION_BASE, "GATEWAY_SHARED_SECRET": "my-real-secret"},
         )
+        assert s.GATEWAY_SHARED_SECRET == "my-real-secret"
 
-    def test_empty_gateway_secret_does_not_log_error_in_staging(self, caplog):
-        """Staging may omit GATEWAY_SHARED_SECRET without error (plan only targets production)."""
-        with caplog.at_level(logging.ERROR, logger="app.core.config"):
-            _make_settings(
-                ENVIRONMENT="staging",
-                VAULT_ADDR="https://vault:8200",
-                SESSION_COOKIE_SECURE=True,
-                GATEWAY_SHARED_SECRET="",
-            )
-        error_records = [
-            r for r in caplog.records
-            if r.levelno >= logging.ERROR and "GATEWAY_SHARED_SECRET" in r.message
-        ]
-        assert not error_records, (
-            "GATEWAY_SHARED_SECRET ERROR must target production only. "
-            f"Records: {[r.message for r in error_records]}"
+    def test_empty_gateway_secret_passes_development(self):
+        """Development intentionally omits GATEWAY_SHARED_SECRET; must not block."""
+        s = _make_settings(
+            ENVIRONMENT="development",
+            GATEWAY_SHARED_SECRET="",
         )
+        assert s.ENVIRONMENT == "development"
+
+    def test_empty_gateway_secret_passes_staging(self):
+        """Staging may omit GATEWAY_SHARED_SECRET (the hard block targets production)."""
+        s = _make_settings(
+            ENVIRONMENT="staging",
+            VAULT_ADDR="https://vault:8200",
+            SESSION_COOKIE_SECURE=True,
+            GATEWAY_SHARED_SECRET="",
+        )
+        assert s.ENVIRONMENT == "staging"
 
 
 # ===========================================================================

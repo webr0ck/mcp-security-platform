@@ -415,6 +415,57 @@ jobs:
           done
           echo "Proxy ready after ${ELAPSED}s"
 
+      - name: Runtime network isolation (F-001 — backend cannot reach proxy)
+        # Runtime complement to the static scripts/check_network_isolation.py gate:
+        # a container on internal-net (where sidecars/backends live) must NOT be
+        # able to reach the proxy, while a container on the proxy's own gateway-net
+        # must. The positive control guards against a false PASS from a broken
+        # probe. The isolation assertion is checked both by service name (DNS) AND
+        # by the proxy's raw gateway-net IP, so a pass means there is genuinely no
+        # route — not merely a name that fails to resolve. Uses a portable nc form
+        # (no -z, which busybox does not reliably support) and discovers the
+        # compose-prefixed network names at runtime.
+        # Verified end-to-end against the live stack (podman) on 2026-06-18:
+        # positive control connects; internal-net fails both by-name and by-IP.
+        run: |
+          set -uo pipefail
+          docker pull busybox:1.36 >/dev/null
+          INTERNAL_NET=$(docker network ls --format '{{.Name}}' | grep -E 'internal-net$' | head -1)
+          GATEWAY_NET=$(docker network ls --format '{{.Name}}' | grep -E 'gateway-net$' | head -1)
+          echo "internal-net=${INTERNAL_NET}  gateway-net=${GATEWAY_NET}"
+          if [ -z "${INTERNAL_NET}" ] || [ -z "${GATEWAY_NET}" ]; then
+            echo "ERROR: expected compose networks not found"; docker network ls; exit 1
+          fi
+
+          # Positive control: the proxy IS reachable from its own inbound network.
+          if ! docker run --rm --network "${GATEWAY_NET}" busybox:1.36 \
+                 sh -c 'nc -w5 proxy 8000 </dev/null'; then
+            echo "ERROR: positive control failed — proxy unreachable from gateway-net; probe is broken"
+            exit 1
+          fi
+          echo "positive control OK: proxy reachable from gateway-net"
+
+          PROXY_IP=$(docker inspect mcp-proxy \
+            --format "{{(index .NetworkSettings.Networks \"${GATEWAY_NET}\").IPAddress}}")
+          echo "proxy gateway-net IP = ${PROXY_IP:-<unknown>}"
+
+          # Isolation assertion 1 — by service name (cross-network DNS must not resolve).
+          docker run --rm --network "${INTERNAL_NET}" busybox:1.36 \
+            sh -c 'nc -w5 proxy 8000 </dev/null'
+          if [ "$?" -eq 0 ]; then
+            echo "FAIL: proxy:8000 reachable by name from internal-net — F-001 isolation broken"; exit 1
+          fi
+
+          # Isolation assertion 2 — by raw IP (proves no route, not just no DNS).
+          if [ -n "${PROXY_IP}" ]; then
+            docker run --rm --network "${INTERNAL_NET}" busybox:1.36 \
+              sh -c "nc -w5 ${PROXY_IP} 8000 </dev/null"
+            if [ "$?" -eq 0 ]; then
+              echo "FAIL: proxy IP ${PROXY_IP}:8000 reachable from internal-net — F-001 isolation broken"; exit 1
+            fi
+          fi
+          echo "PASS: proxy unreachable from internal-net by name and by IP (F-001 runtime isolation holds)"
+
       - name: Run smoke tests
         run: bash scripts/smoke_test.sh dev
 
