@@ -49,9 +49,11 @@ def test_azp_wrong_actor_rejected(keypair):
                                public_key=keypair.public_key())
 
 def test_azp_absent_rejected(keypair):
-    # Token with no azp claim at all must be rejected (KC 24 always sets it; missing = tampered)
+    # Token with no azp claim at all must be rejected (KC 24 always sets it; missing = tampered).
+    # Cannot use _mint() here: base.update({"azp": None}) sets azp=None rather than omitting
+    # the claim; the check would still pass but would not be testing the "absent" code path.
     base = {"sub": "alice", "aud": "lab-tickets", "iss": "http://kc/realms/mcp",
-            "exp": time.time() + 300}  # no azp
+            "exp": time.time() + 300}  # no azp key
     tok = jwt.encode(base, keypair, algorithm="RS256")
     with pytest.raises(ExchangedTokenError, match="azp"):
         assert_exchanged_token(tok, expected_sub="alice", expected_aud="lab-tickets",
