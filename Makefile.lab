@@ -9,7 +9,7 @@ LAB_COMPOSE = podman-compose \
 
 .PHONY: lab-setup lab-up lab-down lab-reset lab-rebuild lab-init lab-test lab-smoke \
         lab-logs lab-dex-logs lab-ps lab-entra-check lab-vault-init \
-        lab-proxy-shell lab-netbox-shell smoke-four incidents help
+        lab-proxy-shell lab-netbox-shell smoke-four wazuh-up incidents help
 
 ## lab-setup       Zero-to-usable: start stack, migrate DB, provision tokens, seed, smoke test
 lab-setup:
@@ -56,6 +56,17 @@ lab-smoke:
 ## smoke-four       PRD-0002 P0 acceptance test — verify 3/4 auth cases registered
 smoke-four:
 	bash lab/scripts/smoke_four_cases.sh
+
+## wazuh-up       Start full SIEM: base lab stack + Wazuh manager/indexer/dashboard overlay
+wazuh-up:
+	podman compose \
+	  -f docker-compose.yml \
+	  -f docker-compose.dev.yml \
+	  -f podman-compose.lab.yml \
+	  -f compose.wazuh.yml \
+	  up -d --build
+	@echo "Wazuh dashboard: http://localhost:5601  (use WAZUH_INDEXER_PASSWORD)"
+	@echo "Wazuh API:       https://localhost:55000 (admin / WAZUH_API_PASSWORD)"
 
 ## incidents        (stub) Query recent audit incidents from the DB (P1)
 incidents:

@@ -48,7 +48,7 @@ services:
 
   # ── Wazuh manager ──────────────────────────────────────────────────────────
   wazuh-manager:
-    image: wazuh/wazuh-manager:4.7.5
+    image: wazuh/wazuh-manager:4.9.1
     container_name: mcp-wazuh-manager
     hostname: wazuh-manager
     security_opt:
@@ -87,7 +87,7 @@ services:
 
   # ── Wazuh indexer (OpenSearch) ─────────────────────────────────────────────
   wazuh-indexer:
-    image: wazuh/wazuh-indexer:4.7.5
+    image: wazuh/wazuh-indexer:4.9.1
     container_name: mcp-wazuh-indexer
     hostname: wazuh-indexer
     security_opt:
@@ -120,7 +120,7 @@ services:
 
   # ── Wazuh dashboard ────────────────────────────────────────────────────────
   wazuh-dashboard:
-    image: wazuh/wazuh-dashboard:4.7.5
+    image: wazuh/wazuh-dashboard:4.9.1
     container_name: mcp-wazuh-dashboard
     security_opt:
       - no-new-privileges:true
