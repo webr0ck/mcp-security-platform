@@ -8,8 +8,13 @@ def keypair():
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 def _mint(key, **claims):
-    base = {"sub": "alice", "aud": "lab-tickets", "iss": "http://kc/realms/mcp",
-            "exp": time.time() + 300, "act": {"sub": "mcp-proxy"}}
+    base = {
+        "sub": "alice",
+        "aud": "lab-tickets",
+        "iss": "http://kc/realms/mcp",
+        "exp": time.time() + 300,
+        "azp": "mcp-proxy",   # KC 24 uses azp, not act
+    }
     base.update(claims)
     return jwt.encode(base, key, algorithm="RS256")
 
@@ -37,14 +42,17 @@ def test_bad_signature_rejected(keypair):
         assert_exchanged_token(tok, expected_sub="alice", expected_aud="lab-tickets",
                                public_key=keypair.public_key())
 
-def test_act_wrong_actor_rejected(keypair):
-    tok = _mint(keypair, act={"sub": "attacker"})
-    with pytest.raises(ExchangedTokenError, match="act"):
+def test_azp_wrong_actor_rejected(keypair):
+    tok = _mint(keypair, azp="attacker")
+    with pytest.raises(ExchangedTokenError, match="azp"):
         assert_exchanged_token(tok, expected_sub="alice", expected_aud="lab-tickets",
                                public_key=keypair.public_key())
 
-def test_act_nested_multi_hop_rejected(keypair):
-    tok = _mint(keypair, act={"sub": "mcp-proxy", "act": {"sub": "someone"}})
-    with pytest.raises(ExchangedTokenError, match="hop"):
+def test_azp_absent_rejected(keypair):
+    # Token with no azp claim at all must be rejected (KC 24 always sets it; missing = tampered)
+    base = {"sub": "alice", "aud": "lab-tickets", "iss": "http://kc/realms/mcp",
+            "exp": time.time() + 300}  # no azp
+    tok = jwt.encode(base, keypair, algorithm="RS256")
+    with pytest.raises(ExchangedTokenError, match="azp"):
         assert_exchanged_token(tok, expected_sub="alice", expected_aud="lab-tickets",
                                public_key=keypair.public_key())

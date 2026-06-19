@@ -2,7 +2,7 @@
 
 Closes the RFC 8693 confused-deputy: the broker must not inject an exchanged
 token without proving (a) signature, (b) sub==caller, (c) aud==expected,
-(d) the act actor-chain is exactly [mcp-proxy] (one hop). Run on EVERY
+(d) azp == mcp-proxy (KC 24 uses azp for delegation evidence, not act). Run on EVERY
 injection including Redis cache hits (the cache stores no pre-computed claims).
 """
 from __future__ import annotations
@@ -34,8 +34,8 @@ def assert_exchanged_token(token: str, *, expected_sub: str, expected_aud: str, 
             f"exchanged token sub {claims.get('sub')!r} != caller {expected_sub!r}"
         )
 
-    act = claims.get("act")
-    if not isinstance(act, dict) or act.get("sub") != EXPECTED_ACTOR:
-        raise ExchangedTokenError(f"exchanged token act actor != {EXPECTED_ACTOR}: {act!r}")
-    if "act" in act:
-        raise ExchangedTokenError(f"exchanged token act chain has >1 hop: {act!r}")
+    # KC 24 sets azp=mcp-proxy on the exchanged token (RFC 8693 §4.4 act is optional).
+    # Verify azp is present and matches the expected actor.
+    azp = claims.get("azp")
+    if azp != EXPECTED_ACTOR:
+        raise ExchangedTokenError(f"exchanged token azp != {EXPECTED_ACTOR}: {azp!r}")
