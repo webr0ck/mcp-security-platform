@@ -1,0 +1,3 @@
+<!-- lab/incidents/02-overprivileged-user/wazuh-rule.xml
+     Detection: 4+ user-mode denials from same upstream_principal in 120s.
+     Add the rule below to deployments/poc/wazuh/rules/mcp-audit-rules.xml -->
