@@ -1,0 +1,3 @@
+<!-- lab/incidents/04-m365-mail-exfil/wazuh-rule.xml
+     Detection: 10+ allowed entra_client_credentials calls in 5 min.
+     Add the rule below to deployments/poc/wazuh/rules/mcp-audit-rules.xml -->

@@ -1,0 +1,3 @@
+<!-- lab/incidents/03-token-exchange-abuse/wazuh-rule.xml
+     Detection: S-6b allowlist block on non-permitted exchange audience.
+     Add the rule below to deployments/poc/wazuh/rules/mcp-audit-rules.xml -->

@@ -68,12 +68,16 @@ wazuh-up:
 	@echo "Wazuh dashboard: http://localhost:5601  (use WAZUH_INDEXER_PASSWORD)"
 	@echo "Wazuh API:       https://localhost:55000 (admin / WAZUH_API_PASSWORD)"
 
-## incidents        (stub) Query recent audit incidents from the DB (P1)
+## incidents        List available incident scenarios and run them
 incidents:
-	@echo "incidents: stub — full incident query lands in P1"
-	@podman exec mcp-db psql -U mcp -d mcp -c \
-	  "SELECT tool_id, outcome, created_at FROM audit_log WHERE outcome != 'allow' ORDER BY created_at DESC LIMIT 20;" \
-	  2>/dev/null || echo "  (DB not reachable — start the lab stack first)"
+	@echo "Available incident scenarios (run individually):"
+	@echo "  bash lab/incidents/01-stolen-sa-token/trigger.sh"
+	@echo "  bash lab/incidents/02-overprivileged-user/trigger.sh"
+	@echo "  bash lab/incidents/03-token-exchange-abuse/trigger.sh"
+	@echo "  bash lab/incidents/04-m365-mail-exfil/trigger.sh"
+	@echo ""
+	@echo "Wazuh rules: deployments/poc/wazuh/rules/mcp-audit-rules.xml (rules 100600-100603)"
+	@echo "Grafana:     http://localhost:3000 → Four-Auth Trace (PRD-0002)"
 
 ## lab-logs         Follow logs for core lab services
 lab-logs:
