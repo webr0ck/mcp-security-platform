@@ -8,7 +8,7 @@
 #   Case 1: m365-graph        injection_mode=entra_client_credentials
 #   Case 2: grafana-query     injection_mode=service
 #   Case 3: netbox-query      injection_mode=user
-#   Case 4: lab-tickets       SKIP — resource server deferred to P1
+#   Case 4: lab-tickets-query injection_mode=kc_token_exchange
 #
 # Strategy: try the proxy API first (GET /api/v1/tools); if it's unreachable
 # or returns unexpected JSON, fall back to a direct psql query against mcp-db.
@@ -118,9 +118,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Case 4: deferred
+# Case 4: lab-tickets-query → kc_token_exchange
 # ---------------------------------------------------------------------------
-skip 4 "lab-tickets resource server deferred to P1"
+TOOL4="lab-tickets-query"
+EXPECTED4="kc_token_exchange"
+MODE4=$(get_injection_mode "${TOOL4}")
+if [[ "${MODE4}" == "${EXPECTED4}" ]]; then
+    pass 4 "${TOOL4}" "${MODE4}"
+else
+    fail 4 "${TOOL4}" "${EXPECTED4}" "${MODE4:-<not found>}"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -128,7 +135,7 @@ skip 4 "lab-tickets resource server deferred to P1"
 echo ""
 echo "========================================"
 if [[ ${FAILURES} -eq 0 ]]; then
-    echo -e "${GREEN}PASS: P0 bar met — 3/4 cases active, case 4 SKIP${NC}"
+    echo -e "${GREEN}PASS: P1 bar met — all 4 cases active${NC}"
     exit 0
 else
     echo -e "${RED}FAIL: ${FAILURES} case(s) did not pass — P0 bar NOT met${NC}"
