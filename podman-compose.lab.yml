@@ -291,6 +291,35 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # ── Lab Tickets MCP Server — RFC 8693 token exchange (Case 4, PRD-0002) ─────
+  # proxy exchanges the caller's KC bearer for aud=lab-tickets via token exchange,
+  # then injects the exchanged token as Authorization: Bearer to this server.
+  # The server validates that azp=mcp-proxy and aud=lab-tickets in the JWT.
+  lab-mcp-lab-tickets:
+    <<: *mcp-hardening
+    build:
+      context: ./lab/mcp-servers/lab-tickets
+    container_name: lab-mcp-lab-tickets
+    ports:
+      - "127.0.0.1:8109:8000"
+    environment:
+      KC_ISSUER: "http://lab-keycloak:8080/realms/mcp"
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    depends_on:
+      lab-keycloak:
+        condition: service_healthy
+    networks:
+      - lab-net
+      - mcp-lab-tickets-net   # pairwise net with proxy only
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   # ── Gitea — self-hosted Git server (Bitbucket equivalent) ───────────────────
   lab-gitea:
     build: ./lab/gitea
@@ -825,6 +854,7 @@ services:
       - mcp-notes-net
       - mcp-self-service-net
       - mcp-search-net
+      - mcp-lab-tickets-net
 
   # ── DB: several rootless-Podman overrides needed:
   # - user: postgres → avoid su-exec user-switch failure
@@ -1005,6 +1035,9 @@ networks:
     driver: bridge
     internal: true
   mcp-search-net:
+    driver: bridge
+    internal: true
+  mcp-lab-tickets-net:
     driver: bridge
     internal: true
   # Notes sidecar net — only lab-mcp-notes + lab-notes-redis; proxy is NOT on this net

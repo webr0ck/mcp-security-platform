@@ -179,6 +179,35 @@ ON CONFLICT (name, version) DO UPDATE SET
     injection_mode = EXCLUDED.injection_mode,
     updated_at     = NOW();
 
+-- ── lab-tickets — KC token exchange to custom RS (Case 4, PRD-0002) ──────────
+-- proxy exchanges the user's KC bearer for an aud=lab-tickets exchanged token,
+-- then injects it as Authorization: Bearer <exchanged> to lab-mcp-lab-tickets.
+-- kc_token_audience drives the exchange audience; the RS validates azp=mcp-proxy.
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode,
+    inject_header, inject_prefix, kc_token_audience
+) VALUES (
+    gen_random_uuid(),
+    'lab-tickets-query', '1.0.0',
+    'Lab ticket management via RFC 8693 token exchange (PRD-0002 Case 4). '
+    'Proxy exchanges caller''s KC token for aud=lab-tickets; RS validates azp=mcp-proxy.',
+    '{"type":"object","properties":{"title":{"type":"string"},"description":{"type":"string"}},"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-lab-tickets:8000/mcp',
+    'active', 'medium', 30,
+    '["Uses RFC 8693 token exchange — proxy acquires a fresh aud=lab-tickets JWT per call","Attribution preserved: sub=caller in the exchanged token"]'::jsonb,
+    'lab-seeder', 'lab-tickets', null, 'kc_token_exchange', 'Authorization', 'Bearer', 'lab-tickets'
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url        = EXCLUDED.upstream_url,
+    service_name        = EXCLUDED.service_name,
+    injection_mode      = EXCLUDED.injection_mode,
+    inject_header       = EXCLUDED.inject_header,
+    inject_prefix       = EXCLUDED.inject_prefix,
+    kc_token_audience   = EXCLUDED.kc_token_audience,
+    updated_at          = NOW();
+
 -- ── Wazuh MCP — service-account Wazuh API JWT (compose.wazuh.yml overlay) ────
 -- Seeded as status='quarantined' (safe default when overlay is not running).
 -- To activate after deploying compose.wazuh.yml:
