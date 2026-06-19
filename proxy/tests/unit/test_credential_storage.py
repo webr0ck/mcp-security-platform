@@ -50,27 +50,25 @@ async def test_store_and_retrieve_credential():
     master_secret = b"0" * 32  # 256-bit master secret
     mock_vault_client.get_master_secret = AsyncMock(return_value=master_secret)
 
-    # Mock database pool/connection with proper async context manager
+    # Mock database pool/connection with proper async context manager.
+    # db_pool() is called synchronously; its return value must support __aenter__/__aexit__.
+    # Production code: store uses session.execute()+commit(); retrieve uses session.execute()
+    # then result.mappings().first().
     mock_db_conn = AsyncMock()
-    mock_db_pool = AsyncMock()
-    mock_db_pool.acquire = MagicMock()
-    mock_db_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_db_conn)
-    mock_db_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-
-    # Mock the INSERT
-    mock_db_conn.execute = AsyncMock()
-
-    # Mock the SELECT for retrieve
-    mock_db_conn.fetchrow = AsyncMock(
-        return_value={
-            "id": credential_id,
-            "encrypted_blob": b"mock-nonce-data" + b"mock-ciphertext",
-            "user_sub": user_sub,
-            "service": service,
-            "tool_id": tool_id,
-            "owner_type": owner_type,
-        }
-    )
+    mock_db_conn.commit = AsyncMock()
+    _mock_execute_result = MagicMock()
+    _mock_execute_result.mappings.return_value.first.return_value = {
+        "encrypted_blob": b"mock-nonce-data" + b"mock-ciphertext",
+        "user_sub": user_sub,
+        "service": service,
+        "tool_id": tool_id,
+        "owner_type": owner_type,
+    }
+    mock_db_conn.execute = AsyncMock(return_value=_mock_execute_result)
+    _mock_cm = MagicMock()
+    _mock_cm.__aenter__ = AsyncMock(return_value=mock_db_conn)
+    _mock_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_db_pool = MagicMock(return_value=_mock_cm)
 
     # Store the credential
     stored_id = await store_credential(
@@ -139,13 +137,14 @@ async def test_store_credential_encrypts_with_kek():
     master_secret = b"x" * 32
     mock_vault_client.get_master_secret = AsyncMock(return_value=master_secret)
 
-    # Mock DB with proper async context manager
+    # Mock DB: db_pool() returns an async context manager yielding the session.
     mock_db_conn = AsyncMock()
-    mock_db_pool = AsyncMock()
-    mock_db_pool.acquire = MagicMock()
-    mock_db_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_db_conn)
-    mock_db_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+    _mock_cm = MagicMock()
+    _mock_cm.__aenter__ = AsyncMock(return_value=mock_db_conn)
+    _mock_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_db_pool = MagicMock(return_value=_mock_cm)
     mock_db_conn.execute = AsyncMock()
+    mock_db_conn.commit = AsyncMock()
 
     # Patch envelope_encrypt to track calls
     with patch("app.services.credential_storage.envelope_encrypt") as mock_encrypt:
@@ -189,22 +188,23 @@ async def test_retrieve_credential_decrypts_with_kek():
     master_secret = b"x" * 32
     mock_vault_client.get_master_secret = AsyncMock(return_value=master_secret)
 
-    # Mock DB with proper async context manager
+    # Mock DB: db_pool() returns an async context manager yielding the session.
+    # Production code calls session.execute(...) then result.mappings().first().
     mock_db_conn = AsyncMock()
-    mock_db_pool = AsyncMock()
-    mock_db_pool.acquire = MagicMock()
-    mock_db_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_db_conn)
-    mock_db_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-    mock_db_conn.fetchrow = AsyncMock(
-        return_value={
-            "id": credential_id,
-            "encrypted_blob": b"nonce-data" + b"ciphertext-data",
-            "user_sub": user_sub,
-            "service": service,
-            "tool_id": tool_id,
-            "owner_type": owner_type,
-        }
-    )
+    mock_execute_result = MagicMock()
+    mock_row = {
+        "encrypted_blob": b"nonce-data" + b"ciphertext-data",
+        "user_sub": user_sub,
+        "service": service,
+        "tool_id": tool_id,
+        "owner_type": owner_type,
+    }
+    mock_execute_result.mappings.return_value.first.return_value = mock_row
+    mock_db_conn.execute = AsyncMock(return_value=mock_execute_result)
+    _mock_cm = MagicMock()
+    _mock_cm.__aenter__ = AsyncMock(return_value=mock_db_conn)
+    _mock_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_db_pool = MagicMock(return_value=_mock_cm)
 
     # Patch envelope_decrypt
     with patch("app.services.credential_storage.envelope_decrypt") as mock_decrypt:
@@ -224,7 +224,7 @@ async def test_retrieve_credential_decrypts_with_kek():
         mock_vault_client.get_master_secret.assert_called_once()
 
         # Verify DB SELECT was called
-        assert mock_db_conn.fetchrow.called
+        assert mock_db_conn.execute.called
 
         # Verify envelope_decrypt was called with encrypted_blob and KEK
         assert mock_decrypt.called
@@ -252,13 +252,14 @@ async def test_store_credential_uses_correct_kek_path():
     master_secret = b"x" * 32
     mock_vault_client.get_master_secret = AsyncMock(return_value=master_secret)
 
-    # Mock DB with proper async context manager
+    # Mock DB: db_pool() returns an async context manager yielding the session.
     mock_db_conn = AsyncMock()
-    mock_db_pool = AsyncMock()
-    mock_db_pool.acquire = MagicMock()
-    mock_db_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_db_conn)
-    mock_db_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+    _mock_cm = MagicMock()
+    _mock_cm.__aenter__ = AsyncMock(return_value=mock_db_conn)
+    _mock_cm.__aexit__ = AsyncMock(return_value=False)
+    mock_db_pool = MagicMock(return_value=_mock_cm)
     mock_db_conn.execute = AsyncMock()
+    mock_db_conn.commit = AsyncMock()
 
     with patch("app.services.credential_storage.envelope_encrypt") as mock_encrypt:
         mock_encrypt.return_value = (b"nonce", b"ct")

@@ -345,6 +345,8 @@ def test_production_config_blocks_startup_when_require_llm_audit_false():
         "SESSION_COOKIE_SECURE": "true",
         # Satisfy VAULT TLS
         "VAULT_ADDR": "https://vault:8200",
+        # Satisfy GATEWAY_SHARED_SECRET (must be non-empty in production)
+        "GATEWAY_SHARED_SECRET": _strong_key,
     }
 
     with _patch.dict(os.environ, production_env, clear=False):
@@ -385,6 +387,7 @@ def test_production_config_passes_when_require_llm_audit_true():
         "OIDC_ENABLED": "false",
         "SESSION_COOKIE_SECURE": "true",
         "VAULT_ADDR": "https://vault:8200",
+        "GATEWAY_SHARED_SECRET": _strong_key,
     }
 
     with _patch.dict(os.environ, production_env, clear=False):

@@ -13,7 +13,7 @@ against a real DB — they must NOT set this flag.
 """
 from __future__ import annotations
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -52,7 +52,8 @@ def pytest_configure(config: object) -> None:  # noqa: ANN001
 def _stub_invocation_redis_calls():
     """
     Unit-test defaults: patch Redis-dependent and network-dependent functions in
-    invocation.py so that unit tests don't need a live Redis connection or DNS.
+    invocation.py and the IP rate-limit middleware so that unit tests don't need
+    a live Redis connection or DNS.
 
     - _get_recent_calls_for_opa → [] (Task 1.7: fail-closed anomaly window fetch)
     - _lookup_profile_with_cache → None (Task 1.10: fail-closed profile lookup)
@@ -62,11 +63,22 @@ def _stub_invocation_redis_calls():
       hostnames that will never resolve.  Tests that specifically exercise the
       revalidation logic (test_upstream_validator.py) patch DNS themselves and do
       NOT rely on this stub.)
+    - app.middleware.audit.redis_pool → working mock that returns count=0 so
+      IPRateLimitMiddleware never triggers 429 when Redis is unavailable.
+      Tests that specifically verify Redis-error behavior patch redis_pool themselves
+      (app.middleware.audit.redis_pool), which overrides this fixture for that test.
 
     Tests that specifically verify these behaviors override these stubs by patching
     the same targets themselves within the test body. pytest's test-level patches
     take priority over autouse fixture-level patches.
     """
+    _mock_pipeline = MagicMock()
+    _mock_pipeline.incr = MagicMock()
+    _mock_pipeline.expire = MagicMock()
+    _mock_pipeline.execute = AsyncMock(return_value=[0, True])
+    _mock_redis_pool = MagicMock()
+    _mock_redis_pool.rate_limit_client.pipeline.return_value = _mock_pipeline
+
     try:
         with patch(
             "app.services.invocation._get_recent_calls_for_opa",
@@ -77,6 +89,9 @@ def _stub_invocation_redis_calls():
         ), patch(
             "app.services.server_onboarding.revalidate_upstream_ip_at_invoke",
             new=AsyncMock(return_value=["127.0.0.1"]),
+        ), patch(
+            "app.middleware.audit.redis_pool",
+            new=_mock_redis_pool,
         ):
             yield
     except (AttributeError, ModuleNotFoundError):
