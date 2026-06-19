@@ -451,6 +451,9 @@ async def _inject_kc_token_exchange(
     from app.credential_broker.keycloak_client import get_public_key_for_token
 
     if exchanged:
+        # Safe: OIDC middleware already verified user_kc_token's signature and
+        # expiry before request reached this code path. Decoding without re-verify
+        # here is equivalent to reading a claim the middleware already checked.
         caller_sub = _jwt.decode(user_kc_token, options={"verify_signature": False}).get("sub", "")
         try:
             public_key = await get_public_key_for_token(exchanged)

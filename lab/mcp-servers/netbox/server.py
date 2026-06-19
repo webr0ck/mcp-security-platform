@@ -88,6 +88,7 @@ async def list_ip_addresses(limit: int = 10) -> dict:
 
 if __name__ == "__main__":
     # Disable DNS rebinding protection for lab (internal network only, no browser access)
+    # LAB ONLY — never disable dns rebinding protection in production.
     from mcp.server.transport_security import TransportSecuritySettings
     mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     app = mcp.streamable_http_app()
