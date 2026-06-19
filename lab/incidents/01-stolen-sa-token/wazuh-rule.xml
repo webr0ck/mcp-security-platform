@@ -1,0 +1,3 @@
+<!-- lab/incidents/01-stolen-sa-token/wazuh-rule.xml
+     Detection: burst of credential injection failures on a service-mode tool.
+     Add the rule below to deployments/poc/wazuh/rules/mcp-audit-rules.xml -->
