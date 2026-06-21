@@ -180,11 +180,11 @@ def build_envelope_result(
     from app.core.config import get_settings
     _s = get_settings()
 
-    effective_content = content
+    effective_content = content or []
     if _s.LAYER_B_ENABLED:
         from app.services.layer_b import wrap_content_layer_b
         effective_content = wrap_content_layer_b(
-            content=content,
+            content=effective_content,
             trust_tier=trust_tier,
             tool_name=tool_name,
             server_id=server_id or "__unknown__",

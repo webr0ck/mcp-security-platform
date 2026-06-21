@@ -124,6 +124,10 @@ def test_layer_b_wraps_untrusted_text_in_build_envelope_result(monkeypatch):
     """Layer B wrapping appears in the content when LAYER_B_ENABLED=true."""
     import proxy.app.core.config as cfg_mod
     import app.core.config as app_cfg_mod
+    # Clear lru_cache before patching so a previously cached real Settings()
+    # instance does not shadow the monkeypatch regardless of test execution order.
+    cfg_mod.get_settings.cache_clear()
+    app_cfg_mod.get_settings.cache_clear()
     # Patch settings on both module aliases (proxy.app.* and app.* share the same
     # sys.path root but are distinct module objects under pytest's conftest rootdir).
     class _FakeSettings:
