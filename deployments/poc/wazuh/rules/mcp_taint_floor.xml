@@ -1,0 +1,41 @@
+<!-- MCP Security Platform — taint floor injection detection rules -->
+<!-- Severity 12 = high; matches on audit events shipped by Filebeat.         -->
+<!--                                                                           -->
+<!-- Actual audit log fields (from mcp_audit_logger/schema.py AuditEvent):    -->
+<!--   event_type = "TOOL_INVOCATION"                                          -->
+<!--   outcome    = "deny"                                                     -->
+<!--   deny_reasons = ["taint_floor:required_integrity=N", ...]               -->
+<!--                                                                           -->
+<!-- The plan named event_type=TOOL_CALL_DENIED — that value does not exist   -->
+<!-- in the schema. The correct signal is outcome=deny + deny_reasons match.  -->
+<group name="mcp-security,">
+
+  <rule id="100001" level="12">
+    <decoded_as>json</decoded_as>
+    <field name="outcome">deny</field>
+    <field name="deny_reasons">taint_floor:</field>
+    <description>MCP taint floor denial — possible indirect prompt injection attempt detected</description>
+    <group>attack,injection,mcp</group>
+    <options>no_full_log</options>
+  </rule>
+
+  <rule id="100002" level="8">
+    <decoded_as>json</decoded_as>
+    <field name="outcome">deny</field>
+    <description>MCP tool call denied by policy</description>
+    <group>policy,mcp</group>
+    <options>no_full_log</options>
+  </rule>
+
+  <rule id="100003" level="15">
+    <decoded_as>json</decoded_as>
+    <field name="outcome">deny</field>
+    <field name="deny_reasons">taint_floor:</field>
+    <frequency>5</frequency>
+    <timeframe>60</timeframe>
+    <if_matched_sid>100001</if_matched_sid>
+    <description>MCP sustained injection storm — 5+ taint floor denials in 60s</description>
+    <group>attack,injection,mcp,storm</group>
+  </rule>
+
+</group>
