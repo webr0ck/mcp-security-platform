@@ -24,6 +24,10 @@ services:
       - VAULT_ADDR=http://mcp-vault:8200
       - VAULT_TOKEN=root
       - VAULT_CA_BUNDLE=
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      # RELOAD=true is read by the CMD to enable uvicorn hot-reload
+      - RELOAD=true
     # Override OPA dependency condition for dev/lab: OPA static binary has no
     # shell/curl for in-container health checks. Use service_started so compose
     # doesn't block on a health check that can never pass in this image.
@@ -53,11 +57,6 @@ services:
       - ./policies:/policies:ro
       - ./infra:/infra:ro
       - ./scripts:/scripts:ro
-    environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
-      # RELOAD=true is read by the CMD to enable uvicorn hot-reload
-      - RELOAD=true
     command: >
       uvicorn app.main:app
       --host 0.0.0.0
