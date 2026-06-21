@@ -41,64 +41,28 @@
 .portal__stats { display: flex; align-items: center; gap: var(--sp-2); font-size: 13px; color: var(--text-secondary); }
 .portal__stat-sep { color: var(--text-muted); }
 
-/* Tool grid */
-.tool-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--sp-4);
-}
-
-.tool-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-base);
-  border-radius: var(--r-lg);
-  padding: var(--sp-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  transition: border-color var(--t-fast), transform var(--t-fast);
-  animation: fade-in var(--t-slow) var(--ease) both;
-}
-.tool-card:hover { border-color: var(--border-bright); transform: translateY(-1px); }
-.tool-card--locked { opacity: 0.5; }
-.tool-card--locked:hover { transform: none; border-color: var(--border-base); }
-
-.tool-card__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-2); }
-.tool-card__name-row { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
-.tool-card__name {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--info);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.tool-card__desc { font-size: 12px; color: var(--text-secondary); line-height: 1.5; flex: 1; }
-
-.tool-card__meta {
-  display: flex;
-  gap: var(--sp-3);
-  font-size: 11px;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-}
-
-.tool-card__result {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-base);
-  border-radius: var(--r-sm);
-  padding: var(--sp-2) var(--sp-3);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--success);
-  overflow: hidden;
-  animation: slide-in-right var(--t-base) var(--ease) both;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.tool-card__footer { margin-top: auto; }
-.tool-card__locked-msg { font-size: 11px; color: var(--text-muted); }
+/* Live portal additions */
+.portal__loading { padding: 64px; text-align: center; color: var(--text-muted); }
+.portal__error { background: #1a0c14; border: 1px solid #ff3d6b; border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; color: #ffc4d4; font-size: 13px; }
+.portal__error button { margin-left: auto; background: none; border: 1px solid #ff3d6b; color: #ff3d6b; border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+.portal__count { font-size: 12px; color: var(--text-muted); }
+.portal__role-value { font-size: 13px; font-weight: 600; color: var(--accent); }
+.portal__server-list { display: flex; flex-direction: column; gap: 12px; }
+.server-card { background: var(--surface, var(--bg-surface)); border: 1px solid var(--border, var(--border-base)); border-radius: 8px; padding: 16px; transition: border-color 0.2s; }
+.server-card--enabled { border-color: #00d4ff44; }
+.server-card__header { display: flex; align-items: flex-start; gap: 12px; }
+.server-card__info { flex: 1; }
+.server-card__name { font-size: 14px; font-weight: 600; color: var(--text, var(--text-primary)); font-family: monospace; }
+.server-card__desc { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.server-card__status { font-size: 11px; color: var(--text-muted); margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+.server-card__controls { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.server-card__expand { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 12px; }
+.server-card__functions { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border, var(--border-base)); display: flex; flex-direction: column; gap: 8px; }
+.fn-row { display: flex; align-items: center; gap: 12px; }
+.fn-row__info { flex: 1; }
+.fn-row__name { font-size: 12px; color: var(--accent); }
+.fn-row__desc { font-size: 11px; color: var(--text-muted); margin-left: 8px; }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); display: inline-block; }
+.status-dot--active { background: #00ff88; }
+.status-dot--quarantined { background: #ff3d6b; }
+.status-dot--pending { background: #ff8c42; }

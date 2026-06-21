@@ -185,7 +185,7 @@ function ServerRegistry({ servers }: { servers: MCPServer[] }) {
                 <td>
                   <Badge
                     label={s.status}
-                    variant={s.status === 'approved' ? 'success' : s.status === 'pending' ? 'medium' : 'critical'}
+                    variant={s.status === 'approved' ? 'low' : s.status === 'pending' ? 'medium' : 'critical'}
                     dot
                   />
                 </td>

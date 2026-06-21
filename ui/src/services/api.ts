@@ -1,8 +1,12 @@
 // ─── API Service Layer ────────────────────────────────────────────────────────
 // All communication with the MCP Security Platform proxy goes through here.
-// Configure BASE_URL via the VITE_API_URL environment variable.
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? ''
+// Base URL is the proxy; the UI is served from the same origin in production.
+// In dev (vite proxy), requests to /api/* are forwarded to the proxy.
+const BASE = import.meta.env.VITE_API_BASE ?? ''
+
+// Legacy base URL alias (used by older code paths)
+const BASE_URL = BASE
 
 class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -14,6 +18,7 @@ class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       ...init?.headers,
@@ -80,3 +85,66 @@ export const policy = {
 }
 
 export { ApiError }
+
+// ─── Profiles API ─────────────────────────────────────────────────────────────
+// Live MCP/tool management for non-technical stakeholders.
+
+export interface McpFunction {
+  name: string
+  description: string
+  enabled: boolean
+}
+
+export interface McpEntry {
+  server_name: string
+  description: string
+  enabled: boolean
+  functions: McpFunction[]
+}
+
+export interface Profile {
+  principal: string
+  mcps: McpEntry[]
+}
+
+export interface AvailableMcp {
+  server_name: string
+  description: string
+  status: string  // 'active' | 'quarantined' | 'pending'
+  enabled_for_account: boolean
+}
+
+async function _req(method: string, path: string, body?: unknown): Promise<unknown> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    credentials: 'include',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`${method} ${path} → ${res.status}: ${text}`)
+  }
+  const ct = res.headers.get('content-type') ?? ''
+  return ct.includes('json') ? res.json() : res.text()
+}
+
+export const api = {
+  getProfile: (principal: string) =>
+    _req('GET', `/api/v1/profiles/${encodeURIComponent(principal)}`) as Promise<Profile>,
+
+  listAvailableMcps: () =>
+    _req('GET', '/api/v1/profiles/available-mcps') as Promise<AvailableMcp[]>,
+
+  enableMcp: (principal: string, serverName: string) =>
+    _req('POST', `/api/v1/profiles/${encodeURIComponent(principal)}/mcps/${encodeURIComponent(serverName)}/enable`) as Promise<void>,
+
+  disableMcp: (principal: string, serverName: string) =>
+    _req('POST', `/api/v1/profiles/${encodeURIComponent(principal)}/mcps/${encodeURIComponent(serverName)}/disable`) as Promise<void>,
+
+  enableFunction: (principal: string, serverName: string, fnName: string) =>
+    _req('POST', `/api/v1/profiles/${encodeURIComponent(principal)}/mcps/${encodeURIComponent(serverName)}/functions/${encodeURIComponent(fnName)}/enable`) as Promise<void>,
+
+  disableFunction: (principal: string, serverName: string, fnName: string) =>
+    _req('POST', `/api/v1/profiles/${encodeURIComponent(principal)}/mcps/${encodeURIComponent(serverName)}/functions/${encodeURIComponent(fnName)}/disable`) as Promise<void>,
+}

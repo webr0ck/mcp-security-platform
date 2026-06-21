@@ -118,7 +118,7 @@ export function SecurityDashboard() {
                 <td>
                   <Badge
                     label={ev.outcome}
-                    variant={ev.outcome === 'allow' ? 'success' : ev.outcome === 'deny' ? 'critical' : 'medium'}
+                    variant={ev.outcome === 'allow' ? 'low' : ev.outcome === 'deny' ? 'critical' : 'medium'}
                     dot
                   />
                 </td>
