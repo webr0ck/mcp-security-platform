@@ -54,15 +54,25 @@ services:
       KC_DB: dev-file
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-adminpassword}
-      KC_HOSTNAME_STRICT: "false"
+      # KC_HOSTNAME_STRICT=true: KC always uses the configured KC_HOSTNAME_URL for
+      # frontend URLs (login pages, discovery, tokens). Without this, KC 24 uses
+      # the request Host header as the issuer, which breaks cross-machine auth
+      # (browser sees localhost:8082, not the LAN IP). Backchannel (server-to-server)
+      # fetches from the proxy still work with strict=true.
+      KC_HOSTNAME_STRICT: "true"
       KC_HTTP_ENABLED: "true"
       KC_PROXY: edge
+      # Tell KC its external frontend URL so all generated URLs use the LAN address.
+      KC_HOSTNAME_URL: "http://${LAB_HOST:-localhost}:8082"
       # Variable substitution in realm import (Keycloak 24 supports KC_* env vars in realm JSON)
       KC_PROXY_CLIENT_SECRET: ${KC_PROXY_CLIENT_SECRET:-mcp-proxy-secret}
       KC_GRAFANA_CLIENT_SECRET: ${KC_GRAFANA_CLIENT_SECRET:-grafana-secret}
       DEX_ALICE_PASSWORD: ${DEX_ALICE_PASSWORD:-labpassword}
       DEX_BOB_PASSWORD: ${DEX_BOB_PASSWORD:-labpassword}
       LAB_HOST: ${LAB_HOST:-localhost}
+      # LAB_HOST_URL is substituted into realm-mcp.json's frontendUrl attribute
+      # (Keycloak 24 env-var interpolation in realm import: ${LAB_HOST_URL:default}).
+      LAB_HOST_URL: "http://${LAB_HOST:-localhost}:8082"
       # Cap JVM heap so the Quarkus build phase isn't OOM-killed in rootless Podman (6 GB machine)
       JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx512m"
     volumes:
@@ -232,28 +242,45 @@ services:
       start_period: 90s
     restart: unless-stopped
 
-  # ── Grafana MCP Server — Case 2: broker injects SA token via Authorization header ──
-  # Our own server.py reads the broker-injected Authorization header (service mode,
-  # PRD-0002). No GRAFANA_SERVICE_ACCOUNT_TOKEN in env — token comes from broker.
+  # ── Grafana MCP Server — official grafana/mcp-grafana image (52 tools) ─────
+  # Uses the upstream grafana/mcp-grafana binary with streamable-http transport
+  # so the proxy can route to /mcp (same path used by all other MCP servers).
+  # GRAFANA_SERVICE_ACCOUNT_TOKEN is seeded by lab/seeder/seed.py and written
+  # to .env.lab. The container name matches the upstream_url in tool_registry.
   lab-mcp-grafana:
-    <<: *mcp-hardening
-    build:
-      context: ./lab/mcp-servers/grafana
+    image: docker.io/grafana/mcp-grafana:0.14.0
     container_name: lab-mcp-grafana
+    entrypoint:
+      - /app/mcp-grafana
+      - -transport
+      - streamable-http
+      - -address
+      - 0.0.0.0:8000
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
     ports:
       - "127.0.0.1:8100:8000"
     environment:
       GRAFANA_URL: "http://lab-grafana:3000"
-      HOST: "0.0.0.0"
-      PORT: "8000"
+      GRAFANA_SERVICE_ACCOUNT_TOKEN: ${GRAFANA_SERVICE_ACCOUNT_TOKEN}
     depends_on:
       lab-grafana:
         condition: service_healthy
     networks:
       - lab-net
-      - mcp-grafana-net   # pairwise net with proxy only; replaces internal-net
+      - mcp-grafana-net   # pairwise net with proxy only
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/mcp')\" 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/mcp > /dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5

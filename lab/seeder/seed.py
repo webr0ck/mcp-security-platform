@@ -87,8 +87,15 @@ LAB_NETBOX_URL = os.environ.get("LAB_NETBOX_URL", "http://lab-netbox:8080")
 LAB_NETBOX_ADMIN_TOKEN: Optional[str] = os.environ.get("LAB_NETBOX_ADMIN_TOKEN")
 
 LAB_GITEA_URL = os.environ.get("LAB_GITEA_URL", "http://lab-gitea:3000")
-LAB_GITEA_ADMIN_USER = os.environ.get("LAB_GITEA_ADMIN_USER", "admin")
-LAB_GITEA_ADMIN_PASSWORD = os.environ.get("LAB_GITEA_ADMIN_PASSWORD", "labpassword")
+# Accept both LAB_GITEA_ADMIN_USER (legacy) and GITEA_ADMIN_USER (.env.lab convention)
+LAB_GITEA_ADMIN_USER = (
+    os.environ.get("LAB_GITEA_ADMIN_USER")
+    or os.environ.get("GITEA_ADMIN_USER", "admin")
+)
+LAB_GITEA_ADMIN_PASSWORD = (
+    os.environ.get("LAB_GITEA_ADMIN_PASSWORD")
+    or os.environ.get("GITEA_ADMIN_PASSWORD", "labpassword")
+)
 
 KC_ADMIN_URL = os.environ.get("KC_ADMIN_URL", "http://lab-keycloak:8080")
 KC_ADMIN_PASSWORD = os.environ.get("KC_ADMIN_PASSWORD", "adminpassword")
@@ -790,11 +797,17 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     Returns the raw (unhashed) key, or None on failure.
     """
     import hashlib
+    import hmac as _hmac
     import secrets
 
     raw_key = secrets.token_hex(32)
-    # Hash using the same algorithm as proxy/app/core/security.py:hash_api_key
-    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    # Must match proxy/app/core/security.py:hash_api_key — HMAC-SHA-256.
+    # Plain sha256 won't authenticate; the proxy always recomputes with HMAC.
+    hmac_key = os.environ.get("API_KEY_HMAC_KEY", "")
+    if not hmac_key:
+        log.error("API_KEY_HMAC_KEY not set — cannot hash self-service API key")
+        return None
+    key_hash = _hmac.new(hmac_key.encode(), raw_key.encode(), hashlib.sha256).hexdigest()
 
     try:
         # Revoke any existing non-revoked keys for this client_id
@@ -807,20 +820,25 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
         # Insert new key
         await conn.execute(
             """
-            INSERT INTO api_keys (client_id, key_hash, created_at)
-            VALUES ('lab-self-service', $1, NOW())
+            INSERT INTO api_keys (client_id, key_hash, created_at, created_by)
+            VALUES ('lab-self-service', $1, NOW(), 'seeder')
             """,
             key_hash,
         )
-        # Ensure role_assignments row exists for 'lab-self-service' with role 'agent'
-        await conn.execute(
-            """
-            INSERT INTO role_assignments (client_id, role, assigned_by)
-            VALUES ('lab-self-service', 'agent', 'seeder')
-            ON CONFLICT (client_id, role) DO NOTHING
-            """,
-        )
-        log.info("lab-self-service API key seeded (client_id=lab-self-service role=agent)")
+        # 'agent' for basic access; 'profile_service' for cross-user profile
+        # reads/writes (caller_id='lab-self-service' != principal, so the
+        # profiles router needs a role grant — scoped narrowly to avoid blanket
+        # admin. See proxy/app/routers/profiles.py:_PROFILE_SERVICE_ROLES).
+        for role in ("agent", "profile_service"):
+            await conn.execute(
+                """
+                INSERT INTO role_assignments (client_id, role, granted_by)
+                VALUES ('lab-self-service', $1, 'seeder')
+                ON CONFLICT (client_id, role) DO NOTHING
+                """,
+                role,
+            )
+        log.info("lab-self-service API key seeded (client_id=lab-self-service roles=agent,admin)")
         return raw_key
     except Exception as exc:
         log.error("lab-self-service API key seeding failed: %s", exc)

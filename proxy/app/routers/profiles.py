@@ -51,6 +51,10 @@ router = APIRouter(prefix="/api/v1/profiles", tags=["Profiles"])
 
 # Roles that can manage other principals' profiles
 _ADMIN_ROLES = frozenset({"admin", "platform_admin"})
+# Narrow role for service accounts that proxy profile calls on behalf of users
+# (e.g. lab-self-service). Grants cross-user profile read/write ONLY — not
+# named-profile management or any other admin capability.
+_PROFILE_SERVICE_ROLES = frozenset({"profile_service"})
 
 # Cache sentinel — must match the value in invocation.py
 _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
@@ -92,7 +96,7 @@ def _assert_may_write(request: Request, principal: str) -> None:
     if caller_id == principal:
         return  # self-service always allowed
     caller_roles: list[str] = list(getattr(request.state, "client_roles", []) or [])
-    if not any(r in _ADMIN_ROLES for r in caller_roles):
+    if not any(r in _ADMIN_ROLES | _PROFILE_SERVICE_ROLES for r in caller_roles):
         raise HTTPException(
             status_code=403,
             detail="Admin role required to manage another principal's profile",
@@ -103,7 +107,7 @@ def _assert_may_read(request: Request, principal: str) -> None:
     """
     Raise HTTP 403 if the caller may not read *principal*'s profile.
 
-    Self-service read is allowed. Admin/auditor may read any profile.
+    Self-service read is allowed. Admin/auditor/profile_service may read any profile.
     """
     caller_id: str = getattr(request.state, "client_id", "") or ""
     if not caller_id:
@@ -111,7 +115,7 @@ def _assert_may_read(request: Request, principal: str) -> None:
     if caller_id == principal:
         return
     caller_roles: list[str] = list(getattr(request.state, "client_roles", []) or [])
-    if not any(r in _ADMIN_ROLES | {"auditor"} for r in caller_roles):
+    if not any(r in _ADMIN_ROLES | _PROFILE_SERVICE_ROLES | {"auditor"} for r in caller_roles):
         raise HTTPException(
             status_code=403,
             detail="Admin or auditor role required to read another principal's profile",

@@ -132,6 +132,16 @@ async def _fetch_idp_discovery() -> dict:
                             k: v.replace(internal, public) if isinstance(v, str) else v
                             for k, v in data.items()
                         }
+                    # KC dev-mode may return a different base URL than `internal`
+                    # (e.g. "localhost:8082" when it inferred the frontend URL from
+                    # an early browser request). Rewrite whatever KC actually returned
+                    # as its issuer so all endpoints point at the public address.
+                    actual_issuer = data.get("issuer", "").rstrip("/")
+                    if actual_issuer and actual_issuer != public:
+                        data = {
+                            k: v.replace(actual_issuer, public) if isinstance(v, str) else v
+                            for k, v in data.items()
+                        }
                     return data
         except Exception as exc:
             logger.debug("IdP discovery at %s%s unavailable: %s", internal, path, exc)

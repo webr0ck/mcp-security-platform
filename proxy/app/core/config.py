@@ -381,7 +381,13 @@ class Settings(BaseSettings):
     # =========================================================================
     # Credential Broker — Dex (local lab OIDC IdP)
     # =========================================================================
+    # DEX_ISSUER_URL: browser-facing URL (used to build the /auth redirect sent
+    #   to the user's browser). Set to the external/LAN address in multi-host labs.
+    # DEX_INTERNAL_ISSUER_URL: server-to-server URL (used by the proxy container
+    #   to POST to /token). Defaults to DEX_ISSUER_URL; override when the proxy
+    #   can reach Dex via an internal hostname (e.g. http://lab-dex:5556/dex).
     DEX_ISSUER_URL: str = "http://localhost:5556/dex"
+    DEX_INTERNAL_ISSUER_URL: str = ""
     DEX_CLIENT_ID: str = "mcp-proxy"
     DEX_CLIENT_SECRET: str = "mcp-proxy-secret"
     DEX_REDIRECT_URI: str = "http://localhost:8000/auth/callback/dex"
@@ -390,6 +396,11 @@ class Settings(BaseSettings):
     @property
     def dex_scopes_list(self) -> list[str]:
         return self.DEX_SCOPES.split()
+
+    @property
+    def dex_internal_issuer_url(self) -> str:
+        """Internal issuer URL for server-to-server calls (token exchange)."""
+        return self.DEX_INTERNAL_ISSUER_URL or self.DEX_ISSUER_URL
 
     # =========================================================================
     # Credential Broker — Session

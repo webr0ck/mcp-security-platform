@@ -22,13 +22,17 @@ class DexAdapter:
         client_secret: str,
         redirect_uri: str,
         scopes: list[str],
+        internal_issuer_url: str = "",
     ) -> None:
         self._issuer_url = issuer_url
         self._client_id = client_id
         self._client_secret = client_secret
         self._redirect_uri = redirect_uri
         self._scopes = scopes
-        self._token_url = f"{issuer_url}/token"
+        # Auth URL uses the browser-facing issuer; token URL uses the internal
+        # one so the proxy container can reach Dex without going through the host.
+        _internal = internal_issuer_url or issuer_url
+        self._token_url = f"{_internal}/token"
         self._auth_url = f"{issuer_url}/auth"
 
     def build_auth_url(self, state: str, code_challenge: str | None = None) -> str:
@@ -109,4 +113,5 @@ def _build_from_settings(settings):
         client_secret=settings.DEX_CLIENT_SECRET,
         redirect_uri=settings.DEX_REDIRECT_URI,
         scopes=settings.dex_scopes_list,
+        internal_issuer_url=settings.dex_internal_issuer_url,
     )
