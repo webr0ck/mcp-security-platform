@@ -36,12 +36,10 @@ REDIS_OK=$(echo "$PROXY_HEALTH" | python3 -c "import sys,json; d=json.load(sys.s
 # Proxy endpoints
 curl -sf "${PROXY}/.well-known/oauth-authorization-server" -o /dev/null && ok "OAuth metadata" || fail "OAuth metadata"
 
-# MCP servers (via proxy registration, not direct)
-for srv in poc-echo-server poc-notes-server poc-search-server; do
-  REGISTERED=$(curl -sf "${PROXY}/api/v1/servers" \
-    -H "X-Api-Key: ${LAB_API_KEY:-lab-admin-key}" 2>/dev/null \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); names=[s.get('name','') for s in d]; print('${srv}' in names)" 2>/dev/null || echo "False")
-  [[ "$REGISTERED" == "True" ]] && ok "MCP server registered: ${srv}" || fail "MCP server not registered: ${srv}"
+# MCP servers (via DB — proxy API requires OIDC auth, use psql directly)
+for srv in lab-echo lab-notes lab-search; do
+  REGISTERED=$(podman exec mcp-db bash -c "psql -U mcp_app mcp_security -tAc \"SELECT count(*) FROM server_registry WHERE name='${srv}' AND deleted_at IS NULL;\" 2>/dev/null" 2>/dev/null || echo "0")
+  [[ "$REGISTERED" -ge "1" ]] && ok "MCP server registered: ${srv}" || fail "MCP server not registered: ${srv}"
 done
 
 echo ""
