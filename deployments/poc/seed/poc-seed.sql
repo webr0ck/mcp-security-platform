@@ -32,10 +32,21 @@ INSERT INTO server_registry (name, upstream_url, status, owner_sub, injection_mo
 VALUES ('poc-echo-server', 'http://mcp-echo:8000', 'approved', 'poc-seeder', 'none')
 ON CONFLICT (name) DO NOTHING;
 
+-- INVARIANT: notes-store tools must have required_integrity >= 1 (the V038 schema DEFAULT 1
+-- applies when required_integrity is NULL). If an admin reclassifies notes-store tools to
+-- required_integrity=0, the taint floor will stop blocking tainted principals from calling
+-- delete_note, silently breaking the demo's core security guarantee. Verify with:
+--   SELECT name, required_integrity FROM tool_registry WHERE server_id =
+--     (SELECT server_id FROM server_registry WHERE name='poc-notes-server');
 INSERT INTO server_registry (name, upstream_url, status, owner_sub, injection_mode)
 VALUES ('poc-notes-server', 'http://mcp-notes:8000', 'approved', 'poc-seeder', 'user')
 ON CONFLICT (name) DO NOTHING;
 
-INSERT INTO server_registry (name, upstream_url, status, owner_sub, injection_mode)
-VALUES ('poc-search-server', 'http://mcp-search:8000', 'approved', 'poc-seeder', 'service')
+-- trust_tier=0 is set explicitly (not relying on V038 DEFAULT 0) so that a schema
+-- default change cannot silently promote poc-search-server to a trusted source and
+-- break the demo's core taint-floor invariant. If this value is changed, the red team
+-- demo (sandbox/tests/red_team/test_prompt_injection_wazuh.sh) will fail to demonstrate
+-- indirect prompt injection via taint propagation.
+INSERT INTO server_registry (name, upstream_url, status, owner_sub, injection_mode, trust_tier)
+VALUES ('poc-search-server', 'http://mcp-search:8000', 'approved', 'poc-seeder', 'service', 0)
 ON CONFLICT (name) DO NOTHING;

@@ -28,7 +28,7 @@ async function loginAs(page: Page, role: 'viewer' | 'editor' | 'analyst' | 'admi
   await page.fill('#username', user)
   await page.fill('#password', pass)
   await page.getByRole('button', { name: /sign in/i }).click()
-  await page.waitForURL('http://localhost:5173/**')
+  await page.waitForURL('http://localhost:3100/**')
 }
 
 // ── Mock helpers (CI / no live stack) ────────────────────────────────────────
@@ -78,6 +78,11 @@ const MOCK_PROFILE = MOCK_PROFILE_EDITOR
 // Defaults to 'editor' (alice) to keep existing tests unchanged.
 async function setupMocks(page: Page, role: 'viewer' | 'editor' | 'analyst' | 'admin' = 'editor') {
   if (!MOCK) return
+  // Mock auth/me so AuthContext resolves as authenticated (avoids ECONNREFUSED log spam)
+  const mockUser = role === 'viewer' ? 'bob' : role === 'analyst' ? 'carol' : role === 'admin' ? 'admin' : 'alice'
+  await page.route('/api/v1/auth/me', route =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ client_id: mockUser, roles: [role] }) })
+  )
   await page.route('/api/v1/profiles/available-mcps', route =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_MCPS) })
   )
@@ -110,10 +115,14 @@ async function setupMocks(page: Page, role: 'viewer' | 'editor' | 'analyst' | 'a
   })
 }
 
-// In mock mode, skip Keycloak flow and go straight to the portal page
+// Navigate to the portal view. In mock mode, skip Keycloak and click the nav button directly.
 async function navigateToPortal(page: Page, role: 'viewer' | 'editor' | 'analyst' | 'admin') {
   if (MOCK) {
     await page.goto('/')
+    // The app starts on the dashboard view — click Portal nav button to switch
+    await page.getByRole('button', { name: /portal/i }).click()
+    // Wait for portal to mount and load
+    await page.waitForSelector('[data-testid="portal-title"]', { timeout: 8000 })
   } else {
     await loginAs(page, role)
   }
@@ -126,7 +135,7 @@ test.describe('UserPortal — MCP management', () => {
     // Issue #13: pass 'viewer' so the mock returns viewer-appropriate profile data
     await setupMocks(page, 'viewer')
     await navigateToPortal(page, 'viewer')
-    if (!MOCK) await page.getByRole('link', { name: /portal|catalog/i }).click()
+    // Portal navigation handled by navigateToPortal (both mock and live modes)
 
     // Issue #11: use data-testid attributes so selector drift causes explicit
     // failures instead of silently passing against stale DOM.
@@ -142,7 +151,7 @@ test.describe('UserPortal — MCP management', () => {
   test('editor can enable and disable an MCP', async ({ page }) => {
     await setupMocks(page, 'editor')
     await navigateToPortal(page, 'editor')
-    if (!MOCK) await page.getByRole('link', { name: /portal|catalog/i }).click()
+    // Portal navigation handled by navigateToPortal (both mock and live modes)
 
     // Issue #11: use data-testid + data-server attribute for reliable card selection
     const echoCard = page.locator('[data-testid="server-card"][data-server="poc-echo-server"]').first()
@@ -179,7 +188,7 @@ test.describe('UserPortal — MCP management', () => {
   test('editor can expand server and toggle individual tools', async ({ page }) => {
     await setupMocks(page, 'editor')
     await navigateToPortal(page, 'editor')
-    if (!MOCK) await page.getByRole('link', { name: /portal|catalog/i }).click()
+    // Portal navigation handled by navigateToPortal (both mock and live modes)
 
     // Issue #11: data-testid for reliable card selection
     const notesCard = page.locator('[data-testid="server-card"][data-server="poc-notes-server"]').first()
@@ -219,7 +228,7 @@ test.describe('UserPortal — MCP management', () => {
     // Reload the page so the new route intercept fires
     await page.reload()
 
-    if (!MOCK) await page.getByRole('link', { name: /portal|catalog/i }).click()
+    // Portal navigation handled by navigateToPortal (both mock and live modes)
 
     // Issue #11: use data-testid for reliable error-state selection
     await expect(page.locator('[data-testid="portal-error"]')).toBeVisible({ timeout: 5000 })

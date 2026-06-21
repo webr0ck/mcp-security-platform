@@ -19,7 +19,7 @@ docker compose -f compose.poc.yml ps
 |-------|---------|-----------------------|------------------------|
 | alice | viewer  | echo tools only       | `POC_ALICE_PASSWORD`   |
 | bob   | editor  | echo + notes          | `POC_BOB_PASSWORD`     |
-| carol | analyst | echo + notes + search | `POC_CAROL_PASSWORD`   |
+| carol | agent   | echo + notes + search | `POC_CAROL_PASSWORD`   |
 | admin | admin   | everything            | `ADMIN_PASSWORD`       |
 
 Create alice/bob/carol in Keycloak (`http://localhost:8082`) after startup.

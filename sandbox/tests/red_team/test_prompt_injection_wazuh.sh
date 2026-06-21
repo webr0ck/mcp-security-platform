@@ -11,6 +11,11 @@
 # Wazuh rule 100001 fires on: json.outcome=deny AND json.deny_reasons contains "taint_floor:"
 # (via Filebeat container-log path; fields arrive as json.* after the built-in JSON decoder)
 #
+# Rule file naming note: the Wazuh rule file is mcp-taint-floor.xml (hyphens), NOT
+# mcp_taint_floor.xml (underscores). The hyphen prefix is load-order-critical — it ensures
+# mcp-audit-rules.xml (which defines base rule 100500) sorts and loads first. Any runbook
+# or external reference citing the underscore form is incorrect.
+#
 # Prerequisites:
 #   - POC lab running:  podman compose -f compose.poc.yml up -d    (NOT docker)
 #   - Lab seeded:       python3 lab/seeder/seed.py
@@ -20,13 +25,23 @@
 #
 # Mechanism (taint is from server trust_tier, not query content):
 #   Step 2 calls search-kb (poc-search-server, trust_tier=0 → integrity=0 → untrusted).
-#   The proxy marks the principal's session tainted after the upstream response.
+#   The proxy marks the PRINCIPAL tainted (Redis key keyed by hashed principal_id, 1hr TTL)
+#   after the upstream response — NOT a single-session token. All concurrent sessions for
+#   this principal within the TTL window will be blocked at the taint floor.
 #   Step 3 calls notes-store / delete_note (high-integrity sink).
 #   The taint floor reads the taint bit from Redis and returns HTTP 403.
 #   The injected string in the search query is theatrically illustrative — the
 #   actual taint comes from the search server's trust_tier, not the query payload.
 #
-# Usage: bash sandbox/tests/red_team/test_prompt_injection_wazuh.sh [--skip-wazuh]
+# Usage: bash sandbox/tests/red_team/test_prompt_injection_wazuh.sh [--skip-wazuh] [--strict]
+#
+# Flags:
+#   --skip-wazuh   Skip section 5 Wazuh alert check entirely (useful when
+#                  Filebeat is not running or Wazuh indexer is unavailable).
+#   --strict       Make Wazuh non-detection a hard failure (exit 1) rather than
+#                  a warning.  Without this flag a missing Wazuh alert exits 0
+#                  so manual demos can complete even without a running SIEM.
+#                  Use --strict in any CI gate to catch silent detection regressions.
 set -euo pipefail
 
 PROXY_URL="${PROXY_URL:-http://localhost:8000}"
@@ -52,9 +67,11 @@ warn()    { echo -e "${YELLOW}⚠${NC} $1"; }
 # (e.g. passing a debug flag would silently set SKIP_WAZUH to that value and
 # break the string comparison). Loop over $@ so any number of flags are handled.
 SKIP_WAZUH=""
+STRICT_WAZUH=""
 for _arg in "$@"; do
   case "$_arg" in
     --skip-wazuh) SKIP_WAZUH="--skip-wazuh" ;;
+    --strict)     STRICT_WAZUH="--strict" ;;
     *) warn "Unknown argument: $_arg" ;;
   esac
 done
@@ -156,7 +173,9 @@ SEARCH_RESULT=$(curl -s -o - -w "\nHTTP_STATUS:%{http_code}" \
     }
   }' 2>/dev/null) || warn "curl transport failure on search-kb invoke"
 
-SEARCH_HTTP_STATUS=$(echo "$SEARCH_RESULT" | grep "HTTP_STATUS" | cut -d: -f2 || echo "")
+# grep -oP extracts only the numeric code, which is safer than cut -d: -f2
+# (cut would silently truncate at any colon if the value ever contained one).
+SEARCH_HTTP_STATUS=$(echo "$SEARCH_RESULT" | grep -oP 'HTTP_STATUS:\K[0-9]+' || echo "")
 SEARCH_RESULT=$(echo "$SEARCH_RESULT" | grep -v "HTTP_STATUS" || true)
 
 if [[ "$SEARCH_HTTP_STATUS" != "200" ]]; then
@@ -199,7 +218,7 @@ DENY_RESULT=$(curl -s -o - -w "\nHTTP_STATUS:%{http_code}" \
     }
   }') || true  # capture curl failure without set -e killing us
 
-HTTP_STATUS=$(echo "$DENY_RESULT" | grep "HTTP_STATUS" | cut -d: -f2 || echo "")
+HTTP_STATUS=$(echo "$DENY_RESULT" | grep -oP 'HTTP_STATUS:\K[0-9]+' || echo "")
 BODY=$(echo "$DENY_RESULT" | grep -v "HTTP_STATUS" || true)
 
 if [[ "$HTTP_STATUS" == "403" ]]; then
@@ -293,6 +312,9 @@ except:
     warn "Rule ID 100001 should appear in Security Events. This may be a timing issue or"
     warn "a Filebeat path mismatch (Podman logs at ~/.local/share/containers/ not /var/lib/docker/)."
     warn "Override credentials: WAZUH_USER=<user> WAZUH_PASS=<pass> before running this script."
+    if [[ "$STRICT_WAZUH" == "--strict" ]]; then
+      fail "Wazuh rule 100001 did not fire within the polling window (--strict mode). Detection pipeline may be broken."
+    fi
   fi
 fi
 
