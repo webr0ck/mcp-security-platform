@@ -158,6 +158,12 @@ def wrap_content_layer_b(
         _ADVISORY_LINE[0],  # fall back to most restrictive for any unlisted tier < threshold
     )
 
+    # Sanitize metadata fields embedded in the advisory header: strip newlines and
+    # pipe characters so a hostile MCP server cannot use a crafted server_id or
+    # tool_name to inject a premature close-boundary or split the header line.
+    _safe_tool = tool_name.replace("\n", " ").replace("\r", " ").replace("|", "/") if tool_name else ""
+    _safe_server = server_id.replace("\n", " ").replace("\r", " ").replace("|", "/") if server_id else ""
+
     def _wrap(item: dict) -> dict:
         text = _extract_text(item)
         if text is None:
@@ -170,7 +176,7 @@ def wrap_content_layer_b(
         close_boundary = f"--{LAYER_B_BOUNDARY_PREFIX}-{nonce}-END--"
         wrapped = (
             f"{open_boundary}\n"
-            f"[ADVISORY: source={source_label} | tool={tool_name} | server={server_id}]\n"
+            f"[ADVISORY: source={source_label} | tool={_safe_tool} | server={_safe_server}]\n"
             f"{advisory_line}\n"
             f"[The authoritative trust label is in the signed _meta envelope (Layer A).]\n"
             f"\n"
