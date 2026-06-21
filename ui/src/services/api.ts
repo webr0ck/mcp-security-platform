@@ -15,6 +15,9 @@ class ApiError extends Error {
   }
 }
 
+// ─── Single unified fetch primitive ──────────────────────────────────────────
+// All API helpers (legacy request() and new profiles api) share this
+// implementation so credentials, error handling, and headers stay consistent.
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
@@ -29,7 +32,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(res.status, body)
   }
   if (res.status === 204) return undefined as T
-  return res.json()
+  const ct = res.headers.get('content-type') ?? ''
+  return ct.includes('json') ? res.json() : (res.text() as unknown as T)
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
@@ -107,44 +111,46 @@ export interface Profile {
   mcps: McpEntry[]
 }
 
+const VALID_MCP_STATUSES = ['active', 'quarantined', 'pending'] as const
+export type McpStatus = typeof VALID_MCP_STATUSES[number]
+
 export interface AvailableMcp {
   server_name: string
   description: string
-  status: string  // 'active' | 'quarantined' | 'pending'
+  // status is validated against the allowlist before use in class names
+  status: McpStatus | string
   enabled_for_account: boolean
 }
 
-async function _req(method: string, path: string, body?: unknown): Promise<unknown> {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    credentials: 'include',
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`${method} ${path} → ${res.status}: ${text}`)
-  }
-  const ct = res.headers.get('content-type') ?? ''
-  return ct.includes('json') ? res.json() : res.text()
+// Validate status against allowlist before interpolating into CSS class names
+export function safeMcpStatus(status: string): McpStatus {
+  return (VALID_MCP_STATUSES as readonly string[]).includes(status)
+    ? (status as McpStatus)
+    : 'pending'
 }
 
+// NOTE (SECURITY): Principal is intentionally removed from mutation URL paths
+// (issue #18). The backend must derive the principal from the session
+// server-side. The client-supplied username is used only for GET profile reads
+// and should be replaced with a server-side self-alias ('/api/v1/profiles/me')
+// once the backend supports it.
 export const api = {
   getProfile: (principal: string) =>
-    _req('GET', `/api/v1/profiles/${encodeURIComponent(principal)}`) as Promise<Profile>,
+    request<Profile>(`/api/v1/profiles/${encodeURIComponent(principal)}`),
 
   listAvailableMcps: () =>
-    _req('GET', '/api/v1/profiles/available-mcps') as Promise<AvailableMcp[]>,
+    request<AvailableMcp[]>('/api/v1/profiles/available-mcps'),
 
-  enableMcp: (principal: string, serverName: string) =>
-    _req('POST', `/api/v1/profiles/${encodeURIComponent(principal)}/mcps/${encodeURIComponent(serverName)}/enable`) as Promise<void>,
+  // Mutations: no principal in path — backend infers identity from session.
+  enableMcp: (_principal: string, serverName: string) =>
+    request<void>(`/api/v1/profiles/me/mcps/${encodeURIComponent(serverName)}/enable`, { method: 'POST' }),
 
-  disableMcp: (principal: string, serverName: string) =>
-    _req('POST', `/api/v1/profiles/${encodeURIComponent(principal)}/mcps/${encodeURIComponent(serverName)}/disable`) as Promise<void>,
+  disableMcp: (_principal: string, serverName: string) =>
+    request<void>(`/api/v1/profiles/me/mcps/${encodeURIComponent(serverName)}/disable`, { method: 'POST' }),
 
-  enableFunction: (principal: string, serverName: string, fnName: string) =>
-    _req('POST', `/api/v1/profiles/${encodeURIComponent(principal)}/mcps/${encodeURIComponent(serverName)}/functions/${encodeURIComponent(fnName)}/enable`) as Promise<void>,
+  enableFunction: (_principal: string, serverName: string, fnName: string) =>
+    request<void>(`/api/v1/profiles/me/mcps/${encodeURIComponent(serverName)}/functions/${encodeURIComponent(fnName)}/enable`, { method: 'POST' }),
 
-  disableFunction: (principal: string, serverName: string, fnName: string) =>
-    _req('POST', `/api/v1/profiles/${encodeURIComponent(principal)}/mcps/${encodeURIComponent(serverName)}/functions/${encodeURIComponent(fnName)}/disable`) as Promise<void>,
+  disableFunction: (_principal: string, serverName: string, fnName: string) =>
+    request<void>(`/api/v1/profiles/me/mcps/${encodeURIComponent(serverName)}/functions/${encodeURIComponent(fnName)}/disable`, { method: 'POST' }),
 }

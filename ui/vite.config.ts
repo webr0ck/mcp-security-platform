@@ -16,6 +16,8 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // Disable source maps in production to avoid exposing TypeScript source,
+    // variable names, API surface, and code comments (issue #21 / LOW).
+    sourcemap: process.env.NODE_ENV !== 'production',
   },
 })
