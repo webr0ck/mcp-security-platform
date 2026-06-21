@@ -70,6 +70,10 @@ services:
     volumes:
       - wazuh-manager-data:/var/ossec/data
       - ./deployments/poc/wazuh/rules:/var/ossec/etc/rules/custom:ro
+      # Decoder mount required so mcp-audit-decoder.xml (UDP syslog path) is loaded.
+      # The Filebeat JSON path uses Wazuh's built-in JSON decoder and does not need
+      # this mount, but it is required if the syslog path is also in use.
+      - ./deployments/poc/wazuh/decoders:/var/ossec/etc/decoders/custom:ro
     ports:
       - "127.0.0.1:1514:1514/udp"
       - "127.0.0.1:1515:1515"
@@ -265,3 +269,22 @@ services:
       db:
         condition: service_healthy
     logging: *default-logging
+
+  # ── POC proxy overlay: enable taint floor for the demo ────────────────────
+  # TAINT_FLOOR_ENABLED defaults to false in config.py. Override it here so
+  # the taint floor mechanism fires in the POC lab without requiring a .env edit.
+  proxy:
+    environment:
+      TAINT_FLOOR_ENABLED: "true"
+
+  # ── Filebeat: Podman log path override ────────────────────────────────────
+  # The base filebeat.yml reads /var/lib/docker/containers (Docker path).
+  # Rootless Podman stores logs at ~/.local/share/containers/storage/overlay-containers/
+  # Mount that host path so Filebeat can ship proxy container logs to Wazuh.
+  # Adjust XDG_RUNTIME_DIR/PODMAN_ROOT to match your user's Podman storage root.
+  filebeat:
+    volumes:
+      - ./deployments/poc/wazuh/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      # Podman container log path (rootless). Replace with the correct path for your
+      # Podman storage root if XDG_DATA_HOME is customised:
+      - ${PODMAN_LOG_PATH:-~/.local/share/containers/storage/overlay-containers}:/podman-containers:ro

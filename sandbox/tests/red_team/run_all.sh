@@ -119,6 +119,15 @@ declare -a TEST_SCRIPTS=(
     "test_tool_poisoning.sh"
 )
 
+# ─── POC lab integration tests (require full POC stack) ──────────────────────
+# These tests require the POC lab to be running:
+#   podman compose -f compose.poc.yml up -d  (plus seed + TAINT_FLOOR_ENABLED=true)
+# They are NOT part of the containment suite above, which uses ephemeral containers.
+# Run standalone: bash sandbox/tests/red_team/test_prompt_injection_wazuh.sh [--skip-wazuh]
+declare -a POC_TEST_SCRIPTS=(
+    "test_prompt_injection_wazuh.sh"
+)
+
 declare -i PASS_COUNT=0
 declare -i FAIL_COUNT=0
 declare -a FAILED_TESTS=()

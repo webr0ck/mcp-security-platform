@@ -16,9 +16,12 @@ INSERT INTO role_assignments (client_id, role, granted_by)
 VALUES ('bob', 'editor', 'poc-seeder')
 ON CONFLICT ON CONSTRAINT idx_role_assignments_client_role DO NOTHING;
 
--- carol — analyst (echo + notes + search)
+-- carol — agent (echo + notes + search + tool invocation)
+-- 'agent' role is required by the /api/v1/tools/{tool_id}/invoke endpoint
+-- (see proxy/app/routers/tools.py line 1115). 'analyst' is not in the allowed
+-- invoke set and would return HTTP 403 at the role gate before the taint floor.
 INSERT INTO role_assignments (client_id, role, granted_by)
-VALUES ('carol', 'analyst', 'poc-seeder')
+VALUES ('carol', 'agent', 'poc-seeder')
 ON CONFLICT ON CONSTRAINT idx_role_assignments_client_role DO NOTHING;
 
 -- ── POC MCP server registrations ──────────────────────────────────────────

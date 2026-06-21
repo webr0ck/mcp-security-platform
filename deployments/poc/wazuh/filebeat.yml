@@ -15,13 +15,18 @@
 # only mcp-proxy events to Wazuh manager on port 5044 (Logstash/Beats protocol).
 
 filebeat.inputs:
-  - type: container
+  # Rootless Podman stores container logs at
+  # ~/.local/share/containers/storage/overlay-containers/<id>/userdata/*.log
+  # The host path is mounted at /podman-containers in the filebeat container
+  # via the compose.poc.yml filebeat volumes override.
+  # Docker path (/var/lib/docker/containers) does NOT exist in a Podman environment.
+  - type: log
     paths:
-      - /var/lib/docker/containers/*/*.log
-    stream: stdout
+      - /podman-containers/*/userdata/*.log
+    json.keys_under_root: true
+    json.add_error_key: false
+    json.overwrite_keys: true
     processors:
-      - add_docker_metadata:
-          host: unix:///var/run/docker.sock
       - decode_json_fields:
           fields: ["message"]
           target: "json"
