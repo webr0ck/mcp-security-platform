@@ -8,7 +8,7 @@ ok()   { echo -e "${GREEN}✓${NC} $1"; }
 fail() { echo -e "${RED}✗${NC} $1"; FAILURES=$((FAILURES+1)); }
 
 PROXY="${PROXY_URL:-http://localhost:8000}"
-KEYCLOAK="${KC_URL:-http://localhost:8080}"
+KEYCLOAK="${KC_URL:-http://localhost:8082}"
 FAILURES=0
 
 wait_for() {

@@ -47,7 +47,7 @@ lab-init:
 
 ## lab-test         Run integration / e2e tests (excludes unit-only tests)
 lab-test:
-	cd proxy && python -m pytest tests/ -m "not unit" --tb=short -v
+	cd proxy && python3 -m pytest tests/ -m "not unit" --tb=short -v
 
 ## lab-smoke        Run the smoke-test script against live endpoints
 lab-smoke:
