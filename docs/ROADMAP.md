@@ -17,7 +17,7 @@ Principle: **no new features until the platform is honest and not exploitable.**
 | **P4 — Self-service MCP** | ✅ **DONE** | `self-service-mcp` (port 8108) live: 7 tools, `mcp_profiles` + `mcp_profile_events` tables (V020), OPA profile enforcement, 57 lab tests pass. |
 | **P5 — OAuth API + scripts** | ⏳ **DEFERRED** | Thin OAuth2-authenticated REST + Python CLI scripts. Non-security; sequence after P6. |
 | **P6 — Runtime-enforcement closure** | 🟢 **CORE DONE** (2026-06-06) | 6.1 meta-tool OPA identity ✅, 6.2 discovery==invoke enforcement ✅, 6.3 oauth_user_token RFC 8693 ✅, 6.4 anomaly dead-code removed ✅. Carried-forward hardening (6.5 INV-007 object-lock, 6.6 F-002 signed-bundle staging, 6.7 lab key material) still open. See Phase 6. |
-| **PRD-0001 Trust Envelope** | 🟡 **M3+M4 DONE / M1+M2 DEFERRED** | M3 labeler (JCS+ES256+PKI) ✅, M4 verifier+observer ✅ (2026-06-13). M1 (V038 schema) and M2 (taint floor enforcement) present as untracked working files — not yet committed. D1/D2 demo criteria require M2. |
+| **PRD-0001 Trust Envelope** | ✅ **ALL MILESTONES DONE** | M1 (V038 schema) ✅, M2 (taint floor) ✅, M3 labeler ✅, M4 verifier+observer ✅, **Layer B** ✅ (2026-06-21). All 5 RFC-0001 components implemented. |
 
 **Test coverage (2026-06-01):** 440 tests (383 proxy + 57 lab). Stress test: 2000 VUs (800 ROPC + 200 SA + 200 per-user + 1400 API-key), 50+ MCP requests/VU, p95 latency <500ms with token caching.
 

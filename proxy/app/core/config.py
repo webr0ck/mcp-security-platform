@@ -149,6 +149,9 @@ class Settings(BaseSettings):
 
     # Trust envelope labeler (PRD-0001 M3 / RFC-0001)
     TRUST_ENVELOPE_ENABLED: bool = False
+    # Layer B: MIME-style in-band advisory wrapper for non-conformant LLM consumers.
+    # Advisory only — never the security boundary (RFC-0001 §3, P2).
+    LAYER_B_ENABLED: bool = False
     LABELER_CERT_PATH: str = "/labeler/leaf.crt"
     LABELER_KEY_PATH: str = "/labeler/leaf.key"
     LABELER_SUB_CA_PATH: str = "/labeler/sub_ca.crt"

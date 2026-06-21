@@ -169,14 +169,31 @@ def build_envelope_result(
     trust_tier: int | None,
     sensitivity_label: str | None,
 ) -> dict:
-    """Return result dict, attaching the trust envelope when labeler is configured.
+    """Return result dict with Layer A envelope and optional Layer B wrapping.
 
+    Layer B (LAYER_B_ENABLED=true): advisory MIME-style boundary on untrusted text.
+    Layer A (TRUST_ENVELOPE_ENABLED=true): signed _meta envelope.
     Signing failure omits _meta without raising — enforcement is never affected (W3.5).
+    Layer B wrapping is applied to the content BEFORE Layer A signing so the
+    content_hash in Layer A covers the wrapped text (Layer A is authoritative over B).
     """
-    result: dict = {"content": content}
+    from app.core.config import get_settings
+    _s = get_settings()
+
+    effective_content = content
+    if _s.LAYER_B_ENABLED:
+        from app.services.layer_b import wrap_content_layer_b
+        effective_content = wrap_content_layer_b(
+            content=content,
+            trust_tier=trust_tier,
+            tool_name=tool_name,
+            server_id=server_id or "__unknown__",
+        )
+
+    result: dict = {"content": effective_content}
     if labeler is not None:
         envelope = labeler.sign_result(
-            content=content,
+            content=effective_content,
             structured_content=None,
             tool_name=tool_name,
             server_id=server_id or "__unknown__",
