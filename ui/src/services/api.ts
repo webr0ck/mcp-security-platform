@@ -116,6 +116,8 @@ export type McpStatus = typeof VALID_MCP_STATUSES[number]
 
 export interface AvailableMcp {
   server_name: string
+  /** Human-readable display name — falls back to server_name if absent */
+  display_name?: string
   description: string
   // status is validated against the allowlist before use in class names
   status: McpStatus | string
@@ -129,14 +131,16 @@ export function safeMcpStatus(status: string): McpStatus {
     : 'pending'
 }
 
-// NOTE (SECURITY): Principal is intentionally removed from mutation URL paths
-// (issue #18). The backend must derive the principal from the session
-// server-side. The client-supplied username is used only for GET profile reads
-// and should be replaced with a server-side self-alias ('/api/v1/profiles/me')
-// once the backend supports it.
+// NOTE (SECURITY / issue #9 + #13): getProfile now calls the /me alias so the
+// backend derives the principal from the session cookie — the caller-supplied
+// string is no longer interpolated into the URL and is accepted but ignored.
+// This eliminates the IDOR on the profile read path and removes the
+// prototype-pollution / XSS lateral-movement vector that existed when
+// principal was caller-controlled.
 export const api = {
-  getProfile: (principal: string) =>
-    request<Profile>(`/api/v1/profiles/${encodeURIComponent(principal)}`),
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  getProfile: (_principal: string) =>
+    request<Profile>('/api/v1/profiles/me'),
 
   listAvailableMcps: () =>
     request<AvailableMcp[]>('/api/v1/profiles/available-mcps'),
