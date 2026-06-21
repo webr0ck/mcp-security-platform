@@ -1,6 +1,8 @@
 """Unit tests for Layer B MIME-style in-band advisory wrapper (RFC-0001 §3)."""
 import pytest
-from proxy.app.services.layer_b import wrap_content_layer_b, LAYER_B_BOUNDARY_PREFIX
+from app.services.layer_b import wrap_content_layer_b, LAYER_B_BOUNDARY_PREFIX
+
+pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +187,7 @@ def test_out_of_range_trust_tier_high_clamps_to_untrusted(caplog):
     """trust_tier=5 (above max) clamps to 0 and logs a warning."""
     import logging
     content = [{"type": "text", "text": "data"}]
-    with caplog.at_level(logging.WARNING, logger="proxy.app.services.layer_b"):
+    with caplog.at_level(logging.WARNING, logger="app.services.layer_b"):
         result = wrap_content_layer_b(
             content=content, trust_tier=5, tool_name="t", server_id="s"
         )
@@ -198,7 +200,7 @@ def test_out_of_range_trust_tier_negative_clamps_to_untrusted(caplog):
     """trust_tier=-1 clamps to 0 and logs a warning."""
     import logging
     content = [{"type": "text", "text": "data"}]
-    with caplog.at_level(logging.WARNING, logger="proxy.app.services.layer_b"):
+    with caplog.at_level(logging.WARNING, logger="app.services.layer_b"):
         result = wrap_content_layer_b(
             content=content, trust_tier=-1, tool_name="t", server_id="s"
         )

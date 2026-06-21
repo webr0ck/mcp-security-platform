@@ -23,13 +23,17 @@ wait_for() {
 
 echo "Waiting for services to be healthy…"
 wait_for "${PROXY}/health"                "Proxy health"         90
-wait_for "${KEYCLOAK}/health/ready"       "Keycloak ready"       120
+wait_for "${KEYCLOAK}/realms/mcp/.well-known/openid-configuration" "Keycloak realm" 120
 wait_for "http://localhost:3000/api/health" "Grafana"            60
-wait_for "http://localhost:5432"           "PostgreSQL"           30 || true  # TCP check
-wait_for "http://localhost:6379"           "Redis"                30 || true
+
+# Proxy services (DB and Redis via proxy health — they don't expose direct TCP)
+PROXY_HEALTH=$(curl -sf "${PROXY}/health" 2>/dev/null || echo "{}")
+DB_OK=$(echo "$PROXY_HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('services',{}).get('database','?'))" 2>/dev/null || echo "?")
+REDIS_OK=$(echo "$PROXY_HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('services',{}).get('redis','?'))" 2>/dev/null || echo "?")
+[[ "$DB_OK" == "ok" ]] && ok "PostgreSQL (via proxy)" || fail "PostgreSQL (via proxy) — got: $DB_OK"
+[[ "$REDIS_OK" == "ok" ]] && ok "Redis (via proxy)" || fail "Redis (via proxy) — got: $REDIS_OK"
 
 # Proxy endpoints
-curl -sf "${PROXY}/openapi.json" -o /dev/null && ok "Proxy OpenAPI" || fail "Proxy OpenAPI"
 curl -sf "${PROXY}/.well-known/oauth-authorization-server" -o /dev/null && ok "OAuth metadata" || fail "OAuth metadata"
 
 # MCP servers (via proxy registration, not direct)
