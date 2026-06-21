@@ -152,6 +152,10 @@ test.describe('UserPortal — MCP management', () => {
     // display_name "Echo Server" from the mock should be visible.
     const firstCardName = page.locator('[data-testid="server-card-name"]').first()
     await expect(firstCardName).not.toContainText('poc-')
+
+    // Viewers see a read-only badge and NO toggle buttons (role gating)
+    await expect(page.locator('[data-testid="readonly-badge"]')).toBeVisible()
+    await expect(page.locator('[data-testid="toggle-btn"]')).toHaveCount(0)
   })
 
   test('editor can enable and disable an MCP', async ({ page }) => {

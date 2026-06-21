@@ -127,6 +127,9 @@ function InfoTooltip({ text }: { text: string }) {
 export function UserPortal() {
   const auth = useAuth()
   const principal = auth.username ?? 'me'
+  // Viewers get a read-only catalog — they can see what's enabled but cannot toggle.
+  // All other roles (editor, analyst, admin) can manage their own profile.
+  const canManage = auth.role !== 'viewer'
 
   const [status, setStatus] = useState<Status>('loading')
   const [mcps, setMcps] = useState<AvailableMcp[]>([])
@@ -288,6 +291,11 @@ export function UserPortal() {
         <div className="portal__role-chip">
           <span className="portal__role-label">Signed in as</span>
           <span className="portal__role-value">{friendlyRole(auth.role)}</span>
+          {!canManage && (
+            <span className="portal__readonly-badge" data-testid="readonly-badge" title="Viewers can see the catalog but cannot enable or disable tools">
+              View only
+            </span>
+          )}
         </div>
       </header>
 
@@ -416,8 +424,8 @@ export function UserPortal() {
                         : 'Features'}
                     </button>
                   )}
-                  {/* Issue #9: confirmation step before toggle commits */}
-                  {pendingConfirm === togKey ? (
+                  {/* Issue #9: confirmation step before toggle commits; hidden for viewers */}
+                  {canManage && (pendingConfirm === togKey ? (
                     <span className="server-card__confirm" data-testid="confirm-bar">
                       {enabled ? 'Disable this tool?' : 'Enable this tool?'}
                       <button
@@ -438,7 +446,7 @@ export function UserPortal() {
                       onToggle={() => toggle(mcp.server_name, enabled)}
                       label={displayName}
                     />
-                  )}
+                  ))}
                 </div>
               </div>
 
@@ -476,8 +484,8 @@ export function UserPortal() {
                             <code className="fn-row__name">{fn.name}</code>
                           )}
                         </div>
-                        {/* Issue #9: confirmation step before function toggle commits */}
-                        {pendingConfirm === fnKey ? (
+                        {/* Issue #9: confirmation step before function toggle commits; hidden for viewers */}
+                        {canManage && (pendingConfirm === fnKey ? (
                           <span className="server-card__confirm" data-testid="confirm-bar">
                             {fn.enabled ? 'Disable?' : 'Enable?'}
                             <button
@@ -498,7 +506,7 @@ export function UserPortal() {
                             onToggle={() => toggleFn(mcp.server_name, fn.name, fn.enabled)}
                             label={`${fn.description || fn.name} in ${displayName}`}
                           />
-                        )}
+                        ))}
                       </div>
                     )
                   })}
