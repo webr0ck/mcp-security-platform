@@ -5,9 +5,6 @@
 // In dev (vite proxy), requests to /api/* are forwarded to the proxy.
 const BASE = import.meta.env.VITE_API_BASE ?? ''
 
-// Legacy base URL alias (used by older code paths)
-const BASE_URL = BASE
-
 class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message)
@@ -19,7 +16,7 @@ class ApiError extends Error {
 // All API helpers (legacy request() and new profiles api) share this
 // implementation so credentials, error handling, and headers stay consistent.
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await fetch(`${BASE}${path}`, {
     ...init,
     credentials: 'include',
     headers: {
@@ -145,16 +142,16 @@ export const api = {
   listAvailableMcps: () =>
     request<AvailableMcp[]>('/api/v1/profiles/available-mcps'),
 
-  // Mutations: no principal in path — backend infers identity from session.
-  enableMcp: (_principal: string, serverName: string) =>
+  // Mutations: no principal parameter — backend infers identity from session cookie.
+  enableMcp: (serverName: string) =>
     request<void>(`/api/v1/profiles/me/mcps/${encodeURIComponent(serverName)}/enable`, { method: 'POST' }),
 
-  disableMcp: (_principal: string, serverName: string) =>
+  disableMcp: (serverName: string) =>
     request<void>(`/api/v1/profiles/me/mcps/${encodeURIComponent(serverName)}/disable`, { method: 'POST' }),
 
-  enableFunction: (_principal: string, serverName: string, fnName: string) =>
+  enableFunction: (serverName: string, fnName: string) =>
     request<void>(`/api/v1/profiles/me/mcps/${encodeURIComponent(serverName)}/functions/${encodeURIComponent(fnName)}/enable`, { method: 'POST' }),
 
-  disableFunction: (_principal: string, serverName: string, fnName: string) =>
+  disableFunction: (serverName: string, fnName: string) =>
     request<void>(`/api/v1/profiles/me/mcps/${encodeURIComponent(serverName)}/functions/${encodeURIComponent(fnName)}/disable`, { method: 'POST' }),
 }

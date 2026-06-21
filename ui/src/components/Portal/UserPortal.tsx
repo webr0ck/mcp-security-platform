@@ -38,6 +38,26 @@ function friendlyStatus(status: string): string {
   return STATUS_LABELS[status] ?? status
 }
 
+// Issue #7: Map raw API role strings to readable permission-level labels.
+// Raw values like 'admin_user' or 'read_only' are not shown directly.
+const ROLE_LABELS: Record<string, string> = {
+  admin: 'Administrator',
+  admin_user: 'Administrator',
+  editor: 'Editor',
+  viewer: 'Viewer',
+  read_only: 'Viewer',
+  analyst: 'Analyst',
+}
+function friendlyRole(role: string | null | undefined): string {
+  if (!role) return 'Unknown'
+  return ROLE_LABELS[role.toLowerCase()] ?? role
+}
+
+// Issue #3: Admin contact email — read from env so operators can configure it
+// without recompiling. Falls back to a safe placeholder that makes it obvious
+// the address is unconfigured rather than silently mailing a dead address.
+const ADMIN_CONTACT_EMAIL = import.meta.env.VITE_ADMIN_EMAIL as string | undefined
+
 function ToggleSwitch({ enabled, loading, onToggle, label }: {
   enabled: boolean; loading: boolean; onToggle: () => void; label: string
 }) {
@@ -76,9 +96,9 @@ function ToggleSwitch({ enabled, loading, onToggle, label }: {
   )
 }
 
-// Issue #7: Accessible tooltip that is reachable on touch devices.
-// Clicking/tapping the ⓘ button toggles a visible popover; keyboard users get
-// focus-triggered visibility. This replaces the hover-only `title` attribute.
+// Issue #7 / issue #1-tooltip: Accessible tooltip that is reachable on touch
+// devices. Clicking/tapping the ⓘ button toggles a visible popover; keyboard
+// users get focus-triggered visibility. This replaces the hover-only `title`.
 function InfoTooltip({ text }: { text: string }) {
   const [open, setOpen] = useState(false)
   const id = useId()
@@ -147,16 +167,28 @@ export function UserPortal() {
   const getEnabledForServer = (serverName: string) =>
     profileMap[serverName]?.enabled ?? false
 
+  // Issue #9: pending confirmation state — key is `mcp:<serverName>` or
+  // `fn:<serverName>:<fnName>`. When set, that row shows Confirm/Cancel instead
+  // of firing the API call immediately.
+  const [pendingConfirm, setPendingConfirm] = useState<string | null>(null)
+
   // Toggle only retries the specific failed operation, not a full reload (issue #17)
   const toggle = async (serverName: string, currentEnabled: boolean) => {
     const key = `mcp:${serverName}`
+    // Issue #9: require a confirmation click before committing any toggle action.
+    if (pendingConfirm !== key) {
+      setPendingConfirm(key)
+      return
+    }
+    setPendingConfirm(null)
     setToggling(prev => new Set(prev).add(key))
     setError('')
     try {
       if (currentEnabled) {
-        await api.disableMcp(principal, serverName)
+        // Issue #10: api mutations are now zero-arity for principal
+        await api.disableMcp(serverName)
       } else {
-        await api.enableMcp(principal, serverName)
+        await api.enableMcp(serverName)
       }
       // Refresh only after success to keep UI consistent
       await load()
@@ -169,13 +201,19 @@ export function UserPortal() {
 
   const toggleFn = async (serverName: string, fnName: string, currentEnabled: boolean) => {
     const key = `fn:${serverName}:${fnName}`
+    // Issue #9: confirmation step before commit
+    if (pendingConfirm !== key) {
+      setPendingConfirm(key)
+      return
+    }
+    setPendingConfirm(null)
     setToggling(prev => new Set(prev).add(key))
     setError('')
     try {
       if (currentEnabled) {
-        await api.disableFunction(principal, serverName, fnName)
+        await api.disableFunction(serverName, fnName)
       } else {
-        await api.enableFunction(principal, serverName, fnName)
+        await api.enableFunction(serverName, fnName)
       }
       await load()
     } catch (e) {
@@ -216,7 +254,7 @@ export function UserPortal() {
           {/* Issue #8: Dismiss moves to 'ready' but shows a notice when data is
               stale so the user is not left with a blank list and no explanation. */}
           <button onClick={() => { setError(''); setStatus('ready') }}>
-            {dataStale ? 'Show last loaded data' : 'Dismiss'}
+            {dataStale ? 'Continue anyway' : 'Dismiss'}
           </button>
         </div>
         {dataStale && (
@@ -238,16 +276,18 @@ export function UserPortal() {
           {/* Issue #7: ⓘ is now a clickable/tappable popover, not hover-only */}
           <h1 className="portal__title font-display" data-testid="portal-title">
             AI Tool Catalog
-            <InfoTooltip text="MCP (Model Context Protocol) servers provide tools and data sources that your AI assistant can use. Enabling a tool grants the AI access to its capabilities." />
+            {/* Issue #1: tooltip avoids "MCP" / "Model Context Protocol" jargon */}
+            <InfoTooltip text="AI tools are add-ons that let your AI assistant connect to external services, search data sources, and take actions on your behalf. Enable the ones you want it to use — changes take effect immediately." />
           </h1>
           <p className="portal__subtitle">
             Enable or disable AI tools and data sources for your profile.
             Changes take effect immediately and control what your AI assistant can access.
           </p>
         </div>
+        {/* Issue #7: display a friendly permission-level label, not the raw API role string */}
         <div className="portal__role-chip">
           <span className="portal__role-label">Signed in as</span>
-          <span className="portal__role-value">{auth.role ?? 'unknown'}</span>
+          <span className="portal__role-value">{friendlyRole(auth.role)}</span>
         </div>
       </header>
 
@@ -272,15 +312,19 @@ export function UserPortal() {
           aria-label="Search AI tools"
           data-testid="search-input"
         />
-        {/* Issue #5: counter says "tool / tools" to match the search placeholder */}
+        {/* Issue #6: when a search filter is active, show "X of Y tools" so the user
+            knows how many exist in total and doesn't mistake filtering for a broken list. */}
         <span className="portal__count" data-testid="tool-count">
-          {filtered.length} {filtered.length !== 1 ? 'tools' : 'tool'}
+          {query
+            ? `${filtered.length} of ${mcps.length} ${mcps.length !== 1 ? 'tools' : 'tool'}`
+            : `${filtered.length} ${filtered.length !== 1 ? 'tools' : 'tool'}`}
         </span>
       </div>
 
       <div className="portal__server-list" data-testid="server-list">
-        {/* Issue #6: Empty state includes a mailto CTA so the user can reach the
-            administrator instead of seeing a dead-end message. */}
+        {/* Issue #3 / #6: empty-state contact link uses VITE_ADMIN_EMAIL env var.
+            When the env var is not set, we show a plain text instruction rather
+            than a mailto: link pointing at a dead address. */}
         {filtered.length === 0 && (
           <div className="portal__empty" role="status" data-testid="empty-state">
             {query
@@ -288,13 +332,17 @@ export function UserPortal() {
               : (
                 <>
                   No AI tools are available for your account.{' '}
-                  <a
-                    href="mailto:admin@example.com?subject=MCP%20Tool%20Access%20Request"
-                    className="portal__empty-cta"
-                  >
-                    Contact your administrator
-                  </a>{' '}
-                  to request access.
+                  {ADMIN_CONTACT_EMAIL
+                    ? (
+                      <a
+                        href={`mailto:${ADMIN_CONTACT_EMAIL}?subject=AI%20Tool%20Access%20Request`}
+                        className="portal__empty-cta"
+                      >
+                        Contact your administrator
+                      </a>
+                    )
+                    : 'Contact your administrator'}
+                  {' '}to request access.
                 </>
               )}
           </div>
@@ -310,13 +358,16 @@ export function UserPortal() {
           // Issue #1: use human-readable display name instead of raw slug
           const displayName = toDisplayName(mcp)
 
-          // Issue #2: always render an expand button for discovery, even when
-          // the server is not yet in the user's profile (never enabled before).
-          // If the profile entry exists, show the real function list; otherwise
-          // show a placeholder explaining that functions become visible after
-          // the tool is enabled.
+          // Issues #2 + #5: render expand button for discovery when a server has
+          // profile functions to show. For servers that are disabled AND have no
+          // profile entry, the button leads to a dead-end placeholder — hide it
+          // so stakeholders are not left clicking a control that does nothing
+          // useful. If the server is enabled OR has a profile entry (even with
+          // 0 functions), still show the button so the user can see the list.
           const hasProfileFunctions = profileEntry && profileEntry.functions.length > 0
-          const canExpand = hasProfileFunctions || !profileEntry  // show button for unknowns too
+          // Show expand if: has real functions, OR has a profile entry (enabled/ever configured),
+          // but NOT when the server is disabled with no profile record at all.
+          const canExpand = hasProfileFunctions || (!!profileEntry) || enabled
 
           return (
             <div
@@ -349,8 +400,7 @@ export function UserPortal() {
                   </div>
                 </div>
                 <div className="server-card__controls">
-                  {/* Issue #2: always render expand button so new users can
-                      discover what a tool offers before enabling it. */}
+                  {/* Issue #2/#5: expand button only shown when there is something useful to show */}
                   {canExpand && (
                     <button
                       className="server-card__expand"
@@ -359,16 +409,36 @@ export function UserPortal() {
                       aria-expanded={isExpanded}
                       aria-controls={`fn-list-${mcp.server_name}`}
                     >
-                      {isExpanded ? '▲' : '▼'} Tools
-                      {hasProfileFunctions ? ` (${profileEntry.functions.length})` : ''}
+                      {isExpanded ? '▲' : '▼'}{' '}
+                      {/* Issue #2: when count is unknown, say "Features" to give context */}
+                      {hasProfileFunctions
+                        ? `Features (${profileEntry.functions.length})`
+                        : 'Features'}
                     </button>
                   )}
-                  <ToggleSwitch
-                    enabled={enabled}
-                    loading={toggling.has(togKey)}
-                    onToggle={() => toggle(mcp.server_name, enabled)}
-                    label={displayName}
-                  />
+                  {/* Issue #9: confirmation step before toggle commits */}
+                  {pendingConfirm === togKey ? (
+                    <span className="server-card__confirm" data-testid="confirm-bar">
+                      {enabled ? 'Disable this tool?' : 'Enable this tool?'}
+                      <button
+                        className="server-card__confirm-yes"
+                        data-testid="confirm-yes"
+                        onClick={() => toggle(mcp.server_name, enabled)}
+                      >Confirm</button>
+                      <button
+                        className="server-card__confirm-no"
+                        data-testid="confirm-no"
+                        onClick={() => setPendingConfirm(null)}
+                      >Cancel</button>
+                    </span>
+                  ) : (
+                    <ToggleSwitch
+                      enabled={enabled}
+                      loading={toggling.has(togKey)}
+                      onToggle={() => toggle(mcp.server_name, enabled)}
+                      label={displayName}
+                    />
+                  )}
                 </div>
               </div>
 
@@ -406,12 +476,29 @@ export function UserPortal() {
                             <code className="fn-row__name">{fn.name}</code>
                           )}
                         </div>
-                        <ToggleSwitch
-                          enabled={fn.enabled}
-                          loading={toggling.has(fnKey)}
-                          onToggle={() => toggleFn(mcp.server_name, fn.name, fn.enabled)}
-                          label={`${fn.description || fn.name} in ${displayName}`}
-                        />
+                        {/* Issue #9: confirmation step before function toggle commits */}
+                        {pendingConfirm === fnKey ? (
+                          <span className="server-card__confirm" data-testid="confirm-bar">
+                            {fn.enabled ? 'Disable?' : 'Enable?'}
+                            <button
+                              className="server-card__confirm-yes"
+                              data-testid="confirm-yes"
+                              onClick={() => toggleFn(mcp.server_name, fn.name, fn.enabled)}
+                            >Confirm</button>
+                            <button
+                              className="server-card__confirm-no"
+                              data-testid="confirm-no"
+                              onClick={() => setPendingConfirm(null)}
+                            >Cancel</button>
+                          </span>
+                        ) : (
+                          <ToggleSwitch
+                            enabled={fn.enabled}
+                            loading={toggling.has(fnKey)}
+                            onToggle={() => toggleFn(mcp.server_name, fn.name, fn.enabled)}
+                            label={`${fn.description || fn.name} in ${displayName}`}
+                          />
+                        )}
                       </div>
                     )
                   })}
