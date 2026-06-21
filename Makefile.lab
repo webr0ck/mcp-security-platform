@@ -40,9 +40,14 @@ lab-rebuild:
 	$(LAB_COMPOSE) up -d --no-deps proxy lab-mcp-grafana mcp-netbox lab-mcp-m365
 	$(LAB_COMPOSE) run --rm lab-seeder
 
-## lab-init         Initialise Vault then run the seeder container
+## lab-init         Initialise Vault, replay missing migrations, then run the seeder container
 lab-init:
 	bash lab/scripts/vault-init.sh
+	@echo "Replaying any migrations not applied at DB init (idempotent)..."
+	@for f in $$(ls infra/db/migrations/V*.sql | sort); do \
+	  fname=$$(basename "$$f"); \
+	  podman exec mcp-db bash -c "psql -U mcp_app mcp_security -f /docker-entrypoint-initdb.d/$$fname" >/dev/null 2>&1 || true; \
+	done
 	$(LAB_COMPOSE) run --rm lab-seeder
 
 ## lab-test         Run integration / e2e tests (excludes unit-only tests)

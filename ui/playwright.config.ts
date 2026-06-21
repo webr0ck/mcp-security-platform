@@ -5,7 +5,7 @@ export default defineConfig({
   fullyParallel: false,
   retries: 1,
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: 'http://localhost:3100',
     headless: true,
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -13,7 +13,7 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
     command: 'npm run dev',
-    url: 'http://localhost:5173',
+    url: 'http://localhost:3100',
     reuseExistingServer: true,
   },
 })
