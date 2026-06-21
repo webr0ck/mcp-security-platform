@@ -65,21 +65,21 @@ def test_rule_100003_exists(rules_by_id):
 
 
 def test_rule_100001_level(rules_by_id):
-    """Taint floor single denial: level 8 (not 12 — see article correction)."""
-    assert rules_by_id["100001"].get("level") == "8", (
-        "Rule 100001 must be level 8 (taint floor single denial). "
-        "Level 12 is reserved for quarantined-tool access (rule 100505)."
+    """Taint floor single denial: level 12 (PRD threat-severity table)."""
+    assert rules_by_id["100001"].get("level") == "12", (
+        "Rule 100001 must be level 12 per PRD threat-severity table. "
+        "Level 12 = high severity for possible indirect prompt injection."
     )
 
 
 def test_rule_100002_level(rules_by_id):
-    """Generic policy denial: level 5."""
-    assert rules_by_id["100002"].get("level") == "5"
+    """Generic policy denial: level 8 (PRD threat-severity table)."""
+    assert rules_by_id["100002"].get("level") == "8"
 
 
 def test_rule_100003_level(rules_by_id):
-    """Injection storm: level 13 (sustained cross-request campaign)."""
-    assert rules_by_id["100003"].get("level") == "13"
+    """Injection storm: level 15 (critical, sustained campaign — PRD)."""
+    assert rules_by_id["100003"].get("level") == "15"
 
 
 def test_rule_100001_fields_match_audit_schema(rules_by_id):
@@ -110,12 +110,26 @@ def test_rule_100001_uses_if_sid_100500(rules_by_id):
     assert "100500" in (if_sid.text or ""), "Rule 100001 must chain off base rule 100500"
 
 
-def test_rule_100003_chains_off_100001(rules_by_id):
-    """Storm rule chains off single-event parent 100001 (not if_matched_sid)."""
+def test_rule_100003_uses_if_matched_sid(rules_by_id):
+    """Storm rule uses <if_matched_sid> (not <if_sid>) for Wazuh frequency correlation.
+
+    <if_matched_sid> counts occurrences of rule 100001 FIRING (canonical Wazuh pattern
+    for N-in-T storm detection, used in built-in rules 5551, 40112).
+    <if_sid> re-evaluates the base condition rather than counting prior rule firings.
+    """
     rule = rules_by_id["100003"]
+    if_matched_sid = rule.find("if_matched_sid")
+    assert if_matched_sid is not None, (
+        "Rule 100003 must use <if_matched_sid>, not <if_sid>, for frequency correlation"
+    )
+    assert "100001" in (if_matched_sid.text or ""), (
+        "Storm rule <if_matched_sid> must reference rule 100001"
+    )
+    # Ensure the wrong element is NOT used
     if_sid = rule.find("if_sid")
-    assert if_sid is not None, "Rule 100003 missing <if_sid>"
-    assert "100001" in (if_sid.text or ""), "Storm rule must chain off rule 100001"
+    assert if_sid is None, (
+        "Rule 100003 must NOT use <if_sid> — use <if_matched_sid> for storm counting"
+    )
 
 
 def test_rule_100003_frequency_timeframe(rules_by_id):

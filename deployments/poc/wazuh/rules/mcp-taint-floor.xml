@@ -1,0 +1,76 @@
+<!-- MCP Security Platform — taint floor injection detection rules -->
+<!-- All rules anchor on <if_sid>100500</if_sid> (the base Filebeat event        -->
+<!-- rule) so that: (a) the Wazuh built-in JSON decoder context is guaranteed,   -->
+<!-- and (b) fields arrive under the json.* namespace as shipped by Filebeat.     -->
+<!--                                                                              -->
+<!-- Actual audit log fields (from mcp_audit_logger/schema.py AuditEvent):       -->
+<!--   event_type  = "TOOL_INVOCATION"                                            -->
+<!--   outcome     = "deny"                                                       -->
+<!--   deny_reasons = ["taint_floor:required_integrity=N", ...]                  -->
+<!--                                                                              -->
+<!-- The plan named event_type=TOOL_CALL_DENIED — that value does not exist      -->
+<!-- in the schema. The correct signal is outcome=deny + deny_reasons match.     -->
+<!--                                                                              -->
+<!-- Field namespace: Filebeat ships container JSON logs; the Wazuh JSON decoder  -->
+<!-- places all fields under json.* (e.g. json.outcome, json.deny_reasons).      -->
+<!-- Bare field names (outcome, deny_reasons) only work via the UDP syslog path  -->
+<!-- and the mcp-audit-decoder.xml — they will NOT match Filebeat events.        -->
+<!--                                                                              -->
+<!-- Load order: this file uses a hyphen prefix so it sorts AFTER                -->
+<!-- mcp-audit-rules.xml (hyphen 0x2D < all ASCII letters). Rule 100500 must    -->
+<!-- exist before if_sid references to it in rules 100001/100002/100003 can be   -->
+<!-- resolved. Do NOT rename either file without updating the README and          -->
+<!-- verifying load order — a rename that reverses order will silently break      -->
+<!-- rules 100001-100003 at Wazuh startup. Preferred long-term fix: migrate to   -->
+<!-- numeric prefixes (0100-mcp-audit-rules.xml, 0200-mcp-taint-floor.xml).      -->
+<!-- Do NOT rename back to mcp_taint_floor.xml — underscore (0x5F) sorts AFTER  -->
+<!-- letters in ASCII, which would load this file BEFORE mcp-audit-rules.xml     -->
+<!-- and break the if_sid forward reference to rule 100500.                      -->
+<group name="mcp_security_platform">
+
+  <!-- Single taint floor denial — level 12 (high severity: possible indirect    -->
+  <!-- prompt injection; session tainted by untrusted tool result → blocked on   -->
+  <!-- high-integrity sink). Level 12 matches the PRD threat-severity table.     -->
+  <!-- event_type guard added: without it, any future audit event with           -->
+  <!-- outcome=deny (e.g. COMPLIANCE_RUN_TRIGGERED denied) would false-positive. -->
+  <!-- Scoped to TOOL_INVOCATION only, consistent with rule 100501.              -->
+  <rule id="100001" level="12">
+    <if_sid>100500</if_sid>
+    <field name="json.event_type">^TOOL_INVOCATION$</field>
+    <field name="json.outcome">^deny$</field>
+    <field name="json.deny_reasons">taint_floor:</field>
+    <description>MCP taint floor denial — possible indirect prompt injection attempt detected (client: $(json.client_id) tool: $(json.tool_name))</description>
+    <group>attack,injection,mcp</group>
+  </rule>
+
+  <!-- Generic MCP policy denial (non-taint-floor) — level 8 (PRD threat table). -->
+  <!-- Scoped to TOOL_INVOCATION only (event_type guard, parity with 100001).   -->
+  <!-- Explicitly excludes taint_floor denials via negate="yes" so this rule     -->
+  <!-- covers OPA/policy denials that are NOT taint-related, and does not        -->
+  <!-- double-fire alongside rule 100001 on taint denials. Without the negate    -->
+  <!-- guard both rules would fire on every taint denial, creating dashboard     -->
+  <!-- confusion and undefined alert precedence for analysts.                    -->
+  <rule id="100002" level="8">
+    <if_sid>100500</if_sid>
+    <field name="json.event_type">^TOOL_INVOCATION$</field>
+    <field name="json.outcome">^deny$</field>
+    <field name="json.deny_reasons" negate="yes">taint_floor:</field>
+    <description>MCP tool call denied by policy (client: $(json.client_id) tool: $(json.tool_name))</description>
+    <group>policy,mcp</group>
+  </rule>
+
+  <!-- Taint floor injection storm — 5+ taint denials from same client in 60s.  -->
+  <!-- <if_matched_sid> is the canonical Wazuh pattern for frequency correlation -->
+  <!-- against a previously-FIRED rule (counts rule 100001 activations, not all  -->
+  <!-- events matching 100001's conditions). Standard in Wazuh built-in rules    -->
+  <!-- e.g. 5551, 40112. <same_field> groups by client_id so denials from 5     -->
+  <!-- different clients cannot falsely aggregate into one storm alert.           -->
+  <!-- Level 15 = critical (sustained cross-request injection campaign, PRD).    -->
+  <rule id="100003" level="15" frequency="5" timeframe="60">
+    <if_matched_sid>100001</if_matched_sid>
+    <same_field>json.client_id</same_field>
+    <description>MCP sustained injection storm — 5+ taint floor denials in 60s from $(json.client_id)</description>
+    <group>attack,injection,mcp,storm</group>
+  </rule>
+
+</group>
