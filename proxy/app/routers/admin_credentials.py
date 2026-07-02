@@ -412,6 +412,7 @@ def _build_html() -> str:
     .badge-oauth_user_token { background: #7c2d12; color: #fdba74; }
     .badge-active { background: #166534; color: #86efac; }
     .badge-quarantined { background: #7f1d1d; color: #fca5a5; }
+    .badge-disabled { background: #374151; color: #9ca3af; }
     label { display: block; font-size: 0.8rem; color: #94a3b8; margin-top: 0.5rem; }
     input, select { width: 100%; padding: 0.4rem 0.6rem; border: 1px solid #475569; border-radius: 4px; background: #0f172a; color: #e2e8f0; font-size: 0.85rem; box-sizing: border-box; }
     button { padding: 0.4rem 1rem; border-radius: 4px; border: none; cursor: pointer; font-size: 0.85rem; }

@@ -35,10 +35,30 @@ if [[ -f "${ENV_LAB}" && "${FORCE}" == "false" ]]; then
   exit 0
 fi
 
+# ── Machine-specific config ───────────────────────────────────────────────────
+# Source lab.config (gitignored) if present, otherwise fall back to the example.
+# lab.config sets LAB_HOST, LAB_HTTPS_PORT, LAB_HTTP_PORT, LAB_KC_PORT.
+LAB_CONFIG="${REPO_ROOT}/lab.config"
+LAB_CONFIG_EXAMPLE="${REPO_ROOT}/lab.config.example"
+if [[ -f "${LAB_CONFIG}" ]]; then
+  # shellcheck source=/dev/null
+  source "${LAB_CONFIG}"
+  echo "INFO: Using machine config from lab.config (LAB_HOST=${LAB_HOST:-unset})"
+elif [[ -f "${LAB_CONFIG_EXAMPLE}" ]]; then
+  source "${LAB_CONFIG_EXAMPLE}"
+  echo "WARN: lab.config not found — using defaults from lab.config.example."
+  echo "      Run: cp lab.config.example lab.config  and set LAB_HOST to your IP."
+fi
+
+LAB_HOST="${LAB_HOST:-127.0.0.1}"
+LAB_HTTPS_PORT="${LAB_HTTPS_PORT:-8443}"
+LAB_HTTP_PORT="${LAB_HTTP_PORT:-8088}"
+GATEWAY_BASE="https://${LAB_HOST}:${LAB_HTTPS_PORT}"
+
 rand32() { openssl rand -hex 32; }
 randpass() { openssl rand -base64 24 | tr -d '/+=' | head -c 28; }
 
-echo "Generating lab secrets → ${ENV_LAB} ..."
+echo "Generating lab secrets → ${ENV_LAB} (gateway: ${GATEWAY_BASE}) ..."
 
 # Generated once and reused below: the mcp-proxy Keycloak client secret must be
 # IDENTICAL in KC_PROXY_CLIENT_SECRET (realm import) and OIDC_CLIENT_SECRET (the
@@ -94,7 +114,9 @@ GATEWAY_SHARED_SECRET=$(rand32)
 
 # ── OIDC callback host config (Option B — derive from request Host header) ────
 OIDC_TRUST_FORWARDED_HOST=true
-PROXY_BASE_URL=
+# Set to your Tailscale/LAN IP so OAuth discovery advertises HTTPS URLs.
+# Sourced from lab.config (LAB_HOST / LAB_HTTPS_PORT). Edit lab.config, not here.
+PROXY_BASE_URL=${GATEWAY_BASE}
 # PROXY_ALLOWED_HOSTS: comma-separated allow-list for Host header validation.
 # Add your LAN/Tailscale IPs here (e.g. localhost:8000,203.0.113.10:8000).
 # Leave empty to skip the check (any host accepted — safe on trusted LAN/VPN).
@@ -102,7 +124,7 @@ PROXY_ALLOWED_HOSTS=
 
 # ── Keycloak OIDC config (wired to lab-keycloak on port 8082) ─────────────────
 OIDC_ENABLED=true
-OIDC_ISSUER_URL=http://localhost:8082/realms/mcp
+OIDC_ISSUER_URL=${GATEWAY_BASE}/realms/mcp
 OIDC_INTERNAL_ISSUER_URL=http://lab-keycloak:8080/realms/mcp
 OIDC_CLIENT_ID=mcp-proxy
 # Must equal KC_PROXY_CLIENT_SECRET (mcp-proxy KC client secret); see note above.
@@ -110,9 +132,11 @@ OIDC_CLIENT_SECRET=${KC_PROXY_SECRET}
 OIDC_AUDIENCE=mcp-proxy
 
 # ── Tailscale / LAN access ────────────────────────────────────────────────────
-# Set LAB_HOST to your machine's LAN or Tailscale IP so Keycloak OIDC
-# redirect URIs are correct when accessing from that address.
-LAB_HOST=localhost
+# Sourced from lab.config. Edit lab.config to change the host IP.
+LAB_HOST=${LAB_HOST}
+LAB_GATEWAY_URL=${GATEWAY_BASE}
+GATEWAY_HTTP_PORT=${LAB_HTTP_PORT}
+GATEWAY_HTTPS_PORT=${LAB_HTTPS_PORT}
 
 # ── External service tokens (fill in if using real integrations) ───────────────
 GRAFANA_URL=http://lab-grafana:3000

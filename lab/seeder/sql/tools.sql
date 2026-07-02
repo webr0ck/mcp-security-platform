@@ -105,9 +105,9 @@ INSERT INTO tool_registry (
 ) VALUES
 (
     gen_random_uuid(),
-    'echo-ping', '1.0.0',
-    'Liveness and auth-verification tools for the echo MCP server.',
-    '{"type":"object","properties":{"message":{"type":"string"},"count":{"type":"integer"},"tag":{"type":"string"}},"additionalProperties":false}'::jsonb,
+    'ping', '1.0.0',
+    'Liveness check — returns server identity, caller, and current timestamp.',
+    '{"type":"object","properties":{},"additionalProperties":false}'::jsonb,
     'http://lab-mcp-echo:8000/mcp',
     'active', 'low', 5, '[]'::jsonb,
     'lab-seeder', null, null, 'none', null, null
@@ -179,6 +179,71 @@ ON CONFLICT (name, version) DO UPDATE SET
     injection_mode = EXCLUDED.injection_mode,
     updated_at     = NOW();
 
+-- ── MCP server onboarding tools (on lab-self-service container) ──────────────
+-- injection_mode='passthrough': proxy forwards the caller's OAuth bearer token to
+-- the upstream. The self-service server re-uses that token when calling back to the
+-- proxy submission API — so submissions are owned by the real authenticated user,
+-- not the service account. This is the correct OAuth-native flow.
+--
+-- plan_mcp_server and get_auth_mode_recommendation are read-only guidance; they
+-- don't call the proxy API at all, so passthrough vs none doesn't matter for them —
+-- but keeping them consistent means the token is available if needed.
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode, inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'plan_mcp_server', '1.0.0',
+    'Start the MCP server onboarding flow. Describe what you want to build and get guided questions.',
+    '{"type":"object","properties":{"intent":{"type":"string","description":"What should the MCP server do?"}},"required":["intent"]}'::jsonb,
+    'http://lab-mcp-self-service:8000/mcp',
+    'active', 'low', 5, '["Read-only guidance, no data written"]'::jsonb,
+    'lab-seeder', null, null, 'passthrough', null, null
+),
+(
+    gen_random_uuid(),
+    'get_auth_mode_recommendation', '1.0.0',
+    'Get a recommended authentication injection mode based on answers about the upstream system.',
+    '{"type":"object","properties":{"has_upstream_auth":{"type":"boolean"},"same_keycloak":{"type":"boolean"},"upstream_idp_type":{"type":"string","enum":["entra","api_key","oauth"]},"per_user":{"type":"boolean"}},"required":["has_upstream_auth"]}'::jsonb,
+    'http://lab-mcp-self-service:8000/mcp',
+    'active', 'low', 5, '[]'::jsonb,
+    'lab-seeder', null, null, 'passthrough', null, null
+),
+(
+    gen_random_uuid(),
+    'submit_mcp_server', '1.0.0',
+    'Create and submit an MCP server for automated scan and security team review.',
+    '{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"injection_mode":{"type":"string"},"data_categories":{"type":"array","items":{"type":"string"}},"has_write_ops":{"type":"boolean"},"github_repo_url":{"type":"string"}},"required":["name","description","injection_mode","data_categories","has_write_ops"]}'::jsonb,
+    'http://lab-mcp-self-service:8000/mcp',
+    'active', 'medium', 30, '["Creates records in server_registry","Triggers git clone and security scan of provided repo"]'::jsonb,
+    'lab-seeder', null, null, 'passthrough', null, null
+),
+(
+    gen_random_uuid(),
+    'check_submission_status', '1.0.0',
+    'Poll the status of an MCP server submission including scan results and reviewer notes.',
+    '{"type":"object","properties":{"server_id":{"type":"string","description":"UUID returned by submit_mcp_server"}},"required":["server_id"]}'::jsonb,
+    'http://lab-mcp-self-service:8000/mcp',
+    'active', 'low', 5, '[]'::jsonb,
+    'lab-seeder', null, null, 'passthrough', null, null
+),
+(
+    gen_random_uuid(),
+    'get_server_scaffold', '1.0.0',
+    'Get starter scaffold code (server.py, requirements.txt, Dockerfile, README) for an MCP server auth mode.',
+    '{"type":"object","properties":{"injection_mode":{"type":"string","description":"Auth mode for the scaffold"}},"required":["injection_mode"]}'::jsonb,
+    'http://lab-mcp-self-service:8000/mcp',
+    'active', 'low', 5, '[]'::jsonb,
+    'lab-seeder', null, null, 'passthrough', null, null
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url   = EXCLUDED.upstream_url,
+    description    = EXCLUDED.description,
+    injection_mode = EXCLUDED.injection_mode,
+    updated_at     = NOW();
+
 -- ── lab-tickets — KC token exchange to custom RS (Case 4, PRD-0002) ──────────
 -- proxy exchanges the user's KC bearer for an aud=lab-tickets exchanged token,
 -- then injects it as Authorization: Bearer <exchanged> to lab-mcp-lab-tickets.
@@ -209,9 +274,8 @@ ON CONFLICT (name, version) DO UPDATE SET
     updated_at          = NOW();
 
 -- ── Wazuh MCP — service-account Wazuh API JWT (compose.wazuh.yml overlay) ────
--- Seeded as status='quarantined' (safe default when overlay is not running).
--- To activate after deploying compose.wazuh.yml:
---   UPDATE tool_registry SET status='active' WHERE name='wazuh-siem' AND version='1.0.0';
+-- Seeded as status='disabled' (overlay not running = service unavailable, not a security block).
+-- 'make lab-up' activates it automatically when compose.wazuh.yml is included.
 -- injection_mode='service': broker injects Wazuh API JWT as Authorization header.
 INSERT INTO tool_registry (
     tool_id, name, version, description, schema, upstream_url,
@@ -222,9 +286,9 @@ INSERT INTO tool_registry (
     gen_random_uuid(),
     'wazuh-siem', '1.0.0',
     'Wazuh SIEM: list alerts, agents, rules, and trigger active responses. Service-account auth (Wazuh API JWT).',
-    '{"type":"object","properties":{"tool_name":{"type":"string","enum":["wazuh_cluster_health","wazuh_list_agents","wazuh_get_agent_detail","wazuh_list_alerts","wazuh_search_alerts","wazuh_get_rules","wazuh_list_decoders","wazuh_run_active_response"]},"arguments":{"type":"object"}},"required":["tool_name"],"additionalProperties":false}'::jsonb,
+    '{"type":"object","properties":{"tool_name":{"type":"string","enum":["wazuh_cluster_health","wazuh_list_agents","wazuh_get_agent_detail","wazuh_list_alerts","wazuh_search_alerts","wazuh_get_rules","wazuh_list_decoders","wazuh_run_active_response","wazuh_list_ai_alerts"]},"arguments":{"type":"object"}},"required":["tool_name"],"additionalProperties":false}'::jsonb,
     'http://lab-mcp-wazuh:8000/mcp',
-    'quarantined', 'high', 75,
+    'disabled', 'high', 75,
     '["Direct access to security event data","wazuh_run_active_response can modify system state","Requires admin Wazuh API credentials","Active response disabled by default (ALLOW_ACTIVE_RESPONSE=false)"]'::jsonb,
     'lab-seeder', 'wazuh', 'B', 'service', 'Authorization', 'Bearer '
 )

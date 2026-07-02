@@ -338,3 +338,46 @@ test_anomaly_lenient_cutoff if {
 test_anomaly_off_never_blocks if {
 	not anomaly_threshold_exceeded with input as {"anomaly_score": 0.95, "anomaly_cutoff": 2.0}
 }
+
+# =============================================================================
+# A-04: sensitive path argument deny — zero coverage gap fixed
+# =============================================================================
+
+_base_allow_input := {
+	"client_id": "alice@corp",
+	"client_roles": ["agent"],
+	"tool_id": "t-safe",
+	"tool_name": "read_file",
+	"tool_status": "active",
+	"tool_risk_level": "low",
+	"tool_server_id": "srv-1",
+	"owned_server_ids": [],
+	"owner_max_risk_level": "critical",
+	"params": {},
+	"anomaly_score": 0.0,
+	"is_testing": false,
+}
+
+test_sensitive_path_etc_passwd_denied if {
+	not allow with input as object.union(_base_allow_input, {"params": {"path": "/etc/passwd"}})
+}
+
+test_sensitive_path_etc_shadow_denied if {
+	not allow with input as object.union(_base_allow_input, {"params": {"file": "/etc/shadow"}})
+}
+
+test_sensitive_path_traversal_denied if {
+	not allow with input as object.union(_base_allow_input, {"params": {"arg": "../../../etc/hosts"}})
+}
+
+test_sensitive_path_ssh_denied if {
+	not allow with input as object.union(_base_allow_input, {"params": {"p": "~/.ssh/id_rsa"}})
+}
+
+test_sensitive_path_proc_denied if {
+	not allow with input as object.union(_base_allow_input, {"params": {"src": "/proc/self/environ"}})
+}
+
+test_safe_path_not_denied if {
+	not "suspicious_path_argument" in data.mcp.authz.deny with input as object.union(_base_allow_input, {"params": {"path": "/app/data/report.json"}})
+}

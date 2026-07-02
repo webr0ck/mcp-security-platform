@@ -178,6 +178,15 @@ async def decrypt_credential(
             owner_type=owner_type,
         )
     except Exception as exc:
+        # A row WAS found (row is not None here) but decryption failed. This is
+        # almost always master-secret drift (the blob was encrypted under a master
+        # the broker no longer loads) or tampering — NOT a missing credential.
+        # Say so explicitly: the caller collapses None into "not provisioned",
+        # which sent a prior acceptance-test run on a 30-min goose chase (USR-04).
         import logging
-        logging.getLogger(__name__).error("Decryption failed for %s/%s: %s", user_sub, service, exc)
+        logging.getLogger(__name__).error(
+            "Credential row FOUND for %s/%s (owner=%s) but decryption FAILED (%s: %s) — "
+            "likely broker master-secret drift or tampering; re-enroll this credential.",
+            user_sub, service, owner_type, type(exc).__name__, exc,
+        )
         return None

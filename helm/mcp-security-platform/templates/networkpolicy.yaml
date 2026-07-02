@@ -1,0 +1,78 @@
+{{/*
+NetworkPolicy — K8s enforcement of the F-001 topology gate.
+
+In Docker Compose the topology gate is implemented via pairwise bridge networks:
+  proxy-opa-net, proxy-redis-net, proxy-db-net, etc.
+Here it is implemented via three NetworkPolicy resources:
+
+  1. proxy-ingress    — proxy accepts traffic ONLY from the ingress controller
+  2. opa-ingress      — OPA accepts traffic ONLY from the proxy (not from ingress)
+  3. deny-opa-egress  — OPA cannot initiate connections (policy eval is request/response)
+
+These policies are intentionally restrictive: add egress rules for your specific
+database, Redis, Vault, and MinIO endpoints in overlay values as needed.
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+---
+# Allow ingress to proxy only from the ingress controller namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcp-security-platform.fullname" . }}-proxy-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mcp-security-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mcp-security-platform.proxySelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow traffic from ingress-nginx (adjust namespace label if using a different controller)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8000
+          protocol: TCP
+    # Allow intra-namespace healthchecks (kubelet probes originate from the node)
+    - ports:
+        - port: 8000
+          protocol: TCP
+---
+# OPA receives traffic ONLY from the proxy — never from ingress or other pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcp-security-platform.fullname" . }}-opa-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mcp-security-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opa
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mcp-security-platform.opaSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the proxy may reach OPA (F-001: pairwise isolation)
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "mcp-security-platform.proxySelectorLabels" . | nindent 14 }}
+      ports:
+        - port: 8181
+          protocol: TCP
+  egress:
+    # OPA needs DNS resolution only — all other egress denied
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+{{- end }}

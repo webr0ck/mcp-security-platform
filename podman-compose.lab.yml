@@ -63,7 +63,8 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_PROXY: edge
       # Tell KC its external frontend URL so all generated URLs use the LAN address.
-      KC_HOSTNAME_URL: "http://${LAB_HOST:-localhost}:8082"
+      # ponytail: KC proxied through nginx at HTTPS — avoids SameSite cookie issues
+      KC_HOSTNAME_URL: "${LAB_GATEWAY_URL:-http://${LAB_HOST:-localhost}:8082}"
       # Variable substitution in realm import (Keycloak 24 supports KC_* env vars in realm JSON)
       KC_PROXY_CLIENT_SECRET: ${KC_PROXY_CLIENT_SECRET:-mcp-proxy-secret}
       KC_GRAFANA_CLIENT_SECRET: ${KC_GRAFANA_CLIENT_SECRET:-grafana-secret}
@@ -72,7 +73,7 @@ services:
       LAB_HOST: ${LAB_HOST:-localhost}
       # LAB_HOST_URL is substituted into realm-mcp.json's frontendUrl attribute
       # (Keycloak 24 env-var interpolation in realm import: ${LAB_HOST_URL:default}).
-      LAB_HOST_URL: "http://${LAB_HOST:-localhost}:8082"
+      LAB_HOST_URL: "${LAB_GATEWAY_URL:-http://${LAB_HOST:-localhost}:8082}"
       # Cap JVM heap so the Quarkus build phase isn't OOM-killed in rootless Podman (6 GB machine)
       JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx512m"
     volumes:
@@ -248,6 +249,10 @@ services:
   # GRAFANA_SERVICE_ACCOUNT_TOKEN is seeded by lab/seeder/seed.py and written
   # to .env.lab. The container name matches the upstream_url in tool_registry.
   lab-mcp-grafana:
+    # A-03 WAIVER: cannot use <<: *mcp-hardening fully because grafana/mcp-grafana:0.14.0
+    # upstream image runs as an unknown non-root UID (not 1001) and writes to /tmp at startup,
+    # so read_only:true and user:"1001:1001" both break it. Waiver approved for lab tier.
+    # Compensating controls applied manually below (same set as anchor minus read_only+user).
     image: docker.io/grafana/mcp-grafana:0.14.0
     container_name: lab-mcp-grafana
     entrypoint:
@@ -260,6 +265,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+      - seccomp:${PWD}/sandbox/files/seccomp/mcp-sandbox.json
     pids_limit: 64
     deploy:
       resources:
@@ -716,6 +722,8 @@ services:
     user: "redis"
     security_opt:
       - no-new-privileges:false
+    ports:
+      - "127.0.0.1:6379:6379"
 
   # ── MinIO: remap host ports to avoid clash with other projects on :9000/:9001 ──
   minio:
@@ -766,7 +774,8 @@ services:
       - ./lab/vault/auto-unseal.sh:/usr/local/bin/vault-auto-unseal.sh:ro
     ports:
       # Remapped to 8201 — port 8200 is used by isl-vault from intentional-secrets-lab
-      - "8201:8200"
+      # A-01: 127.0.0.1 binding — prevents Tailscale peers from reaching Vault directly.
+      - "127.0.0.1:8201:8200"
     healthcheck:
       # Healthy ONLY when initialised AND unsealed (sys/health returns 200 only then),
       # so dependents (seeder) wait for the wrapper to finish unsealing. Plain HTTP.
@@ -843,12 +852,18 @@ services:
       - ENVIRONMENT=development
       - LOG_LEVEL=DEBUG
       - RELOAD=true
+      # SEC-05: reject inbound to proxy:8000 from anything but the gateway/loopback,
+      # so MCP backends can't dial the proxy back over their per-backend network.
+      - PROXY_INGRESS_ALLOWLIST_ENABLED=true
       # Option B: derive the OIDC callback URL from the incoming request's Host
       # header so the proxy works from any IP (LAN, Tailscale, localhost) without
       # reconfiguring PROXY_BASE_URL. Safe here because all traffic is on trusted
       # local/VPN networks and Keycloak's realm whitelists port-8000 callbacks.
       - OIDC_TRUST_FORWARDED_HOST=true
-      - PROXY_BASE_URL=
+      - PROXY_BASE_URL=${PROXY_BASE_URL}
+      # Lab Vault uses persistent file storage (not dev mode), so the proxy must
+      # use the lab token from .env.lab — not the hardcoded "root" from dev compose.
+      - VAULT_TOKEN=${VAULT_TOKEN}
     command: >
       uvicorn app.main:app
       --host 0.0.0.0

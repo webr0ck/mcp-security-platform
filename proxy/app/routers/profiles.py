@@ -49,12 +49,25 @@ from app.core.database import AsyncSessionLocal
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/profiles", tags=["Profiles"])
 
-# Roles that can manage other principals' profiles
+# Roles that can manage the platform (named profiles, tool registry, etc.)
 _ADMIN_ROLES = frozenset({"admin", "platform_admin"})
 # Narrow role for service accounts that proxy profile calls on behalf of users
 # (e.g. lab-self-service). Grants cross-user profile read/write ONLY — not
 # named-profile management or any other admin capability.
 _PROFILE_SERVICE_ROLES = frozenset({"profile_service"})
+# Roles that may WRITE to ANOTHER principal's MCP profile.
+# Plain "admin" is intentionally excluded: it is a platform management role,
+# not a user-profile delegation role. Granting admin-level platform access
+# must not automatically allow silently mutating other users' entitlements.
+# Only platform_admin (super-admin) and profile_service (dedicated delegation
+# role) may perform cross-user profile writes.
+_CROSS_PROFILE_WRITE_ROLES = frozenset({"platform_admin"}) | _PROFILE_SERVICE_ROLES
+
+# Roles allowed to use self-service /me profile mutation routes.
+# Deny-by-default: only listed roles may enable/disable their own MCP servers.
+# The old negative check ("block if viewer") was bypassed by empty-roles tokens
+# (PRIVESC-001 fix). A positive allowlist is the correct pattern.
+_SELF_SERVICE_ALLOWED_ROLES = frozenset({"admin", "platform_admin", "analyst", "editor", "profile_service"})
 
 # Cache sentinel — must match the value in invocation.py
 _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
@@ -83,23 +96,46 @@ class ProfileUpsertBody(BaseModel):
 # Authorization helper
 # ---------------------------------------------------------------------------
 
+def _assert_not_service_account(request: Request) -> None:
+    """P1-2: profile mutation is a human governance action — bar machine tokens.
+
+    A Keycloak client_credentials (service-account) token must never mutate a
+    profile: a service account that could self-enable MCPs or expand its own
+    allowed_functions is a privilege-escalation vector (automated credential
+    compromise → scope expansion). Only interactive humans (OIDC/PKCE session)
+    may manage profiles. Fail-closed. The proxy sets request.state.is_service_account.
+    """
+    if getattr(request.state, "is_service_account", False):
+        caller_id = getattr(request.state, "client_id", "") or "unknown"
+        logger.warning(
+            "SELF_SERVICE_SA_BLOCKED: service-account %s attempted profile mutation "
+            "on %s — denied (P1-2)", caller_id, request.url.path
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="self_service_unavailable_for_service_accounts",
+        )
+
+
 def _assert_may_write(request: Request, principal: str) -> None:
     """
     Raise HTTP 403 if the caller may not modify *principal*'s profile.
 
     Self-service: caller's client_id == principal → allowed for any role.
-    Cross-profile: caller must have an admin role.
+    Cross-profile: caller must hold platform_admin or profile_service.
+    Plain "admin" is NOT sufficient for cross-user writes (IDOR-005 fix).
     """
+    _assert_not_service_account(request)  # P1-2: machine tokens can never mutate profiles
     caller_id: str = getattr(request.state, "client_id", "") or ""
     if not caller_id:
         raise HTTPException(status_code=401, detail="Caller identity not resolved")
     if caller_id == principal:
         return  # self-service always allowed
     caller_roles: list[str] = list(getattr(request.state, "client_roles", []) or [])
-    if not any(r in _ADMIN_ROLES | _PROFILE_SERVICE_ROLES for r in caller_roles):
+    if not any(r in _CROSS_PROFILE_WRITE_ROLES for r in caller_roles):
         raise HTTPException(
             status_code=403,
-            detail="Admin role required to manage another principal's profile",
+            detail="platform_admin or profile_service role required to manage another principal's profile",
         )
 
 
@@ -168,7 +204,7 @@ async def _upsert_profile_row(
                 """
                 INSERT INTO mcp_profiles
                     (profile_id, mcp_name, enabled, allowed_functions, updated_by, updated_at)
-                VALUES (:pid, :mname, :enabled, :af::jsonb, :changed_by, now())
+                VALUES (:pid, :mname, :enabled, CAST(:af AS jsonb), :changed_by, now())
                 ON CONFLICT (profile_id, mcp_name) DO UPDATE SET
                     enabled           = EXCLUDED.enabled,
                     allowed_functions = EXCLUDED.allowed_functions,
@@ -202,7 +238,7 @@ async def _emit_profile_event(
                 """
                 INSERT INTO mcp_profile_events
                     (profile_id, mcp_name, event_type, old_state, new_state, changed_by)
-                VALUES (:pid, :mname, :etype, :old::jsonb, :new::jsonb, :by)
+                VALUES (:pid, :mname, :etype, CAST(:old AS jsonb), CAST(:new AS jsonb), :by)
                 """
             ),
             {
@@ -221,7 +257,13 @@ async def _emit_profile_event(
 # Cache invalidation — must call after every profile mutation
 # ---------------------------------------------------------------------------
 
-async def _invalidate_profile_cache(principal: str, mcp_name: str, new_value: dict | None) -> None:
+async def _invalidate_profile_cache(
+    principal: str,
+    mcp_name: str,
+    new_value: dict | None,
+    *,
+    hard_on_disable: bool = False,
+) -> None:
     """
     Write the updated profile value into the Redis cache used by
     _lookup_profile_with_cache (invocation.py Task 1.10).
@@ -229,7 +271,11 @@ async def _invalidate_profile_cache(principal: str, mcp_name: str, new_value: di
     Cache key: mcp_profile:{principal}:{mcp_name}
 
     If new_value is None → write the sentinel (no profile row = default allow).
-    On Redis errors: log + continue (best-effort; fail-closed path is in invocation.py).
+
+    hard_on_disable: when True (disable / function-disable paths) a Redis failure
+    raises HTTPException 503 rather than silently continuing. A missed enable is
+    safe (caller retries); a missed disable leaves stale enabled=True in cache for
+    up to TTL seconds, which is a security gap (LOGIC-003 fix).
     """
     try:
         from app.core.redis_client import redis_pool
@@ -242,15 +288,204 @@ async def _invalidate_profile_cache(principal: str, mcp_name: str, new_value: di
             extra={"principal": principal, "mcp_name": mcp_name},
         )
     except Exception as exc:
+        if hard_on_disable:
+            logger.error(
+                "Cache write failed on disable — refusing to return 200 with stale cache",
+                extra={"principal": principal, "mcp_name": mcp_name, "error": str(exc)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Profile cache unavailable — disable not confirmed. Retry the request.",
+            ) from exc
         logger.warning(
-            "Failed to invalidate profile cache after mutation — "
+            "Failed to update profile cache after enable — "
             "invocation.py will use stale cache for up to TTL seconds",
             extra={"principal": principal, "mcp_name": mcp_name, "error": str(exc)},
         )
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Self-service /me routes — MUST be registered before /{principal}/* routes.
+# FastAPI matches static path segments before dynamic ones, but registering
+# these first guarantees correct resolution when the router is included.
+# ---------------------------------------------------------------------------
+
+@router.get("/available-mcps")
+async def list_available_mcps(request: Request) -> JSONResponse:
+    """
+    Return all non-deleted MCP servers from server_registry.
+
+    Used by the React self-service portal and MCP self-service tools to show
+    the full catalog of available servers (enabled_for_account from caller's profile).
+
+    RBAC: any authenticated caller.
+    """
+    client_id: str = getattr(request.state, "client_id", "")
+    try:
+        async with AsyncSessionLocal() as db:
+            tools = await db.execute(
+                text(
+                    "SELECT name, description, status, risk_level "
+                    "FROM tool_registry WHERE deleted_at IS NULL ORDER BY name"
+                )
+            )
+            rows = tools.mappings().all()
+
+            # Fetch caller's enabled flags in one query
+            if rows:
+                names = [r["name"] for r in rows]
+                prof_result = await db.execute(
+                    text(
+                        "SELECT mcp_name, enabled FROM mcp_profiles "
+                        "WHERE profile_id = :pid AND mcp_name = ANY(:names)"
+                    ),
+                    {"pid": client_id, "names": names},
+                )
+                enabled_map = {r["mcp_name"]: r["enabled"] for r in prof_result.mappings().all()}
+            else:
+                enabled_map = {}
+    except Exception as exc:
+        logger.error("list_available_mcps DB error: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to fetch available MCPs") from exc
+
+    return JSONResponse([
+        {
+            "server_name": r["name"],
+            "display_name": r["name"],
+            "description": r["description"] or "",
+            "status": r["status"] or "unknown",
+            "risk_level": r["risk_level"] or "unknown",
+            "enabled_for_account": enabled_map.get(r["name"], False),
+        }
+        for r in rows
+    ])
+
+
+@router.get("/me")
+async def get_my_profile(request: Request) -> JSONResponse:
+    """
+    Return the caller's full profile: all MCPs and their enabled/function state.
+
+    RBAC: any authenticated caller (self-service only).
+    """
+    principal: str = getattr(request.state, "client_id", "")
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                text(
+                    "SELECT mcp_name, enabled, allowed_functions "
+                    "FROM mcp_profiles WHERE profile_id = :pid ORDER BY mcp_name"
+                ),
+                {"pid": principal},
+            )
+            rows = result.mappings().all()
+    except Exception as exc:
+        logger.error("get_my_profile DB error for %r: %s", principal, exc)
+        raise HTTPException(status_code=500, detail="Failed to fetch profile") from exc
+
+    mcps = []
+    for row in rows:
+        fns_raw = row["allowed_functions"]
+        functions = []
+        if fns_raw:
+            try:
+                fn_list = json.loads(fns_raw) if isinstance(fns_raw, str) else fns_raw
+                functions = [{"name": f, "description": f, "enabled": True} for f in (fn_list or [])]
+            except Exception:
+                pass
+        mcps.append({
+            "server_name": row["mcp_name"],
+            "description": "",
+            "enabled": bool(row["enabled"]),
+            "functions": functions,
+        })
+
+    return JSONResponse({"principal": principal, "mcps": mcps})
+
+
+@router.post("/me/mcps/{mcp_name}/enable")
+async def enable_mcp_self(mcp_name: str, request: Request) -> JSONResponse:
+    """Enable an MCP server in the caller's own profile (self-service)."""
+    principal: str = getattr(request.state, "client_id", "")
+    _assert_not_service_account(request)  # P1-2: machine tokens can never mutate profiles
+    roles: list = getattr(request.state, "client_roles", [])
+    if not (set(roles) & _SELF_SERVICE_ALLOWED_ROLES):
+        raise HTTPException(status_code=403, detail="Insufficient role to modify profile")
+    await _assert_mcp_exists(mcp_name)
+    row = await _get_profile_row(principal, mcp_name)
+    allowed_fns = row["allowed_functions"] if row else None
+    await _upsert_profile_row(principal, mcp_name, True, allowed_fns, principal)
+    new_state = {"enabled": True, "allowed_functions": allowed_fns}
+    await _emit_profile_event(principal, mcp_name, "MCP_ENABLED", old_state=row, new_state=new_state, changed_by=principal)
+    await _invalidate_profile_cache(principal, mcp_name, new_state)
+    return JSONResponse({"ok": True, "principal": principal, "mcp_name": mcp_name, "enabled": True})
+
+
+@router.post("/me/mcps/{mcp_name}/disable")
+async def disable_mcp_self(mcp_name: str, request: Request) -> JSONResponse:
+    """Disable an MCP server in the caller's own profile (self-service)."""
+    principal: str = getattr(request.state, "client_id", "")
+    _assert_not_service_account(request)  # P1-2: machine tokens can never mutate profiles
+    roles: list = getattr(request.state, "client_roles", [])
+    if not (set(roles) & _SELF_SERVICE_ALLOWED_ROLES):
+        raise HTTPException(status_code=403, detail="Insufficient role to modify profile")
+    await _assert_mcp_exists(mcp_name)
+    row = await _get_profile_row(principal, mcp_name)
+    allowed_fns = row["allowed_functions"] if row else None
+    await _upsert_profile_row(principal, mcp_name, False, allowed_fns, principal)
+    new_state = {"enabled": False, "allowed_functions": allowed_fns}
+    await _emit_profile_event(principal, mcp_name, "MCP_DISABLED", old_state=row, new_state=new_state, changed_by=principal)
+    await _invalidate_profile_cache(principal, mcp_name, new_state, hard_on_disable=True)
+    return JSONResponse({"ok": True, "principal": principal, "mcp_name": mcp_name, "enabled": False})
+
+
+@router.post("/me/mcps/{mcp_name}/functions/{fn_name}/enable")
+async def enable_fn_self(mcp_name: str, fn_name: str, request: Request) -> JSONResponse:
+    """Enable a specific function for an MCP in the caller's own profile."""
+    principal: str = getattr(request.state, "client_id", "")
+    _assert_not_service_account(request)  # P1-2: machine tokens can never mutate profiles
+    roles: list = getattr(request.state, "client_roles", [])
+    if not (set(roles) & _SELF_SERVICE_ALLOWED_ROLES):
+        raise HTTPException(status_code=403, detail="Insufficient role to modify profile")
+    await _assert_mcp_exists(mcp_name)
+    row = await _get_profile_row(principal, mcp_name)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No profile row for '{mcp_name}' — enable the server first")
+    fns_raw = row.get("allowed_functions")
+    fns = json.loads(fns_raw) if isinstance(fns_raw, str) else (fns_raw or [])
+    if fn_name not in fns:
+        fns.append(fn_name)
+    await _upsert_profile_row(principal, mcp_name, bool(row["enabled"]), fns, principal)
+    new_state = {"enabled": row["enabled"], "allowed_functions": fns}
+    await _emit_profile_event(principal, mcp_name, "FUNCTION_ENABLED", old_state=row, new_state=new_state, changed_by=principal)
+    await _invalidate_profile_cache(principal, mcp_name, new_state)
+    return JSONResponse({"ok": True, "principal": principal, "mcp_name": mcp_name, "fn_name": fn_name, "enabled": True})
+
+
+@router.post("/me/mcps/{mcp_name}/functions/{fn_name}/disable")
+async def disable_fn_self(mcp_name: str, fn_name: str, request: Request) -> JSONResponse:
+    """Disable a specific function for an MCP in the caller's own profile."""
+    principal: str = getattr(request.state, "client_id", "")
+    _assert_not_service_account(request)  # P1-2: machine tokens can never mutate profiles
+    roles: list = getattr(request.state, "client_roles", [])
+    if not (set(roles) & _SELF_SERVICE_ALLOWED_ROLES):
+        raise HTTPException(status_code=403, detail="Insufficient role to modify profile")
+    await _assert_mcp_exists(mcp_name)
+    row = await _get_profile_row(principal, mcp_name)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No profile row for '{mcp_name}'")
+    fns_raw = row.get("allowed_functions")
+    fns = json.loads(fns_raw) if isinstance(fns_raw, str) else (fns_raw or [])
+    fns = [f for f in fns if f != fn_name]
+    await _upsert_profile_row(principal, mcp_name, bool(row["enabled"]), fns, principal)
+    new_state = {"enabled": row["enabled"], "allowed_functions": fns}
+    await _emit_profile_event(principal, mcp_name, "FUNCTION_DISABLED", old_state=row, new_state=new_state, changed_by=principal)
+    await _invalidate_profile_cache(principal, mcp_name, new_state, hard_on_disable=True)
+    return JSONResponse({"ok": True, "principal": principal, "mcp_name": mcp_name, "fn_name": fn_name, "enabled": False})
+
+
+# ---------------------------------------------------------------------------
+# Routes — principal-scoped (dynamic parameter; must come AFTER /me and /named)
 # ---------------------------------------------------------------------------
 
 @router.get("/{principal}/mcps/{mcp_name}")
@@ -323,7 +558,10 @@ async def upsert_profile_mcp(
         new_state=new_state,
         changed_by=actor,
     )
-    await _invalidate_profile_cache(principal, mcp_name, new_state)
+    # hard_on_disable: a PUT with enabled=False is a disable operation and must
+    # fail hard on Redis error (same guarantee as POST /disable). A caller must
+    # not be able to bypass the 503 safeguard by using PUT instead of POST.
+    await _invalidate_profile_cache(principal, mcp_name, new_state, hard_on_disable=not body.enabled)
 
     return JSONResponse(
         {
@@ -407,7 +645,7 @@ async def disable_mcp(principal: str, mcp_name: str, request: Request) -> JSONRe
         "enabled": False,
         "allowed_functions": old["allowed_functions"] if old else None,
     }
-    await _invalidate_profile_cache(principal, mcp_name, new_cache)
+    await _invalidate_profile_cache(principal, mcp_name, new_cache, hard_on_disable=True)
 
     return JSONResponse(
         {"ok": True, "principal": principal, "mcp_name": mcp_name, "enabled": False}
@@ -552,7 +790,7 @@ async def disable_function(
         changed_by=actor,
     )
     new_cache = {"enabled": old["enabled"] if old else True, "allowed_functions": new_af}
-    await _invalidate_profile_cache(principal, mcp_name, new_cache)
+    await _invalidate_profile_cache(principal, mcp_name, new_cache, hard_on_disable=True)
 
     return JSONResponse(
         {

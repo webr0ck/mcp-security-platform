@@ -46,7 +46,7 @@ VALUES
     '00000000-0000-0000-0002-000000000002',
     'b0b00000000000000000000000000000000000000000000000000000000000b0',
     'bob@corp',
-    '{"auditor"}',
+    '{"agent"}',
     120,
     'lab-seeder'
 )
@@ -56,6 +56,17 @@ ON CONFLICT (key_id) DO NOTHING;
 INSERT INTO role_assignments (client_id, role, granted_by)
 VALUES
     ('alice@corp', 'agent',   'lab-seeder'),
-    ('bob@corp',   'auditor', 'lab-seeder'),
+    ('bob@corp',   'agent',   'lab-seeder'),
     ('bootstrap',  'admin',   'lab-seeder')
 ON CONFLICT (client_id, role) DO NOTHING;
+
+-- OPA client grants — max_risk_level drives the risk_level_within_threshold gate.
+-- alice gets 'critical' so all lab tools are reachable; add per-user rows for
+-- tighter lab scenarios.
+INSERT INTO client_grants (client_id, max_risk_level, allowed_tools, allowed_tags, granted_by)
+VALUES
+    ('alice@corp', 'critical', '[]'::jsonb, '[]'::jsonb, 'lab-seeder'),
+    ('bob@corp',   'medium',   '[]'::jsonb, '[]'::jsonb, 'lab-seeder')
+ON CONFLICT (client_id) DO UPDATE
+    SET max_risk_level = EXCLUDED.max_risk_level,
+        updated_at     = now();

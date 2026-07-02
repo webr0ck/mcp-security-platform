@@ -344,7 +344,7 @@ async def grant_entitlement(
                 FROM entitlement
                 WHERE server_id = :sid
                   AND principal_id = :pid
-                  AND principal_type = :ptype::principal_type_enum
+                  AND principal_type = CAST(:ptype AS principal_type_enum)
                 """
             ),
             {
@@ -459,7 +459,7 @@ async def grant_entitlement(
                 VALUES (
                     :sid,
                     :pid,
-                    :ptype::principal_type_enum,
+                    CAST(:ptype AS principal_type_enum),
                     :granted_by
                 )
                 RETURNING

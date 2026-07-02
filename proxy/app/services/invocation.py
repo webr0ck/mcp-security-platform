@@ -6,7 +6,8 @@ Implements the critical invocation path described in docs/ARCHITECTURE.md Sectio
 This service orchestrates:
   1. Tool status check (INV-005: quarantine block before OPA)
   2. Anomaly score computation
-  3. OPA policy evaluation (INV-004: fail-closed on OPA unreachable)
+  3. Credential injection (Step 3c-pre: fail-fast before DNS revalidation)
+  3b. DNS-rebind revalidation of upstream IP
   4. HTTP forwarding to upstream MCP server
   5. Audit event emission (INV-001: synchronous, before response returned)
   6. Anomaly baseline update (async, post-response)
@@ -263,13 +264,73 @@ async def invoke_tool(
     params = json_rpc_request.get("params", {}).get("arguments", {})
 
     # -------------------------------------------------------------------------
-    # Step 1: INV-005 — Block quarantined tools before OPA evaluation
+    # Step 1: INV-005 — Block unavailable/quarantined tools before OPA evaluation
     # -------------------------------------------------------------------------
+    if tool_status == "disabled":
+        raise ToolDisabledError(tool_id, tool_name)
+
     if tool_status == "quarantined":
         raise ToolQuarantinedError(tool_id, tool_name)
 
     if tool_status == "deprecated":
         raise ToolDeprecatedError(tool_id, tool_name)
+
+    # -------------------------------------------------------------------------
+    # Step 1.2: Supply-chain scan freshness gate (Stage 3).
+    # If the tool is linked to a server and SCAN_FRESHNESS_ENFORCED=True,
+    # deny calls to servers whose last_rescanned_at is older than
+    # SCAN_MAX_AGE_HOURS or NULL (never rescanned).
+    # When SCAN_FRESHNESS_ENFORCED=False (default), only a warning is emitted.
+    # -------------------------------------------------------------------------
+    if tool_server_id:
+        from app.core.config import settings as _scan_settings
+        from app.core.database import AsyncSessionLocal
+        from datetime import timedelta
+        from sqlalchemy import text as _sql_text
+
+        try:
+            async with AsyncSessionLocal() as _conn:
+                _row = await _conn.execute(
+                    _sql_text(
+                        "SELECT last_rescanned_at FROM server_registry "
+                        "WHERE server_id = :sid AND deleted_at IS NULL"
+                    ),
+                    {"sid": tool_server_id},
+                )
+                _scan_row = _row.fetchone()
+            _last = _scan_row[0] if _scan_row else None
+            _age_limit = datetime.now(timezone.utc) - timedelta(hours=_scan_settings.SCAN_MAX_AGE_HOURS)
+            _stale = _last is None or _last < _age_limit
+            if _stale:
+                if _scan_settings.SCAN_FRESHNESS_ENFORCED:
+                    await _emit_audit_event(
+                        tool_id=str(tool_id) if tool_id is not None else None,
+                        tool_name=tool_name,
+                        tool_version=tool_record.get("version"),
+                        client_id=client_id,
+                        outcome="deny",
+                        deny_reasons=["scan_freshness_stale"],
+                        request_id=request_id,
+                        latency_ms=0,
+                        anomaly_score=0.0,
+                        opa_decision_id="",
+                        is_testing=is_testing,
+                        source_ip=source_ip,
+                        principal_type=principal_type,
+                        roles=client_roles,
+                        session_jti=session_jti,
+                    )
+                    raise ScanFreshnessError(tool_id, tool_name, _last)
+                else:
+                    logger.warning(
+                        "Scan freshness stale for server %s (last=%s) — warn-only "
+                        "(SCAN_FRESHNESS_ENFORCED=False)",
+                        tool_server_id, _last,
+                    )
+        except ScanFreshnessError:
+            raise
+        except Exception as _sf_exc:
+            logger.warning("Scan freshness check failed for %s, skipping: %s", tool_server_id, _sf_exc)
 
     # -------------------------------------------------------------------------
     # Step 1.5: 6.2 — discovery==invoke. If the tool is linked to a server,
@@ -331,7 +392,7 @@ async def invoke_tool(
             _server_default_injection,
         )
         _required = effective_required_integrity(_tool_required, _eff_injection)
-        _tainted = await is_tainted_for_principal(principal_id)
+        _tainted = await is_tainted_for_principal(client_id)  # keyed on logical identity, not auth-method (LOGIC-005)
         if taint_floor_decision(tainted=_tainted, required_integrity=_required) == "deny":
             await _emit_audit_event(
                 tool_id=str(tool_id) if tool_id is not None else None,
@@ -543,6 +604,76 @@ async def invoke_tool(
         raise ValueError(f"SSRF blocked upstream URL at invoke time: {exc}") from exc
 
     # -------------------------------------------------------------------------
+    # Step 3c-pre: Credential injection (fail-fast before DNS revalidation)
+    #
+    # Credential injection runs BEFORE the DNS-rebind check so that we never
+    # make outbound DNS queries for tools whose credentials are not available.
+    # This is a fail-fast security improvement: no DNS leakage for uncredentialed
+    # tools. CredentialInjectionError is re-raised after emitting a deny audit.
+    # -------------------------------------------------------------------------
+    from app.credential_broker.dispatcher import (
+        CredentialInjectionError,
+        CredentialEnrollmentRequiredError,
+    )
+
+    extra_headers: dict[str, str] = {}
+    credential = None
+    injection_mode = tool_record.get("injection_mode", "none")
+    service_name = tool_record.get("service_name")
+
+    if injection_mode == "passthrough":
+        # Case-3 (3b) native passthrough: inject none of OUR credentials. Forward
+        # the client's downstream token (if any) and let the upstream challenge
+        # (401 + WWW-Authenticate) when it is absent/invalid — the gateway relays
+        # that challenge to the client (see the 401-relay below).
+        if inbound_auth:
+            extra_headers = {"Authorization": inbound_auth}
+    elif injection_mode != "none":
+        from app.credential_broker.dispatcher import dispatch_credential_injection
+        try:
+            extra_headers = await dispatch_credential_injection(
+                tool_record=tool_record,
+                client_id=client_id,
+                # 6.3: thread the caller's KC token for oauth_user_token (RFC 8693).
+                # None for non-OIDC callers → that mode fails closed downstream.
+                user_kc_token=user_kc_token,
+            )
+        except CredentialInjectionError as _cred_exc:
+            # INV-001: a credential refusal on the auth boundary (e.g. user not
+            # enrolled for delegated access, missing service secret, broker down)
+            # is a security-relevant DENY and MUST be audited — parity with the
+            # OPA-stage deny above. Without this the only signal is a -32603 to
+            # the caller and no audit trail. Emit, then re-raise so the actionable
+            # message still reaches the caller.
+            #
+            # Task 4: distinguish "user not enrolled" from "broker down / secret
+            # missing" so the audit trail (and TTFF metric) can tell them apart.
+            # INV-002: injection_mode is kept as the second element; no token value
+            # is ever placed in deny_reasons.
+            if isinstance(_cred_exc, CredentialEnrollmentRequiredError):
+                _deny_primary = "enrollment_required"
+            else:
+                _deny_primary = "credential_injection_failed"
+            await _emit_audit_event(
+                tool_id=str(tool_id),
+                tool_name=tool_name,
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=[_deny_primary, injection_mode],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=anomaly_score,
+                opa_decision_id=opa_decision_id,
+                is_testing=is_testing,
+                source_ip=source_ip,
+                principal_type=principal_type,
+                roles=client_roles,
+                session_jti=session_jti,
+            )
+            raise
+
+    # -------------------------------------------------------------------------
     # Step 3c: Invoke-time DNS-rebind / TOCTOU revalidation (Task 3.1 / ISO-F2.6)
     #
     # Registration-time SSRF checks are necessary but not sufficient — a hostname
@@ -644,67 +775,7 @@ async def invoke_tool(
     # -------------------------------------------------------------------------
     # Step 4: Forward to upstream MCP server
     # -------------------------------------------------------------------------
-    from app.credential_broker.dispatcher import (
-        CredentialInjectionError,
-        CredentialEnrollmentRequiredError,
-    )
-
-    extra_headers: dict[str, str] = {}
-    credential = None
-    injection_mode = tool_record.get("injection_mode", "none")
-    service_name = tool_record.get("service_name")
-
-    if injection_mode == "passthrough":
-        # Case-3 (3b) native passthrough: inject none of OUR credentials. Forward
-        # the client's downstream token (if any) and let the upstream challenge
-        # (401 + WWW-Authenticate) when it is absent/invalid — the gateway relays
-        # that challenge to the client (see the 401-relay below).
-        if inbound_auth:
-            extra_headers = {"Authorization": inbound_auth}
-    elif injection_mode != "none":
-        from app.credential_broker.dispatcher import dispatch_credential_injection
-        try:
-            extra_headers = await dispatch_credential_injection(
-                tool_record=tool_record,
-                client_id=client_id,
-                # 6.3: thread the caller's KC token for oauth_user_token (RFC 8693).
-                # None for non-OIDC callers → that mode fails closed downstream.
-                user_kc_token=user_kc_token,
-            )
-        except CredentialInjectionError as _cred_exc:
-            # INV-001: a credential refusal on the auth boundary (e.g. user not
-            # enrolled for delegated access, missing service secret, broker down)
-            # is a security-relevant DENY and MUST be audited — parity with the
-            # OPA-stage deny above. Without this the only signal is a -32603 to
-            # the caller and no audit trail. Emit, then re-raise so the actionable
-            # message still reaches the caller.
-            #
-            # Task 4: distinguish "user not enrolled" from "broker down / secret
-            # missing" so the audit trail (and TTFF metric) can tell them apart.
-            # INV-002: injection_mode is kept as the second element; no token value
-            # is ever placed in deny_reasons.
-            if isinstance(_cred_exc, CredentialEnrollmentRequiredError):
-                _deny_primary = "enrollment_required"
-            else:
-                _deny_primary = "credential_injection_failed"
-            await _emit_audit_event(
-                tool_id=str(tool_id),
-                tool_name=tool_name,
-                tool_version=tool_record.get("version"),
-                client_id=client_id,
-                outcome="deny",
-                deny_reasons=[_deny_primary, injection_mode],
-                request_id=request_id,
-                latency_ms=0,
-                anomaly_score=anomaly_score,
-                opa_decision_id=opa_decision_id,
-                is_testing=is_testing,
-                source_ip=source_ip,
-                principal_type=principal_type,
-                roles=client_roles,
-                session_jti=session_jti,
-            )
-            raise
+    # (credential injection was moved to Step 3c-pre, before DNS-rebind)
 
     start_ts = datetime.now(timezone.utc)
     upstream_response: dict[str, Any] = {}
@@ -934,7 +1005,7 @@ async def invoke_tool(
         from app.services.taint_store import mark_tainted_for_principal
 
         if result_taints_session(_taint_server_trust_tier):
-            await mark_tainted_for_principal(principal_id)
+            await mark_tainted_for_principal(client_id)  # keyed on logical identity, not auth-method (LOGIC-005)
 
     # -------------------------------------------------------------------------
     # Step 6a: Indirect prompt-injection screen on the tool RESPONSE (MCP-003 /
@@ -1099,6 +1170,15 @@ async def _mcp_initialize(
     return session_id
 
 
+_INJECTION_MODE_CASE: dict[str, int] = {
+    "entra_client_credentials": 1,
+    "service": 2,
+    "user": 3,
+    "kc_token_exchange": 4,
+    "oauth_user_token": 4,  # alias
+}
+
+
 def _compute_trace_fields(
     injection_mode: str,
     user_sub: str,
@@ -1128,14 +1208,7 @@ def _compute_trace_fields(
         upstream_principal = "__service__"
 
     # case_id: the PRD-0002 case number (None for modes not in the four-auth POC)
-    _case_map = {
-        "entra_client_credentials": 1,
-        "service": 2,
-        "user": 3,
-        "kc_token_exchange": 4,
-        "oauth_user_token": 4,  # alias
-    }
-    case_id = _case_map.get(injection_mode)
+    case_id = _INJECTION_MODE_CASE.get(injection_mode)
 
     return {
         "case_id": case_id,
@@ -1456,6 +1529,15 @@ class AuditEmissionError(RuntimeError):
     """
 
 
+class ToolDisabledError(Exception):
+    """Raised when attempting to invoke a disabled tool (service not deployed)."""
+
+    def __init__(self, tool_id: str, tool_name: str) -> None:
+        self.tool_id = tool_id
+        self.tool_name = tool_name
+        super().__init__(f"Tool '{tool_name}' ({tool_id}) is disabled (underlying service not available).")
+
+
 class ToolQuarantinedError(Exception):
     """Raised when attempting to invoke a quarantined tool (INV-005)."""
 
@@ -1472,6 +1554,19 @@ class ToolDeprecatedError(Exception):
         self.tool_id = tool_id
         self.tool_name = tool_name
         super().__init__(f"Tool '{tool_name}' ({tool_id}) is deprecated.")
+
+
+class ScanFreshnessError(Exception):
+    """Raised when a server's supply-chain scan is stale and SCAN_FRESHNESS_ENFORCED=True."""
+
+    def __init__(self, tool_id: str, tool_name: str, last_rescanned_at) -> None:
+        self.tool_id = tool_id
+        self.tool_name = tool_name
+        self.last_rescanned_at = last_rescanned_at
+        super().__init__(
+            f"Tool '{tool_name}' denied: server supply-chain scan is stale "
+            f"(last_rescanned_at={last_rescanned_at})."
+        )
 
 
 class TaintFloorDenyError(Exception):

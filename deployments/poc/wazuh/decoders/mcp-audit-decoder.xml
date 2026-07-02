@@ -24,7 +24,6 @@
 <!-- Extract fields from the JSON payload after the prefix -->
 <decoder name="mcp-audit">
   <parent>mcp-audit-pre</parent>
-  <prematch offset="after_prematch">{"client_id":"</prematch>
-  <regex offset="after_prematch">([^"]+)","tool_name":"([^"]+)","outcome":"([^"]+)","anomaly_score":([0-9.]+),"risk_level":"([^"]+)"</regex>
+  <regex offset="after_parent">([^"]+)","tool_name":"([^"]+)","outcome":"([^"]+)","anomaly_score":([0-9.]+),"risk_level":"([^"]+)"</regex>
   <order>srcuser,id,action,extra_data,status</order>
 </decoder>

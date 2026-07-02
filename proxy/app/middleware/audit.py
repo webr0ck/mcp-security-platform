@@ -95,7 +95,13 @@ class AuditMiddleware(BaseHTTPMiddleware):
         # Residual: the recorded method/path strings are attacker-chosen —
         # they are run through redact_string before recording (INV-002).
         # ----------------------------------------------------------------
-        if response.status_code in (401, 403):
+        # Skip the generic 401/403 audit when a route handler already emitted a
+        # tool-specific deny audit (request.state.invocation_audit_emitted = True).
+        # Without this guard, route handlers that emit their own audit (e.g. the
+        # quarantined-tool check in invoke_tool) would produce two audit events per
+        # request — one with tool context and one with just the HTTP status.
+        _already_audited = getattr(request.state, "invocation_audit_emitted", False)
+        if response.status_code in (401, 403) and not _already_audited:
             try:
                 from uuid import uuid4
 

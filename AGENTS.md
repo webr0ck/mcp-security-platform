@@ -105,7 +105,7 @@ python -m mcphub_sdk.scaffold <server-name>    # generates server.py / Dockerfil
 ```
 
 Then register it (`scripts/onboard_server.py` or `POST /api/v1/servers`). Full walkthrough:
-[`docs/MCP-SERVER-PUBLISHING.md`](docs/MCP-SERVER-PUBLISHING.md). The `lab/mcp-servers/` dir has working examples.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The `lab/mcp-servers/` dir has working examples.
 
 ## Conventions (follow these)
 
@@ -124,10 +124,10 @@ Then register it (`scripts/onboard_server.py` or `POST /api/v1/servers`). Full w
 |---|---|
 | [`README.md`](README.md) | thesis, threat model, **Enforced-vs-Roadmap table = source of truth** |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | **canonical** as-built architecture (current at HEAD). README table + ROADMAP remain authoritative for per-control status |
-| [`docs/API.md`](docs/API.md) · [`docs/RBAC.md`](docs/RBAC.md) | API surface · role model |
-| [`docs/SECURITY_NONNEGATABLES.md`](docs/SECURITY_NONNEGATABLES.md) | the security invariants CI enforces |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | done vs next |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | API surface · role model |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | the security invariants CI enforces |
+| [`README.md`](README.md) | done vs next |
 | [`SECURITY.md`](SECURITY.md) | disclosure policy + tracked known-limitations |
 | [`docs/archive/`](docs/archive/) | superseded/historical docs — **do not rely on these** |
 
-> `docs/archive/ARCHITECTURE-v1.md` (v1) is **superseded**; prefer `ARCHITECTURE.md`.
+> `docs/ARCHITECTURE.md` (v1) is **superseded**; prefer `ARCHITECTURE.md`.

@@ -1,0 +1,25 @@
+# lab.config.example — machine-specific lab settings
+#
+# Copy to lab.config and fill in your values:
+#   cp lab.config.example lab.config
+#
+# lab.config is gitignored. lab.config.example is committed as the reference.
+# scripts/lab-init.sh sources lab.config (or this file as fallback) when
+# generating .env.lab so IPs never get hardcoded in the script itself.
+
+# ── Host IP ───────────────────────────────────────────────────────────────────
+# Your Tailscale or LAN IP — the address external clients (Claude Code, browser
+# on another machine) use to reach this lab host.
+# Find it: tailscale ip -4   OR   ip route get 1 | awk '{print $7; exit}'
+LAB_HOST=127.0.0.1
+
+# ── Gateway ports ─────────────────────────────────────────────────────────────
+# Must match GATEWAY_HTTPS_PORT / GATEWAY_HTTP_PORT in docker-compose.yml.
+LAB_HTTPS_PORT=8443
+LAB_HTTP_PORT=8088
+
+# ── Keycloak external port ────────────────────────────────────────────────────
+# Port on which Keycloak is reachable from a browser (not the internal container port).
+# Only needed if you expose KC directly (e.g. for Entra redirect URIs).
+# When KC is proxied through nginx (default lab setup) leave this blank.
+LAB_KC_PORT=

@@ -34,6 +34,9 @@ def _make_request(
     req.url.path = path
     req.state.request_id = "req-test-001"
     req.state.client_id = client_id
+    # Must be False: MagicMock auto-creates truthy objects for unset attrs,
+    # which would make the middleware believe the request was already audited.
+    req.state.invocation_audit_emitted = False
     req.client = MagicMock()
     req.client.host = "10.0.0.1"
     # session_jti: absent for unauthenticated

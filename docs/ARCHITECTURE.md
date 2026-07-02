@@ -2,13 +2,12 @@
 
 **Version:** 3.0 · **Status:** Canonical, current as of code at HEAD.
 
-This document describes the MCP Security Platform **as it is built today**. It is held to the same
-rule as the rest of the repo: every claim is matched to code, and where something is roadmap it is
-labelled **(roadmap)** rather than implied as shipped. The
-**[README Enforced-vs-Roadmap table](../README.md#enforced-today-vs-roadmap)** and
-**[ROADMAP.md](ROADMAP.md)** remain the authoritative per-control status; this doc explains *how the
-pieces fit together*. For the design history (the pre-hardening defect review) see
-[`archive/`](archive/).
+This document is the **canonical, reusable specification** of the MCP Security Platform: enough to
+re-implement the service from scratch. It describes the platform **as it is built today** — every
+claim is matched to code, and anything not yet built is labelled **(roadmap)** rather than implied as
+shipped. The **[README Enforced-vs-Roadmap table](../README.md#enforced-today-vs-roadmap)** is the
+authoritative per-control status; this doc explains *how the pieces fit together*, and §10 lists the
+security invariants any faithful re-implementation must preserve.
 
 ---
 
@@ -196,8 +195,8 @@ not affected** — the LLM auditor only runs at registration.
 
 ## 8. Threat model (summary)
 
-Full invariants: [`SECURITY_NONNEGATABLES.md`](SECURITY_NONNEGATABLES.md). Disclosed residual risks:
-[`../SECURITY.md`](../SECURITY.md). Headline properties and how they're met:
+Full invariants are in §10 below. Disclosed residual risks: [`../SECURITY.md`](../SECURITY.md).
+Headline properties and how they're met:
 
 | Goal | Mechanism |
 |---|---|
@@ -216,10 +215,39 @@ per-server network isolation and per-tool rate limiting are **(roadmap)**.
 
 ## 9. Status & roadmap
 
-Current per-control status is the [README Enforced-vs-Roadmap table](../README.md#enforced-today-vs-roadmap);
-forward plan and current test counts are in [ROADMAP.md](ROADMAP.md). Notable **(roadmap)** items:
-SPDX SBOM, outbound Jira, Helm/K8s, learned anomaly baseline, server-owner onboarding wizard,
-per-server network isolation.
+Current per-control status is the [README Enforced-vs-Roadmap table](../README.md#enforced-today-vs-roadmap).
+Notable **(roadmap)** items: SPDX SBOM, outbound Jira, Helm/K8s, learned anomaly baseline,
+server-owner onboarding wizard, per-server network isolation.
 
-> Keep this document matched to code. If you change a control, update this doc, the README table, and
-> ROADMAP in the same change — a claim without backing code is treated as a bug.
+> Keep this document matched to code. If you change a control, update this doc and the README table
+> in the same change — a claim without backing code is treated as a bug.
+
+---
+
+## 10. Security invariants
+
+These are hard constraints; a faithful re-implementation must preserve every one. Machine-verifiable
+ones are gated by `make security-check`; the rest are enforced by design and reviewed by hand.
+
+| # | Invariant | Enforced by |
+|---|---|---|
+| INV-001 | Every tool invocation **and** auth-layer rejection (401/403) produces a synchronous audit event *before* the response; emission failure ⇒ 500 (no un-audited execution) | `middleware/audit.py`, `services/invocation.py` |
+| INV-002 | Logs never contain raw payloads/secrets — credential & PII patterns auto-redacted (`[REDACTED:<cat>]`) | `mcp-audit-logger` redaction (unit-tested) |
+| INV-003 | OPA is **deny-by-default** — `default allow = false`, no wildcard allow, no fallthrough | `policies/rego/authz.rego` |
+| INV-004 | OPA unreachable ⇒ **fail closed** (503 `OPA_UNAVAILABLE`); `null`/missing result normalised to deny | `services/policy.py` |
+| INV-005 | Quarantined tools cannot be invoked by any role (incl. admin), denied pre-OPA | `services/invocation.py` |
+| INV-006 | Every registered tool has an HMAC-signed SBOM; no `active` status without a valid signature | `services/sbom.py`, DB constraint |
+| INV-007 | Audit archive bucket has Object-Lock (≥GOVERNANCE, 90d); no app/API/Make path may delete it | `compliance-checker/checker.py`, `setup-minio.sh` |
+| INV-008 | No secret value in any git-tracked file (`.env.example` placeholders only) | trufflehog in CI / `make security-check` |
+| INV-009 | `/tools/{id}/invoke` requires mTLS cert or API key or OIDC JWT; unauthenticated ⇒ 401 before app logic | gateway `ssl_verify_client` + auth middleware |
+| INV-010 | mTLS client certs have ≤24h TTL | step-ca provisioner config |
+| INV-011 | Only the `proxy_app` DB role may write registry/audit/credential tables; only `compliance_checker` writes `compliance_reports` | PostgreSQL grants (`V003`/`V009`) |
+| INV-012 | Signed OPA bundles in staging/production (HS256 `--verification-key`); **signed is the default** | `docker-compose.yml`, `check_signed_default.sh` |
+| INV-013 | Every brokered credential is AES-256-GCM envelope-encrypted under a per-user HKDF-SHA256 KEK (≥256-bit master), keyed on the **authenticated** identity, with a synchronous lifecycle audit | `credential_broker/{kms,approaches/approach_a}.py` |
+| INV-014 | Session-JTI revocation **fails closed** — any Redis/DB error ⇒ deny (never allow a revoked token) | `middleware/auth.py::_is_session_jti_revoked` |
+| INV-015 | MCP-profile lookup **fails closed** — DB error + cache miss ⇒ 503, never an empty (unrestricted) profile | `services/invocation.py::_lookup_profile_with_cache` |
+
+Identity anti-spoofing (P1-1): an OIDC email is only used as the identity key when the IdP asserts it
+**verified** (`verified_oidc_identity`); with realm `verifyEmail=true`, a changed email is unverified
+until re-proven, so a user cannot rename their email to a privileged identity. Machine
+(client_credentials) tokens cannot perform human-only self-service profile mutation (P1-2).

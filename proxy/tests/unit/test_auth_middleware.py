@@ -77,11 +77,12 @@ def _patch_resolve_api_key(client_id: str | None):
     return patch("app.middleware.auth._resolve_api_key", new=AsyncMock(return_value=client_id))
 
 
-def _patch_validate_oidc_jwt(sub: str | None, jwt_roles: list[str] | None = None):
-    """Patch the OIDC JWT validator."""
+def _patch_validate_oidc_jwt(sub: str | None, jwt_roles: list[str] | None = None,
+                             is_service_account: bool = False):
+    """Patch the OIDC JWT validator (returns the P1-2 3-tuple)."""
     return patch(
         "app.middleware.auth._validate_oidc_jwt",
-        new=AsyncMock(return_value=(sub, jwt_roles or [])),
+        new=AsyncMock(return_value=(sub, jwt_roles or [], is_service_account)),
     )
 
 

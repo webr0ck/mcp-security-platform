@@ -28,6 +28,8 @@ services:
       - LOG_LEVEL=DEBUG
       # RELOAD=true is read by the CMD to enable uvicorn hot-reload
       - RELOAD=true
+      # Pass through from .env.lab when running the red team demo; defaults false
+      - TAINT_FLOOR_ENABLED=${TAINT_FLOOR_ENABLED:-false}
     # Override OPA dependency condition for dev/lab: OPA static binary has no
     # shell/curl for in-container health checks. Use service_started so compose
     # doesn't block on a health check that can never pass in this image.
@@ -71,9 +73,10 @@ services:
       - "5678:5678"
 
   db:
-    # Expose PostgreSQL to host so developers can use psql/pgAdmin/Postico directly
+    # Expose PostgreSQL to host so developers can use psql/pgAdmin/Postico directly.
+    # A-01: bound to 127.0.0.1 — prevents Tailscale / VPN peers from reaching the DB directly.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       # Allow a simple dev password via env — .env should have DB_PASSWORD set
       - POSTGRES_PASSWORD=${DB_PASSWORD:-devpassword}
@@ -189,8 +192,10 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
+    # A-01: bound to 127.0.0.1 — Vault root token in dev mode; host exposure would allow
+    # any Tailscale peer to read all secrets without credentials.
     ports:
-      - "8200:8200"
+      - "127.0.0.1:8200:8200"
 
   compliance-checker:
     environment:

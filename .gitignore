@@ -50,3 +50,4 @@ lab/nginx/lab-certs/*.key
 # Personal agent guidance + internal AI planning docs — not for public repo
 CLAUDE.md
 docs/superpowers/
+lab.config

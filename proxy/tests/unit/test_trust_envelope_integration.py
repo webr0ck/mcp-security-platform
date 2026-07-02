@@ -122,21 +122,14 @@ class TestBuildEnvelopeResult:
 
 def test_layer_b_wraps_untrusted_text_in_build_envelope_result(monkeypatch):
     """Layer B wrapping appears in the content when LAYER_B_ENABLED=true."""
-    import proxy.app.core.config as cfg_mod
-    import app.core.config as app_cfg_mod
-    # Clear lru_cache before patching so a previously cached real Settings()
-    # instance does not shadow the monkeypatch regardless of test execution order.
+    import app.core.config as cfg_mod
     cfg_mod.get_settings.cache_clear()
-    app_cfg_mod.get_settings.cache_clear()
-    # Patch settings on both module aliases (proxy.app.* and app.* share the same
-    # sys.path root but are distinct module objects under pytest's conftest rootdir).
     class _FakeSettings:
         LAYER_B_ENABLED = True
     monkeypatch.setattr(cfg_mod, "get_settings", lambda: _FakeSettings())
-    monkeypatch.setattr(app_cfg_mod, "get_settings", lambda: _FakeSettings())
 
-    from proxy.app.services.trust_labeler import build_envelope_result, TRUST_ENVELOPE_KEY
-    from proxy.app.services.layer_b import LAYER_B_BOUNDARY_PREFIX
+    from app.services.trust_labeler import build_envelope_result, TRUST_ENVELOPE_KEY
+    from app.services.layer_b import LAYER_B_BOUNDARY_PREFIX
 
     result = build_envelope_result(
         content=[{"type": "text", "text": "untrusted web content"}],
@@ -153,8 +146,8 @@ def test_layer_b_wraps_untrusted_text_in_build_envelope_result(monkeypatch):
 
 def test_layer_b_disabled_by_default_in_build_envelope_result():
     """Layer B wrapping must NOT fire unless explicitly enabled."""
-    from proxy.app.services.trust_labeler import build_envelope_result
-    from proxy.app.services.layer_b import LAYER_B_BOUNDARY_PREFIX
+    from app.services.trust_labeler import build_envelope_result
+    from app.services.layer_b import LAYER_B_BOUNDARY_PREFIX
 
     result = build_envelope_result(
         content=[{"type": "text", "text": "untrusted web content"}],

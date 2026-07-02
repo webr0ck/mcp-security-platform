@@ -59,7 +59,8 @@ async def test_server_owner_can_register_server():
          patch("app.routers.server_registry.validate_mode_and_idp") as mock_validate_mode, \
          patch("app.routers.server_registry.validate_upstream_url_ssrf") as mock_validate_url, \
          patch("app.routers.server_registry.validate_upstream_idp_config") as mock_validate_idp_config, \
-         patch("app.routers.server_registry._emit_registration_audit") as mock_audit:
+         patch("app.routers.server_registry._emit_registration_audit") as mock_audit, \
+         patch("app.middleware.auth._load_roles", new=AsyncMock(return_value=["server_owner"])):
 
         # Setup mocks
         mock_session_local.return_value.__aenter__.return_value = async_session_mock

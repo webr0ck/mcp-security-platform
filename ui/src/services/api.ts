@@ -155,3 +155,81 @@ export const api = {
   disableFunction: (serverName: string, fnName: string) =>
     request<void>(`/api/v1/profiles/me/mcps/${encodeURIComponent(serverName)}/functions/${encodeURIComponent(fnName)}/disable`, { method: 'POST' }),
 }
+
+// ── MCP Server Submissions ────────────────────────────────────────────────────
+// Field names match the actual API (submission.py + V044 DB schema).
+
+export interface Submission {
+  server_id: string
+  name: string
+  github_repo_url: string | null
+  description: string | null
+  injection_mode: string | null
+  data_categories: string[] | null
+  has_write_ops: boolean | null
+  submission_status: string
+  scan_status: string | null
+  scan_report: Array<Record<string, unknown>> | null
+  review_notes: string | null
+  owner_sub?: string
+  reviewed_by?: string | null
+  reviewed_at?: string | null
+  created_at: string
+  updated_at: string | null
+}
+
+export interface DesignPrompt { id: string; prompt: string }
+export interface DesignPromptsResponse {
+  server_id: string
+  injection_mode: string
+  prompts: DesignPrompt[]
+}
+
+export const submissions = {
+  create: (body: { name: string; github_repo_url?: string; description?: string }) =>
+    request<{ server_id: string; submission_status: string }>(
+      '/api/v1/submissions', { method: 'POST', body: JSON.stringify(body) }
+    ),
+
+  update: (id: string, body: {
+    github_repo_url?: string; description?: string
+    injection_mode?: string; data_categories?: string[]; has_write_ops?: boolean
+  }) =>
+    request<{ server_id: string; updated: boolean }>(
+      `/api/v1/submissions/${id}`, { method: 'PATCH', body: JSON.stringify(body) }
+    ),
+
+  submit: (id: string) =>
+    request<{ server_id: string; submission_status: string }>(
+      `/api/v1/submissions/${id}/submit`, { method: 'POST' }
+    ),
+
+  list: () =>
+    request<{ submissions: Submission[] }>('/api/v1/submissions'),
+
+  get: (id: string) =>
+    request<Submission>(`/api/v1/submissions/${id}`),
+
+  prompts: (id: string) =>
+    request<DesignPromptsResponse>(`/api/v1/submissions/${id}/prompts`),
+}
+
+export const adminSubmissions = {
+  list: () =>
+    request<{ submissions: Submission[] }>('/api/v1/admin/submissions'),
+
+  approve: (id: string, notes?: string) =>
+    request<{ server_id: string; submission_status: string }>(
+      `/api/v1/admin/submissions/${id}/approve`, { method: 'POST', body: JSON.stringify({ notes }) }
+    ),
+
+  reject: (id: string, notes?: string) =>
+    request<{ server_id: string; submission_status: string }>(
+      `/api/v1/admin/submissions/${id}/reject`, { method: 'POST', body: JSON.stringify({ notes }) }
+    ),
+
+  requestChanges: (id: string, notes?: string) =>
+    request<{ server_id: string; submission_status: string }>(
+      `/api/v1/admin/submissions/${id}/request-changes`, { method: 'POST', body: JSON.stringify({ notes }) }
+    ),
+}

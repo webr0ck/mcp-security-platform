@@ -68,6 +68,28 @@ def _is_trusted_proxy(request: Request) -> bool:
 
 logger = logging.getLogger(__name__)
 
+
+def verified_oidc_identity(sub: str, email: str, email_verified: bool) -> str:
+    """Resolve the client_id for an OIDC caller, anti-spoof (P1-1).
+
+    Email is used as the identity key only when the IdP asserts it verified.
+    With ``verifyEmail=true`` on the realm, changing one's email resets
+    ``email_verified`` to false until the new mailbox is proven — so a user
+    cannot rename their email to a privileged identity (e.g. ``admin@corp``)
+    and inherit its roles / entitlements / brokered credentials. An unverified
+    or absent email falls back to the immutable ``sub`` (a non-privileged UUID),
+    never the claimed email. Fail-closed by construction.
+    """
+    if email and email_verified:
+        return email
+    if email and not email_verified:
+        logger.warning(
+            "OIDC identity: email present but not verified for sub=%s; "
+            "using sub as client_id (P1-1 anti-spoof)", sub
+        )
+    return sub
+
+
 # Endpoints that do not require authentication
 PUBLIC_PATHS: frozenset[str] = frozenset({
     "/",           # redirects to /portal
@@ -141,10 +163,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.principal_id = None
             request.state.principal_type = None
             request.state.profile_uuid = None
+            request.state.is_service_account = False
             return await call_next(request)  # type: ignore[misc]
 
         client_id: str | None = None
         auth_method: str = "none"
+        # P1-2: default False; only the OIDC bearer path flips this True for
+        # Keycloak client_credentials (service-account) tokens.
+        request.state.is_service_account = False
 
         # ----------------------------------------------------------------
         # Priority 1: mTLS client certificate CN (set by Nginx gateway)
@@ -229,11 +255,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
                     # 3b. Try external OIDC JWT (Keycloak access token directly).
                     if not client_id and settings.OIDC_ENABLED:
-                        oidc_client_id, jwt_roles = await _validate_oidc_jwt(token)
+                        oidc_client_id, jwt_roles, is_sa = await _validate_oidc_jwt(token)
                         if oidc_client_id:
                             client_id = oidc_client_id
                             auth_method = "oidc"
                             request.state._jwt_roles = jwt_roles
+                            request.state.is_service_account = is_sa
                             # 6.3: the bearer IS a Keycloak access token here, so it
                             # can serve as the RFC 8693 subject_token for
                             # oauth_user_token on-behalf-of exchange. Stash it for the
@@ -515,11 +542,14 @@ async def _fetch_jwks() -> list[dict]:
         return _jwks_cache.get("keys", [])
 
 
-async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
+async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str], bool]:
     """
     Validate an OIDC JWT Bearer token against the configured issuer's JWKS.
-    Returns (sub, roles_from_jwt) on success, (None, []) on failure.
-    Roles from the JWT are used as a fallback when the DB has no assignments.
+    Returns (client_id, roles_from_jwt, is_service_account) on success,
+    (None, [], False) on failure. Roles from the JWT are a fallback when the DB
+    has no assignments. ``is_service_account`` is True for Keycloak
+    client_credentials tokens (preferred_username ``service-account-<clientId>``)
+    — used to bar machine tokens from human-only self-service (P1-2).
     """
     try:
         import jwt as jose_jwt
@@ -529,7 +559,7 @@ async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
         keys = await _fetch_jwks()
         if not keys:
             logger.warning("No JWKS keys available — cannot validate OIDC JWT")
-            return None, []
+            return None, [], False
 
         # Decode header to pick the right key by kid
         header = jose_jwt.get_unverified_header(token)
@@ -572,12 +602,19 @@ async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
                 )
                 sub: str = claims.get("sub", "")
                 if not sub:
-                    return None, []
-                # Use email as client_id when present so it matches role_assignments
-                # and OPA grants (which use email-based identities like alice@corp).
-                # Fall back to sub (UUID) if no email claim.
+                    return None, [], False
+                # Email is the identity key when present (matches role_assignments
+                # and OPA grants like alice@corp) — but only when IdP-verified (P1-1).
                 email: str = claims.get("email", "")
-                client_id_from_jwt = email or sub
+                email_verified = claims.get("email_verified", False) is True
+                client_id_from_jwt = verified_oidc_identity(sub, email, email_verified)
+                # P1-2: KC client_credentials (service-account) tokens carry
+                # preferred_username="service-account-<clientId>". Flag them so the
+                # entitlement layer can bar machine tokens from human-only actions
+                # (self-service profile mutation) — a service account that could
+                # self-expand its own profile is a privilege-escalation vector.
+                preferred_username = str(claims.get("preferred_username", ""))
+                is_service_account = preferred_username.startswith("service-account-")
                 # Extract roles claim — supports top-level "roles" claim.
                 # Also check realm_access.roles (Keycloak default location).
                 jwt_roles: list[str] = claims.get("roles", [])
@@ -586,18 +623,19 @@ async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str]]:
                     jwt_roles = realm_access.get("roles", []) if isinstance(realm_access, dict) else []
                 if isinstance(jwt_roles, str):
                     jwt_roles = [jwt_roles]
-                logger.debug("OIDC JWT validated: sub=%s client_id=%s jwt_roles=%s", sub, client_id_from_jwt, jwt_roles)
-                return client_id_from_jwt, jwt_roles
+                logger.debug("OIDC JWT validated: sub=%s client_id=%s jwt_roles=%s sa=%s",
+                             sub, client_id_from_jwt, jwt_roles, is_service_account)
+                return client_id_from_jwt, jwt_roles, is_service_account
             except JWTError as exc:
                 last_exc = exc
                 continue
 
         logger.info("OIDC JWT validation failed: %s", last_exc)
-        return None, []
+        return None, [], False
 
     except Exception as exc:
         logger.warning("Unexpected error in OIDC JWT validation: %s", exc)
-        return None, []
+        return None, [], False
 
 
 async def _resolve_api_key(token: str) -> str | None:

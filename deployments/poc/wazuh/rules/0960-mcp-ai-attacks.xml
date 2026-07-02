@@ -36,7 +36,7 @@
   <!-- 100511: AI agent policy probe burst — jailbreak signal -->
   <!-- Fires when the same agent gets 3+ denials in 60s -->
   <rule id="100511" level="13" frequency="3" timeframe="60">
-    <if_sid>100510</if_sid>
+    <if_matched_sid>100510</if_matched_sid>
     <same_field>json.client_id</same_field>
     <description>MCP AI: jailbreak probe — agent $(json.client_id) received 3+ policy denials in 60s</description>
     <group>ai_attack,jailbreak,</group>
@@ -55,7 +55,7 @@
   <!-- 100513: AI agent with high anomaly AND denied (strong compromise signal) -->
   <rule id="100513" level="14">
     <if_sid>100510</if_sid>
-    <field name="json.anomaly_score">^(0\.7[0-9]|0\.[89][0-9]|1\.0)$</field>
+    <field name="json.anomaly_score">^0\.[789]</field>
     <description>MCP AI: CRITICAL — agent $(json.client_id) denied with anomaly score $(json.anomaly_score): possible prompt injection or agent hijack</description>
     <group>ai_attack,jailbreak,anomaly,</group>
     <options>alert_by_email</options>
@@ -70,7 +70,7 @@
   <rule id="100514" level="7">
     <if_sid>100500</if_sid>
     <field name="json.principal_type">^agent$</field>
-    <field name="json.tool_name">^wazuh_(list_alerts|search_alerts|list_ai_alerts|list_agents|get_agent_detail|get_rules|list_decoders)$</field>
+    <field name="json.tool_name">^wazuh_</field>
     <field name="json.outcome">^allow$</field>
     <description>MCP AI: agent $(json.client_id) reading SIEM data via $(json.tool_name)</description>
     <group>ai_attack,data_access,</group>
@@ -78,7 +78,7 @@
 
   <!-- 100515: Agent SIEM read burst — exfiltration pattern -->
   <rule id="100515" level="13" frequency="10" timeframe="60">
-    <if_sid>100514</if_sid>
+    <if_matched_sid>100514</if_matched_sid>
     <same_field>json.client_id</same_field>
     <description>MCP AI: SIEM exfiltration pattern — agent $(json.client_id) made 10+ SIEM reads in 60s</description>
     <group>ai_attack,exfiltration,</group>
@@ -115,7 +115,7 @@
 
   <!-- 100518: Agent invocation burst (any tool, 20+ in 60s) -->
   <rule id="100518" level="10" frequency="20" timeframe="60">
-    <if_sid>100500</if_sid>
+    <if_matched_sid>100500</if_matched_sid>
     <field name="json.principal_type">^agent$</field>
     <field name="json.outcome">^allow$</field>
     <same_field>json.client_id</same_field>
@@ -125,9 +125,9 @@
 
   <!-- 100519: Agent burst on high-risk tools -->
   <rule id="100519" level="12" frequency="5" timeframe="60">
-    <if_sid>100500</if_sid>
+    <if_matched_sid>100500</if_matched_sid>
     <field name="json.principal_type">^agent$</field>
-    <field name="json.risk_level">^(high|critical)$</field>
+    <field name="json.risk_level">^high|^critical</field>
     <field name="json.outcome">^allow$</field>
     <same_field>json.client_id</same_field>
     <description>MCP AI: agent $(json.client_id) burst on high/critical risk tools — 5+ in 60s</description>
@@ -147,36 +147,10 @@
     <group>ai_attack,auto_remediation,</group>
   </rule>
 
-  <!-- ================================================================ -->
-  <!-- SYSLOG PATH (direct UDP from proxy — Podman-compatible)           -->
-  <!-- These rules match events emitted via wazuh_syslog.py             -->
-  <!-- srcuser=client_id, id=tool_name, action=outcome, status=risk_level -->
-  <!-- ================================================================ -->
-
-  <!-- 100521: OPA deny via syslog path -->
-  <rule id="100521" level="6">
-    <decoded_as>mcp-audit</decoded_as>
-    <field name="action">^deny$</field>
-    <description>MCP (syslog): tool invocation denied — client $(srcuser) tool $(id)</description>
-    <group>mcp_audit,policy_violation,</group>
-  </rule>
-
-  <!-- 100522: High anomaly via syslog path -->
-  <rule id="100522" level="9">
-    <decoded_as>mcp-audit</decoded_as>
-    <field name="action">^allow$</field>
-    <field name="extra_data">^(0\.7[0-9]|0\.[89][0-9]|1\.0)$</field>
-    <description>MCP (syslog): high anomaly score $(extra_data) on allowed invocation of $(id)</description>
-    <group>mcp_audit,anomaly,</group>
-  </rule>
-
-  <!-- 100523: Active response via syslog path -->
-  <rule id="100523" level="10">
-    <decoded_as>mcp-audit</decoded_as>
-    <field name="id">^wazuh_run_active_response$</field>
-    <field name="action">^allow$</field>
-    <description>MCP (syslog): active response triggered by $(srcuser)</description>
-    <group>mcp_audit,active_response,</group>
-  </rule>
+  <!-- SYSLOG PATH rules removed: Wazuh 4.9.1 treats 'action' as a static field
+       that cannot be used in <field> conditions. Detection coverage is preserved
+       via the Filebeat JSON path rules in mcp-audit-rules.xml (json.outcome etc.).
+       The syslog UDP path (mcp-audit decoder) is kept for future use but rules
+       matching on decoded 'action' must use <match> on raw log text instead. -->
 
 </group>

@@ -1,0 +1,230 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mcp-security-platform.fullname" . }}-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mcp-security-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  replicas: {{ .Values.proxy.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mcp-security-platform.proxySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp-security-platform.proxySelectorLabels" . | nindent 8 }}
+      {{- with .Values.proxy.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "mcp-security-platform.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.proxy.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: proxy
+          image: "{{ .Values.proxy.image.repository }}:{{ include "mcp-security-platform.proxyImageTag" . }}"
+          imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          {{- with .Values.proxy.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            # Non-sensitive configuration from values.yaml
+            - name: ENVIRONMENT
+              value: {{ .Values.proxy.env.ENVIRONMENT | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.proxy.env.LOG_LEVEL | quote }}
+            - name: PROXY_HOST
+              value: {{ .Values.proxy.env.PROXY_HOST | quote }}
+            - name: PROXY_PORT
+              value: {{ .Values.proxy.env.PROXY_PORT | quote }}
+            - name: PROXY_WORKERS
+              value: {{ .Values.proxy.env.PROXY_WORKERS | quote }}
+            - name: DB_HOST
+              value: {{ .Values.proxy.env.DB_HOST | quote }}
+            - name: DB_PORT
+              value: {{ .Values.proxy.env.DB_PORT | quote }}
+            - name: DB_NAME
+              value: {{ .Values.proxy.env.DB_NAME | quote }}
+            - name: DB_USER
+              value: {{ .Values.proxy.env.DB_USER | quote }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.proxy.env.DB_POOL_SIZE | quote }}
+            - name: DB_MAX_OVERFLOW
+              value: {{ .Values.proxy.env.DB_MAX_OVERFLOW | quote }}
+            - name: REDIS_HOST
+              value: {{ .Values.proxy.env.REDIS_HOST | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.proxy.env.REDIS_PORT | quote }}
+            - name: REDIS_DB
+              value: {{ .Values.proxy.env.REDIS_DB | quote }}
+            - name: REDIS_RATE_LIMIT_DB
+              value: {{ .Values.proxy.env.REDIS_RATE_LIMIT_DB | quote }}
+            # OPA address — always the in-cluster service name
+            - name: OPA_HOST
+              value: {{ include "mcp-security-platform.opaServiceName" . | quote }}
+            - name: OPA_PORT
+              value: {{ .Values.proxy.env.OPA_PORT | quote }}
+            - name: OPA_TIMEOUT_SECONDS
+              value: {{ .Values.proxy.env.OPA_TIMEOUT_SECONDS | quote }}
+            - name: VAULT_ADDR
+              value: {{ .Values.vault.address | quote }}
+            - name: BROKER_MASTER_SECRET_PATH
+              value: {{ .Values.proxy.env.BROKER_MASTER_SECRET_PATH | quote }}
+            - name: BROKER_MASTER_SECRET_TTL_SECONDS
+              value: {{ .Values.proxy.env.BROKER_MASTER_SECRET_TTL_SECONDS | quote }}
+            - name: MINIO_HOST
+              value: {{ .Values.proxy.env.MINIO_HOST | quote }}
+            - name: MINIO_PORT
+              value: {{ .Values.proxy.env.MINIO_PORT | quote }}
+            - name: MINIO_AUDIT_BUCKET
+              value: {{ .Values.proxy.env.MINIO_AUDIT_BUCKET | quote }}
+            - name: MINIO_RETENTION_DAYS
+              value: {{ .Values.proxy.env.MINIO_RETENTION_DAYS | quote }}
+            - name: OIDC_ENABLED
+              value: {{ .Values.proxy.env.OIDC_ENABLED | quote }}
+            - name: OIDC_ISSUER_URL
+              value: {{ .Values.proxy.env.OIDC_ISSUER_URL | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ .Values.proxy.env.OIDC_CLIENT_ID | quote }}
+            - name: OIDC_AUDIENCE
+              value: {{ .Values.proxy.env.OIDC_AUDIENCE | quote }}
+            - name: PROXY_BASE_URL
+              value: {{ .Values.proxy.env.PROXY_BASE_URL | quote }}
+            - name: SESSION_COOKIE_SECURE
+              value: {{ .Values.proxy.env.SESSION_COOKIE_SECURE | quote }}
+            - name: SESSION_COOKIE_DOMAIN
+              value: {{ .Values.proxy.env.SESSION_COOKIE_DOMAIN | quote }}
+            - name: OLLAMA_HOST
+              value: {{ .Values.proxy.env.OLLAMA_HOST | quote }}
+            - name: OLLAMA_PORT
+              value: {{ .Values.proxy.env.OLLAMA_PORT | quote }}
+            - name: OLLAMA_MODEL
+              value: {{ .Values.proxy.env.OLLAMA_MODEL | quote }}
+            - name: REQUIRE_LLM_AUDIT
+              value: {{ .Values.proxy.env.REQUIRE_LLM_AUDIT | quote }}
+            - name: RATE_LIMIT_ADMIN
+              value: {{ .Values.proxy.env.RATE_LIMIT_ADMIN | quote }}
+            - name: RATE_LIMIT_AGENT
+              value: {{ .Values.proxy.env.RATE_LIMIT_AGENT | quote }}
+            - name: RATE_LIMIT_AUDITOR
+              value: {{ .Values.proxy.env.RATE_LIMIT_AUDITOR | quote }}
+            - name: RATE_LIMIT_READONLY
+              value: {{ .Values.proxy.env.RATE_LIMIT_READONLY | quote }}
+            - name: TRUST_ENVELOPE_ENABLED
+              value: {{ .Values.proxy.env.TRUST_ENVELOPE_ENABLED | quote }}
+            - name: LAYER_B_ENABLED
+              value: {{ .Values.proxy.env.LAYER_B_ENABLED | quote }}
+            {{- with .Values.proxy.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            # Sensitive values injected from Kubernetes Secret
+            {{- if .Values.secrets.existingSecret }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: DB_PASSWORD
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: REDIS_PASSWORD
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: MINIO_ROOT_PASSWORD
+            - name: PROXY_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: PROXY_SECRET_KEY
+            - name: API_KEY_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: API_KEY_HMAC_KEY
+            - name: SBOM_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: SBOM_SIGNING_KEY
+            - name: AUDIT_LOG_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: AUDIT_LOG_HMAC_KEY
+            - name: WEBHOOK_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: WEBHOOK_SIGNING_KEY
+            - name: POLICY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: POLICY_SIGNING_KEY
+            - name: VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: VAULT_TOKEN
+            - name: GATEWAY_SHARED_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: GATEWAY_SHARED_SECRET
+            - name: OAUTH_STATE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: OAUTH_STATE_SECRET
+            {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- with .Values.proxy.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.proxy.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.proxy.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        # readOnlyRootFilesystem requires a writable /tmp (INV-009)
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- with .Values.proxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.proxy.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.proxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

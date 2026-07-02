@@ -3,6 +3,8 @@ import { SecurityDashboard } from './components/Dashboard/SecurityDashboard'
 import { AdminPanel } from './components/AdminPanel/AdminPanel'
 import { UserPortal } from './components/Portal/UserPortal'
 import { InstallWizard } from './components/Wizard/InstallWizard'
+import { SubmitServerWizard } from './components/Submissions/SubmitServerWizard'
+import { SubmissionReview } from './components/Submissions/SubmissionReview'
 import { useAuth } from './auth/AuthContext'
 
 function Unauthorized() {
@@ -24,11 +26,16 @@ export function App() {
         if (view === 'admin' && (!auth.authenticated || auth.role !== 'admin')) {
           return <Unauthorized />
         }
+        if (view === 'review' && (!auth.authenticated || !['admin', 'security_auditor', 'auditor'].includes(auth.role ?? ''))) {
+          return <Unauthorized />
+        }
         switch (view) {
           case 'dashboard': return <SecurityDashboard />
           case 'admin':     return <AdminPanel />
           case 'portal':    return <UserPortal />
           case 'wizard':    return <InstallWizard />
+          case 'submit':    return <SubmitServerWizard />
+          case 'review':    return <SubmissionReview />
         }
       }}
     </AppShell>

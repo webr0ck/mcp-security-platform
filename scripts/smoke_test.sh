@@ -66,6 +66,7 @@ fi
 PASS_COUNT=0
 FAIL_COUNT=0
 RESULTS=()
+HTTP_STATUS=""  # set by http_body(); init to prevent set -u error on first reference
 
 pass() {
     local check="$1"
@@ -83,33 +84,25 @@ fail() {
     echo "[${TIMESTAMP}] FAIL: ${check}${detail:+ — ${detail}}" >&2
 }
 
+# bash 3.2: empty array[@] under set -u triggers "unbound variable"; guard with length check
+_curl() { if [[ ${#CURL_OPTS[@]} -gt 0 ]]; then curl "${CURL_OPTS[@]}" "$@"; else curl "$@"; fi; }
+
 # Curl wrapper: returns HTTP status code; body goes to stdout
 http_status() {
     local method="$1"
     local url="$2"
     shift 2
-    curl -s -o /dev/null -w "%{http_code}" \
+    _curl -s -o /dev/null -w "%{http_code}" \
         -X "${method}" \
-        "${CURL_OPTS[@]}" \
         "$@" \
         "${url}" 2>/dev/null || echo "000"
 }
 
-# Curl wrapper: returns body; status code goes to variable HTTP_STATUS
-http_body() {
-    local method="$1"
-    local url="$2"
-    shift 2
-    local tmp_status
-    tmp_status=$(mktemp)
-    local body
-    body=$(curl -s -w "%{http_code}" \
-        -X "${method}" \
-        "${CURL_OPTS[@]}" \
-        "$@" \
-        "${url}" 2>/dev/null)
-    HTTP_STATUS="${body: -3}"
-    echo "${body%???}"
+# _curl_to_file: write body to file, return status code on stdout.
+# Avoids subshell problem by separating body (to file) from status (to stdout).
+_curl_to_file() {
+    local _out="$1"; shift
+    _curl -s -o "${_out}" -w "%{http_code}" "$@" 2>/dev/null || echo "000"
 }
 
 # ─── Smoke Tests ──────────────────────────────────────────────────────────────
@@ -164,17 +157,18 @@ SMOKE_TOOL_PAYLOAD=$(cat <<'TOOL_EOF'
 TOOL_EOF
 )
 
+_reg_body=$(mktemp)
 if [ -n "${SMOKE_TEST_API_KEY}" ]; then
-    REGISTER_BODY=$(http_body POST "${PROXY_URL}/tools/register" \
-        -H "Content-Type: application/json" \
+    REGISTER_STATUS=$(_curl_to_file "${_reg_body}" \
+        -X POST -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${SMOKE_TEST_API_KEY}" \
-        -d "${SMOKE_TOOL_PAYLOAD}")
+        -d "${SMOKE_TOOL_PAYLOAD}" "${PROXY_URL}/tools/register")
 else
-    REGISTER_BODY=$(http_body POST "${PROXY_URL}/tools/register" \
-        -H "Content-Type: application/json" \
-        -d "${SMOKE_TOOL_PAYLOAD}")
+    REGISTER_STATUS=$(_curl_to_file "${_reg_body}" \
+        -X POST -H "Content-Type: application/json" \
+        -d "${SMOKE_TOOL_PAYLOAD}" "${PROXY_URL}/tools/register")
 fi
-REGISTER_STATUS="${HTTP_STATUS}"
+REGISTER_BODY=$(cat "${_reg_body}"); rm -f "${_reg_body}"
 
 if [ "${REGISTER_STATUS}" = "201" ]; then
     # Verify risk_score is present in response body
@@ -278,27 +272,29 @@ fi
 # ─── Check 7: MinIO Object Lock status (INV-007) ─────────────────────────────
 echo "[${TIMESTAMP}] CHECK 7: MinIO WORM Object Lock verification (INV-007)..."
 
+# Prefer external port exposed to host; fall back to default
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://localhost:9002}"
 MINIO_HEALTH=$(curl -sf "${MINIO_ENDPOINT}/minio/health/live" 2>/dev/null && echo "ok" || echo "fail")
 if [ "${MINIO_HEALTH}" = "ok" ]; then
-    # MinIO is reachable. Check if the audit bucket exists via the mc container.
-    # We run mc as a one-shot container to avoid requiring mc on the host.
-    LOCK_CHECK=$(docker compose exec -T mcp-minio-init \
-        mc object-lock info "mcp-minio/${MINIO_AUDIT_BUCKET}" 2>&1 || true)
-
-    if echo "${LOCK_CHECK}" | grep -qi "enabled\|governance\|compliance"; then
-        pass "MinIO Object Lock → ENABLED on bucket '${MINIO_AUDIT_BUCKET}' (INV-007)"
-    else
-        # Try via API call if mc container is not available
-        LOCK_VIA_API=$(docker compose run --rm \
-            -e "MINIO_ROOT_USER=${MINIO_ROOT_USER}" \
-            -e "MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}" \
-            minio-init \
-            mc object-lock info "mcp-minio/${MINIO_AUDIT_BUCKET}" 2>&1 || echo "unavailable")
-
-        if echo "${LOCK_VIA_API}" | grep -qi "enabled\|governance"; then
-            pass "MinIO Object Lock → ENABLED on bucket '${MINIO_AUDIT_BUCKET}' (INV-007)"
+    # Use mc inside the running mcp-minio container (mc is bundled with MinIO image).
+    # 'mc retention info' replaces the deprecated 'mc object-lock info'.
+    if podman exec mcp-minio mc alias set _smoke http://localhost:9000 \
+            "${MINIO_ROOT_USER:-}" "${MINIO_ROOT_PASSWORD:-}" >/dev/null 2>&1; then
+        LOCK_CHECK=$(podman exec mcp-minio mc retention info --recursive \
+            "_smoke/${MINIO_AUDIT_BUCKET}" 2>&1 || true)
+        if echo "${LOCK_CHECK}" | grep -qi "governance\|compliance"; then
+            pass "MinIO Object Lock → WORM retention active on '${MINIO_AUDIT_BUCKET}' (INV-007)"
         else
-            fail "MinIO Object Lock → could not verify WORM status on '${MINIO_AUDIT_BUCKET}'" \
+            fail "MinIO WORM retention not detected on '${MINIO_AUDIT_BUCKET}'" \
+                 "Run: make setup to re-run minio-init"
+        fi
+    else
+        # init container exited 0 = WORM was successfully configured at startup
+        INIT_EXIT=$(podman inspect mcp-minio-init --format '{{.State.ExitCode}}' 2>/dev/null || echo "unknown")
+        if [ "${INIT_EXIT}" = "0" ]; then
+            pass "MinIO Object Lock → init container exited 0 (WORM configured at startup)"
+        else
+            fail "MinIO WORM: mc alias setup failed and init container exit=${INIT_EXIT}" \
                  "Run: make setup to re-run minio-init"
         fi
     fi

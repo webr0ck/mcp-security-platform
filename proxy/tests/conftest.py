@@ -19,6 +19,9 @@ from httpx import AsyncClient, ASGITransport
 # and never use these credentials directly; they are only needed to satisfy
 # pydantic-settings validation when importing the app.
 _SETTINGS_DEFAULTS = {
+    # Skip production-startup validation so unit / oracle tests work without
+    # a full container stack or real secrets loaded into the shell.
+    "ENVIRONMENT": "development",
     "DB_PASSWORD": "test",
     "REDIS_PASSWORD": "test",
     "PROXY_SECRET_KEY": "test",
@@ -28,6 +31,19 @@ _SETTINGS_DEFAULTS = {
     "WEBHOOK_SIGNING_KEY": "test",
     "MINIO_ROOT_USER": "test",
     "MINIO_ROOT_PASSWORD": "test",
+    # When running integration tests from the Mac host (outside the podman
+    # network), service names like "db", "redis", and "opa" don't resolve via
+    # DNS.  The lab compose exposes:
+    #   mcp-db    → localhost:5432
+    #   mcp-redis → localhost:5678   (non-standard host port)
+    #   mcp-opa   → 127.0.0.1:8181
+    # These defaults are applied only when the env vars are not already set
+    # (i.e. they are no-ops inside a container where DB_HOST=db is already set
+    # by docker-compose).
+    "DB_HOST": "localhost",
+    "REDIS_HOST": "localhost",
+    "REDIS_PORT": "6379",
+    "OPA_HOST": "localhost",
 }
 for _k, _v in _SETTINGS_DEFAULTS.items():
     os.environ.setdefault(_k, _v)

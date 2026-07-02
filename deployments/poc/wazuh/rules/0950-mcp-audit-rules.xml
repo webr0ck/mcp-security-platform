@@ -1,0 +1,126 @@
+<!-- deployments/poc/wazuh/rules/mcp-audit-rules.xml
+     Compiled from detections/*.yml (Sigma format — source of truth).
+     Regenerate: sigma convert -t wazuh detections/ -o deployments/poc/wazuh/rules/
+
+     Field mapping: Filebeat ships container JSON logs; fields arrive as
+     json.event_type, json.outcome, json.client_id, json.tool_name, json.anomaly_score
+-->
+<group name="mcp_security_platform">
+
+  <!-- Base: any MCP audit event from Filebeat -->
+  <rule id="100500" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="fields.log_type">^mcp_audit$</field>
+    <description>MCP Security Platform: audit event received</description>
+    <group>mcp_audit,</group>
+  </rule>
+
+  <!-- mcp-tool-invocation-denied.yml: single OPA deny -->
+  <rule id="100501" level="6">
+    <if_sid>100500</if_sid>
+    <field name="json.event_type">^TOOL_INVOCATION$</field>
+    <field name="json.outcome">^deny$</field>
+    <description>MCP: tool invocation denied by policy — client $(json.client_id) tool $(json.tool_name)</description>
+    <group>policy_violation,</group>
+  </rule>
+
+  <!-- mcp-policy-probe-burst.yml: 5+ denials in 60s from same client -->
+  <rule id="100502" level="10" frequency="5" timeframe="60">
+    <if_matched_sid>100501</if_matched_sid>
+    <same_field>json.client_id</same_field>
+    <description>MCP: policy probe burst — 5+ denials in 60s from $(json.client_id)</description>
+    <group>policy_violation,attack,</group>
+  </rule>
+
+  <!-- mcp-high-anomaly-score.yml: anomaly_score > 0.85, outcome allow -->
+  <!-- Note: Wazuh regex on float — match 0.86-0.99 and 1.0 -->
+  <rule id="100503" level="9">
+    <if_sid>100500</if_sid>
+    <field name="json.event_type">^TOOL_INVOCATION$</field>
+    <field name="json.outcome">^allow$</field>
+    <field name="json.anomaly_score">^0\.[89]</field>
+    <description>MCP: high anomaly score $(json.anomaly_score) on allowed invocation of $(json.tool_name)</description>
+    <group>anomaly,</group>
+  </rule>
+
+  <!-- mcp-credential-change.yml: credential lifecycle events -->
+  <rule id="100504" level="6">
+    <if_sid>100500</if_sid>
+    <field name="json.event_type">^CREDENTIAL_|^API_KEY_</field>
+    <description>MCP: credential change event — $(json.event_type) by $(json.client_id)</description>
+    <group>credential_change,</group>
+  </rule>
+
+  <!-- mcp-quarantined-tool-access.yml: invocation attempt on quarantined tool -->
+  <!-- deny_reasons contains 'tool_quarantined' -->
+  <rule id="100505" level="12">
+    <if_sid>100500</if_sid>
+    <field name="json.event_type">^TOOL_INVOCATION$</field>
+    <field name="json.outcome">^deny$</field>
+    <field name="json.deny_reasons">tool_quarantined</field>
+    <description>MCP: invocation attempt on quarantined tool $(json.tool_name) by $(json.client_id)</description>
+    <group>suspicious,quarantined,</group>
+  </rule>
+
+  <!-- mcp-tool-lifecycle-event.yml: tool registration/status change/deletion -->
+  <rule id="100506" level="6">
+    <if_sid>100500</if_sid>
+    <field name="json.event_type">^TOOL_REGISTERED|^TOOL_STATUS_CHANGED|^TOOL_DELETED</field>
+    <description>MCP: tool lifecycle event — $(json.event_type) for $(json.tool_name) by $(json.client_id)</description>
+    <group>tool_lifecycle,</group>
+  </rule>
+
+  <!-- mcp-slow-exfiltration.yml: 30+ allowed invocations of same tool in 1h -->
+  <rule id="100507" level="8" frequency="30" timeframe="3600">
+    <if_matched_sid>100500</if_matched_sid>
+    <field name="json.event_type">^TOOL_INVOCATION$</field>
+    <field name="json.outcome">^allow$</field>
+    <same_field>json.client_id</same_field>
+    <same_field>json.tool_name</same_field>
+    <description>MCP: sustained tool invocation — $(json.client_id) called $(json.tool_name) 30+ times in 1h (potential exfiltration)</description>
+    <group>exfiltration,</group>
+  </rule>
+
+  <!-- mcp-stolen-sa-token.yml: burst of CREDENTIAL_INJECTION_FAILED on service-mode tool -->
+  <rule id="100600" level="12" frequency="5" timeframe="60">
+    <if_matched_sid>100500</if_matched_sid>
+    <field name="json.event_type">^CREDENTIAL_INJECTION_FAILED$</field>
+    <field name="json.injection_mode">^service$</field>
+    <same_field>json.client_id</same_field>
+    <description>MCP [INCIDENT-01]: stolen SA token probe — 5+ credential injection failures for service-mode tool from $(json.client_id)</description>
+    <group>mcp_incident,credential_abuse,</group>
+  </rule>
+
+  <!-- mcp-overprivileged-user.yml: user-mode deny burst from same principal -->
+  <rule id="100601" level="10" frequency="4" timeframe="120">
+    <if_matched_sid>100500</if_matched_sid>
+    <field name="json.event_type">^TOOL_INVOCATION$</field>
+    <field name="json.outcome">^deny$</field>
+    <field name="json.injection_mode">^user$</field>
+    <same_field>json.upstream_principal</same_field>
+    <description>MCP [INCIDENT-02]: over-privileged user probe — 4+ user-mode denials from $(json.upstream_principal) in 2 minutes</description>
+    <group>mcp_incident,policy_violation,</group>
+  </rule>
+
+  <!-- mcp-token-exchange-abuse.yml: S-6b allowlist block -->
+  <rule id="100602" level="13">
+    <if_sid>100500</if_sid>
+    <field name="json.event_type">^CREDENTIAL_INJECTION_FAILED$</field>
+    <field name="json.injection_mode">^kc_token_exchange$</field>
+    <field name="json.error">allowlist</field>
+    <description>MCP [INCIDENT-03]: token exchange audience abuse — S-6b allowlist blocked kc_token_exchange to non-permitted audience by $(json.client_id)</description>
+    <group>mcp_incident,token_exchange_abuse,</group>
+  </rule>
+
+  <!-- mcp-m365-mail-exfil.yml: M365 burst calls on entra_client_credentials -->
+  <rule id="100603" level="11" frequency="10" timeframe="300">
+    <if_matched_sid>100500</if_matched_sid>
+    <field name="json.event_type">^TOOL_INVOCATION$</field>
+    <field name="json.outcome">^allow$</field>
+    <field name="json.injection_mode">^entra_client_credentials$</field>
+    <same_field>json.client_id</same_field>
+    <description>MCP [INCIDENT-04]: M365 mail exfil — 10+ allowed entra_client_credentials calls in 5min from $(json.client_id) to $(json.tool_name)</description>
+    <group>mcp_incident,data_exfil,</group>
+  </rule>
+
+</group>

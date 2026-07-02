@@ -1,15 +1,33 @@
 apiVersion: v2
 name: mcp-security-platform
-description: Full-stack security platform for the MCP ecosystem
+description: >
+  Runtime security gateway for MCP (Model Context Protocol) tool calls.
+  Enforces deny-by-default OPA policy with CI-signed bundles, per-identity
+  credential encryption (HKDF-SHA256/AES-256-GCM/AAD), and a verifiable
+  network topology gate — every enforcement claim maps to a tested file.
 type: application
-version: 1.0.0
+version: 0.1.0
 appVersion: "1.0.0"
 keywords:
   - mcp
-  - security
-  - ai-agents
-  - fastapi
+  - mcp-security
+  - mcp-gateway
+  - ai-security
+  - llm-security
+  - runtime-security
   - opa
+  - open-policy-agent
+  - credential-broker
+  - zero-trust
+  - oauth2
+  - agentic-security
+home: https://github.com/webr0ck/mcp-security-platform
+sources:
+  - https://github.com/webr0ck/mcp-security-platform
 maintainers:
-  - name: MCP Security Platform Team
-    url: https://github.com/your-org/mcp-security-platform
+  - name: Alexander Romanov
+    email: webr0ck@outlook.com
+    url: https://github.com/webr0ck
+annotations:
+  artifacthub.io/category: security
+  artifacthub.io/license: Apache-2.0

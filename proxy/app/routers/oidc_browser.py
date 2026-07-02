@@ -504,9 +504,14 @@ async def oidc_callback(
         )
         raise HTTPException(400, "OIDC nonce mismatch — possible token injection")
 
+    from app.middleware.auth import verified_oidc_identity
+
     claims = id_token_claims
     subject = claims.get("sub", "unknown")
     email = claims.get("email", "")
+    # SECURITY (P1-1): only trust email as identity when IdP-verified; else fall
+    # back to the immutable sub. Shared with the bearer path in middleware.auth.
+    email_verified = claims.get("email_verified", False) is True
     roles = claims.get("roles", []) or []
     if isinstance(roles, str):
         roles = [roles]
@@ -514,7 +519,7 @@ async def oidc_callback(
     # Map KC roles to proxy roles
     _ROLE_MAP = {"admin": "admin", "agent": "agent", "auditor": "auditor", "readonly": "readonly"}
     proxy_roles = [_ROLE_MAP[r] for r in roles if r in _ROLE_MAP]
-    client_id = email or subject
+    client_id = verified_oidc_identity(subject, email, email_verified)
 
     jti = str(uuid.uuid4())
     session_jwt = _issue_session_jwt(

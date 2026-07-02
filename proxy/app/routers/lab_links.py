@@ -94,6 +94,11 @@ async def root_redirect():
     return RedirectResponse(url="/portal", status_code=302)
 
 
+@router.get("/admin/{tab}", include_in_schema=False)
+async def admin_tab_redirect(tab: str):
+    return RedirectResponse(url=f"/portal/admin/{tab}", status_code=302)
+
+
 @router.api_route("/netbox/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], include_in_schema=False)
 async def netbox_proxy(path: str, request: Request):
     return await _proxy(_LAB_SERVICES["netbox"], path, request)

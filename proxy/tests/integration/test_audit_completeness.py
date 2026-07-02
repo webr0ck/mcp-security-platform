@@ -333,9 +333,8 @@ async def test_403_produces_audit_event(db_conn: asyncpg.Connection):
     """
     # Headers for an authenticated caller with insufficient role for invocation.
     # 'test-auditor-client' must exist in the test fixtures with role=auditor only.
-    import os
-    gw = os.getenv("GATEWAY_SHARED_SECRET", "")
-    auditor_headers = {"X-Client-Cert-CN": "test-auditor-client", "X-Gateway-Secret": gw}
+    from app.core.config import settings as _settings_local
+    auditor_headers = {"X-Client-Cert-CN": "test-auditor-client", "X-Gateway-Secret": _settings_local.GATEWAY_SHARED_SECRET}
 
     # Count existing rows for this client_id before the request.
     before_count = await db_conn.fetchval(

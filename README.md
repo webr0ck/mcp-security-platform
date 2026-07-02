@@ -296,15 +296,11 @@ In `~/.claude/settings.json` (or `~/.claude.json`) on the machine running Claude
 |---|---|
 | [`INSTALL.md`](INSTALL.md) | Production deployment (bring-your-own IDP / SIEM / logs / MCP servers) |
 | [`LAB.md`](LAB.md) | Full self-contained lab for testing |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Canonical, reusable architecture spec — enough to re-implement from scratch, incl. the security invariants (§10). The Enforced-vs-Roadmap table above is authoritative for per-control status. |
+| [`docs/TESTING.md`](docs/TESTING.md) | How to run the suite and the security gate |
 | [`SECURITY.md`](SECURITY.md) | Responsible disclosure + tracked known-limitations |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Canonical as-built architecture (current at HEAD). This table + `ROADMAP.md` remain authoritative for per-control status. |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Status: done vs next |
-| [`docs/API.md`](docs/API.md) · [`docs/RBAC.md`](docs/RBAC.md) · [`docs/SECURITY_NONNEGATABLES.md`](docs/SECURITY_NONNEGATABLES.md) | API surface · role model · security invariants |
-| [`docs/appsec-review.md`](docs/appsec-review.md) | Historical full AppSec audit of the 12 invariants |
-| [`docs/README.md`](docs/README.md) | Index of all design, security, and reference docs |
-| [`AGENTS.md`](AGENTS.md) | Repo map & conventions for AI coding agents and new contributors |
-| [`design.html`](design.html) | Interactive single-page design overview (open in a browser, or via GitHub Pages) |
+| [`AGENTS.md`](AGENTS.md) | Repo map & conventions for contributors |
 
 ## License
 

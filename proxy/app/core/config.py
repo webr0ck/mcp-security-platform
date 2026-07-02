@@ -159,6 +159,20 @@ class Settings(BaseSettings):
     # Trust envelope observer (W4.2) — passive verification log; never blocks
     TRUST_OBSERVER_ENABLED: bool = False
 
+    # =========================================================================
+    # Supply-chain re-scan freshness (Stage 3)
+    # =========================================================================
+    # SCAN_MAX_AGE_HOURS: how old last_rescanned_at may be before a server is
+    # considered stale.  Default 168 h (7 days).
+    # SCAN_FRESHNESS_ENFORCED: when True, a stale or never-rescanned server
+    # blocks calls at invocation time.  Default False (warn-only) so existing
+    # labs keep working until the rescan loop has run at least once.
+    # RESCAN_INTERVAL_HOURS: how often the background loop re-checks all
+    # approved servers.  Default 24 h.
+    SCAN_MAX_AGE_HOURS: int = 168
+    SCAN_FRESHNESS_ENFORCED: bool = False
+    RESCAN_INTERVAL_HOURS: int = 24
+
     @property
     def ollama_base_url(self) -> str:
         return f"http://{self.OLLAMA_HOST}:{self.OLLAMA_PORT}"

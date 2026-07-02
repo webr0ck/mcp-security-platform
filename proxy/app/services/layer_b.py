@@ -74,9 +74,6 @@ _ADVISORY_LINE: dict[int, str] = {
 # implication that tier 2 is a floor of trusted ranks — it is the wrap cutoff.
 _WRAP_THRESHOLD = 2
 
-# Keep the old name as an alias so external references don't break.
-_TRUSTED_FLOOR = _WRAP_THRESHOLD
-
 
 def _extract_text(item: dict) -> str | None:
     """Return the text string for items that carry human-readable text.

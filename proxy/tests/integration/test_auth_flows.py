@@ -185,7 +185,7 @@ async def test_oidc_valid_jwt_resolves_sub_as_client_id():
     """
     with (
         patch("app.middleware.auth.settings") as s,
-        patch("app.middleware.auth._validate_oidc_jwt", new=AsyncMock(return_value=("oidc-sub-001", ["agent"]))),
+        patch("app.middleware.auth._validate_oidc_jwt", new=AsyncMock(return_value=("oidc-sub-001", ["agent"], False))),
         patch("app.middleware.auth._load_roles", new=AsyncMock(return_value=["agent"])),
     ):
         s.OIDC_ENABLED = True
@@ -207,7 +207,7 @@ async def test_oidc_jwt_with_wrong_audience_rejected():
     """
     with (
         patch("app.middleware.auth.settings") as s,
-        patch("app.middleware.auth._validate_oidc_jwt", new=AsyncMock(return_value=(None, []))),
+        patch("app.middleware.auth._validate_oidc_jwt", new=AsyncMock(return_value=(None, [], False))),
         patch("app.middleware.auth._resolve_api_key", new=AsyncMock(return_value=None)),
     ):
         s.OIDC_ENABLED = True
@@ -232,7 +232,7 @@ async def test_oidc_jwt_roles_merged_with_db_roles():
     # Combined should be ["agent", "readonly"]
     with (
         patch("app.middleware.auth.settings") as s,
-        patch("app.middleware.auth._validate_oidc_jwt", new=AsyncMock(return_value=("oidc-sub", ["readonly"]))),
+        patch("app.middleware.auth._validate_oidc_jwt", new=AsyncMock(return_value=("oidc-sub", ["readonly"], False))),
         patch("app.middleware.auth._load_roles", new=AsyncMock(return_value=["agent"])),
     ):
         s.OIDC_ENABLED = True

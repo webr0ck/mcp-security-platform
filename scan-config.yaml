@@ -1,0 +1,50 @@
+# scan-config.yaml — Automated submission scan rules
+#
+# Controls what the submission scanner blocks vs warns on.
+# Edit this file to tune the gate; changes take effect immediately (no restart).
+#
+# block: true  → submission is blocked, error sent to submitter, stays in draft
+# block: false → warning is recorded in scan_report but submission proceeds to review
+
+scanners:
+  trufflehog:
+    enabled: true
+    # verified: only block on secrets trufflehog has confirmed active with the provider
+    # all:      also block on unverified (higher false-positive rate)
+    block_on: verified
+    # Patterns in file paths to skip entirely (relative to repo root)
+    skip_paths:
+      - "tests/"
+      - "test/"
+      - "*.test.*"
+      - "*.spec.*"
+      - "docs/"
+    # Detector IDs to suppress (trufflehog detector names)
+    suppress_detectors: []
+
+  dependency_audit:
+    enabled: true
+    # Block on packages with CVEs at this severity or above: critical|high|medium|low
+    block_on: critical
+    # Ecosystems to scan (pip = Python requirements*.txt / pyproject.toml)
+    ecosystems:
+      - pip
+
+  custom_rules:
+    - id: no_hardcoded_ips
+      description: "Hardcoded IP address — use environment variables or service discovery"
+      pattern: 'https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+      files: ["*.py", "*.ts", "*.js", "*.go"]
+      block: false
+
+    - id: no_print_credentials
+      description: "Potential credential logging — never print/log auth headers or tokens"
+      pattern: 'print\s*\(.*[Aa]uthorization|print\s*\(.*[Tt]oken|print\s*\(.*[Pp]assword'
+      files: ["*.py"]
+      block: false
+
+    - id: no_eval
+      description: "eval() usage — review required"
+      pattern: '\beval\s*\('
+      files: ["*.py", "*.js", "*.ts"]
+      block: false

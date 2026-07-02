@@ -96,3 +96,34 @@ async def test_mark_tainted_writes_taint_bit():
     key, ttl, value = client.setex_calls[0]
     assert key == taint_key("human:kc:alice")
     assert ttl > 0
+
+
+# --- LOGIC-005 fix: taint key is stable across auth methods ---
+
+def test_taint_key_same_client_id_is_stable():
+    """Same client_id always produces the same taint key (deterministic)."""
+    from app.services.taint_store import taint_key
+    assert taint_key("alice@corp") == taint_key("alice@corp")
+
+
+def test_taint_key_differs_across_identities():
+    """Different logical identities must produce different taint keys."""
+    from app.services.taint_store import taint_key
+    assert taint_key("alice@corp") != taint_key("bob@corp")
+
+
+def test_taint_key_does_not_encode_auth_method():
+    """The old principal_id namespace (human:oidc-issuer:alice vs human:apikey:alice)
+    produced different keys for the same human. The new key (client_id directly)
+    must be identical for both auth paths for the same logical identity.
+    """
+    from app.services.taint_store import taint_key
+    # Both OIDC and API-key auth for alice@corp yield the same client_id="alice@corp"
+    # so they must share one taint key. Verify the function is stable for that value.
+    key = taint_key("alice@corp")
+    assert key.startswith("mcp_taint:")
+    # Historically principal_id would have been "human:oidc-issuer:alice@corp"
+    # or "human:apikey:alice@corp" — those would have hashed differently.
+    # Now both callers pass client_id="alice@corp" and get the same key.
+    assert taint_key("human:oidc-issuer:alice@corp") != key  # old path would have differed
+    assert taint_key("human:apikey:alice@corp") != key       # old path would have differed

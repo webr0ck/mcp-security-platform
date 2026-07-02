@@ -51,6 +51,14 @@ import time
 from enum import Enum
 from typing import Any
 
+import jwt as _jwt
+from app.credential_broker.token_assert import assert_exchanged_token, ExchangedTokenError
+from app.credential_broker.keycloak_client import get_public_key_for_token
+
+# S-6(b): proxy-side allowlist of audiences the KC realm may mint tokens for
+# via token exchange. Hardcoded so a malicious/buggy DB row cannot widen the mint.
+_ALLOWED_EXCHANGE_AUDIENCES = frozenset({"lab-tickets"})
+
 logger = logging.getLogger(__name__)
 
 # Entra token cache TTL safety margin (seconds): fetch a fresh token this many
@@ -431,9 +439,7 @@ async def _inject_kc_token_exchange(
             f"{tool_record.get('tool_id')}; refusing to forward unauthenticated request"
         )
 
-    # S-6(b): proxy-side audience allowlist — a malicious/buggy DB row cannot
-    # widen the mint even if the KC realm policy regresses.
-    _ALLOWED_EXCHANGE_AUDIENCES = frozenset({"lab-tickets"})
+    # S-6(b): proxy-side audience allowlist (see module-level _ALLOWED_EXCHANGE_AUDIENCES).
     if audience not in _ALLOWED_EXCHANGE_AUDIENCES:
         raise CredentialInjectionError(
             f"kc_token_exchange mode: audience {audience!r} not in allowlist "
@@ -446,10 +452,6 @@ async def _inject_kc_token_exchange(
     )
 
     # S-5: JWKS-verify the exchanged token before trusting any claim.
-    import jwt as _jwt
-    from app.credential_broker.token_assert import assert_exchanged_token, ExchangedTokenError
-    from app.credential_broker.keycloak_client import get_public_key_for_token
-
     if exchanged:
         # Safe: OIDC middleware already verified user_kc_token's signature and
         # expiry before request reached this code path. Decoding without re-verify

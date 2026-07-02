@@ -29,11 +29,17 @@ import asyncpg
 import httpx
 import pytest
 
+import os as _os
+from app.core.config import settings as _settings
+
 PROXY_URL = "http://localhost:8000"
-DB_DSN = "postgresql://mcp_app:devpassword@localhost:5432/mcp_security"
+DB_DSN = _os.environ.get("TEST_DB_DSN") or (
+    f"postgresql://{_settings.DB_USER}:{_settings.DB_PASSWORD}"
+    f"@{_settings.DB_HOST}:{_settings.DB_PORT}/{_settings.DB_NAME}"
+)
 
 # UUID for a tool seeded with injection_mode='basic_auth' — must match fixtures.
-BASIC_AUTH_TOOL_ID = "00000000-0000-0000-0000-000000000030"
+BASIC_AUTH_TOOL_ID = "00000000-0000-0000-0000-000000000031"
 
 
 def _gw() -> str:

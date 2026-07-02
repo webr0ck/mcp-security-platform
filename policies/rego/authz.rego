@@ -117,6 +117,42 @@ deny contains "suspicious_parameter_pattern" if {
     matches_prompt_injection(s)
 }
 
+# Stage 4: argument-aware deny — sensitive filesystem path patterns in any
+# string argument value.  Blocks traversal and home-directory exfiltration
+# attempts independent of which tool is being called.
+deny contains "suspicious_path_argument" if {
+    some s in all_string_values(input.params)
+    is_string(s)
+    _matches_sensitive_path(s)
+}
+
+_sensitive_path_patterns := [
+    "../../../", "..\\", "~/.ssh", "~/.gnupg", "~/.aws",
+    "/etc/passwd", "/etc/shadow", "/etc/sudoers",
+    "/proc/", "/sys/", "/dev/",
+]
+
+_matches_sensitive_path(s) if {
+    some pattern in _sensitive_path_patterns
+    contains(lower(s), pattern)
+}
+
+# Stage 4: argument-aware deny — dangerous URL schemes in any string argument
+# value.  Catches file://, javascript:, data: and other SSRF-enabling schemes
+# that a model might be prompted to pass as a tool argument.
+deny contains "suspicious_url_scheme" if {
+    some s in all_string_values(input.params)
+    is_string(s)
+    _matches_dangerous_scheme(s)
+}
+
+_dangerous_schemes := ["file://", "javascript:", "data:", "vbscript:", "gopher://"]
+
+_matches_dangerous_scheme(s) if {
+    some scheme in _dangerous_schemes
+    startswith(lower(s), scheme)
+}
+
 # =============================================================================
 # HELPER RULES
 # =============================================================================

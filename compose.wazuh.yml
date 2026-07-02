@@ -32,12 +32,12 @@ x-mcp-hardening: &mcp-hardening
     - seccomp:${PWD}/sandbox/files/seccomp/mcp-sandbox.json
   cap_drop:
     - ALL
-  pids_limit: 64
   deploy:
     resources:
       limits:
         memory: 256m
         cpus: "0.5"
+        pids: 64
   user: "1001:1001"
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m
@@ -57,18 +57,25 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      - SYS_PTRACE   # Wazuh process monitoring
+      - SYS_PTRACE       # Wazuh process monitoring
       - NET_BIND_SERVICE
+      - CHOWN            # init script: cp -a preserves ownership
+      - DAC_OVERRIDE     # init script: write to dirs owned by ossec user
+      - SETUID
+      - SETGID
+      - FOWNER
+      - SYS_CHROOT       # wazuh-analysisd jails itself inside /var/ossec
     read_only: false  # ossec writes extensively to /var/ossec/
     tmpfs:
       - /tmp
     environment:
-      INDEXER_URL: ""
+      # Set WAZUH_INDEXER_URL=https://wazuh-indexer:9200 in .env.lab to enable
+      # data flow to the indexer when running with --profile dashboard.
+      INDEXER_URL: "${WAZUH_INDEXER_URL:-}"
       FILEBEAT_SSL_VERIFICATION_MODE: none
       SSL_CERTIFICATE_AUTHORITIES: ""
       SSL_CERTIFICATE: ""
       SSL_KEY: ""
-      # Lab: disable Filebeat shipment (no indexer running)
       # WAZUH_API_PASSWORD here configures the Wazuh manager's own admin password.
       # Must be set in .env.lab; no safe default (fail-closed on missing cred).
       WAZUH_API_PASSWORD: "${WAZUH_API_PASSWORD:?Set WAZUH_API_PASSWORD in .env.lab}"
@@ -79,6 +86,9 @@ services:
       MCP_AR_DRY_RUN: "${WAZUH_AR_DRY_RUN:-true}"  # dry-run by default; set false to enable
     volumes:
       - wazuh-manager-data:/var/ossec/data
+      # Wazuh 4.9.1 removed data_tmp fallback; seed etc/ via wazuh-config-mount
+      - ./deployments/poc/wazuh/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
+      - ./deployments/poc/wazuh/etc-seed/shared:/wazuh-config-mount/etc/shared:ro
       # Detection rules (base + AI attack)
       - ./deployments/poc/wazuh/rules:/var/ossec/etc/rules/custom:ro
       # Decoder for MCP audit syslog UDP events
@@ -86,18 +96,22 @@ services:
       # Active response: auto-quarantine MCP tools on AI attack rules
       - ./deployments/poc/wazuh/active-response/quarantine-mcp-tool.py:/var/ossec/active-response/bin/quarantine-mcp-tool.py:ro
     ports:
-      - "127.0.0.1:55000:55000"   # Wazuh REST API (JWT auth)
+      - "55000:55000"    # Wazuh REST API (JWT auth) — LAN-accessible for lab
       - "127.0.0.1:1514:1514/udp" # Agent syslog
       - "127.0.0.1:1515:1515"     # Agent registration
     networks:
       - wazuh-manager-net
       - proxy-wazuh-syslog-net  # receive syslog UDP from proxy (AI attack events)
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf -k https://localhost:55000/ | grep -q 'title' && exit 0 || exit 1"]
+      # wazuh-apid starts slower than wazuh-control's 60s timeout on first boot,
+      # which causes wazuh-control start to exit 1 and kill all daemons. The
+      # healthcheck self-heals: if the API doesn't respond, clear stale .failed
+      # markers and call wazuh-control start again (safe to call repeatedly).
+      test: ["CMD-SHELL", "curl -sf -k https://localhost:55000/ | grep -q 'title' && exit 0 || { rm -f /var/ossec/var/run/*.failed /var/ossec/var/run/*.start 2>/dev/null; /var/ossec/bin/wazuh-control start 2>/dev/null; sleep 5; curl -sf -k https://localhost:55000/ | grep -q 'title'; }"]
       interval: 30s
-      timeout: 10s
-      retries: 12
-      start_period: 120s
+      timeout: 90s
+      retries: 20
+      start_period: 30s
     restart: unless-stopped
 
   # ── Wazuh MCP Server — reads from Wazuh REST API ─────────────────────────────
@@ -126,7 +140,10 @@ services:
       FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
     depends_on:
       lab-wazuh-manager:
-        condition: service_healthy
+        # service_started (not service_healthy) so `up -d` doesn't block for
+        # wazuh-manager's 120s start_period + 12 retries. The MCP server has its
+        # own healthcheck and will retry API calls once wazuh-manager is ready.
+        condition: service_started
     networks:
       - mcp-wazuh-net        # pairwise with proxy only
       - wazuh-manager-net    # can reach wazuh manager API
@@ -139,10 +156,24 @@ services:
     restart: unless-stopped
 
   # ── Filebeat: ship mcp-proxy container logs to Wazuh (Beats protocol) ──────
-  # Reads proxy container logs from the Podman/Docker socket and forwards
+  # Reads proxy container logs from the container runtime socket and forwards
   # to Wazuh manager port 5044 so mcp-audit-rules.xml (json.* fields) fire.
-  # For Podman rootless: adjust the socket path below to your UID.
+  #
+  # OPT-IN via profile — not started by default because the socket path is
+  # host-specific. To enable:
+  #   1. Find your socket: podman machine inspect --format \
+  #        '{{.ConnectionInfo.PodmanSocket.Path}}'  (macOS)
+  #        or: echo /run/user/$(id -u)/podman/podman.sock  (Linux rootless)
+  #   2. Set in .env.lab:  PODMAN_SOCK=/path/to/podman.sock
+  #   3. Run: make wazuh-filebeat-up   (or pass --profile filebeat to compose)
+  #
+  # Note: the proxy already ships audit events directly to wazuh-manager via
+  # syslog UDP (proxy-wazuh-syslog-net). Filebeat adds container-stdout log
+  # shipping and is useful for deeper incident correlation but not required for
+  # the core wazuh-siem MCP demo.
   lab-filebeat-wazuh:
+    profiles:
+      - filebeat
     image: elastic/filebeat:8.13.0
     container_name: lab-filebeat-wazuh
     user: root
@@ -154,15 +185,96 @@ services:
       - /usr/share/filebeat/data:mode=755
     volumes:
       - ./deployments/poc/wazuh/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
-      # Podman rootless socket — run `echo /run/user/$(id -u)/podman/podman.sock`
-      # Docker: /var/run/docker.sock
-      - /run/user/1000/podman/podman.sock:/var/run/docker.sock:ro
+      # Set PODMAN_SOCK in .env.lab to your container runtime socket path.
+      - ${PODMAN_SOCK:-/run/user/1000/podman/podman.sock}:/var/run/docker.sock:ro
     command: filebeat -e -strict.perms=false
     networks:
       - wazuh-manager-net
     depends_on:
       lab-wazuh-manager:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── Wazuh indexer (OpenSearch) ─────────────────────────────────────────────
+  # Optional — enable with: make wazuh-dashboard-up  (requires ~2GB extra RAM)
+  lab-wazuh-indexer:
+    profiles:
+      - dashboard
+    image: wazuh/wazuh-indexer:4.9.1
+    container_name: lab-wazuh-indexer
+    hostname: wazuh-indexer
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    environment:
+      # ponytail: 768m heap + 512m direct = 1.25GB — minimum for security plugin
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m -XX:MaxDirectMemorySize=536870912"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - wazuh-indexer-data:/var/lib/wazuh-indexer
+      - ./lab/wazuh/opensearch.yml:/usr/share/wazuh-indexer/opensearch.yml:ro,z
+      - ./lab/wazuh/certs/wazuh-indexer.pem:/usr/share/wazuh-indexer/certs/indexer.pem:ro,z
+      - ./lab/wazuh/certs/wazuh-indexer-key.pem:/usr/share/wazuh-indexer/certs/indexer-key.pem:ro,z
+      - ./lab/wazuh/certs/root-ca.pem:/usr/share/wazuh-indexer/certs/root-ca.pem:ro,z
+    ports:
+      - "127.0.0.1:9200:9200"
+    networks:
+      - wazuh-manager-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -u admin:${WAZUH_INDEXER_PASSWORD:-labpassword} -k https://localhost:9200/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    restart: unless-stopped
+
+  # ── Wazuh dashboard (OpenSearch Dashboards + Wazuh plugin) ─────────────────
+  # Optional — enable with: make wazuh-dashboard-up
+  # Default URL: http://<host-ip>:5601  login: admin / WAZUH_INDEXER_PASSWORD
+  lab-wazuh-dashboard:
+    profiles:
+      - dashboard
+    image: wazuh/wazuh-dashboard:4.9.1
+    container_name: lab-wazuh-dashboard
+    # ponytail: no cap_drop/no-new-privileges — Node.js in Wazuh dashboard
+    # needs exec permissions that rootless Podman blocks with those restrictions
+    tmpfs:
+      - /tmp
+    environment:
+      INDEXER_USERNAME: admin
+      INDEXER_PASSWORD: "${WAZUH_INDEXER_PASSWORD:-labpassword}"
+      WAZUH_API_URL: https://wazuh-manager
+      DASHBOARD_USERNAME: kibanaserver
+      DASHBOARD_PASSWORD: "${WAZUH_INDEXER_PASSWORD:-labpassword}"
+      API_USERNAME: wazuh-wui
+      API_PASSWORD: "${WAZUH_INDEXER_PASSWORD:-labpassword}"
+    volumes:
+      - ./lab/wazuh/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml:ro,z
+      - ./lab/wazuh/certs/wazuh-dashboard.pem:/etc/wazuh-dashboard/certs/dashboard.pem:ro,z
+      - ./lab/wazuh/certs/wazuh-dashboard-key.pem:/etc/wazuh-dashboard/certs/dashboard-key.pem:ro,z
+      - ./lab/wazuh/certs/root-ca.pem:/etc/wazuh-dashboard/certs/root-ca.pem:ro,z
+    ports:
+      - "5601:5601"   # Dashboard UI — LAN-accessible for lab
+    networks:
+      - wazuh-manager-net
+    depends_on:
+      lab-wazuh-indexer:
         condition: service_healthy
+      lab-wazuh-manager:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     restart: unless-stopped
 
   # ── Extend the proxy with the new wazuh networks ─────────────────────────
@@ -176,6 +288,8 @@ services:
 
 volumes:
   wazuh-manager-data:
+    driver: local
+  wazuh-indexer-data:
     driver: local
 
 networks:

@@ -122,10 +122,11 @@ class PlatformMCPServer:
         starlette_app = self._mcp.streamable_http_app()
 
         # H1: explicit /health (FastMCP does not auto-serve this)
+        _server_name = self.name
         async def _health_handler(request):
             from starlette.responses import JSONResponse
 
-            return JSONResponse({"status": "ok", "server": self.name})
+            return JSONResponse({"status": "ok", "server": _server_name})
 
         starlette_app.add_route("/health", _health_handler, methods=["GET"])
 

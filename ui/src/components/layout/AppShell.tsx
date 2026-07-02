@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Sidebar } from './Sidebar'
 import './AppShell.css'
 
-export type View = 'wizard' | 'admin' | 'dashboard' | 'portal'
+export type View = 'wizard' | 'admin' | 'dashboard' | 'portal' | 'submit' | 'review'
 
 interface Props {
   children: (view: View, setView: (v: View) => void) => React.ReactNode

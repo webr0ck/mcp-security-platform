@@ -49,13 +49,11 @@ def test_default_compose_requires_verification_key() -> None:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
-        # Run without POLICY_SIGNING_KEY so only the structural grep check runs.
-        # The functional OPA-load check is covered by test_signed_bundle.sh and
-        # the integration marker below.
-        env={**__import__("os").environ, "POLICY_SIGNING_KEY": ""},
+        # STRUCTURAL_CHECK_ONLY=1: run only the compose-file grep (no key guard,
+        # no podman OPA load). The functional check is covered by the integration
+        # fixture test_tampered_bundle_rejected and by test_signed_bundle.sh.
+        env={**__import__("os").environ, "STRUCTURAL_CHECK_ONLY": "1"},
     )
-    # With an empty POLICY_SIGNING_KEY the script should skip the functional
-    # check but still pass the structural grep and print "PASS".
     assert result.returncode == 0, (
         f"check_signed_default.sh failed.\n"
         f"stdout:\n{result.stdout}\n"

@@ -54,6 +54,7 @@ def _make_app_ctx(roles=("agent",), tool_status="active", tool_upstream="http://
             return SimpleNamespace(
                 tool_id=TOOL_ID,
                 name="test-tool",
+                description="test tool",
                 version="1.0.0",
                 status=tool_status,
                 risk_level="low",
@@ -61,6 +62,7 @@ def _make_app_ctx(roles=("agent",), tool_status="active", tool_upstream="http://
                 injection_mode="none", service_name=None,
                 inject_header="Authorization", inject_prefix="Bearer",
                 kc_client_id=None, kc_token_audience=None,
+                server_id=None,
             )
 
         def fetchall(self):
@@ -592,7 +594,16 @@ async def test_tamper_sbom_missing_signature_cannot_activate_tool():
     from app.core.database import get_db
 
     # Tool row with no SBOM (sbom_id=None)
-    tool_no_sbom = SimpleNamespace(status="quarantined", sbom_id=None)
+    tool_no_sbom = SimpleNamespace(
+        status="quarantined", sbom_id=None,
+        description="test tool",
+        name="test-tool", version="1.0.0", risk_level="low",
+        upstream_url="http://safe:9000/mcp", server_id=None,
+        injection_mode="none", service_name=None,
+        inject_header="Authorization", inject_prefix="Bearer",
+        kc_client_id=None, kc_token_audience=None,
+        schema=None,
+    )
 
     class _FakeResult:
         def fetchone(self):

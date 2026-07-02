@@ -5,7 +5,7 @@
 > topology": the full enforcement stack (gateway, proxy, OPA, PKI, Vault) running together under
 > Docker Compose. It does **not** mean "cleared for production use without further hardening." Read
 > the [Pre-production hardening checklist](#pre-production-hardening-checklist) and
-> [docs/SECURITY_NONNEGATABLES.md](docs/SECURITY_NONNEGATABLES.md) before putting this in front of
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before putting this in front of
 > real traffic.
 
 **Who this guide is for:** operators who bring their own infrastructure — their own IDP
@@ -73,9 +73,11 @@ the secrets it owns; you must still fill the operator-supplied values (`DB_PASSW
 For local development/testing, see **[LAB.md](LAB.md)**:
 
 ```bash
-cp .env.lab.example .env.lab    # optional — lab-init.sh generates it if absent
-make lab-up                     # base + lab overlay on Podman; auto-seeds Keycloak/Dex/MCP servers
+cp lab.config.example lab.config  # set LAB_HOST=<your-ip> inside (gitignored)
+make -f Makefile.lab lab-up       # generates .env.lab, starts stack, seeds DB/Keycloak
 ```
+
+`lab.config` holds your machine-specific IP and port overrides. `scripts/lab-init.sh` reads it when generating `.env.lab` so `PROXY_BASE_URL` and `OIDC_ISSUER_URL` are set correctly for your host. On purely local use (`localhost` only) the defaults work without editing.
 
 ---
 
@@ -313,7 +315,7 @@ below it.
 
 These are the known gaps between the current reference implementation and production-hardened
 operation. The authoritative source of truth is the **Enforced today vs Roadmap** table in
-`README.md` and `docs/SECURITY_NONNEGATABLES.md`.
+`README.md` and `docs/ARCHITECTURE.md`.
 
 | # | Item | Status | Action |
 |---|---|---|---|
@@ -370,7 +372,7 @@ containers cannot reach platform backend networks directly. Exit code 0 = all ch
 
 - [LAB.md](LAB.md) — full self-contained test lab on Podman (includes all three demo MCP servers,
   Wazuh, Keycloak, and the complete test suite)
-- [docs/SECURITY_NONNEGATABLES.md](docs/SECURITY_NONNEGATABLES.md) — enforcement status of all
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — enforcement status of all
   security invariants (INV-001 through INV-012), the authoritative source on what is and is not
   machine-verified today
 - [README.md](README.md) — architecture overview, the Enforced vs Roadmap table, and the honesty

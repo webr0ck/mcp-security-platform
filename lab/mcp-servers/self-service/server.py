@@ -56,6 +56,8 @@ PROXY_PROFILE_API_URL = os.environ.get(
     "PROXY_PROFILE_API_URL", "http://mcp-proxy:8000/api/v1/profiles"
 ).rstrip("/")
 
+PROXY_BASE_URL = os.environ.get("PROXY_BASE_URL", "http://mcp-proxy:8000")
+
 # Service API key for authenticating to the proxy profile API.
 # Seeded by lab/seeder/seed.py into api_keys table as service "lab-self-service".
 # Must be set — no default. Compose fail-fast enforces this at startup.
@@ -68,13 +70,19 @@ if not SELF_SERVICE_API_KEY:
 log = logging.getLogger("self-service-mcp")
 
 # ContextVars populated by _IdentityMiddleware for each request.
-# The proxy injects X-User-Sub and X-User-Role HTTP headers; tools read from
-# these vars so the proxy-verified identity is used.
+# The proxy injects X-User-Sub, X-User-Role, and (for passthrough tools)
+# Authorization headers. Tools read from these vars.
 _ctx_caller_sub: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_ctx_caller_sub", default="anonymous"
 )
 _ctx_caller_role: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_ctx_caller_role", default="agent"
+)
+# OAuth bearer token forwarded by the proxy (passthrough injection_mode).
+# Present when the user authenticated via OAuth PKCE. Used for submission API
+# calls so the proxy resolves the real caller identity (not the service account).
+_ctx_user_token: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_ctx_user_token", default=""
 )
 
 
@@ -84,13 +92,17 @@ class _IdentityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         sub = request.headers.get("x-user-sub", "anonymous")
         role = request.headers.get("x-user-role", "agent")
+        # In passthrough mode the proxy forwards the caller's Authorization header.
+        auth = request.headers.get("authorization", "")
         tok_sub = _ctx_caller_sub.set(sub)
         tok_role = _ctx_caller_role.set(role)
+        tok_user = _ctx_user_token.set(auth)
         try:
             return await call_next(request)
         finally:
             _ctx_caller_sub.reset(tok_sub)
             _ctx_caller_role.reset(tok_role)
+            _ctx_user_token.reset(tok_user)
 
 
 # stateless_http=True is REQUIRED so the identity ContextVars set by
@@ -106,9 +118,29 @@ mcp = FastMCP("self-service-mcp", stateless_http=True)
 
 
 def _auth_headers() -> dict[str, str]:
-    """Return auth headers for proxy profile API requests."""
+    """Return auth headers for proxy profile API requests (service identity)."""
     return {
         "Authorization": f"Bearer {SELF_SERVICE_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _oauth_headers() -> dict[str, str]:
+    """Return auth headers for submission API calls using the caller's OAuth token.
+
+    In passthrough mode the proxy forwards the user's bearer token as the
+    Authorization header to this server. We re-use it when calling back to
+    the proxy submission API so the proxy resolves the *real* user identity
+    (not the service account) for owner_sub attribution.
+
+    Falls back to the service API key if no user token is present (e.g. when
+    called directly in tests without a user session).
+    """
+    user_token = _ctx_user_token.get()
+    token = user_token if user_token else f"Bearer {SELF_SERVICE_API_KEY}"
+    return {
+        "Authorization": token,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
@@ -148,6 +180,20 @@ async def _proxy_post(path: str, body: dict | None = None) -> dict:
         return r.json()
     except Exception as exc:
         log.error("Proxy profile API POST %s failed: %s", path, exc)
+        return {"error": "proxy_unreachable", "detail": str(exc)}
+
+
+async def _proxy_patch(path: str, body: dict) -> dict:
+    """PATCH to proxy API."""
+    url = f"{PROXY_BASE_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.patch(url, headers=_auth_headers(), content=json.dumps(body))
+        if r.status_code >= 400:
+            return {"error": "api_error", "status_code": r.status_code, "detail": r.text[:200]}
+        return r.json()
+    except Exception as exc:
+        log.error("Proxy PATCH %s failed: %s", path, exc)
         return {"error": "proxy_unreachable", "detail": str(exc)}
 
 
@@ -360,6 +406,272 @@ async def disable_function(
         return {"error": "forbidden"}
 
     return await _proxy_post(f"/{profile_id}/mcps/{mcp_name}/functions/{function_name}/disable")
+
+
+# ── MCP server onboarding tools ───────────────────────────────────────────────
+
+@mcp.tool()
+async def plan_mcp_server(intent: str) -> dict:
+    """
+    Start the MCP server onboarding flow.
+
+    Describe what you want the MCP server to do and this tool will return
+    the questions you (or the user) need to answer before building and
+    submitting it.  Call this first; then call get_auth_mode_recommendation
+    with the answers.
+
+    Args:
+        intent: A plain-language description of the server's purpose,
+                e.g. "query our internal Jira instance on behalf of each user".
+
+    Returns: {questions, next_tool, guidance}
+    """
+    url = f"{PROXY_BASE_URL}/api/v1/design-assist"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, headers=_oauth_headers())
+        data = r.json() if r.status_code == 200 else {}
+    except Exception as exc:
+        data = {}
+        log.error("design-assist GET failed: %s", exc)
+
+    return {
+        "intent": intent,
+        "next_step": "Answer the questions below, then call get_auth_mode_recommendation",
+        "auth_questions": [
+            "Does your server call any upstream system that requires authentication? (yes/no)",
+            "If yes: is the upstream the same Keycloak instance this platform uses? (yes/no)",
+            "If external: Microsoft Entra, static API key/bearer, or another OAuth IdP?",
+            "If API key / bearer: is one shared credential used for all callers, or does each user have their own?",
+            "If per-user: stored credentials or live OAuth token exchange?",
+        ],
+        "data_questions": [
+            "What categories of data does the server expose? "
+            "(pii / financial / health / internal_docs / source_code / email_calendar / infrastructure / public)",
+            "Does the server perform write operations (create/update/delete)? (yes/no)",
+        ],
+        "decision_tree": data.get("decision_tree", []),
+        "hint": "Once you have the answers, call get_auth_mode_recommendation.",
+    }
+
+
+@mcp.tool()
+async def get_auth_mode_recommendation(
+    has_upstream_auth: bool,
+    same_keycloak: Optional[bool] = None,
+    upstream_idp_type: Optional[str] = None,
+    per_user: Optional[bool] = None,
+) -> dict:
+    """
+    Returns the recommended authentication injection mode for an MCP server.
+
+    Args:
+        has_upstream_auth: True if the server calls an upstream system that requires auth.
+        same_keycloak: True if the upstream is the same Keycloak realm as the platform.
+        upstream_idp_type: "entra", "api_key", "oauth" — which upstream IdP (if not Keycloak).
+        per_user: True if each caller needs their own credential; False if shared.
+
+    Returns: {recommended_mode, reason, next_tool}
+    """
+    if not has_upstream_auth:
+        mode, reason = "none", "No credential injection needed."
+    elif same_keycloak:
+        mode, reason = "kc_token_exchange", "Token exchange — no secret at rest. Full per-user attribution."
+    elif upstream_idp_type == "entra":
+        if per_user:
+            mode, reason = "entra_user_token", "Entra delegated token. Full per-user attribution in Entra."
+        else:
+            mode, reason = "entra_client_credentials", "Entra app identity (machine). Attribution at gateway only."
+    elif upstream_idp_type == "oauth":
+        if per_user:
+            mode, reason = "oauth_user_token", "Per-user OAuth token from external IdP."
+        else:
+            mode, reason = "service_account", "Shared OAuth service account token."
+    else:  # api_key / bearer
+        if per_user:
+            mode, reason = "user", "Per-user stored credential. Full per-user attribution. Users enroll their own token via the portal."
+        else:
+            mode, reason = "service", "Shared service account credential."
+
+    return {
+        "recommended_mode": mode,
+        "reason": reason,
+        "next_tool": "submit_mcp_server",
+        "hint": f"Pass injection_mode='{mode}' to submit_mcp_server.",
+    }
+
+
+@mcp.tool()
+async def submit_mcp_server(
+    name: str,
+    description: str,
+    injection_mode: str,
+    data_categories: list,
+    has_write_ops: bool,
+    github_repo_url: Optional[str] = None,
+) -> dict:
+    """
+    Create and submit an MCP server for security review.
+
+    If github_repo_url is provided the platform will clone and scan it
+    automatically before human review.  If omitted the submission goes
+    directly to review and scaffold code is generated for download.
+
+    Args:
+        name: Unique server name, 2-63 chars, lowercase letters/numbers/hyphens.
+        description: What the server does (shown in the review queue).
+        injection_mode: Auth mode — one of: none, service, user, service_account,
+                        oauth_user_token, entra_client_credentials, entra_user_token,
+                        kc_token_exchange.
+        data_categories: List of data sensitivity categories the server exposes.
+                         Values: pii, financial, health, internal_docs, source_code,
+                         email_calendar, infrastructure, public.
+        has_write_ops: True if the server performs any create/update/delete operations.
+        github_repo_url: https://github.com/<owner>/<repo> — leave None if no code yet.
+
+    Returns: {server_id, submission_status, next_steps}
+    """
+    caller_sub = _ctx_caller_sub.get()
+    base = f"{PROXY_BASE_URL}/api/v1/submissions"
+    hdrs = _oauth_headers()  # user's OAuth token — proxy resolves real owner_sub
+
+    # 1. Create draft
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(base, headers=hdrs, content=json.dumps({
+            "name": name,
+            "description": description,
+            "github_repo_url": github_repo_url,
+        }))
+    if r.status_code >= 400:
+        return {"error": "create_failed", "detail": r.text[:300]}
+    draft = r.json()
+    sid = draft["server_id"]
+
+    # 2. Patch with design data
+    async with httpx.AsyncClient(timeout=10) as client:
+        await client.patch(f"{base}/{sid}", headers=hdrs, content=json.dumps({
+            "injection_mode": injection_mode,
+            "data_categories": data_categories,
+            "has_write_ops": has_write_ops,
+        }))
+
+    # 3. Submit
+    async with httpx.AsyncClient(timeout=10) as client:
+        r2 = await client.post(f"{base}/{sid}/submit", headers=hdrs, content=b"{}")
+    if r2.status_code >= 400:
+        return {"error": "submit_failed", "server_id": sid, "detail": r2.text[:300]}
+    result = r2.json()
+    status = result.get("submission_status", "unknown")
+
+    if github_repo_url:
+        next_steps = [
+            f"Your server (id={sid}) is being scanned. Poll status with check_submission_status.",
+            "If the scan passes, the security team will review. This typically takes 1-2 business days.",
+            "Once approved, you'll need to provide the running server URL.",
+        ]
+    else:
+        next_steps = [
+            f"No code provided. Download your scaffold: GET /api/v1/submissions/{sid}/scaffold",
+            f"Or call get_server_scaffold(injection_mode='{injection_mode}') to see the starter code.",
+            "Implement your server, push to GitHub, then re-submit with a github_repo_url.",
+        ]
+
+    return {
+        "server_id": sid,
+        "submission_status": status,
+        "submitter": caller_sub,
+        "next_steps": next_steps,
+    }
+
+
+@mcp.tool()
+async def check_submission_status(server_id: str) -> dict:
+    """
+    Check the current status of an MCP server submission.
+
+    Args:
+        server_id: The UUID returned by submit_mcp_server.
+
+    Returns: {submission_status, scan_status, scan_findings_count, blocked_count, review_notes}
+    """
+    url = f"{PROXY_BASE_URL}/api/v1/submissions/{server_id}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, headers=_oauth_headers())
+        if r.status_code == 404:
+            return {"error": "not_found"}
+        if r.status_code >= 400:
+            return {"error": "api_error", "detail": r.text[:200]}
+        data = r.json()
+    except Exception as exc:
+        return {"error": "proxy_unreachable", "detail": str(exc)}
+
+    scan_report = data.get("scan_report") or []
+    blocked = [f for f in scan_report if f.get("block")]
+    findings = [
+        {"scanner": f.get("scanner"), "file": f.get("file"), "message": f.get("message")}
+        for f in scan_report
+    ]
+
+    status = data.get("submission_status", "unknown")
+    guidance = {
+        "draft":                "Submission is still a draft. Call submit_mcp_server to submit.",
+        "scan_pending":         "Clone + scan queued. Check back in a minute.",
+        "scan_running":         "Scan in progress. Check back in a minute.",
+        "scan_blocked":         "Scan found issues — fix them in your repo, then re-submit.",
+        "awaiting_review":      "Scan passed. Security team is reviewing.",
+        "changes_requested":    "Reviewer requested changes. See review_notes.",
+        "approved_pending_url": "Approved! Deploy your server and provide the running URL via the portal.",
+        "active":               "Active — the server is live.",
+        "rejected":             "Rejected. See review_notes for details.",
+    }.get(status, "")
+
+    return {
+        "server_id": server_id,
+        "submission_status": status,
+        "scan_status": data.get("scan_status"),
+        "scan_findings": len(scan_report),
+        "blocked_findings": len(blocked),
+        "findings": findings[:5],  # first 5 for readability
+        "review_notes": data.get("review_notes"),
+        "guidance": guidance,
+    }
+
+
+@mcp.tool()
+async def get_server_scaffold(injection_mode: str) -> dict:
+    """
+    Return starter scaffold code for an MCP server with the given auth mode.
+
+    Useful when the user has no code yet.  Returns the contents of server.py,
+    requirements.txt, Dockerfile, and README.md so the agent can show or
+    save them directly.
+
+    Args:
+        injection_mode: One of: none, service, user, service_account,
+                        oauth_user_token, entra_client_credentials,
+                        entra_user_token, kc_token_exchange.
+
+    Returns: {files: {filename: content}, next_steps}
+    """
+    url = f"{PROXY_BASE_URL}/api/v1/design-assist/scaffold"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, headers=_oauth_headers(), params={"mode": injection_mode})
+        if r.status_code == 200:
+            data = r.json()
+            return {
+                "files": data.get("files", {}),
+                "next_steps": [
+                    "Save server.py, requirements.txt, Dockerfile, and README.md to your project.",
+                    "Implement your tools inside the @srv.tool() function stubs.",
+                    "Push to GitHub, then call submit_mcp_server with your repo URL.",
+                ],
+            }
+    except Exception as exc:
+        log.error("scaffold GET failed: %s", exc)
+
+    return {"error": "scaffold_unavailable", "detail": "Could not fetch scaffold from platform."}
 
 
 # ── startup ───────────────────────────────────────────────────────────────────

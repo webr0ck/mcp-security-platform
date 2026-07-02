@@ -4,6 +4,8 @@ import './Sidebar.css'
 const NAV_ITEMS: { id: View; label: string; icon: string; badge?: string }[] = [
   { id: 'dashboard', label: 'Security', icon: '⬡' },
   { id: 'portal',    label: 'Portal',   icon: '⊞' },
+  { id: 'submit',    label: 'Request',  icon: '＋' },
+  { id: 'review',    label: 'Review',   icon: '◉' },
   { id: 'admin',     label: 'Admin',    icon: '⚙' },
   { id: 'wizard',    label: 'Setup',    icon: '◈' },
 ]

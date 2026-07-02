@@ -177,5 +177,7 @@
         "analyst"
       ]
     }
-  ]
+  ],
+  "verifyEmail": true,
+  "editUsernameAllowed": false
 }

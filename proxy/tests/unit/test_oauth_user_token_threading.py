@@ -107,7 +107,13 @@ async def test_invoke_tool_threads_user_kc_token_to_dispatcher():
 @pytest.mark.unit
 async def test_dispatcher_oauth_user_token_uses_caller_token_as_subject():
     """The dispatcher must pass the caller's token as the RFC 8693 subject_token."""
+    import jwt as _jwt
     from app.credential_broker import dispatcher as disp
+
+    # Real, structurally-valid JWT so the dispatcher's unverified sub-claim read
+    # (`_jwt.decode(..., verify_signature=False)`) works without a global jwt.decode
+    # patch — that patch is order-fragile because sibling tests stub sys.modules.
+    caller_token = _jwt.encode({"sub": "alice"}, "test-secret", algorithm="HS256")
 
     captured = {}
 
@@ -128,17 +134,16 @@ async def test_dispatcher_oauth_user_token_uses_caller_token_as_subject():
     with patch("app.credential_broker.keycloak_client.exchange_token",
                AsyncMock(side_effect=fake_exchange)), \
          patch("app.services.invocation.broker_instance", MagicMock()), \
-         patch("app.credential_broker.keycloak_client.get_public_key_for_token",
-               AsyncMock(return_value="mock-key")), \
-         patch("app.credential_broker.token_assert.assert_exchanged_token", return_value=None), \
-         patch("jwt.decode", return_value={"sub": "alice"}):
+         patch.object(disp, "get_public_key_for_token",
+                      AsyncMock(return_value="mock-key")), \
+         patch.object(disp, "assert_exchanged_token", return_value=None):
         headers = await disp.dispatch_credential_injection(
             tool_record=tool_record,
             client_id="alice@corp",
-            user_kc_token="caller-kc-access-token",
+            user_kc_token=caller_token,
         )
 
-    assert captured["subject_token"] == "caller-kc-access-token"
+    assert captured["subject_token"] == caller_token
     assert captured["audience"] == "lab-tickets"
     assert headers["Authorization"] == "Bearer exchanged-token"
 
@@ -189,13 +194,13 @@ async def test_auth_stashes_kc_token_only_for_oidc(monkeypatch):
 
     # Direct-OIDC caller → token stashed.
     with patch.object(auth_mod, "_validate_oidc_jwt",
-                      AsyncMock(return_value=("alice@corp", ["agent"]))), \
+                      AsyncMock(return_value=("alice@corp", ["agent"], False))), \
          patch.object(auth_mod, "_load_roles", AsyncMock(return_value=["agent"])):
         await mw.dispatch(make_request(b"kc-access-token-123"), call_next)
     assert captured["v"] == "kc-access-token-123"
 
     # API-key caller (OIDC validation returns no subject) → NOT stashed.
-    with patch.object(auth_mod, "_validate_oidc_jwt", AsyncMock(return_value=(None, []))), \
+    with patch.object(auth_mod, "_validate_oidc_jwt", AsyncMock(return_value=(None, [], False))), \
          patch.object(auth_mod, "_resolve_api_key", AsyncMock(return_value="svc-1")), \
          patch.object(auth_mod, "_load_roles", AsyncMock(return_value=["agent"])):
         await mw.dispatch(make_request(b"opaque-api-key"), call_next)

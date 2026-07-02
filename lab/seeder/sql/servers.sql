@@ -17,25 +17,31 @@ BEGIN;
 
 INSERT INTO server_registry
     (name, upstream_url, status, owner_sub, injection_mode, custody_mode,
-     trust_tier, upstream_allowlist_entry, url_allowlist_checked)
-SELECT v.name, v.upstream_url, 'approved', 'lab-seeder', 'none', 'session_suk',
-       0, '10.89.0.0/16', false
+     trust_tier, trust_tier_label, upstream_allowlist_entry, url_allowlist_checked, platform_managed_creds)
+SELECT v.name, v.upstream_url, 'approved', 'alice@corp', v.imode::injection_mode_enum, 'session_suk',
+       2, 'internal', '10.89.0.0/16', false, v.platform_creds
 FROM (VALUES
-    ('lab-echo',         'http://lab-mcp-echo:8000/mcp'),
-    ('lab-gitea',        'http://lab-mcp-gitea:8000/mcp'),
-    ('lab-grafana-mcp',  'http://lab-mcp-grafana:8000/mcp'),
-    ('lab-search',       'http://lab-mcp-search:8000/mcp'),
-    ('lab-notes',        'http://lab-mcp-notes:8000/mcp'),
-    ('lab-m365',         'http://lab-mcp-m365:8000/mcp'),
-    ('lab-dex-cal',      'http://lab-dex:5556/mcp'),
-    ('lab-rag',          'http://lab-rag-assistant:8000/mcp'),
-    ('lab-self-service', 'http://lab-mcp-self-service:8000/mcp'),
-    ('lab-netbox-mcp',   'http://mcp-netbox:8000/mcp')
-) AS v(name, upstream_url)
+    ('lab-echo',         'http://lab-mcp-echo:8000/mcp',          'none',                     false),
+    ('lab-gitea',        'http://lab-mcp-gitea:8000/mcp',         'service',                  true),
+    ('lab-grafana-mcp',  'http://lab-mcp-grafana:8000/mcp',       'service',                  true),
+    ('lab-search',       'http://lab-mcp-search:8000/mcp',        'none',                     false),
+    ('lab-notes',        'http://lab-mcp-notes:8000/mcp',         'none',                     false),
+    ('lab-m365',         'http://lab-mcp-m365:8000/mcp',          'entra_client_credentials', false),
+    ('lab-dex-cal',      'http://lab-dex:5556/mcp',               'user',                     true),
+    ('lab-rag',          'http://lab-rag-assistant:8000/mcp',     'none',                     false),
+    ('lab-self-service', 'http://lab-mcp-self-service:8000/mcp',  'none',                     false),
+    ('lab-netbox-mcp',   'http://mcp-netbox:8000/mcp',            'user',                     true),
+    ('lab-wazuh',        'http://lab-mcp-wazuh:8000/mcp',         'service',                  true)
+) AS v(name, upstream_url, imode, platform_creds)
 ON CONFLICT (name) DO UPDATE
-    SET status = 'approved',
+    SET status                   = 'approved',
+        owner_sub                = EXCLUDED.owner_sub,
+        injection_mode           = EXCLUDED.injection_mode,
+        platform_managed_creds   = EXCLUDED.platform_managed_creds,
         upstream_allowlist_entry = EXCLUDED.upstream_allowlist_entry,
-        updated_at = now();
+        trust_tier               = EXCLUDED.trust_tier,
+        trust_tier_label         = EXCLUDED.trust_tier_label,
+        updated_at               = now();
 
 -- Link each tool to its server by matching upstream_url (only fills NULLs)
 UPDATE tool_registry t
@@ -45,12 +51,18 @@ WHERE t.server_id IS NULL
   AND t.deleted_at IS NULL
   AND t.upstream_url = s.upstream_url;
 
--- Grant the lab principal an entitlement on each onboarded server (mirrors lab-echo)
+-- Grant the lab Keycloak user an entitlement on each onboarded server
 INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by, entitlement_version)
 SELECT s.server_id, 'human:keycloak:alice@corp', 'human', 'lab-seeder', 1
 FROM server_registry s
-WHERE s.owner_sub = 'lab-seeder'
-  AND s.upstream_allowlist_entry = '10.89.0.0/16'
+WHERE s.upstream_allowlist_entry = '10.89.0.0/16'
+ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING;
+
+-- Grant the lab API key (Claude Code SELF_SERVICE_API_KEY) an entitlement on each onboarded server
+INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by, entitlement_version)
+SELECT s.server_id, 'human:apikey:lab-self-service', 'human', 'lab-seeder', 1
+FROM server_registry s
+WHERE s.upstream_allowlist_entry = '10.89.0.0/16'
 ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING;
 
 COMMIT;

@@ -334,6 +334,7 @@ async def test_opa_unavailable_returns_503_unit():
     with (
         patch("app.services.policy.evaluate_policy", mock_evaluate_policy),
         patch("app.services.anomaly.detect", mock_detect),
+        patch("app.services.invocation._get_recent_calls_for_opa", AsyncMock(return_value=[])),
     ):
         with pytest.raises(OPAUnavailableError) as exc_info:
             await invoke_tool(

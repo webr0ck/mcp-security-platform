@@ -344,7 +344,7 @@ async def register_tool(
 @router.get("")
 async def list_tools(
     request: Request,
-    status: Optional[str] = Query(None, pattern="^(active|quarantined|deprecated)$"),
+    status: Optional[str] = Query(None, pattern="^(active|quarantined|deprecated|disabled)$"),
     risk_level: Optional[str] = Query(None, pattern="^(low|medium|high|critical)$"),
     tag: Optional[list[str]] = Query(None),
     page: int = Query(1, ge=1),
@@ -566,7 +566,7 @@ async def update_tool(
     # tools and exists only as an OPA policy bypass signal.  Allowing any operator to
     # PATCH a tool's status to "internal" via the API would bypass all OPA gates
     # (quarantine check, risk threshold, and grant checks) for every authenticated role.
-    _PATCHABLE_STATUSES = {"active", "quarantined", "deprecated"}
+    _PATCHABLE_STATUSES = {"active", "quarantined", "deprecated", "disabled"}
     if new_status and new_status not in _PATCHABLE_STATUSES:
         raise HTTPException(
             status_code=422,
@@ -1101,6 +1101,7 @@ async def invoke_tool(
     from app.services.invocation import (
         TaintFloorDenyError,
         ToolDeprecatedError,
+        ToolDisabledError,
         ToolQuarantinedError,
         invoke_tool as _invoke,
     )
@@ -1208,6 +1209,8 @@ async def invoke_tool(
             )
         except Exception as _audit_exc:
             logger.warning("Audit emit failed for NOT_ENTITLED denial: %s", _audit_exc)
+        else:
+            request.state.invocation_audit_emitted = True
         raise HTTPException(
             status_code=403,
             detail={
@@ -1294,6 +1297,19 @@ async def invoke_tool(
             },
         )
 
+    except ToolDisabledError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "error": {
+                    "code": -32601,
+                    "message": "Tool not found in registry.",
+                    "data": {"detail": str(exc)},
+                },
+            },
+        )
     except ToolQuarantinedError as exc:
         # INV-001: emit audit event for quarantined tool blocks
         try:
@@ -1327,6 +1343,10 @@ async def invoke_tool(
                     "message": "Denied (quarantined) but audit logging failed; failing closed.",
                 },
             ) from audit_exc
+        else:
+            # Signal AuditMiddleware to skip its generic 401/403 audit — we already
+            # emitted the tool-specific deny above.
+            request.state.invocation_audit_emitted = True
         return JSONResponse(
             status_code=403,
             content={

@@ -8,7 +8,7 @@ reference implementation — contributions, issues, and ideas are welcome.
 - **It's a reference implementation, not a product.** Changes should keep the docs honest: if you
   add or wire a control, update the **Enforced today vs Roadmap** table in the [README](README.md)
   so it stays matched to the code. Over-claiming is treated as a bug.
-- **Security invariants are non-negotiable.** See [`docs/SECURITY_NONNEGATABLES.md`](docs/SECURITY_NONNEGATABLES.md).
+- **Security invariants are non-negotiable.** See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
   Don't introduce a fail-open path. Deny-by-default and fail-closed are the defaults everywhere.
 - **No secrets in commits.** `.env*` files are gitignored; only `*.example` placeholders are tracked.
 

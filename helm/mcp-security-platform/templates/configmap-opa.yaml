@@ -1,0 +1,29 @@
+{{/*
+OPA runtime configuration (INV-002: decision log masking).
+Masks /input/params and /input/arguments to prevent credential and parameter
+leakage in the decision log stream shipped to Loki.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mcp-security-platform.fullname" . }}-opa-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mcp-security-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opa
+data:
+  opa-config.yaml: |
+    decision_logs:
+      console: {{ .Values.opa.decisionLogsConsole }}
+      # INV-002: mask tool-call parameters and arguments to prevent
+      # credential/PII leakage in the decision log audit stream.
+      mask:
+        - op: upsert
+          path: "/input/params"
+          value: "[redacted]"
+        - op: upsert
+          path: "/input/arguments"
+          value: "[redacted]"
+    plugins:
+      envoy_ext_authz_grpc:
+        enable: false

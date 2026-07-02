@@ -26,7 +26,7 @@
 
 COMPOSE         := podman-compose
 COMPOSE_DEV     := $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
-COMPOSE_LAB     := $(COMPOSE) -f docker-compose.yml -f podman-compose.lab.yml
+COMPOSE_LAB     := $(COMPOSE) --env-file .env.lab -f docker-compose.yml -f podman-compose.lab.yml -f compose.wazuh.yml
 PROXY_CONTAINER := proxy
 DB_CONTAINER    := mcp-db
 DB_NAME         ?= mcp_security
@@ -181,20 +181,24 @@ labup: lab-up
 lab-up:
 	@[ -f .env.lab ] || scripts/lab-init.sh
 	@echo "Starting MCP Security Platform (lab mode)..."
-	$(COMPOSE_LAB) up -d
+	$(COMPOSE_LAB) up -d || true
+	@echo "Starting services that may have missed dependency window..."
+	@sleep 3
+	$(COMPOSE_LAB) up -d --no-deps gateway lab-mcp-wazuh 2>/dev/null || true
 	@echo ""
 	@echo "Waiting for core services to become healthy (max 7m30s)..."
 	@n=0; max=90; \
 	while [ $$n -lt $$max ]; do \
 		n=$$((n+1)); \
-		kc=$$(curl -sf http://localhost:8082/health/ready                     2>/dev/null && echo "ok" || echo "-"); \
-		proxy=$$(curl -sf http://localhost:8000/health/ready                  2>/dev/null && echo "ok" || echo "-"); \
-		vault=$$(curl -sf "http://localhost:8201/v1/sys/health?standbyok=true" 2>/dev/null && echo "ok" || echo "-"); \
-		grafana=$$(curl -sf http://localhost:3001/api/health                  2>/dev/null && echo "ok" || echo "-"); \
-		printf "\r  keycloak=%-4s  proxy=%-4s  vault=%-4s  grafana=%-4s  (%d/%d, %ds)" \
-			"$$kc" "$$proxy" "$$vault" "$$grafana" $$n $$max $$((n*5)); \
-		if [ "$$kc" = "ok" ] && [ "$$proxy" = "ok" ] && [ "$$vault" = "ok" ] && [ "$$grafana" = "ok" ]; then \
-			printf "\n\nAll services healthy.\n"; break; \
+		curl -sf -o /dev/null http://localhost:8082/realms/mcp                      2>/dev/null && kc="ok"    || kc="-"; \
+		curl -sf -o /dev/null http://localhost:8000/health/ready                   2>/dev/null && proxy="ok" || proxy="-"; \
+		curl -sf -o /dev/null "http://localhost:8201/v1/sys/health?standbyok=true" 2>/dev/null && vault="ok" || vault="-"; \
+		curl -sf -o /dev/null http://localhost:3001/api/health                     2>/dev/null && gf="ok"    || gf="-"; \
+		curl -sf -k -o /dev/null https://localhost:55000/                          2>/dev/null && wazuh="ok" || wazuh="-"; \
+		printf "\r  keycloak=%-3s  proxy=%-3s  vault=%-3s  grafana=%-3s  wazuh=%-3s  (%d/%d, %ds)" \
+			"$$kc" "$$proxy" "$$vault" "$$gf" "$$wazuh" $$n $$max $$((n*5)); \
+		if [ "$$kc" = "ok" ] && [ "$$proxy" = "ok" ] && [ "$$vault" = "ok" ] && [ "$$gf" = "ok" ]; then \
+			printf "\n\nCore services healthy (wazuh may still be starting — takes ~2min).\n"; break; \
 		fi; \
 		if [ $$n -ge $$max ]; then \
 			printf "\n\nWARN: timeout — not all services healthy after $$(( max * 5 ))s.\n"; \
@@ -202,16 +206,22 @@ lab-up:
 		fi; \
 		sleep 5; \
 	done
+	@podman exec $(DB_CONTAINER) psql -U $(DB_USER) -d $(DB_NAME) \
+		-c "UPDATE tool_registry SET status='active' WHERE name='wazuh-siem' AND version='1.0.0';" \
+		2>/dev/null && echo "wazuh-siem activated in registry." || true
 	@echo ""
 	@echo "--- Service status ---"
-	@podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | grep -E "(NAMES|mcp-|proxy|gateway|opa|grafana|loki|minio|vault|redis|ollama|step|keycloak|dex|gitea|netbox|seeder|egress|rag|echo|notes)" || $(COMPOSE_LAB) ps 2>/dev/null
+	@podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | grep -E "(NAMES|mcp-|proxy|gateway|opa|grafana|loki|minio|vault|redis|ollama|step|keycloak|dex|gitea|netbox|seeder|egress|rag|echo|notes|wazuh|filebeat)" || $(COMPOSE_LAB) ps 2>/dev/null
 	@echo ""
 	@echo "Endpoints:"
 	@echo "  Proxy:    http://localhost:8000"
-	@echo "  Gateway:  http://localhost:8088 / https://localhost:8443"
+	@echo "  Gateway:  http://localhost:8088 / https://localhost:8443  (redirects → /portal)"
+	@echo "  Portal:   https://localhost:8443/portal"
 	@echo "  Keycloak: http://localhost:8082"
 	@echo "  Vault:    http://localhost:8201"
 	@echo "  Grafana:  http://localhost:3001"
+	@echo "  Wazuh:    https://localhost:55000  (API, admin / \$$WAZUH_API_PASSWORD)"
+	@echo "  Wazuh UI: http://localhost:5601     (run: make wazuh-dashboard-up first)"
 	@echo ""
 	@echo "  make logs SVC=proxy   — tail a service"
 	@echo "  make proxy-shell      — open proxy shell"

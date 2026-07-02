@@ -276,12 +276,11 @@ async def enroll(service: str, request: Request) -> HTMLResponse:
             if isinstance(requested_scopes, str):
                 requested_scopes = [s.strip() for s in requested_scopes.split() if s.strip()]
         else:
-            # Server found but no upstream_idp_config
-            raise HTTPException(
-                status_code=400,
-                detail=f"Service '{service}' has no IdP configured",
-            )
-    else:
+            # Registry entry exists but upstream_idp_config is NULL — fall through to
+            # hardcoded adapters so existing m365/bitbucket/dex enrollments keep working.
+            registry_config = None
+
+    if not registry_config:
         # Fallback to hardcoded adapters for backward compatibility
         adapter = _get_adapter(service)
         if adapter is None:

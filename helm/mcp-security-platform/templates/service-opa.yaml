@@ -1,0 +1,22 @@
+{{/*
+OPA is exposed ONLY as a ClusterIP service — never via Ingress or NodePort.
+The proxy reaches OPA at http://<release>-opa:8181; no external caller can.
+This is the K8s analog of the F-001 pairwise proxy↔OPA network isolation.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mcp-security-platform.opaServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mcp-security-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opa
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mcp-security-platform.opaSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.opa.service.port }}
+      targetPort: http
+      protocol: TCP

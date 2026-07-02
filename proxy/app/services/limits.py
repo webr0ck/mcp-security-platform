@@ -41,10 +41,12 @@ async def _read_limits_row(client_id: str) -> dict | None:
         "SELECT rate_limit, anomaly_sensitivity FROM client_limits WHERE client_id = $1",
         client_id,
     )
-    payload = _MISS if row is None else json.dumps(
-        {"rate_limit": row["rate_limit"], "anomaly_sensitivity": row["anomaly_sensitivity"]})
-    await rc.set(ckey, payload, ex=_CACHE_TTL)
-    return None if row is None else json.loads(payload)
+    if row is None:
+        await rc.set(ckey, _MISS, ex=_CACHE_TTL)
+        return None
+    row_dict = {"rate_limit": row["rate_limit"], "anomaly_sensitivity": row["anomaly_sensitivity"]}
+    await rc.set(ckey, json.dumps(row_dict), ex=_CACHE_TTL)
+    return row_dict
 
 
 async def invalidate(client_id: str) -> None:

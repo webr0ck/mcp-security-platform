@@ -39,6 +39,10 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from app.credential_broker.dispatcher import (
+    CredentialEnrollmentRequiredError,
+    ServiceCredentialMissingError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +227,66 @@ _TOOLS: list[dict[str, Any]] = [
         },
         "_roles": {"admin", "platform_admin", "agent"},
     },
+    # ------------------------------------------------------------------
+    # Self-service profile management tools — available to all roles so
+    # non-technical stakeholders can manage their own MCP access via the
+    # MCP protocol itself (not just the UI portal).
+    # ------------------------------------------------------------------
+    {
+        "name": "list_available_mcps",
+        "description": (
+            "List all MCP servers available on this platform and whether each is enabled "
+            "for your profile. Use this to see what AI tools you have access to."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "_roles": {"admin", "analyst", "viewer", "editor", "platform_admin", "agent"},
+    },
+    {
+        "name": "get_my_profile",
+        "description": (
+            "Return your current access profile: which MCP servers are enabled, "
+            "and (if configured) which individual functions within each server you can use."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "_roles": {"admin", "analyst", "viewer", "editor", "platform_admin"},
+    },
+    {
+        "name": "enable_mcp_server",
+        "description": "Enable an MCP server for your profile so you can call its tools.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "server_name": {
+                    "type": "string",
+                    "description": "The server_name from list_available_mcps (e.g. 'poc-echo-server').",
+                }
+            },
+            "required": ["server_name"],
+        },
+        "_roles": {"admin", "analyst", "editor", "platform_admin"},
+    },
+    {
+        "name": "disable_mcp_server",
+        "description": "Disable an MCP server for your profile so its tools are no longer callable.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "server_name": {
+                    "type": "string",
+                    "description": "The server_name from list_available_mcps (e.g. 'poc-echo-server').",
+                }
+            },
+            "required": ["server_name"],
+        },
+        "_roles": {"admin", "analyst", "editor", "platform_admin"},
+    },
 ]
+
+
+# Frozen set of platform meta-tool names. Computed once at import time so the
+# tools/call dispatch guard (PRIVESC-004) never diverges across requests and
+# cannot be widened by a future dynamic _TOOLS update within a single process.
+_PLATFORM_NAMES: frozenset[str] = frozenset(t["name"] for t in _TOOLS)
 
 
 def _visible_tools(roles: list[str]) -> list[dict]:
@@ -652,7 +715,7 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             result = await session.execute(
                 text(
                     "SELECT * FROM tool_registry WHERE name = :name "
-                    "AND status NOT IN ('deprecated', 'quarantined') "
+                    "AND status NOT IN ('deprecated', 'quarantined', 'disabled')"
                     "AND deleted_at IS NULL LIMIT 1"
                 ),
                 {"name": name},
@@ -700,7 +763,6 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                 profile_uuid=getattr(request.state, "profile_uuid", None),
             )
     except Exception as exc:
-        from app.credential_broker.dispatcher import CredentialEnrollmentRequiredError
         from app.services.entitlement import NotEntitledError
         if isinstance(exc, NotEntitledError):
             # 6.2 discovery==invoke: caller is not entitled to this tool's server.
@@ -708,7 +770,10 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             logger.info("MCP invoke denied (not entitled) tool=%s client=%s reason=%s",
                         name, client_id, exc.reason)
             return _err(req_id, -32003, "Access denied: not entitled to this tool's server")
-        from app.services.invocation import TaintFloorDenyError
+        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError
+        if isinstance(exc, ScanFreshnessError):
+            logger.warning("MCP invoke denied (stale scan) tool=%s client=%s", name, client_id)
+            return _err(req_id, -32003, "Access denied: server supply-chain scan is stale")
         if isinstance(exc, TaintFloorDenyError):
             # PRD-0001 M2: taint floor denied a high-sensitivity sink in a tainted
             # session. Audit already emitted in invoke_tool (INV-001). No internals leaked.
@@ -739,11 +804,9 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                     ),
                 },
             )
-        from app.credential_broker.dispatcher import ServiceCredentialMissingError
-        # ORDERING INVARIANT: this guard MUST precede any future
-        # `isinstance(exc, CredentialInjectionError)` guard — ServiceCredentialMissingError
-        # subclasses it, so a parent-class guard placed above would shadow this branch
-        # and silently regress to the generic -32603 (leaking internals on fallthrough).
+        # ORDERING INVARIANT: ServiceCredentialMissingError MUST precede any future
+        # isinstance(exc, CredentialInjectionError) guard — it subclasses it and would
+        # be shadowed, silently regressing to the generic -32603.
         if isinstance(exc, ServiceCredentialMissingError):
             # Service-mode credential is admin-provisioned, not user-enrolled.
             # Surface an admin-actionable deny instead of a generic 500 (and
@@ -923,7 +986,7 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                text("SELECT * FROM tool_registry WHERE name = :name AND status NOT IN ('deprecated', 'quarantined') AND deleted_at IS NULL LIMIT 1"),
+                text("SELECT * FROM tool_registry WHERE name = :name AND status NOT IN ('deprecated', 'quarantined', 'disabled') AND deleted_at IS NULL LIMIT 1"),
                 {"name": lookup_name},
             )
             row = result.mappings().fetchone()
@@ -998,11 +1061,13 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
             logger.info("invoke_tool denied (not entitled) tool=%s client=%s reason=%s",
                         tool_name, client_id, exc.reason)
             return {"type": "text", "text": "Access denied: not entitled to this tool's server"}
-        from app.services.invocation import TaintFloorDenyError
+        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError
+        if isinstance(exc, ScanFreshnessError):
+            logger.warning("invoke_tool denied (stale scan) tool=%s client=%s", tool_name, client_id)
+            return {"type": "text", "text": "Access denied: server supply-chain scan is stale"}
         if isinstance(exc, TaintFloorDenyError):
             logger.info("invoke_tool denied (taint floor) tool=%s client=%s", tool_name, client_id)
             return {"type": "text", "text": "Access denied: session restricted by trust policy"}
-        from app.credential_broker.dispatcher import CredentialEnrollmentRequiredError
         if isinstance(exc, CredentialEnrollmentRequiredError):
             logger.info("invoke_tool needs enrollment tool=%s client=%s service=%s",
                         tool_name, client_id, exc.service)
@@ -1015,9 +1080,8 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 f"proxy) to log in:\n    {enroll_url}\n\n"
                 f"After you finish sign-in/consent, retry this tool call."
             )}
-        from app.credential_broker.dispatcher import ServiceCredentialMissingError
-        # ORDERING INVARIANT: keep this BEFORE any isinstance(exc, CredentialInjectionError)
-        # guard — ServiceCredentialMissingError subclasses it (see _route_to_registry note).
+        # ORDERING INVARIANT: same as _route_to_registry — ServiceCredentialMissingError
+        # before any CredentialInjectionError parent-class guard.
         if isinstance(exc, ServiceCredentialMissingError):
             logger.warning("invoke_tool: service credential missing tool=%s service=%s",
                            tool_name, exc.service)
@@ -1031,12 +1095,157 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
         return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}
 
 
+async def _handle_list_available_mcps(args: dict, request: Request) -> dict:
+    client_id: str = getattr(request.state, "client_id", "")
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as db:
+            tools = await db.execute(
+                text(
+                    "SELECT name, description, status, risk_level "
+                    "FROM tool_registry WHERE deleted_at IS NULL ORDER BY name"
+                )
+            )
+            rows = tools.mappings().all()
+            names = [r["name"] for r in rows]
+            enabled_map: dict = {}
+            if names:
+                prof = await db.execute(
+                    text(
+                        "SELECT mcp_name, enabled FROM mcp_profiles "
+                        "WHERE profile_id = :pid AND mcp_name = ANY(:names)"
+                    ),
+                    {"pid": client_id, "names": names},
+                )
+                enabled_map = {r["mcp_name"]: r["enabled"] for r in prof.mappings().all()}
+    except Exception as exc:
+        logger.exception("list_available_mcps DB error for %s", client_id)
+        return {"type": "text", "text": f"Error fetching server catalog: {exc}"}
+    catalog = [
+        {
+            "tool_name": r["name"],
+            "description": r["description"] or "",
+            "status": r["status"] or "unknown",
+            "risk_level": r["risk_level"] or "unknown",
+            "enabled_for_your_profile": enabled_map.get(r["name"], False),
+        }
+        for r in rows
+    ]
+    return {"type": "text", "text": json.dumps({"tools": catalog, "total": len(catalog)}, indent=2)}
+
+
+async def _handle_get_my_profile(args: dict, request: Request) -> dict:
+    principal: str = getattr(request.state, "client_id", "")
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                text(
+                    "SELECT mcp_name, enabled, allowed_functions "
+                    "FROM mcp_profiles WHERE profile_id = :pid ORDER BY mcp_name"
+                ),
+                {"pid": principal},
+            )
+            rows = result.mappings().all()
+    except Exception as exc:
+        logger.exception("get_my_profile DB error for %s", principal)
+        return {"type": "text", "text": f"Error fetching profile: {exc}"}
+    mcps = []
+    for row in rows:
+        fns_raw = row["allowed_functions"]
+        fn_list = []
+        if fns_raw:
+            try:
+                fn_list = json.loads(fns_raw) if isinstance(fns_raw, str) else (fns_raw or [])
+            except Exception:
+                pass
+        mcps.append({
+            "server_name": row["mcp_name"],
+            "enabled": bool(row["enabled"]),
+            "allowed_functions": fn_list or None,
+        })
+    return {
+        "type": "text",
+        "text": json.dumps({"principal": principal, "mcps": mcps}, indent=2),
+    }
+
+
+async def _handle_enable_mcp_server(args: dict, request: Request) -> dict:
+    principal: str = getattr(request.state, "client_id", "")
+    server_name: str = args.get("server_name", "").strip()
+    if not server_name:
+        return {"type": "text", "text": "Error: server_name is required"}
+    from app.routers.profiles import _assert_mcp_exists, _get_profile_row, _upsert_profile_row, _invalidate_profile_cache
+    from fastapi import HTTPException
+    try:
+        await _assert_mcp_exists(server_name)
+    except HTTPException as exc:
+        return {"type": "text", "text": f"Error: {exc.detail}"}
+    except Exception as exc:
+        return {"type": "text", "text": f"Error validating server: {exc}"}
+    try:
+        row = await _get_profile_row(principal, server_name)
+        allowed_fns = row["allowed_functions"] if row else None
+        await _upsert_profile_row(principal, server_name, True, allowed_fns, principal)
+        await _invalidate_profile_cache(principal, server_name, {"enabled": True, "allowed_functions": allowed_fns})
+    except Exception as exc:
+        logger.exception("enable_mcp_server error for %s/%s", principal, server_name)
+        return {"type": "text", "text": f"Error enabling server: {exc}"}
+    return {
+        "type": "text",
+        "text": json.dumps({
+            "ok": True,
+            "server_name": server_name,
+            "enabled": True,
+            "message": f"'{server_name}' is now enabled for your profile.",
+        }, indent=2),
+    }
+
+
+async def _handle_disable_mcp_server(args: dict, request: Request) -> dict:
+    principal: str = getattr(request.state, "client_id", "")
+    server_name: str = args.get("server_name", "").strip()
+    if not server_name:
+        return {"type": "text", "text": "Error: server_name is required"}
+    from app.routers.profiles import _assert_mcp_exists, _get_profile_row, _upsert_profile_row, _invalidate_profile_cache
+    from fastapi import HTTPException
+    try:
+        await _assert_mcp_exists(server_name)
+    except HTTPException as exc:
+        return {"type": "text", "text": f"Error: {exc.detail}"}
+    except Exception as exc:
+        return {"type": "text", "text": f"Error validating server: {exc}"}
+    try:
+        row = await _get_profile_row(principal, server_name)
+        allowed_fns = row["allowed_functions"] if row else None
+        await _upsert_profile_row(principal, server_name, False, allowed_fns, principal)
+        await _invalidate_profile_cache(principal, server_name, {"enabled": False, "allowed_functions": allowed_fns})
+    except Exception as exc:
+        logger.exception("disable_mcp_server error for %s/%s", principal, server_name)
+        return {"type": "text", "text": f"Error disabling server: {exc}"}
+    return {
+        "type": "text",
+        "text": json.dumps({
+            "ok": True,
+            "server_name": server_name,
+            "enabled": False,
+            "message": f"'{server_name}' is now disabled for your profile.",
+        }, indent=2),
+    }
+
+
 _TOOL_HANDLERS = {
     "platform_info": _handle_platform_info,
     "security_pulse_summary": _handle_security_pulse_summary,
     "enrollment_status": _handle_enrollment_status,
     "list_registered_tools": _handle_list_registered_tools,
     "invoke_tool": _handle_invoke_tool_real,
+    "list_available_mcps": _handle_list_available_mcps,
+    "get_my_profile": _handle_get_my_profile,
+    "enable_mcp_server": _handle_enable_mcp_server,
+    "disable_mcp_server": _handle_disable_mcp_server,
 }
 
 
@@ -1142,6 +1351,15 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
     if method == "tools/call":
         name = params.get("name", "")
         args = params.get("arguments") or {}
+
+        # PRIVESC-004 fix: if the name matches a platform meta-tool but the caller
+        # lacks the required role, return 403 instead of falling through to the
+        # registry. Falling through would allow an admin to shadow-register a tool
+        # with the same name as a platform meta-tool and have low-priv callers reach
+        # it by bypassing _roles.  Uses the module-level _PLATFORM_NAMES frozenset
+        # (computed at import time) rather than rebuilding per request.
+        if name in _PLATFORM_NAMES and not _can_call(name, roles):
+            return _err(req_id, -32003, "Authorization denied", http_status=403)
 
         # Registry tool — route directly through the security pipeline
         if not _can_call(name, roles):

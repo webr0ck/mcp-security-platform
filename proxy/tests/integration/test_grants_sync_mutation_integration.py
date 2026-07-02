@@ -83,26 +83,30 @@ async def setup_test_server(db_conn: asyncpg.Connection) -> AsyncIterator[str]:
     # Insert test server
     await db_conn.execute(
         """
-        INSERT INTO server_registry (server_id, name, upstream_url, status)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO server_registry (server_id, name, upstream_url, status, owner_sub)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (server_id) DO NOTHING
         """,
         TEST_SERVER_ID,
         "test-server",
         "http://localhost:9999",
-        "active",
+        "approved",
+        "test-owner",
     )
 
     # Grant server_owner role to the test caller
     await db_conn.execute(
         """
-        INSERT INTO server_role_grant (server_id, principal_id, role)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (server_id, principal_id, role) DO NOTHING
+        INSERT INTO server_role_grant
+            (server_id, principal_id, principal_type, role, granted_by)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (server_id, principal_id, principal_type, role) DO NOTHING
         """,
         TEST_SERVER_ID,
         "test-server-owner",
+        "human",
         "server_owner",
+        "test-setup",
     )
 
     yield TEST_SERVER_ID
@@ -144,7 +148,7 @@ async def _get_opa_grants() -> dict:
     """Fetch the current grants from OPA's data API."""
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.get(f"{OPA_URL}/v1/data/mcp/grants", timeout=5.0)
+            resp = await client.get(f"{OPA_URL}/v1/data/mcp_grants", timeout=5.0)
             if resp.status_code == 200:
                 return resp.json()
             else:

@@ -55,6 +55,16 @@ _TRANSIENT_SERVICES = frozenset({
     "lab-keycloak-seeder",
 })
 
+# ── Lab-tier mock backends allowed as extra pairwise-net occupants ─────────────
+# In the lab, mock services (lab-mock-graph, lab-mock-idp) act as test doubles
+# for external APIs (MS Graph, IdP) that MCP servers call. They must share the
+# pairwise net with the MCP server they mock. This is expected lab behaviour and
+# not a production topology concern — prod never has lab-mock-* services.
+_LAB_MOCK_SERVICES = frozenset({
+    "lab-mock-graph",
+    "lab-mock-idp",
+})
+
 # ── Networks that MCP servers must never share with platform backends ─────────
 PLATFORM_BACKEND_NETS = frozenset({
     "internal-net",
@@ -231,6 +241,9 @@ def _is_overlay_context(c: dict) -> bool:
     and pairwise-net checks cannot be evaluated against a complete picture.
     """
     svc = c.get("services") or {}
+    # proxy with no networks = overlay (adding env/volumes to base proxy)
+    if "proxy" in svc and svc["proxy"].get("networks") is None:
+        return True
     overlay_indicators = {"opa", "redis", "db", "vault"}
     for be in overlay_indicators:
         if be in svc and svc[be].get("networks") is None:
@@ -274,6 +287,12 @@ def _check_proxy_isolation(c: dict, fails: list[str]) -> None:
             # fully defined; skip rather than emit a false-positive FAIL.
             print(f"INFO  Skipping proxy<->{be} pairwise check: "
                   f"{be} has no networks defined in this file (overlay context).")
+            continue
+        if not proxy_nets:
+            # proxy has no networks in this file — it is an overlay fragment.
+            # Skip rather than emit a false-positive FAIL.
+            print(f"INFO  Skipping proxy<->{be} pairwise check: "
+                  f"proxy has no networks defined in this file (overlay context).")
             continue
         shared = proxy_nets & set(be_nets if isinstance(be_nets, list) else be_nets.keys())
         chk(f"proxy<->{be} reachable via {pn} only (got {sorted(shared)})",
@@ -366,7 +385,7 @@ def _check_mcp_isolation(c: dict, compose_file: str, fails: list[str]) -> None:
             expected = {name}
             if "proxy" in svc:
                 expected.add("proxy")
-            extra = occupants - expected
+            extra = occupants - expected - _LAB_MOCK_SERVICES
             chk(
                 f"MCP {name}: pairwise net {pairwise_net} shared only with proxy"
                 f" (extra occupants: {sorted(extra)})",

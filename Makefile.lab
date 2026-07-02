@@ -2,14 +2,15 @@
 # Usage: make -f Makefile.lab <target>
 # Prerequisites: podman, podman-compose, python3, curl, jq
 
-LAB_COMPOSE = podman-compose \
+LAB_COMPOSE = podman-compose --env-file .env.lab \
   -f docker-compose.yml \
   -f docker-compose.dev.yml \
-  -f podman-compose.lab.yml
+  -f podman-compose.lab.yml \
+  -f compose.wazuh.yml
 
 .PHONY: lab-setup lab-up lab-down lab-reset lab-rebuild lab-init lab-test lab-smoke \
         lab-logs lab-dex-logs lab-ps lab-entra-check lab-vault-init \
-        lab-proxy-shell lab-netbox-shell smoke-four wazuh-up incidents help
+        lab-proxy-shell lab-netbox-shell smoke-four wazuh-up wazuh-dashboard-up incidents help
 
 ## lab-setup       Zero-to-usable: start stack, migrate DB, provision tokens, seed, smoke test
 lab-setup:
@@ -43,11 +44,22 @@ lab-rebuild:
 ## lab-init         Initialise Vault, replay missing migrations, then run the seeder container
 lab-init:
 	bash lab/scripts/vault-init.sh
-	@echo "Replaying any migrations not applied at DB init (idempotent)..."
-	@for f in $$(ls infra/db/migrations/V*.sql | sort); do \
+	@echo "Replaying migrations (idempotent — piped from host, errors visible)..."
+	@failed=0; \
+	for f in $$(ls infra/db/migrations/V*.sql | sort); do \
 	  fname=$$(basename "$$f"); \
-	  podman exec mcp-db bash -c "psql -U mcp_app mcp_security -f /docker-entrypoint-initdb.d/$$fname" >/dev/null 2>&1 || true; \
-	done
+	  out=$$(podman exec -i mcp-db psql -U mcp_app mcp_security 2>&1 < "$$f"); \
+	  rc=$$?; \
+	  if [ $$rc -ne 0 ]; then \
+	    echo "  FAIL $$fname: $$(echo "$$out" | grep -i error | head -1)"; \
+	    failed=$$((failed+1)); \
+	  fi; \
+	done; \
+	if [ $$failed -gt 0 ]; then \
+	  echo "  $$failed migration(s) failed — check output above"; \
+	else \
+	  echo "  All migrations OK"; \
+	fi
 	$(LAB_COMPOSE) run --rm lab-seeder
 
 ## lab-test         Run integration / e2e tests (excludes unit-only tests)
@@ -62,16 +74,43 @@ lab-smoke:
 smoke-four:
 	bash lab/scripts/smoke_four_cases.sh
 
-## wazuh-up       Start full SIEM: base lab stack + Wazuh manager/indexer/dashboard overlay
+## wazuh-up           Start full lab stack + Wazuh SIEM + Wazuh MCP server (no dashboard)
 wazuh-up:
-	podman compose \
-	  -f docker-compose.yml \
-	  -f docker-compose.dev.yml \
-	  -f podman-compose.lab.yml \
-	  -f compose.wazuh.yml \
-	  up -d --build
-	@echo "Wazuh dashboard: http://localhost:5601  (use WAZUH_INDEXER_PASSWORD)"
-	@echo "Wazuh API:       https://localhost:55000 (admin / WAZUH_API_PASSWORD)"
+	$(LAB_COMPOSE) up -d --build
+	@echo "Wazuh API:  https://localhost:55000  (admin / \$$WAZUH_API_PASSWORD from .env.lab)"
+	@echo "Wazuh MCP:  proxied via http://localhost:8000/mcp  (tool: wazuh-siem)"
+	@echo "Dashboard:  run 'make wazuh-dashboard-up' for the full Wazuh UI (~4GB RAM)"
+
+## wazuh-dashboard-up  Start full Wazuh stack including indexer + dashboard UI (~4GB RAM)
+wazuh-dashboard-up:
+	@echo "Generating Wazuh TLS certificates (if missing)..."
+	@if [ ! -f lab/wazuh/certs/root-ca.pem ]; then \
+	  podman run --rm \
+	    -v "$(PWD)/lab/wazuh/certs-config.yml:/config/certs.yml:ro,z" \
+	    -v "$(PWD)/lab/wazuh/certs:/certificates:z" \
+	    wazuh/wazuh-certs-generator:0.0.2 \
+	    /entrypoint.sh 2>&1 | tail -5; \
+	  echo "  Certs generated in lab/wazuh/certs/"; \
+	else \
+	  echo "  Certs already present (lab/wazuh/certs/root-ca.pem exists)."; \
+	fi
+	@echo "Starting Wazuh with indexer + dashboard (requires ~4GB RAM total)..."
+	WAZUH_INDEXER_URL=https://wazuh-indexer:9200 $(LAB_COMPOSE) --profile dashboard up -d --build || true
+	@echo "Starting stragglers that may have missed dependency window..."
+	@sleep 3
+	WAZUH_INDEXER_URL=https://wazuh-indexer:9200 $(LAB_COMPOSE) --profile dashboard up -d --no-deps lab-wazuh-indexer lab-wazuh-dashboard lab-wazuh-manager 2>/dev/null || true
+	@echo ""
+	@echo "Wazuh Dashboard: http://192.168.0.10:5601"
+	@echo "  Login: admin / \$$WAZUH_INDEXER_PASSWORD (default: labpassword)"
+	@echo "Wazuh API:       https://192.168.0.10:55000  (wazuh / \$$WAZUH_API_PASSWORD)"
+	@echo ""
+	@echo "NOTE: Dashboard takes 2-3 min to fully initialize (indexer start_period: 90s)."
+	@echo "      To persist the indexer password: add WAZUH_INDEXER_PASSWORD=<pass> to .env.lab"
+
+## wazuh-filebeat-up  Also start Filebeat log shipper (set PODMAN_SOCK in .env.lab first)
+wazuh-filebeat-up:
+	$(LAB_COMPOSE) --profile filebeat up -d --build
+	@echo "Filebeat started — shipping container logs to wazuh-manager:5044"
 
 ## incidents        List available incident scenarios and run them
 incidents:
@@ -111,6 +150,19 @@ lab-proxy-shell:
 ## lab-netbox-shell Open a sh shell inside the NetBox container
 lab-netbox-shell:
 	$(LAB_COMPOSE) exec lab-netbox /bin/sh
+
+## lab-backfill-sboms  Generate signed SBOMs for seeded tools that lack one
+lab-backfill-sboms:
+	$(LAB_COMPOSE) exec proxy python /scripts/backfill_sboms.py
+
+## provision-demo     Auto-provision the two demo MCP flows end-to-end (flow A upload + flow B scaffold)
+provision-demo:
+	python3 scripts/provision_mcp.py --name demo-uploaded --source $(CURDIR)/sandbox/uploaded-demo-mcp
+	python3 scripts/provision_mcp.py --name demo-selfservice --scaffold-mode none
+
+## provision           Auto-provision one MCP: make -f Makefile.lab provision ARGS="--name x --source ./dir"
+provision:
+	python3 scripts/provision_mcp.py $(ARGS)
 
 ## help             Show this help message
 help:

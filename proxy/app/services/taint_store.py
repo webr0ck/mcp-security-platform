@@ -7,9 +7,13 @@ INV-015 discipline, and the deliberate INVERSE of the `mcp_session:*` cache
   * write failure                   -> raise, so the caller fails the in-flight
                                        request closed (write-before-forward)
 
-The store keys on the authenticated caller principal (`request.state.principal_id`,
-set for mTLS / API-key / OIDC alike, `auth.py:_build_principal_id`). A distinct
-`mcp_taint:` namespace ensures it is never confused with the fail-open session cache.
+The store keys on `client_id` — the logical identity (e.g. "alice@corp") that is
+stable across all auth methods. Using `principal_id` (which encodes the auth method
+prefix: "human:oidc-issuer:alice" vs "human:apikey:alice") would allow taint evasion
+by switching from an OIDC JWT to an API key for the same account (LOGIC-005).
+
+A distinct `mcp_taint:` namespace ensures it is never confused with the fail-open
+session cache.
 
 The Redis-pool plumbing lives in the thin `*_for_principal` wrappers; the core
 `is_tainted` / `mark_tainted` take the client explicitly so the fail-closed branching
@@ -37,23 +41,27 @@ class TaintStoreError(Exception):
     """Raised when the taint bit cannot be durably written (caller must 500)."""
 
 
-def taint_key(principal_id: str) -> str:
-    """Namespaced, hashed key. Distinct from the fail-open `mcp_session:` cache."""
-    digest = hashlib.sha256(principal_id.encode()).hexdigest()[:16]
+def taint_key(client_id: str) -> str:
+    """Namespaced, hashed key keyed on logical identity (client_id), not auth method.
+
+    Using client_id (stable across OIDC/API-key/session) prevents taint evasion by
+    switching auth methods (LOGIC-005 fix). Distinct from the fail-open
+    `mcp_session:` cache.
+    """
+    digest = hashlib.sha256(client_id.encode()).hexdigest()[:16]
     return f"mcp_taint:{digest}"
 
 
-async def is_tainted(client, principal_id: str | None) -> bool:
-    """True if the principal's session is tainted. Fail-CLOSED: unknown -> True."""
-    if principal_id is None:
-        # An unauthenticated/unidentifiable caller cannot key a clean session.
-        logger.warning("Taint check with no principal_id; failing closed (tainted)")
+async def is_tainted(client, client_id: str | None) -> bool:
+    """True if the identity's session is tainted. Fail-CLOSED: unknown -> True."""
+    if client_id is None:
+        logger.warning("Taint check with no client_id; failing closed (tainted)")
         return True
     if client is None:
         logger.warning("Taint store unavailable on read; failing closed (tainted)")
         return True
     try:
-        value = await client.get(taint_key(principal_id))
+        value = await client.get(taint_key(client_id))
     except Exception as exc:  # noqa: BLE001 - any read failure must fail closed
         logger.warning("Taint store read failed; failing closed (tainted): %s", exc)
         return True
@@ -61,15 +69,15 @@ async def is_tainted(client, principal_id: str | None) -> bool:
 
 
 async def mark_tainted(
-    client, principal_id: str | None, ttl: int = DEFAULT_TAINT_TTL_SECONDS
+    client, client_id: str | None, ttl: int = DEFAULT_TAINT_TTL_SECONDS
 ) -> None:
     """Durably set the taint bit. Raises TaintStoreError if it cannot be written."""
-    if principal_id is None:
-        raise TaintStoreError("no principal_id to taint; failing closed")
+    if client_id is None:
+        raise TaintStoreError("no client_id to taint; failing closed")
     if client is None:
         raise TaintStoreError("taint store unavailable; cannot mark tainted")
     try:
-        await client.setex(taint_key(principal_id), ttl, b"1")
+        await client.setex(taint_key(client_id), ttl, b"1")
     except Exception as exc:  # noqa: BLE001
         raise TaintStoreError(f"taint write failed: {exc}") from exc
 
@@ -91,11 +99,11 @@ def _pool_client():
         return None
 
 
-async def is_tainted_for_principal(principal_id: str | None) -> bool:
-    return await is_tainted(_pool_client(), principal_id)
+async def is_tainted_for_principal(client_id: str | None) -> bool:
+    return await is_tainted(_pool_client(), client_id)
 
 
 async def mark_tainted_for_principal(
-    principal_id: str | None, ttl: int = DEFAULT_TAINT_TTL_SECONDS
+    client_id: str | None, ttl: int = DEFAULT_TAINT_TTL_SECONDS
 ) -> None:
-    await mark_tainted(_pool_client(), principal_id, ttl)
+    await mark_tainted(_pool_client(), client_id, ttl)

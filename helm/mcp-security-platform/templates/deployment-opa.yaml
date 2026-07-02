@@ -1,0 +1,147 @@
+{{/*
+OPA deployment — deny-by-default policy engine with CI-enforced signed bundles.
+
+INV-012: OPA MUST NOT start without a valid signed bundle. The --verification-key
+flag means OPA refuses any unsigned or tampered bundle.tar.gz at load time AND
+on every bundle refresh.
+
+Bundle delivery (values.yaml opa.bundleSource):
+  "configmap"     — bundle.tar.gz from a ConfigMap (CI-injected; best for GitOps).
+                    Create/update with:
+                    kubectl create configmap mcp-opa-bundle \
+                      --from-file=bundle.tar.gz=policies/bundle.tar.gz \
+                      --dry-run=client -o yaml | kubectl apply -f -
+  "initContainer" — init container fetches bundle from object storage (S3/GCS).
+                    Set opa.bundleInit.* values and provide IAM credentials.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mcp-security-platform.opaServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mcp-security-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opa
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mcp-security-platform.opaSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp-security-platform.opaSelectorLabels" . | nindent 8 }}
+      annotations:
+        # Force rollout when the OPA config changes
+        checksum/opa-config: {{ include (print $.Template.BasePath "/configmap-opa.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.opa.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if eq .Values.opa.bundleSource "initContainer" }}
+      initContainers:
+        - name: fetch-bundle
+          image: {{ .Values.opa.bundleInit.image | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              aws s3 cp s3://{{ .Values.opa.bundleInit.s3Bucket }}/{{ .Values.opa.bundleInit.s3Key }} \
+                /policies/bundle.tar.gz
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.opa.bundleInit.s3Region | quote }}
+          volumeMounts:
+            - name: policies
+              mountPath: /policies
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      {{- end }}
+      containers:
+        - name: opa
+          image: "{{ .Values.opa.image.repository }}:{{ .Values.opa.image.tag }}"
+          imagePullPolicy: {{ .Values.opa.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8181
+              protocol: TCP
+          {{- with .Values.opa.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            - "run"
+            - "--server"
+            - "--addr=0.0.0.0:8181"
+            - "--log-format={{ .Values.opa.logFormat }}"
+            - "--log-level={{ .Values.opa.logLevel }}"
+            - "--config-file=/opa-config/opa-config.yaml"
+            - "--set=decision_logs.console={{ .Values.opa.decisionLogsConsole }}"
+            # INV-012: bundle signing verification — OPA refuses to load unsigned
+            # or tampered bundles. POLICY_SIGNING_KEY comes from existingSecret.
+            - "--verification-key=$(POLICY_SIGNING_KEY)"
+            - "--verification-key-id=mcp-policy-signing-key-v1"
+            - "--signing-alg=HS256"
+            - "--bundle"
+            - "/policies/bundle.tar.gz"
+          env:
+            {{- if .Values.secrets.existingSecret }}
+            - name: POLICY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: POLICY_SIGNING_KEY
+            {{- end }}
+          volumeMounts:
+            - name: opa-config
+              mountPath: /opa-config
+              readOnly: true
+            - name: policies
+              mountPath: /policies
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8181
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8181
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- with .Values.opa.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: opa-config
+          configMap:
+            name: {{ include "mcp-security-platform.fullname" . }}-opa-config
+        - name: policies
+          {{- if eq .Values.opa.bundleSource "configmap" }}
+          configMap:
+            name: {{ .Values.opa.bundleConfigMap }}
+            items:
+              - key: bundle.tar.gz
+                path: bundle.tar.gz
+          {{- else }}
+          # initContainer fetches bundle.tar.gz into this emptyDir
+          emptyDir:
+            sizeLimit: 32Mi
+          {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

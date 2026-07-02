@@ -75,10 +75,20 @@ class TestAuthorizationGate:
         assert exc_info.value.status_code == 403
 
     @pytest.mark.unit
-    def test_admin_can_write_other_profile(self):
+    def test_admin_cannot_write_other_profile(self):
+        """IDOR-005 fix: plain admin must NOT write to another user's profile."""
+        from fastapi import HTTPException
         from app.routers.profiles import _assert_may_write
         req = _make_request(client_id="admin-user", roles=["admin"])
-        # Should not raise
+        with pytest.raises(HTTPException) as exc_info:
+            _assert_may_write(req, "some-other-user")
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.unit
+    def test_profile_service_can_write_other_profile(self):
+        """profile_service role is the delegation path for cross-user writes."""
+        from app.routers.profiles import _assert_may_write
+        req = _make_request(client_id="svc-account", roles=["profile_service"])
         _assert_may_write(req, "some-other-user")
 
     @pytest.mark.unit
@@ -186,11 +196,22 @@ class TestEnableMcp:
         assert exc_info.value.status_code == 403
 
     @pytest.mark.unit
-    async def test_enable_mcp_admin_can_enable_other(self):
-        """Admin can enable another user's MCP."""
+    async def test_enable_mcp_admin_cannot_enable_other(self):
+        """IDOR-005 fix: admin cannot enable an MCP on another user's profile."""
+        from fastapi import HTTPException
         from app.routers.profiles import enable_mcp
 
         req = _make_request(client_id="admin-user", roles=["admin"])
+        with pytest.raises(HTTPException) as exc_info:
+            await enable_mcp("target-user", "file_tool", req)
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.unit
+    async def test_enable_mcp_platform_admin_can_enable_other(self):
+        """platform_admin (super-admin) retains cross-user write capability."""
+        from app.routers.profiles import enable_mcp
+
+        req = _make_request(client_id="platform-admin", roles=["platform_admin"])
 
         with patch("app.routers.profiles._assert_mcp_exists", AsyncMock()), \
              patch("app.routers.profiles._get_profile_row", AsyncMock(return_value=None)), \
@@ -274,6 +295,84 @@ class TestDisableMcp:
         mock_upsert.assert_awaited_once()
         kwargs = mock_upsert.call_args.kwargs
         assert kwargs["allowed_functions"] == ["fn_a", "fn_b"]
+
+
+# ---------------------------------------------------------------------------
+# Self-service /me routes emit audit events (IDOR-002 fix)
+# ---------------------------------------------------------------------------
+
+class TestSelfServiceAuditEvents:
+    """Verify that /me mutation handlers call _emit_profile_event (IDOR-002)."""
+
+    @pytest.mark.unit
+    async def test_enable_mcp_self_emits_audit_event(self):
+        from app.routers.profiles import enable_mcp_self
+
+        req = _make_request(client_id="alice", roles=["editor"])
+        mock_emit = AsyncMock()
+
+        with patch("app.routers.profiles._assert_mcp_exists", AsyncMock()), \
+             patch("app.routers.profiles._get_profile_row", AsyncMock(return_value=None)), \
+             patch("app.routers.profiles._upsert_profile_row", AsyncMock()), \
+             patch("app.routers.profiles._emit_profile_event", mock_emit), \
+             patch("app.routers.profiles._invalidate_profile_cache", AsyncMock()):
+            await enable_mcp_self("echo-ping", req)
+
+        mock_emit.assert_awaited_once()
+        assert mock_emit.call_args[0][2] == "MCP_ENABLED"
+
+    @pytest.mark.unit
+    async def test_disable_mcp_self_emits_audit_event(self):
+        from app.routers.profiles import disable_mcp_self
+
+        req = _make_request(client_id="alice", roles=["editor"])
+        mock_emit = AsyncMock()
+
+        with patch("app.routers.profiles._assert_mcp_exists", AsyncMock()), \
+             patch("app.routers.profiles._get_profile_row", AsyncMock(return_value={"enabled": True, "allowed_functions": None})), \
+             patch("app.routers.profiles._upsert_profile_row", AsyncMock()), \
+             patch("app.routers.profiles._emit_profile_event", mock_emit), \
+             patch("app.routers.profiles._invalidate_profile_cache", AsyncMock()):
+            await disable_mcp_self("echo-ping", req)
+
+        mock_emit.assert_awaited_once()
+        assert mock_emit.call_args[0][2] == "MCP_DISABLED"
+
+    @pytest.mark.unit
+    async def test_enable_fn_self_emits_audit_event(self):
+        from app.routers.profiles import enable_fn_self
+
+        req = _make_request(client_id="alice", roles=["editor"])
+        mock_emit = AsyncMock()
+        existing_row = {"enabled": True, "allowed_functions": None}
+
+        with patch("app.routers.profiles._assert_mcp_exists", AsyncMock()), \
+             patch("app.routers.profiles._get_profile_row", AsyncMock(return_value=existing_row)), \
+             patch("app.routers.profiles._upsert_profile_row", AsyncMock()), \
+             patch("app.routers.profiles._emit_profile_event", mock_emit), \
+             patch("app.routers.profiles._invalidate_profile_cache", AsyncMock()):
+            await enable_fn_self("echo-ping", "search", req)
+
+        mock_emit.assert_awaited_once()
+        assert mock_emit.call_args[0][2] == "FUNCTION_ENABLED"
+
+    @pytest.mark.unit
+    async def test_disable_fn_self_emits_audit_event(self):
+        from app.routers.profiles import disable_fn_self
+
+        req = _make_request(client_id="alice", roles=["editor"])
+        mock_emit = AsyncMock()
+        existing_row = {"enabled": True, "allowed_functions": ["search", "read"]}
+
+        with patch("app.routers.profiles._assert_mcp_exists", AsyncMock()), \
+             patch("app.routers.profiles._get_profile_row", AsyncMock(return_value=existing_row)), \
+             patch("app.routers.profiles._upsert_profile_row", AsyncMock()), \
+             patch("app.routers.profiles._emit_profile_event", mock_emit), \
+             patch("app.routers.profiles._invalidate_profile_cache", AsyncMock()):
+            await disable_fn_self("echo-ping", "search", req)
+
+        mock_emit.assert_awaited_once()
+        assert mock_emit.call_args[0][2] == "FUNCTION_DISABLED"
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +481,7 @@ class TestCacheInvalidation:
         mock_cache.assert_awaited_once_with(
             "alice", "file_tool",
             {"enabled": True, "allowed_functions": ["fn_a"]},
+            hard_on_disable=False,
         )
 
     @pytest.mark.unit
@@ -608,3 +708,31 @@ class TestGetProfile:
         assert body["enabled"] is False
         assert body["allowed_functions"] == ["read_file"]
         assert body["explicit_row"] is True
+
+
+# ---------------------------------------------------------------------------
+# A-06: PRIVESC-001 negative test — empty roles → 403 on self-service enable
+# ---------------------------------------------------------------------------
+
+class TestPrivesc001EmptyRoles:
+    @pytest.mark.unit
+    async def test_empty_roles_cannot_enable_own_mcp(self):
+        """PRIVESC-001: empty roles token must not reach /me/mcps/.../enable."""
+        from fastapi import HTTPException
+        from app.routers.profiles import enable_mcp_self
+
+        req = _make_request(client_id="alice", roles=[])
+        with pytest.raises(HTTPException) as exc_info:
+            await enable_mcp_self("file_tool", req)
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.unit
+    async def test_empty_roles_cannot_disable_own_mcp(self):
+        """PRIVESC-001: empty roles must also block /me/mcps/.../disable."""
+        from fastapi import HTTPException
+        from app.routers.profiles import disable_mcp_self
+
+        req = _make_request(client_id="alice", roles=[])
+        with pytest.raises(HTTPException) as exc_info:
+            await disable_mcp_self("file_tool", req)
+        assert exc_info.value.status_code == 403

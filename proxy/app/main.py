@@ -7,6 +7,7 @@ and lifecycle event handlers.
 See docs/ARCHITECTURE.md for service boundary definitions.
 See docs/API.md for complete endpoint specifications.
 """
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -21,7 +22,7 @@ from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
 from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
-from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, portal, server_registry, catalog, lab_links, entitlements, profiles
+from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, portal, server_registry, catalog, lab_links, entitlements, profiles, submission
 from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.log_filter import RedactingFilter
@@ -84,14 +85,26 @@ async def lifespan(app: FastAPI):
     logger.info("Redis pool initialized")
 
     # Step 2: Initialize asyncpg pool (needed by Registry, credential_storage, etc.)
-    try:
-        await asyncpg_pool.initialize()
-        logger.info("Asyncpg pool initialized")
-    except Exception as exc:
-        logger.warning(
-            "Asyncpg pool initialization failed — Registry refresh loop disabled",
-            extra={"error": str(exc)},
-        )
+    # Retry up to 5 times with backoff — DB container may not be accepting connections
+    # yet even when compose reports service_healthy (pg_isready passes before tables load).
+    for _attempt in range(5):
+        try:
+            await asyncpg_pool.initialize()
+            logger.info("Asyncpg pool initialized (attempt %d)", _attempt + 1)
+            break
+        except Exception as exc:
+            if _attempt == 4:
+                logger.warning(
+                    "Asyncpg pool initialization failed after 5 attempts — Registry refresh loop disabled",
+                    extra={"error": str(exc)},
+                )
+            else:
+                wait = 2 ** _attempt  # 1, 2, 4, 8 s
+                logger.warning(
+                    "Asyncpg pool init attempt %d failed, retrying in %ds: %s",
+                    _attempt + 1, wait, exc,
+                )
+                await asyncio.sleep(wait)
 
     # Step 3: Initialize credential broker
     from app.services import invocation as inv_svc
@@ -145,6 +158,13 @@ async def lifespan(app: FastAPI):
             extra={"error": str(exc)},
         )
 
+    # Step 5.5: Start supply-chain re-scan loop (Stage 3 — periodic freshness check)
+    from app.services import rescan_scheduler as _rescan_svc
+    try:
+        _rescan_svc.start(interval_hours=settings.RESCAN_INTERVAL_HOURS)
+    except Exception as exc:
+        logger.warning("Rescan scheduler failed to start: %s", exc)
+
     # Step 6: Initialize trust envelope labeler (PRD-0001 M3) — fail-graceful
     if settings.TRUST_ENVELOPE_ENABLED:
         from app.services.trust_labeler import init_labeler as _init_labeler
@@ -165,6 +185,10 @@ async def lifespan(app: FastAPI):
         logger.warning("Database not reachable at startup — health endpoint will report degraded")
 
     yield
+
+    # Shutdown — stop rescan loop
+    from app.services import rescan_scheduler as _rescan_svc
+    await _rescan_svc.stop()
 
     # Shutdown — stop OPA data sync reconcile loop first
     if opa_data_sync is not None:
@@ -243,6 +267,14 @@ if settings.ENVIRONMENT == "development":
         allow_headers=["*"],
     )
 
+# SEC-05: outermost guard — reject any inbound peer that isn't the gateway or
+# loopback, so MCP backend containers cannot dial proxy:8000 back over their
+# per-backend bridge network. Added last => runs first. Flag-gated (lab enables it).
+if os.environ.get("PROXY_INGRESS_ALLOWLIST_ENABLED", "").lower() in ("1", "true", "yes"):
+    from app.middleware.ingress import IngressAllowlistMiddleware
+    app.add_middleware(IngressAllowlistMiddleware)
+    logger.info("SEC-05 ingress allowlist ENABLED (trusted: gateway + loopback)")
+
 # ============================================================================
 # Router registration — all API endpoints under /api/v1
 # Health endpoints are at root level (no prefix).
@@ -268,6 +300,7 @@ app.include_router(admin_limits.router)        # Per-client limits API (Task 5)
 app.include_router(catalog.router)            # Principal-scoped server catalog (discovery==invoke)
 app.include_router(entitlements.router)       # Entitlement CRUD (Phase 2.2)
 app.include_router(profiles.router)           # Profile CRUD — self-service + admin (Task 4.2)
+app.include_router(submission.router)         # Self-service MCP server submission + review queue
 app.include_router(lab_links.router)          # Lab convenience: / → portal, /netbox /grafana /keycloak
 
 # Static assets — served at /static/* (no auth required; public JS/CSS only)

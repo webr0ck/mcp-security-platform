@@ -389,6 +389,51 @@ async def delete_server(server_id: str, request: Request):
         await db.commit()
 
 
+@router.post("/api/v1/admin/servers/{server_id}/reject", status_code=204, response_class=Response)
+async def reject_server(server_id: str, request: Request):
+    """Reject a pending server — soft-deletes and sets status='rejected'."""
+    _require_platform_admin(request)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text(
+                "UPDATE server_registry SET deleted_at = now(), status = 'rejected' "
+                "WHERE server_id = :id AND deleted_at IS NULL"
+            ),
+            {"id": server_id},
+        )
+        await db.commit()
+
+
+@router.post("/api/v1/admin/servers/{server_id}/quarantine", status_code=204, response_class=Response)
+async def quarantine_server(server_id: str, request: Request):
+    """Quarantine an approved server — blocks invocations without deleting it."""
+    _require_platform_admin(request)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text(
+                "UPDATE server_registry SET status = 'quarantined' "
+                "WHERE server_id = :id AND deleted_at IS NULL"
+            ),
+            {"id": server_id},
+        )
+        await db.commit()
+
+
+@router.post("/api/v1/admin/servers/{server_id}/release", status_code=204, response_class=Response)
+async def release_server(server_id: str, request: Request):
+    """Release a quarantined server back to 'approved'."""
+    _require_platform_admin(request)
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text(
+                "UPDATE server_registry SET status = 'approved' "
+                "WHERE server_id = :id AND deleted_at IS NULL AND status = 'quarantined'"
+            ),
+            {"id": server_id},
+        )
+        await db.commit()
+
+
 @router.post("/api/v1/servers/{server_id}/consent", status_code=201)
 async def mint_consent_token(server_id: str, body: ConsentRequest, request: Request):
     """
@@ -559,6 +604,20 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
                 "RETURNING server_id"
             ),
             {"id": server_id, "approver": approver, "consent_jti": consent_payload.jti},
+        )
+        # A-07: append-only audit record so approval history survives future UPDATEs.
+        await db.execute(
+            text(
+                "INSERT INTO audit_events "
+                "(event_id, event_type, client_id, tool_name, outcome, request_id, sha256_hash, latency_ms) "
+                "VALUES (:eid, 'SERVER_APPROVED', :approver, :server_id, 'success', :rid, '', 0)"
+            ),
+            {
+                "eid": str(uuid.uuid4()),
+                "approver": approver,
+                "server_id": server_id,
+                "rid": getattr(request.state, "request_id", ""),
+            },
         )
         await db.commit()
         rows_updated = result.rowcount

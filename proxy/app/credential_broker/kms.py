@@ -71,7 +71,9 @@ class VaultKMSClient:
             raise KMSError(f"Vault unreachable: {exc}") from exc
 
         try:
-            encoded = resp.json()["data"]["data"]["master_secret"]
+            # Vault stores the KEK under "value" (written by lab/seeder/vault-init.sh).
+            data = resp.json()["data"]["data"]
+            encoded = data.get("master_secret") or data["value"]
             return _decode_master_secret(encoded)
         except (KeyError, ValueError) as exc:
             raise KMSError(f"Unexpected Vault response structure: {exc}") from exc

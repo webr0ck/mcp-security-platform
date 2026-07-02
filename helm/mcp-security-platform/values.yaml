@@ -1,65 +1,288 @@
-# Helm values for mcp-security-platform
-# These are stub values — configure for your production environment.
-# See docs/ARCHITECTURE.md for service descriptions.
+# MCP Security Platform — Helm Values
+#
+# Quick-start: helm install mcp-security ./helm/mcp-security-platform \
+#   --set proxy.env.ENVIRONMENT=staging \
+#   --set secrets.existingSecret=my-mcp-secrets
+#
+# All sensitive values (DB_PASSWORD, REDIS_PASSWORD, signing keys, etc.) MUST
+# come from an existing Kubernetes Secret — set secrets.existingSecret to its
+# name. Never set sensitive values inline in values.yaml or --set flags.
+#
+# See docs/ARCHITECTURE.md for service topology and security properties.
 
-replicaCount: 1
+# ─────────────────────────────────────────────────────────────────────────────
+# Global
+# ─────────────────────────────────────────────────────────────────────────────
+nameOverride: ""
+fullnameOverride: ""
 
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Secrets
+# ─────────────────────────────────────────────────────────────────────────────
+secrets:
+  # Name of an EXISTING Kubernetes Secret that contains all sensitive env vars.
+  # Required fields in the secret — see .env.example for descriptions:
+  #   DB_PASSWORD, REDIS_PASSWORD, MINIO_ROOT_USER, MINIO_ROOT_PASSWORD,
+  #   PROXY_SECRET_KEY, API_KEY_HMAC_KEY, SBOM_SIGNING_KEY, AUDIT_LOG_HMAC_KEY,
+  #   WEBHOOK_SIGNING_KEY, POLICY_SIGNING_KEY, VAULT_TOKEN, GATEWAY_SHARED_SECRET,
+  #   OAUTH_STATE_SECRET, SESSION_SECRET (optional), OIDC_CLIENT_SECRET (if OIDC).
+  existingSecret: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Proxy (FastAPI MCP Security Gateway)
+# ─────────────────────────────────────────────────────────────────────────────
 proxy:
+  replicaCount: 2
+
   image:
-    repository: mcp-security-proxy
-    tag: "1.0.0"
+    repository: ghcr.io/webr0ck/mcp-security-proxy
+    tag: ""   # defaults to .Chart.AppVersion
     pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8000
+
   resources:
     requests:
-      cpu: "500m"
-      memory: "512Mi"
+      cpu: "250m"
+      memory: "256Mi"
     limits:
       cpu: "2"
-      memory: "2Gi"
+      memory: "1Gi"
 
+  # Non-sensitive environment variables.
+  # Sensitive values come from secrets.existingSecret.
+  env:
+    ENVIRONMENT: "production"
+    LOG_LEVEL: "INFO"
+    PROXY_HOST: "0.0.0.0"
+    PROXY_PORT: "8000"
+    PROXY_WORKERS: "4"
+    # Database — host/port/name are non-sensitive; password comes from secret
+    DB_HOST: "postgres"
+    DB_PORT: "5432"
+    DB_NAME: "mcp_security"
+    DB_USER: "mcp_app"
+    DB_POOL_SIZE: "20"
+    DB_MAX_OVERFLOW: "10"
+    # Redis — host/port are non-sensitive; password comes from secret
+    REDIS_HOST: "redis-master"
+    REDIS_PORT: "6379"
+    REDIS_DB: "0"
+    REDIS_RATE_LIMIT_DB: "1"
+    # OPA — internal ClusterIP; no external exposure
+    OPA_HOST: "{{ include \"mcp-security-platform.fullname\" . }}-opa"
+    OPA_PORT: "8181"
+    OPA_TIMEOUT_SECONDS: "2"
+    # Vault — address is non-sensitive; token comes from secret
+    VAULT_ADDR: "https://vault:8200"
+    BROKER_MASTER_SECRET_PATH: "secret/data/mcp/broker-master"
+    BROKER_MASTER_SECRET_TTL_SECONDS: "300"
+    # MinIO / S3 — endpoint is non-sensitive; credentials come from secret
+    MINIO_HOST: "minio"
+    MINIO_PORT: "9000"
+    MINIO_AUDIT_BUCKET: "mcp-audit-archive"
+    MINIO_RETENTION_DAYS: "90"
+    # OIDC (disabled by default — enable per your IdP)
+    OIDC_ENABLED: "false"
+    OIDC_ISSUER_URL: ""
+    OIDC_CLIENT_ID: ""
+    OIDC_AUDIENCE: ""
+    PROXY_BASE_URL: "https://mcp-security.example.com"
+    SESSION_COOKIE_SECURE: "true"
+    SESSION_COOKIE_DOMAIN: "mcp-security.example.com"
+    # Ollama (local LLM risk scoring)
+    OLLAMA_HOST: "ollama"
+    OLLAMA_PORT: "11434"
+    OLLAMA_MODEL: "llama3.2"
+    REQUIRE_LLM_AUDIT: "true"
+    # Rate limits (requests/min per role)
+    RATE_LIMIT_ADMIN: "300"
+    RATE_LIMIT_AGENT: "120"
+    RATE_LIMIT_AUDITOR: "60"
+    RATE_LIMIT_READONLY: "30"
+    # Trust envelope (disabled unless explicitly enabled post-PKI-init)
+    TRUST_ENVELOPE_ENABLED: "false"
+    LAYER_B_ENABLED: "false"
+
+  # Extra env vars — override or extend without touching values.yaml
+  extraEnv: []
+  # - name: WEBHOOK_ENABLED
+  #   value: "true"
+
+  # Liveness / readiness probes
+  livenessProbe:
+    httpGet:
+      path: /health/live
+      port: 8000
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /health/ready
+      port: 8000
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  podAnnotations: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    fsGroup: 1001
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OPA (Open Policy Agent — deny-by-default, CI-signed bundles)
+# ─────────────────────────────────────────────────────────────────────────────
 opa:
   image:
     repository: openpolicyagent/opa
-    tag: "latest-static"
+    tag: "0.63.0-static"
+    pullPolicy: IfNotPresent
+
   resources:
     requests:
-      cpu: "100m"
-      memory: "128Mi"
+      cpu: "50m"
+      memory: "64Mi"
     limits:
       cpu: "500m"
       memory: "256Mi"
 
-# In production: use managed PostgreSQL (RDS)
-postgresql:
-  enabled: false
-  external:
-    host: ""
-    port: 5432
-    database: mcp_security
-    secretName: mcp-db-credentials
+  # OPA logs — json format for Loki/Promtail ingestion
+  logFormat: "json"
+  logLevel: "info"
 
-# In production: use managed Redis (ElastiCache)
-redis:
-  enabled: false
-  external:
-    host: ""
-    port: 6379
-    secretName: mcp-redis-credentials
+  # OPA decision log masking (INV-002): masks /input/params and /input/arguments
+  # to prevent credential and parameter leakage in audit logs.
+  # The full opa-config.yaml is rendered into a ConfigMap (configmap-opa.yaml).
+  decisionLogsConsole: true
 
-# In production: use AWS S3 + Object Lock
-minio:
-  enabled: false
-  s3:
-    bucket: ""
-    region: us-east-1
-    secretName: mcp-s3-credentials
+  service:
+    type: ClusterIP
+    port: 8181
 
+  # Bundle source: how OPA receives the signed policy bundle.
+  # Options:
+  #   "configmap" — bundle.tar.gz is stored in a ConfigMap (small bundles, CI-injected).
+  #   "initContainer" — an init container fetches bundle.tar.gz from S3/GCS before OPA starts.
+  # Production recommendation: "initContainer" with your object storage.
+  bundleSource: "configmap"
+
+  # When bundleSource=configmap: name of the ConfigMap that holds bundle.tar.gz.
+  # Create with: kubectl create configmap mcp-opa-bundle --from-file=bundle.tar.gz=policies/bundle.tar.gz
+  bundleConfigMap: "mcp-opa-bundle"
+
+  # When bundleSource=initContainer: image and S3 coordinates for the fetcher.
+  bundleInit:
+    image: "amazon/aws-cli:2.15.0"
+    s3Bucket: ""
+    s3Key: "opa/bundle.tar.gz"
+    s3Region: "us-east-1"
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ingress
+# ─────────────────────────────────────────────────────────────────────────────
 ingress:
-  enabled: true
-  className: nginx
+  enabled: false
+  className: "nginx"
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # ModSecurity / WAF annotations if using ingress-nginx with ModSecurity
+    # nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    # nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+  hosts:
+    - host: mcp-security.example.com
+      paths:
+        - path: /
+          pathType: Prefix
   tls:
     - secretName: mcp-tls
       hosts:
-        - mcp-security.your-org.example.com
+        - mcp-security.example.com
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NetworkPolicy — K8s enforcement of the F-001 topology gate
+# (pairwise proxy↔backend networks; OPA not reachable from outside the proxy)
+# ─────────────────────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# External dependencies (point at managed services in production)
+# ─────────────────────────────────────────────────────────────────────────────
+postgresql:
+  # Set enabled: true to deploy an in-cluster PostgreSQL (bitnami/postgresql).
+  # For production use a managed service (RDS, Cloud SQL) and set enabled: false.
+  enabled: false
+  external:
+    host: "postgres.example.com"
+    port: 5432
+    database: "mcp_security"
+    # Secret must contain key: password
+    secretName: "mcp-db-credentials"
+
+redis:
+  # Set enabled: true to deploy an in-cluster Redis (bitnami/redis).
+  # For production use a managed service (ElastiCache, Memorystore).
+  enabled: false
+  external:
+    host: "redis.example.com"
+    port: 6379
+    # Secret must contain key: password
+    secretName: "mcp-redis-credentials"
+
+minio:
+  # Set enabled: true for development/staging with in-cluster MinIO.
+  # For production use AWS S3 with Object Lock or equivalent.
+  enabled: false
+  external:
+    bucket: "mcp-audit-archive"
+    region: "us-east-1"
+    # Secret must contain keys: accessKeyId, secretAccessKey
+    secretName: "mcp-s3-credentials"
+
+vault:
+  # Point at your existing Vault cluster.
+  # The proxy authenticates via VAULT_TOKEN (from secrets.existingSecret).
+  address: "https://vault:8200"
+  # Optional: path to a CA bundle ConfigMap for verifying Vault TLS
+  caBundle:
+    enabled: false
+    configMapName: "vault-ca-bundle"
+    key: "ca.crt"

@@ -30,6 +30,9 @@ async def redis_ready():
     yield
 
 
+_test_tool_ids: list[str] = []
+
+
 async def _insert_tool(tool_id: str, name: str, required_integrity: int = 1, server_id=None):
     """Insert a real tool row so the audit_events.tool_id FK is satisfied."""
     async with AsyncSessionLocal() as db:
@@ -44,6 +47,22 @@ async def _insert_tool(tool_id: str, name: str, required_integrity: int = 1, ser
             {"id": tool_id, "name": name, "ri": required_integrity, "sid": server_id},
         )
         await db.commit()
+    _test_tool_ids.append(tool_id)
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_test_tools():
+    """Soft-delete any tool_registry rows created by this module after each test."""
+    yield
+    if not _test_tool_ids:
+        return
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text("UPDATE tool_registry SET deleted_at = NOW() WHERE tool_id = ANY(:ids)"),
+            {"ids": _test_tool_ids},
+        )
+        await db.commit()
+    _test_tool_ids.clear()
 
 
 def _tool_record(name: str, tool_id: str, required_integrity: int = 1, server_id=None, injection_mode="none"):
@@ -75,21 +94,22 @@ async def test_d1_tainted_session_blocks_high_sink(redis_ready, monkeypatch):
     tid = str(uuid.uuid4())
     name = f"demo-high-sink-{uuid.uuid4().hex[:8]}"
     await _insert_tool(tid, name, required_integrity=1)
-    principal = f"human:test:{uuid.uuid4()}"
+    # taint_store keys on client_id (logical identity, stable across auth methods).
+    client_id = f"test-agent-taint-{uuid.uuid4().hex[:8]}"
 
-    # Pre-taint the principal against REAL Redis (simulating a prior untrusted result).
-    await taint_store.mark_tainted_for_principal(principal)
-    assert await taint_store.is_tainted_for_principal(principal) is True
+    # Pre-taint the client_id against REAL Redis (simulating a prior untrusted result).
+    await taint_store.mark_tainted_for_principal(client_id)
+    assert await taint_store.is_tainted_for_principal(client_id) is True
 
     with pytest.raises(TaintFloorDenyError):
         await invoke_tool(
             tool_record=_tool_record(name, tid, required_integrity=1, server_id=None),
             json_rpc_request=_req(name),
-            client_id="test-agent",
+            client_id=client_id,
             client_roles=["agent"],
             is_testing=False,
             request_id=str(uuid.uuid4()),
-            principal_id=principal,
+            principal_id=None,
             principal_type="human",
         )
 
@@ -115,6 +135,23 @@ async def test_d3_clean_session_passes_taint_gate(redis_ready, monkeypatch):
     name = f"demo-clean-{uuid.uuid4().hex[:8]}"
     await _insert_tool(tid, name, required_integrity=1)
     principal = f"human:test:{uuid.uuid4()}"  # never tainted
+
+    # Clear any residual taint for the shared "test-agent" client_id from previous test runs.
+    # taint_store keys on client_id; "test-agent" is a fixed string so Redis taint persists
+    # across test sessions. Use a synchronous redis client so we don't bind a connection to
+    # this test's event loop (which would break the async pool for subsequent tests).
+    from app.services.taint_store import taint_key as _taint_key
+    from app.core.config import get_settings as _gs
+    try:
+        import redis as _redis_sync
+        _s = _gs()
+        _r_sync = _redis_sync.Redis(host=_s.REDIS_HOST, port=_s.REDIS_PORT,
+                                     password=_s.REDIS_PASSWORD, decode_responses=True)
+        _r_sync.delete(_taint_key("test-agent"))
+        _r_sync.close()
+    except Exception:
+        pass  # non-fatal: if Redis unavailable, taint check will fail-open per LOGIC-005
+
     assert await taint_store.is_tainted_for_principal(principal) is False
 
     try:
@@ -155,9 +192,16 @@ async def test_lookup_server_trust_real_db():
         )
         await db.commit()
 
-    tier, _dim = await _lookup_server_trust(sid)
-    assert tier == 0  # untrusted server
+    try:
+        tier, _dim = await _lookup_server_trust(sid)
+        assert tier == 0  # untrusted server
 
-    # Unknown server_id -> fail-closed (None) -> caller treats as untrusted.
-    missing_tier, _ = await _lookup_server_trust(str(uuid.uuid4()))
-    assert missing_tier is None
+        # Unknown server_id -> fail-closed (None) -> caller treats as untrusted.
+        missing_tier, _ = await _lookup_server_trust(str(uuid.uuid4()))
+        assert missing_tier is None
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                text("DELETE FROM server_registry WHERE server_id = :sid"), {"sid": sid}
+            )
+            await db.commit()

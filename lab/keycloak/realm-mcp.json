@@ -33,7 +33,12 @@
         "http://${LAB_HOST}:8000/api/v1/auth/oidc/callback",
         "http://${LAB_HOST}:8088/api/v1/auth/oidc/callback"
       ],
-      "webOrigins": ["http://localhost:8000", "http://localhost:8088", "http://${LAB_HOST}:8000", "http://${LAB_HOST}:8088"],
+      "webOrigins": [
+        "http://localhost:8000",
+        "http://localhost:8088",
+        "http://${LAB_HOST}:8000",
+        "http://${LAB_HOST}:8088"
+      ],
       "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
@@ -95,7 +100,9 @@
         "http://localhost/*",
         "http://127.0.0.1/*"
       ],
-      "webOrigins": ["+"],
+      "webOrigins": [
+        "+"
+      ],
       "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
@@ -104,8 +111,15 @@
         "pkce.code.challenge.method": "S256",
         "access.token.lifespan": "86400"
       },
-      "defaultClientScopes": ["openid", "profile", "email", "roles"],
-      "optionalClientScopes": ["offline_access"],
+      "defaultClientScopes": [
+        "openid",
+        "profile",
+        "email",
+        "roles"
+      ],
+      "optionalClientScopes": [
+        "offline_access"
+      ],
       "protocolMappers": [
         {
           "name": "mcp-proxy-audience",
@@ -150,7 +164,7 @@
     },
     {
       "clientId": "lab-test",
-      "name": "Lab Test Client (ROPC — lab only, never production)",
+      "name": "Lab Test Client (ROPC \u2014 lab only, never production)",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
@@ -163,8 +177,15 @@
       "attributes": {
         "access.token.lifespan": "3600"
       },
-      "defaultClientScopes": ["openid", "profile", "email", "roles"],
-      "optionalClientScopes": ["offline_access"],
+      "defaultClientScopes": [
+        "openid",
+        "profile",
+        "email",
+        "roles"
+      ],
+      "optionalClientScopes": [
+        "offline_access"
+      ],
       "protocolMappers": [
         {
           "name": "audience-mcp-proxy",
@@ -194,7 +215,12 @@
       "attributes": {
         "access.token.lifespan": "3600"
       },
-      "defaultClientScopes": ["openid", "profile", "email", "roles"],
+      "defaultClientScopes": [
+        "openid",
+        "profile",
+        "email",
+        "roles"
+      ],
       "protocolMappers": [
         {
           "name": "audience-mcp-proxy",
@@ -232,7 +258,9 @@
       "secret": "lab-tickets-secret",
       "serviceAccountsEnabled": true,
       "authorizationServicesEnabled": true,
-      "redirectUris": ["http://localhost:9000/*"],
+      "redirectUris": [
+        "http://localhost:9000/*"
+      ],
       "webOrigins": [],
       "protocol": "openid-connect",
       "attributes": {},
@@ -248,13 +276,34 @@
   ],
   "roles": {
     "realm": [
-      {"name": "admin", "description": "Full platform admin"},
-      {"name": "agent", "description": "Can invoke registered tools"},
-      {"name": "auditor", "description": "Read-only audit and reporting"},
-      {"name": "readonly", "description": "Read-only tool catalogue"},
-      {"name": "grafana-admin", "description": "Grafana admin role"},
-      {"name": "grafana-editor", "description": "Grafana editor role"},
-      {"name": "grafana-viewer", "description": "Grafana viewer role"}
+      {
+        "name": "admin",
+        "description": "Full platform admin"
+      },
+      {
+        "name": "agent",
+        "description": "Can invoke registered tools"
+      },
+      {
+        "name": "auditor",
+        "description": "Read-only audit and reporting"
+      },
+      {
+        "name": "readonly",
+        "description": "Read-only tool catalogue"
+      },
+      {
+        "name": "grafana-admin",
+        "description": "Grafana admin role"
+      },
+      {
+        "name": "grafana-editor",
+        "description": "Grafana editor role"
+      },
+      {
+        "name": "grafana-viewer",
+        "description": "Grafana viewer role"
+      }
     ]
   },
   "users": [
@@ -264,8 +313,18 @@
       "enabled": true,
       "firstName": "Alice",
       "lastName": "Admin",
-      "credentials": [{"type": "password", "value": "${DEX_ALICE_PASSWORD}", "temporary": false}],
-      "realmRoles": ["admin", "grafana-admin"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEX_ALICE_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "admin",
+        "grafana-admin"
+      ],
+      "emailVerified": true
     },
     {
       "username": "bob",
@@ -273,8 +332,18 @@
       "enabled": true,
       "firstName": "Bob",
       "lastName": "Agent",
-      "credentials": [{"type": "password", "value": "${DEX_BOB_PASSWORD}", "temporary": false}],
-      "realmRoles": ["agent", "grafana-editor"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEX_BOB_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agent",
+        "grafana-editor"
+      ],
+      "emailVerified": true
     },
     {
       "username": "carol",
@@ -282,8 +351,18 @@
       "enabled": true,
       "firstName": "Carol",
       "lastName": "Auditor",
-      "credentials": [{"type": "password", "value": "labpassword", "temporary": false}],
-      "realmRoles": ["auditor", "grafana-viewer"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "labpassword",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "auditor",
+        "grafana-viewer"
+      ],
+      "emailVerified": true
     }
   ],
   "identityProviders": [],
@@ -292,5 +371,7 @@
     "xRobotsTag": "none",
     "xFrameOptions": "SAMEORIGIN",
     "contentSecurityPolicy": "frame-src 'self'; frame-ancestors 'self'; object-src 'none';"
-  }
+  },
+  "verifyEmail": true,
+  "editUsernameAllowed": false
 }

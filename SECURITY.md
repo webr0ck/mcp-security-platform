@@ -35,7 +35,7 @@ Because this is a reference implementation, several controls are **partial or ro
 documented openly rather than papered over. The items below are the security-relevant ones; the
 full status matrix is in the README and the design rationale is in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the historical audit
-[`docs/appsec-review.md`](docs/appsec-review.md).
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 | ID | Area | Limitation | Mitigation / status |
 |---|---|---|---|

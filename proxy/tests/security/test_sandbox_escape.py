@@ -42,6 +42,7 @@ def _make_ctx(roles=("agent",), status="active"):
             return SimpleNamespace(
                 tool_id=TOOL_ID,
                 name="test-tool",
+                description="test tool",
                 version="1.0.0",
                 status=status,
                 risk_level="low",
@@ -49,6 +50,7 @@ def _make_ctx(roles=("agent",), status="active"):
                 injection_mode="none", service_name=None,
                 inject_header="Authorization", inject_prefix="Bearer",
                 kc_client_id=None, kc_token_audience=None,
+                server_id=None,
             )
 
         def fetchall(self):
@@ -419,7 +421,7 @@ async def test_tamper_replayed_expired_jwt_rejected():
     """
     with (
         patch("app.middleware.auth.settings") as s,
-        patch("app.middleware.auth._validate_oidc_jwt", new=AsyncMock(return_value=(None, []))),
+        patch("app.middleware.auth._validate_oidc_jwt", new=AsyncMock(return_value=(None, [], False))),
         patch("app.middleware.auth._resolve_api_key", new=AsyncMock(return_value=None)),
     ):
         s.OIDC_ENABLED = True
