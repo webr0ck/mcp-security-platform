@@ -1,4 +1,4 @@
-# Generated demo certs — never commit private keys. See README.md.
+# Generated on demand by `make wazuh-dashboard-up` (official wazuh-certs-generator
+# + ../certs-config.yml). Never commit private keys.
 *.pem
 *.key
-!config.yml
