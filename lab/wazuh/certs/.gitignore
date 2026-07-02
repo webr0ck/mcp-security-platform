@@ -1,0 +1,4 @@
+# Generated demo certs — never commit private keys. See README.md.
+*.pem
+*.key
+!config.yml

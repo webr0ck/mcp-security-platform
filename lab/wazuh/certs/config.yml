@@ -1,0 +1,14 @@
+# Wazuh certificate node manifest (NOT a secret — safe to commit).
+# Consumed by scripts/gen-wazuh-certs.sh, which runs Wazuh's official
+# wazuh-certs-tool.sh to produce the self-signed lab certs this overlay mounts.
+# Node names/IPs must match the service hostnames in compose.wazuh.yml.
+nodes:
+  indexer:
+    - name: wazuh-indexer
+      ip: wazuh-indexer
+  server:
+    - name: wazuh-manager
+      ip: wazuh-manager
+  dashboard:
+    - name: wazuh-dashboard
+      ip: wazuh-dashboard
