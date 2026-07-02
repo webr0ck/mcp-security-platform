@@ -22,8 +22,10 @@ paths = [
   '''proxy/tests/.*test_.*\.py''',
   # Lab sample server ships an example `curl` snippet (documentation string), not a credential.
   '''lab/mcp-servers/rag-assistant/server\.py''',
-  # Archived historical doc (superseded), not shipped guidance.
-  '''docs/archive/.*''',
+  # Red-team / incident demo scripts use a shell ${TOKEN} var and a literal
+  # placeholder ("INVALID_TOKEN_SIMULATING_STOLEN_CRED") — no real credential.
+  '''sandbox/tests/red_team/test_prompt_injection_wazuh\.sh''',
+  '''lab/incidents/.*\.sh''',
 ]
 
 regexes = [
