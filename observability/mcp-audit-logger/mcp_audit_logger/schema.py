@@ -109,6 +109,15 @@ class AuditEvent:
     #   Used to correlate audit events with session revocation records (INV-014).
     session_jti: str | None = None
 
+    # tainted: session taint state at decision time (RFC-0001 §8.1 / PRD-0001 W2.4).
+    #   True  = the caller's session was tainted (ingested untrusted content earlier)
+    #           when this call was decided — recorded on ALLOW *and* DENY so a
+    #           tainted-session ALLOW of a low-floor sink is never silently unrecorded.
+    #   False = session was clean.
+    #   None  = taint floor disabled / not evaluated (not applicable).
+    #   Not part of the canonical integrity hash (advisory enrichment only).
+    tainted: bool | None = None
+
     # NOTE: prev_hash was deleted in Task 1.2 (plan decision: delete, not wire).
     # Hash-chain / sequence tamper evidence is P5 scope; per-event HMAC (Task 0.2)
     # is the tamper-evidence mechanism for this build. Callers that previously
@@ -185,4 +194,5 @@ class AuditEvent:
             "principal_type": self.principal_type,
             "roles": self.roles,
             "session_jti": self.session_jti,
+            "tainted": self.tainted,
         }

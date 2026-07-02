@@ -539,7 +539,7 @@ async def test_invoke_tool_filter_match_returns_jsonrpc_error_and_emits_audit():
     async def _fake_emit(
         tool_id, tool_name, tool_version, client_id, outcome, deny_reasons,
         request_id, latency_ms, anomaly_score, opa_decision_id, is_testing,
-        source_ip=None, principal_type=None, roles=None, session_jti=None,
+        source_ip=None, principal_type=None, roles=None, session_jti=None, **kwargs,
     ) -> str:
         captured_emit_calls.append({
             "outcome": outcome,
@@ -629,7 +629,7 @@ async def test_invoke_tool_filter_match_detection_only_passes_through():
     async def _fake_emit(
         tool_id, tool_name, tool_version, client_id, outcome, deny_reasons,
         request_id, latency_ms, anomaly_score, opa_decision_id, is_testing,
-        source_ip=None, principal_type=None, roles=None, session_jti=None,
+        source_ip=None, principal_type=None, roles=None, session_jti=None, **kwargs,
     ) -> str:
         captured_emit_calls.append({
             "outcome": outcome,
@@ -710,7 +710,7 @@ async def test_invoke_tool_clean_response_no_filter_audit_event():
     async def _fake_emit(
         tool_id, tool_name, tool_version, client_id, outcome, deny_reasons,
         request_id, latency_ms, anomaly_score, opa_decision_id, is_testing,
-        source_ip=None, principal_type=None, roles=None, session_jti=None,
+        source_ip=None, principal_type=None, roles=None, session_jti=None, **kwargs,
     ) -> str:
         captured_emit_calls.append({
             "outcome": outcome,

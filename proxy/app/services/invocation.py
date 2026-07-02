@@ -374,6 +374,7 @@ async def invoke_tool(
     # -------------------------------------------------------------------------
     from app.core.config import settings as _tf_settings
     _taint_server_trust_tier: int | None = None  # stashed for write-before-forward below
+    _tainted: bool | None = None  # GAP-1: session taint state, recorded on the ALLOW audit too
     if _tf_settings.TAINT_FLOOR_ENABLED:
         from app.services.taint_floor import (
             effective_injection_mode,
@@ -410,6 +411,7 @@ async def invoke_tool(
                 principal_type=principal_type,
                 roles=client_roles,
                 session_jti=session_jti,
+                tainted=_tainted,
             )
             raise TaintFloorDenyError(
                 str(tool_id) if tool_id is not None else "", tool_name, _required
@@ -937,6 +939,7 @@ async def invoke_tool(
         principal_type=principal_type,
         roles=client_roles,
         session_jti=session_jti,
+        tainted=_tainted,  # GAP-1: record taint state on ALLOW/error, not just DENY
     )
 
     # PRD-0002 §5.1: emit uniform trace spine fields (captured by Loki for Grafana pivot)
@@ -1276,6 +1279,7 @@ async def _emit_audit_event(
     principal_type: str | None = None,
     roles: list[str] | None = None,
     session_jti: str | None = None,
+    tainted: bool | None = None,
 ) -> str:
     """
     Emit a structured audit event via mcp-audit-logger.
@@ -1331,6 +1335,7 @@ async def _emit_audit_event(
             principal_type=principal_type,
             roles=roles,
             session_jti=session_jti,
+            tainted=tainted,
         )
         sha256_hash = audit_logger.emit(event)
         event_id = str(event.event_id)
