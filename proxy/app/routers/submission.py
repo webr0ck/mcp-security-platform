@@ -107,9 +107,14 @@ def _require_not_self_review(sub: dict[str, Any], reviewer: str) -> None:
 
 
 def _require_reviewer(request: Request) -> None:
-    """M2 fix: read-only review queue accessible to security_auditor + auditor, not just admin."""
+    """M2 fix: read-only review queue accessible to security_auditor + auditor, not just admin.
+    Also includes security_reviewer: anyone entitled to approve/reject a submission
+    (via _require_submission_reviewer) must be able to read it first."""
     roles = list(getattr(request.state, "client_roles", []) or [])
-    if not any(r in {"admin", "platform_admin", "security_auditor", "auditor"} for r in roles):
+    if not any(
+        r in {"admin", "platform_admin", "security_auditor", "auditor", "security_reviewer"}
+        for r in roles
+    ):
         raise HTTPException(status_code=403, detail="reviewer role required")
 
 

@@ -193,18 +193,33 @@ pre-existing tools (`self-service-mcp`, `plan_mcp_server`,
 a non-NULL `server_id` — so the `IS NULL` guard skipped them, leaving them
 linked to `lab-self-service` while the four new reviewer tools (freshly
 inserted with `server_id IS NULL`) linked to the *new* `self-service` row.
-Two `server_registry` rows shared the same `upstream_url`
-(`http://self-service:8000/mcp`) for what is conceptually one server, and
-`_ensure_self_service_entitlement()` (§10a) only grants access to the new
-`self-service` server — so a brand-new human principal saw the four
+
+The two `server_registry` rows do **not** share an `upstream_url` — the
+legacy `lab-self-service` row points at
+`http://lab-mcp-self-service:8000/mcp` and the new `self-service` row at
+`http://self-service:8000/mcp`; these were never the same value. The actual
+mismatch was introduced by V052's own tool-row `UPDATE`: the migration's
+`INSERT ... ON CONFLICT (name, version) DO UPDATE` unconditionally rewrites
+`upstream_url` on all ten `tool_registry` rows it owns — including the six
+pre-existing ones — to the *new* server's `upstream_url`
+(`http://self-service:8000/mcp`), even though those six rows'
+`server_id` FK still pointed at the *old* `lab-self-service` row (whose own
+`upstream_url` was never touched). So after V052's INSERT ran, those six
+rows had `upstream_url = http://self-service:8000/mcp` but
+`server_id` → a server row whose `upstream_url` was
+`http://lab-mcp-self-service:8000/mcp` — a mismatch V052 itself created
+between a row's `upstream_url` column and its `server_id` FK target, not a
+pre-existing coincidental collision between the two server rows. Combined
+with `_ensure_self_service_entitlement()` (§10a) only granting access to the
+new `self-service` server, a brand-new human principal saw the four
 reviewer tools (correctly gated by `required_roles`) but not the six
 onboarding tools.
 
 The fix removes the `t.server_id IS NULL` condition from that `UPDATE`
-entirely: the preceding `INSERT ... ON CONFLICT (name, version) DO UPDATE`
-already rewrites `upstream_url` to the exact same value
-(`http://self-service:8000/mcp`) for all ten rows this migration owns, so
-the linking step now matches — and repoints — any tool_registry row whose
+entirely: since the preceding `INSERT ... ON CONFLICT (name, version) DO
+UPDATE` already rewrites `upstream_url` to the exact same value
+(`http://self-service:8000/mcp`) for all ten rows this migration owns, the
+linking step now matches — and repoints — any tool_registry row whose
 `upstream_url` equals the new server's `upstream_url`, regardless of its
 current `server_id`. Nothing else in the table coincidentally shares that
 `upstream_url`, so this is safe and idempotent to re-run. After re-applying

@@ -93,7 +93,7 @@ INSERT INTO tool_registry (
     'http://self-service:8000/mcp',
     'active', 'low', 5, '[]'::jsonb,
     'system:default-seed', null, null, 'passthrough', null, null,
-    '{"required_roles": ["admin", "platform_admin", "security_reviewer"]}'::jsonb
+    '{"required_roles": ["admin", "platform_admin", "security_auditor", "auditor", "security_reviewer"]}'::jsonb
 ),
 (
     gen_random_uuid(), 'review_submission', '1.0.0',
@@ -102,7 +102,7 @@ INSERT INTO tool_registry (
     'http://self-service:8000/mcp',
     'active', 'low', 10, '["Clones and reads submitted source code"]'::jsonb,
     'system:default-seed', null, null, 'passthrough', null, null,
-    '{"required_roles": ["admin", "platform_admin", "security_reviewer"]}'::jsonb
+    '{"required_roles": ["admin", "platform_admin", "security_auditor", "auditor", "security_reviewer"]}'::jsonb
 ),
 (
     gen_random_uuid(), 'approve_submission', '1.0.0',

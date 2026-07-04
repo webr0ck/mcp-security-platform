@@ -16,7 +16,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.routers.submission import _clone_and_read_repo, review_submission_detail
+from fastapi import HTTPException
+
+from app.routers.submission import (
+    _clone_and_read_repo,
+    _require_reviewer,
+    _require_submission_reviewer,
+    review_submission_detail,
+)
 
 
 def _fake_submission(github_repo_url=None):
@@ -120,3 +127,51 @@ class TestCloneAndReadRepoSymlinks:
         assert files.get("real.txt") == "real file content"
         assert "evil_link.txt" not in files  # target content never read
         assert "SENTINEL_SECRET_CONTENT" not in files.values()
+
+
+def _request_with_roles(*roles):
+    req = MagicMock()
+    req.state = SimpleNamespace(client_id="someone@corp", client_roles=list(roles))
+    return req
+
+
+class TestRequireReviewerRoleGate:
+    """_require_reviewer gates the two READ endpoints (list_pending_reviews /
+    review_submission). It must accept every role that can also mutate a
+    submission via _require_submission_reviewer (security_reviewer), plus the
+    read-only audit roles (security_auditor, auditor) — see finding 1 in the
+    final whole-branch review: security_reviewer could approve/reject but not
+    read, which is a broken workflow."""
+
+    @pytest.mark.parametrize(
+        "role",
+        ["admin", "platform_admin", "security_auditor", "auditor", "security_reviewer"],
+    )
+    def test_allowed_roles_pass(self, role):
+        _require_reviewer(_request_with_roles(role))  # must not raise
+
+    def test_unrelated_role_rejected(self):
+        with pytest.raises(HTTPException) as exc_info:
+            _require_reviewer(_request_with_roles("submitter"))
+        assert exc_info.value.status_code == 403
+
+    def test_no_roles_rejected(self):
+        with pytest.raises(HTTPException) as exc_info:
+            _require_reviewer(_request_with_roles())
+        assert exc_info.value.status_code == 403
+
+
+class TestRequireSubmissionReviewerRoleGate:
+    """_require_submission_reviewer gates the two MUTATE endpoints
+    (approve_submission / reject_submission). Read-only audit roles must NOT
+    be able to mutate."""
+
+    @pytest.mark.parametrize("role", ["admin", "platform_admin", "security_reviewer"])
+    def test_allowed_roles_pass(self, role):
+        _require_submission_reviewer(_request_with_roles(role))  # must not raise
+
+    @pytest.mark.parametrize("role", ["security_auditor", "auditor"])
+    def test_read_only_roles_rejected(self, role):
+        with pytest.raises(HTTPException) as exc_info:
+            _require_submission_reviewer(_request_with_roles(role))
+        assert exc_info.value.status_code == 403
