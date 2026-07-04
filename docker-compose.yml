@@ -83,6 +83,9 @@ networks:
   proxy-db-net:
     driver: bridge
     internal: true
+  proxy-self-service-net:
+    driver: bridge
+    internal: true
 
 volumes:
   postgres-data:
@@ -260,6 +263,7 @@ services:
       - proxy-ollama-net    # LLM risk scoring egress (pairwise)
       - proxy-redis-net     # rate/session/cache egress (pairwise)
       - proxy-db-net        # persistence egress (pairwise)
+      - proxy-self-service-net  # self-service MCP tool routing + design-assist callback (pairwise)
     depends_on:
       db:
         condition: service_healthy
@@ -283,6 +287,12 @@ services:
       - LABELER_CERT_PATH=/labeler/leaf.crt
       - LABELER_KEY_PATH=/labeler/leaf.key
       - LABELER_SUB_CA_PATH=/labeler/sub_ca.crt
+      # self-service is a deliberate exception to the gateway-only ingress
+      # rule: it calls back into /api/v1/design-assist and /api/v1/submissions
+      # over its dedicated pairwise network, forwarding the caller's real
+      # OAuth bearer token on every such call (not an authn bypass).
+      - PROXY_INGRESS_ALLOWLIST_ENABLED=true
+      - PROXY_INGRESS_TRUSTED_HOSTS=gateway,self-service
     logging: *default-logging
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health/ready"]
@@ -290,6 +300,27 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # Self-service MCP server: submission/design-assist tooling. Reachable at
+  # http://self-service:8000/mcp inside the compose network. Lives on its own
+  # pairwise net with the proxy (proxy-self-service-net) and calls back into
+  # the proxy's /api/v1/design-assist and /api/v1/submissions REST API.
+  self-service:
+    build:
+      context: ./mcp-servers/self-service
+    container_name: self-service
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      PROXY_PROFILE_API_URL: "http://proxy:8000/api/v1/profiles"
+      PROXY_BASE_URL: "http://proxy:8000"
+      # Must be set at deploy time — see infra/scripts (or your own key
+      # provisioning step). No default; the container fails fast if unset,
+      # matching mcp-servers/self-service/server.py's existing behavior.
+      SELF_SERVICE_API_KEY: "${SELF_SERVICE_API_KEY:?SELF_SERVICE_API_KEY must be set}"
+    networks:
+      - proxy-self-service-net
+    restart: unless-stopped
 
   opa:
     # OPA 0.63+ static binary image (no shell, minimal attack surface)

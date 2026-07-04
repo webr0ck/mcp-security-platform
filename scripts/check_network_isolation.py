@@ -34,6 +34,7 @@ import yaml
 ALLOWED_PROXY_PEERS = {
     "gateway", "grafana", "step-ca",          # ingress / benign control plane
     "opa", "ollama", "redis", "db", "vault",  # backends the proxy dials
+    "self-service",                           # self-service MCP server (pairwise, calls back into design-assist/submissions)
     # IdP services legitimately on gateway-net in multi-tier deploys
     "keycloak", "keycloak-seeder",
 }
@@ -43,6 +44,7 @@ PAIRWISE = {
     "redis": "proxy-redis-net",
     "db": "proxy-db-net",
     "vault": "vault-net",
+    "self-service": "proxy-self-service-net",
 }
 
 # ── One-shot init / seeder containers excluded from persistent peer check ─────
