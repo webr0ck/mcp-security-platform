@@ -318,6 +318,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         principal_id, principal_type = _build_principal_id(auth_method, client_id)
         request.state.principal_id = principal_id
         request.state.principal_type = principal_type
+        if request.url.path == "/mcp" and principal_type == "human":
+            await _ensure_self_service_entitlement(principal_id, principal_type)
         # Task 4.3: named profile UUID from session JWT claim (cookie path 2 or Bearer 3a).
         # None when no profile was bound at login (backward compatible: legacy mcp_profiles path).
         # mTLS and API-key callers never have a profile_uuid.
@@ -774,3 +776,54 @@ async def _load_roles(client_id: str) -> list[str]:
         logger.warning("Failed to cache roles in Redis", extra={"error": str(exc)})
 
     return roles
+
+
+_SELF_SERVICE_ENTITLEMENT_CACHE_TTL = 86400  # 24h — this rarely needs re-checking
+
+
+def _get_cached_redis():
+    from app.core.redis_client import redis_pool
+    return redis_pool.client
+
+
+async def _ensure_self_service_entitlement(principal_id: str, principal_type: str) -> None:
+    """
+    Grant every human principal an entitlement on the default 'self-service'
+    server the first time they're seen, since the entitlement model has no
+    wildcard/"everyone" concept — self-service is meant to be available to
+    every authenticated user out of the box, unlike other server-linked tools.
+
+    Cached in Redis (24h TTL) so this only touches the DB once per principal
+    per day, not on every /mcp request.
+    """
+    cache_key = f"self_service_entitlement_ensured:{principal_id}"
+    try:
+        redis = _get_cached_redis()
+        if await redis.get(cache_key):
+            return
+    except Exception:
+        pass  # cache miss on Redis error — fall through and just do the DB check
+
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by, entitlement_version) "
+                    "SELECT server_id, :pid, :ptype, 'system:default-entitlement', 1 "
+                    "FROM server_registry WHERE name = 'self-service' AND deleted_at IS NULL "
+                    "ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING"
+                ),
+                {"pid": principal_id, "ptype": principal_type},
+            )
+            await session.commit()
+    except Exception as exc:
+        logger.warning("self-service auto-entitlement failed for %s: %s", principal_id, exc)
+        return  # don't cache on failure — retry next request
+
+    try:
+        redis = _get_cached_redis()
+        await redis.setex(cache_key, _SELF_SERVICE_ENTITLEMENT_CACHE_TTL, "1")
+    except Exception:
+        pass  # best-effort cache write only
