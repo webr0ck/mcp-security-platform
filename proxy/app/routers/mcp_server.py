@@ -74,7 +74,7 @@ _MAX_BATCH_SIZE = 20  # MCP spec doesn't define a limit; 20 is generous for real
 # metadata.hidden=true (legacy server-alias rows) stay callable via the
 # invoke_tool meta-tool but are excluded from tools/list discovery.
 REGISTERED_TOOLS_QUERY = (
-    "SELECT name, description, schema, tags, server_id "
+    "SELECT name, description, schema, tags, server_id, metadata "
     "FROM tool_registry "
     "WHERE status = 'active' AND deleted_at IS NULL "
     "AND COALESCE(metadata->>'hidden', 'false') <> 'true' "
@@ -673,6 +673,13 @@ async def _registered_tools_for_client(
             )
             if profile is not None and not profile["enabled"]:
                 continue
+
+        # required_roles: discovery-time role gate (Part C of the reviewer-
+        # tools design). Absent/empty = unrestricted, matching every existing
+        # row. This is belt-and-suspenders — OPA still re-enforces on invoke.
+        required_roles = (row.get("metadata") or {}).get("required_roles")
+        if required_roles and not (set(required_roles) & set(roles)):
+            continue
 
         schema = row["schema"] or {}
         if isinstance(schema, str):
