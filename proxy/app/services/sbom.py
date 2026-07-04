@@ -41,6 +41,7 @@ def generate_cyclonedx_sbom(
     tags: list[str],
     risk_score: int,
     risk_level: str,
+    declared_components: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str, str]:
     """
     Generate a CycloneDX 1.5 SBOM document for a registered MCP tool.
@@ -56,6 +57,13 @@ def generate_cyclonedx_sbom(
         tags: Taxonomy tags.
         risk_score: Combined risk score (0-100).
         risk_level: Risk level string (low/medium/high/critical).
+        declared_components: R-9 — optional list of {name, version, purl}
+            dicts parsed (textually, unresolved) from the submission repo's
+            dependency manifests (requirements.txt / pyproject.toml /
+            package.json). Each becomes an additional CycloneDX "library"
+            component alongside the schema-digest attestation component.
+            No `hashes` are set for these — nothing was downloaded/resolved,
+            so no real hash exists; fabricating one would be misleading.
 
     Returns:
         Tuple of (bom_document dict, schema_hash str, sbom_signature str)
@@ -96,6 +104,26 @@ def generate_cyclonedx_sbom(
             {"name": "mcp:source_commit", "value": source_commit}
         )
 
+    components: list[dict[str, Any]] = [component]
+    for dep in (declared_components or []):
+        name = str(dep.get("name") or "").strip()
+        if not name:
+            continue
+        version = str(dep.get("version") or "*")
+        purl = dep.get("purl") or f"pkg:generic/{name}@{version}"
+        components.append({
+            "type": "library",
+            "bom-ref": f"sbom_{uuid4().hex[:16]}",
+            "name": name,
+            "version": version,
+            "purl": purl,
+            # R-9: declared, unresolved — no download/build happened, so no
+            # real hash exists. Omit `hashes` rather than fabricate one.
+            "properties": [
+                {"name": "mcp:sbom_source", "value": "manifest-declared"},
+            ],
+        })
+
     bom_document: dict[str, Any] = {
         "bomFormat": "CycloneDX",
         "specVersion": CYCLONEDX_SPEC_VERSION,
@@ -110,7 +138,7 @@ def generate_cyclonedx_sbom(
                 }
             ],
         },
-        "components": [component],
+        "components": components,
     }
 
     # Sign the SBOM document (INV-006)

@@ -48,6 +48,9 @@ dependencies = [
     "tenacity==9.1.2",       # Retry logic for OPA/Ollama calls
     "jcs==0.1.0",            # RFC 8785 JSON Canonicalization Scheme — trust envelope signing
 
+    # Submission scanner (PRD-0003 R-0) — dependency-vuln check on submitted repos
+    "pip-audit==2.7.3",
+
     # Internal
     "mcp-audit-logger",      # From observability/mcp-audit-logger (local package)
 ]

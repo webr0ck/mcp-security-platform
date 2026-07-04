@@ -141,9 +141,33 @@ def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
         raise SSRFError(f"Host {host!r} resolves to a blocked private/reserved IP range")
 
     # DNS resolution check (best-effort — catches obvious rebind; not a full guard)
-    # Skip for localhost and dev-mode container hostnames: they resolve to private IPs
-    # (10.x Podman network) which are in blocked ranges but intentionally trusted in dev.
-    if host in ("localhost",) or (allow_http_localhost and parsed.scheme == "http"):
+    if host == "localhost":
+        return
+
+    if allow_http_localhost and parsed.scheme == "http":
+        # Security fix: this branch previously skipped DNS resolution entirely
+        # for ANY hostname once dev-mode HTTP was allowed — including a real
+        # public, attacker-controlled domain, not just internal lab containers.
+        # Dev-mode HTTP exists ONLY so lab container hostnames (which resolve
+        # to private Podman-network IPs, themselves in the "blocked" ranges
+        # above) can be used; it must still resolve DNS and POSITIVELY require
+        # a private/reserved address — never silently trust an unresolved or
+        # public hostname.
+        try:
+            resolved = socket.getaddrinfo(host, None)
+        except OSError as exc:
+            raise SSRFError(f"DNS resolution failed for {host!r}: {exc}.") from exc
+        for _, _, _, _, sockaddr in resolved:
+            ip_str = sockaddr[0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_str.split("%")[0])
+            except ValueError:
+                continue
+            if ip_obj.is_global:
+                raise SSRFError(
+                    f"Host {host!r} resolves to a public IP ({ip_str}) — "
+                    "dev-mode HTTP is only permitted for internal/private targets"
+                )
         return
 
     try:

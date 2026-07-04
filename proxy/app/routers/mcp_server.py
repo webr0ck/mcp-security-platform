@@ -132,7 +132,7 @@ SERVER_INFO = {
 # ---------------------------------------------------------------------------
 # Tool catalogue — each entry declares which roles may call it
 # ---------------------------------------------------------------------------
-_OAUTH_SERVICES: list[str] = ["m365", "bitbucket", "dex"]
+_OAUTH_SERVICES: list[str] = ["m365", "bitbucket", "dex", "netbox"]
 
 
 async def _get_enrollment_status(client_id: str, base_url: str) -> list[dict]:
@@ -770,10 +770,14 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             logger.info("MCP invoke denied (not entitled) tool=%s client=%s reason=%s",
                         name, client_id, exc.reason)
             return _err(req_id, -32003, "Access denied: not entitled to this tool's server")
-        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError
+        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError, ServerInMaintenanceError
         if isinstance(exc, ScanFreshnessError):
             logger.warning("MCP invoke denied (stale scan) tool=%s client=%s", name, client_id)
             return _err(req_id, -32003, "Access denied: server supply-chain scan is stale")
+        if isinstance(exc, ServerInMaintenanceError):
+            logger.info("MCP invoke denied (maintenance mode) tool=%s client=%s server=%s",
+                        name, client_id, exc.server_id)
+            return _err(req_id, -32003, "MCP server is in maintenance")
         if isinstance(exc, TaintFloorDenyError):
             # PRD-0001 M2: taint floor denied a high-sensitivity sink in a tainted
             # session. Audit already emitted in invoke_tool (INV-001). No internals leaked.
@@ -827,6 +831,14 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                     ),
                 },
             )
+        from app.services.policy import OPADenyError
+        if isinstance(exc, OPADenyError):
+            # Distinguish a policy denial (e.g. anomaly_threshold_exceeded,
+            # mcp_disabled_for_profile) from a genuine internal error — same
+            # reason list a client would get calling the tool directly.
+            logger.info("MCP invoke denied (OPA) tool=%s client=%s reasons=%s",
+                        name, client_id, exc.reasons)
+            return _err(req_id, -32003, "Access denied by policy", data={"reasons": exc.reasons})
         logger.exception("Registry tool invocation error for %s", name)
         return _err(req_id, -32603, f"Tool invocation failed: {exc}")
 
@@ -982,7 +994,14 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
     if not lookup_name:
         return {"type": "text", "text": "tools/call requires arguments.name (the tool to invoke)"}
 
-    # Look up tool_record from the DB
+    # Look up tool_record from the DB. Prefer a row for the sub-tool itself
+    # (lookup_name) — backends onboarded with per-function granularity (e.g.
+    # check_submission_status) register each sub-tool individually, so OPA/
+    # quarantine apply per sub-tool. Multi-function backends onboarded as a
+    # single server row (e.g. notes-store's create_note/list_notes/...) have
+    # no such row; fall back to the parent tool_name row so the call still
+    # authorizes/dispatches against the server, forwarding the sub-tool name
+    # in params (already set below) unchanged.
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -990,6 +1009,12 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 {"name": lookup_name},
             )
             row = result.mappings().fetchone()
+            if row is None and lookup_name != tool_name:
+                result = await session.execute(
+                    text("SELECT * FROM tool_registry WHERE name = :name AND status NOT IN ('deprecated', 'quarantined', 'disabled') AND deleted_at IS NULL LIMIT 1"),
+                    {"name": tool_name},
+                )
+                row = result.mappings().fetchone()
     except Exception as exc:
         logger.error("DB error looking up tool %s: %s", lookup_name, exc)
         return {"type": "text", "text": "Tool lookup failed (internal error). Check server logs."}
@@ -1061,10 +1086,14 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
             logger.info("invoke_tool denied (not entitled) tool=%s client=%s reason=%s",
                         tool_name, client_id, exc.reason)
             return {"type": "text", "text": "Access denied: not entitled to this tool's server"}
-        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError
+        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError, ServerInMaintenanceError
         if isinstance(exc, ScanFreshnessError):
             logger.warning("invoke_tool denied (stale scan) tool=%s client=%s", tool_name, client_id)
             return {"type": "text", "text": "Access denied: server supply-chain scan is stale"}
+        if isinstance(exc, ServerInMaintenanceError):
+            logger.info("invoke_tool denied (maintenance mode) tool=%s client=%s server=%s",
+                        tool_name, client_id, exc.server_id)
+            return {"type": "text", "text": "MCP server is in maintenance"}
         if isinstance(exc, TaintFloorDenyError):
             logger.info("invoke_tool denied (taint floor) tool=%s client=%s", tool_name, client_id)
             return {"type": "text", "text": "Access denied: session restricted by trust policy"}
@@ -1091,6 +1120,11 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 f"must provision — it is not something you can self-enroll.\n\n"
                 f"\U0001F449 Contact your platform admin to provision the '{exc.service}' credential."
             )}
+        from app.services.policy import OPADenyError
+        if isinstance(exc, OPADenyError):
+            logger.info("invoke_tool denied (OPA) tool=%s client=%s reasons=%s",
+                        tool_name, client_id, exc.reasons)
+            return {"type": "text", "text": f"Access denied by policy: {', '.join(exc.reasons)}"}
         logger.exception("invoke_tool pipeline error for %s", tool_name)
         return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}
 
@@ -1128,7 +1162,11 @@ async def _handle_list_available_mcps(args: dict, request: Request) -> dict:
             "description": r["description"] or "",
             "status": r["status"] or "unknown",
             "risk_level": r["risk_level"] or "unknown",
-            "enabled_for_your_profile": enabled_map.get(r["name"], False),
+            # Absence of an mcp_profiles row means "no explicit restriction"
+            # platform-wide (see _lookup_profile_row) — enforcement treats that
+            # as enabled. Defaulting the display to False here previously lied:
+            # the catalog said disabled while an actual call would go through.
+            "enabled_for_your_profile": enabled_map.get(r["name"], True),
         }
         for r in rows
     ]

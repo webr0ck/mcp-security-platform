@@ -340,8 +340,14 @@ async def register_tool(
 
 # ---------------------------------------------------------------------------
 # GET /tools
+#
+# Both "" and "/" are registered so no request ever hits Starlette's
+# trailing-slash redirect: uvicorn runs without --proxy-headers (deliberately,
+# see middleware/ingress.py for SEC-05), so that redirect builds an absolute
+# http:// Location that nginx then rejects on the HTTPS port (AN-05).
 # ---------------------------------------------------------------------------
 @router.get("")
+@router.get("/")
 async def list_tools(
     request: Request,
     status: Optional[str] = Query(None, pattern="^(active|quarantined|deprecated|disabled)$"),
@@ -1081,6 +1087,172 @@ async def get_tool_sbom(
 
 
 # ---------------------------------------------------------------------------
+# SBOM collection — many lab/self-service tools were seeded straight into
+# tool_registry (lab/seeder/sql/tools.sql) rather than going through POST
+# /tools/register, so they never got the SBOM that endpoint generates
+# in-line. These endpoints let an admin backfill/refresh one on demand,
+# reusing the exact same generator + storage shape as registration.
+# ---------------------------------------------------------------------------
+
+async def _generate_and_store_sbom(db: AsyncSession, tool_row) -> None:
+    """Generate a fresh CycloneDX SBOM for one tool_registry row and store it.
+    Mirrors the INSERT done inline at POST /tools/register.
+
+    Also pulls in server_registry.sbom_components — the declared pip/npm/go
+    dependencies R-9's submission scanner already parses from a submitted
+    repo's manifests (requirements.txt/pyproject.toml/package.json/go.mod) —
+    as real CycloneDX components, not just the single tool-as-component
+    placeholder. Only populated for servers that were submitted with a real
+    github_repo_url and successfully scanned; a server registered directly
+    (most lab/built-in tools) has nothing to pull from — that's a data-
+    availability fact, not a bug in this function.
+    """
+    import json
+    from uuid import uuid4
+    from sqlalchemy import text
+    from app.services.sbom import generate_cyclonedx_sbom
+
+    schema = tool_row.schema if isinstance(tool_row.schema, dict) else json.loads(tool_row.schema or "{}")
+
+    declared_components = None
+    if tool_row.server_id:
+        srv = (await db.execute(
+            text("SELECT sbom_components FROM server_registry WHERE server_id = :sid"),
+            {"sid": str(tool_row.server_id)},
+        )).fetchone()
+        if srv and srv.sbom_components:
+            raw = srv.sbom_components
+            declared_components = raw if isinstance(raw, list) else json.loads(raw)
+
+    bom_document, schema_hash, sbom_signature = generate_cyclonedx_sbom(
+        tool_id=str(tool_row.tool_id),
+        tool_name=tool_row.name,
+        tool_version=tool_row.version,
+        description=tool_row.description or "",
+        schema=schema,
+        source_repo=tool_row.source_repo,
+        source_commit=tool_row.source_commit,
+        tags=list(tool_row.tags or []),
+        risk_score=tool_row.risk_score,
+        risk_level=tool_row.risk_level,
+        declared_components=declared_components,
+    )
+    await db.execute(
+        text(
+            """
+            INSERT INTO sbom_records
+              (sbom_id, tool_id, bom_ref, cyclonedx_json,
+               schema_hash, signature, auditor_version, generated_at)
+            VALUES
+              (:sbom_id, :tool_id, :bom_ref, CAST(:cyclonedx_json AS jsonb),
+               :schema_hash, :signature, :auditor_version, NOW())
+            """
+        ),
+        {
+            "sbom_id": str(uuid4()),
+            "tool_id": str(tool_row.tool_id),
+            "bom_ref": str(uuid4()),
+            "cyclonedx_json": json.dumps(bom_document),
+            "schema_hash": schema_hash,
+            "signature": sbom_signature,
+            "auditor_version": "1.0.0",
+        },
+    )
+
+
+def _require_admin_role(request: Request) -> None:
+    roles = getattr(request.state, "client_roles", [])
+    if not any(r in {"admin", "platform_admin"} for r in roles):
+        raise HTTPException(403, {"code": "FORBIDDEN", "message": "Requires admin role."})
+
+
+@router.post("/{tool_id}/sbom/generate", status_code=201)
+async def generate_tool_sbom(
+    tool_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """Generate (or refresh) the SBOM for one existing tool. Admin only."""
+    from sqlalchemy import text
+
+    _require_admin_role(request)
+    result = await db.execute(
+        text("SELECT * FROM tool_registry WHERE tool_id = :id AND deleted_at IS NULL"),
+        {"id": str(tool_id)},
+    )
+    row = result.fetchone()
+    if row is None:
+        raise HTTPException(404, {"code": "NOT_FOUND", "message": f"Tool '{tool_id}' not found."})
+
+    try:
+        await _generate_and_store_sbom(db, row)
+        await db.commit()
+    except Exception as exc:
+        logger.error("generate_tool_sbom failed", extra={"tool_id": str(tool_id), "error": str(exc)})
+        raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "SBOM generation failed."})
+
+    return JSONResponse(status_code=201, content={"tool_id": str(tool_id), "status": "generated"})
+
+
+@servers_router.post("/{server_id}/sbom/generate-all")
+async def generate_server_sboms(
+    server_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """Generate/refresh SBOMs for every tool registered under one server,
+    one at a time (not parallel — keeps DB load predictable and gives a
+    clean per-tool failure list). Admin only."""
+    from sqlalchemy import text
+
+    _require_admin_role(request)
+    result = await db.execute(
+        text("SELECT * FROM tool_registry WHERE server_id = :sid AND deleted_at IS NULL ORDER BY name"),
+        {"sid": str(server_id)},
+    )
+    rows = result.fetchall()
+
+    generated, failed = [], []
+    for row in rows:
+        try:
+            await _generate_and_store_sbom(db, row)
+            await db.commit()
+            generated.append(row.name)
+        except Exception as exc:
+            await db.rollback()
+            logger.error("generate_server_sboms tool failed", extra={"tool_id": str(row.tool_id), "error": str(exc)})
+            failed.append({"tool": row.name, "error": str(exc)})
+
+    return JSONResponse(content={"server_id": str(server_id), "generated": generated, "failed": failed})
+
+
+@router.post("/sbom/generate-all")
+async def generate_all_sboms(request: Request, db: AsyncSession = Depends(get_db)) -> JSONResponse:
+    """Generate/refresh SBOMs for every registered tool platform-wide, one at
+    a time. Admin only. Lab/small-fleet scale — no pagination/background job,
+    just a sequential loop (21 tools today; add a job queue if this ever
+    needs to scale past a few hundred)."""
+    from sqlalchemy import text
+
+    _require_admin_role(request)
+    result = await db.execute(text("SELECT * FROM tool_registry WHERE deleted_at IS NULL ORDER BY name"))
+    rows = result.fetchall()
+
+    generated, failed = [], []
+    for row in rows:
+        try:
+            await _generate_and_store_sbom(db, row)
+            await db.commit()
+            generated.append(row.name)
+        except Exception as exc:
+            await db.rollback()
+            logger.error("generate_all_sboms tool failed", extra={"tool_id": str(row.tool_id), "error": str(exc)})
+            failed.append({"tool": row.name, "error": str(exc)})
+
+    return JSONResponse(content={"generated": generated, "failed": failed})
+
+
+# ---------------------------------------------------------------------------
 # POST /tools/{tool_id}/invoke
 # ---------------------------------------------------------------------------
 @router.post("/{tool_id}/invoke")
@@ -1099,6 +1271,7 @@ async def invoke_tool(
     INV-005: Quarantined tools blocked before OPA evaluation.
     """
     from app.services.invocation import (
+        ServerInMaintenanceError,
         TaintFloorDenyError,
         ToolDeprecatedError,
         ToolDisabledError,
@@ -1362,6 +1535,54 @@ async def invoke_tool(
                 },
             },
         )
+    except ServerInMaintenanceError as exc:
+        # INV-001: same fail-closed audit pattern as TOOL_QUARANTINED — a
+        # maintenance-mode lockout is a deliberate access restriction, its
+        # deny must never go unaudited.
+        try:
+            from app.services.invocation import _emit_audit_event
+            await _emit_audit_event(
+                tool_id=tool_record["tool_id"],
+                tool_name=tool_record["name"],
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=["SERVER_IN_MAINTENANCE"],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=0.0,
+                opa_decision_id="",
+                is_testing=is_testing,
+            )
+        except Exception as audit_exc:
+            logger.error(
+                "Audit emit failed on SERVER_IN_MAINTENANCE deny path — failing closed: %s",
+                audit_exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "AUDIT_FAILURE",
+                    "message": "Denied (maintenance mode) but audit logging failed; failing closed.",
+                },
+            ) from audit_exc
+        else:
+            request.state.invocation_audit_emitted = True
+        return JSONResponse(
+            status_code=403,
+            content={
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "error": {
+                    "code": -32603,
+                    "message": "MCP server is in maintenance.",
+                    "data": {
+                        "opa_reasons": ["SERVER_IN_MAINTENANCE"],
+                        "detail": str(exc),
+                    },
+                },
+            },
+        )
     except ToolDeprecatedError as exc:
         return JSONResponse(
             status_code=403,
@@ -1442,11 +1663,34 @@ async def invoke_tool(
 # ---------------------------------------------------------------------------
 # POST /servers/{server_id}/discover-tools (Task 13)
 # ---------------------------------------------------------------------------
-@servers_router.post("/{server_id}/discover-tools", status_code=200)
-async def discover_tools(
+def resolve_kc_token_audience(injection_mode: str | None, upstream_idp_config) -> str | None:
+    """
+    F-14 fix: the wizard's kc_token_exchange step writes 'audience' onto
+    server_registry.upstream_idp_config; the runtime dispatcher reads
+    tool_registry.kc_token_audience (credential_broker/dispatcher.py). Nothing
+    ever copied one into the other — this is that copy, applied at R-10's
+    tool_registry-creation point. Returns None for any other injection mode
+    (a stray audience value on a non-exchange mode is inert there, so we don't
+    carry it forward and create a false impression it's wired to anything).
+    """
+    import json as _json
+
+    mode = injection_mode or "none"
+    if mode not in ("kc_token_exchange", "oauth_user_token"):
+        return None
+    cfg = upstream_idp_config
+    if cfg and not isinstance(cfg, dict):
+        try:
+            cfg = _json.loads(cfg)
+        except (TypeError, ValueError):
+            return None
+    return (cfg or {}).get("audience")
+
+
+async def _run_tool_discovery(
     server_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession,
+    actor_client_id: str,
 ) -> JSONResponse:
     """
     Discover tools from an approved upstream MCP server.
@@ -1454,7 +1698,11 @@ async def discover_tools(
     Calls the upstream server's /tools/list endpoint, registers returned tools
     with status='quarantined' (INV-005 default), and returns discovery results.
 
-    Required role: admin (platform_admin)
+    Shared by the admin-only HTTP route below and R-10's synchronous
+    auto-provisioning call from submission.py's provide_running_url (the caller
+    there is the submitter, not an admin — the admin already approved the
+    submission; this call does not re-check admin role, callers are
+    responsible for their own authorization).
 
     Per Task 13 specification:
     1. Verify server exists and status='approved' (404 if not)
@@ -1472,23 +1720,19 @@ async def discover_tools(
     from sqlalchemy import text
     import httpx
 
+    from app.services.auditor import run_audit as _run_audit, LLMAuditRequiredError
+    from app.services.sbom import generate_cyclonedx_sbom
+
     logger = logging.getLogger(__name__)
-
-    roles: list[str] = getattr(request.state, "client_roles", [])
-    client_id: str = getattr(request.state, "client_id", "unknown")
-
-    if "admin" not in roles and "platform_admin" not in roles:
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "FORBIDDEN", "message": "Requires admin role."},
-        )
+    client_id = actor_client_id
 
     # Step 1: Fetch and validate server
     try:
         result = await db.execute(
             text(
                 """
-                SELECT server_id, upstream_url, service_name, status, upstream_allowlist_entry
+                SELECT server_id, upstream_url, service_name, status, upstream_allowlist_entry,
+                       sbom_components, github_repo_url, injection_mode, upstream_idp_config
                 FROM server_registry
                 WHERE server_id = :server_id AND deleted_at IS NULL
                 LIMIT 1
@@ -1515,10 +1759,27 @@ async def discover_tools(
 
     upstream_url = server_row.upstream_url
 
+    # F-14 fix: carry the server's injection_mode onto each discovered tool, and —
+    # for kc_token_exchange mode — resolve kc_token_audience from the wizard's
+    # upstream_idp_config.audience. This is the wiring that was previously
+    # entirely missing: the wizard wrote server_registry.upstream_idp_config but
+    # nothing ever copied it onto tool_registry.kc_token_audience, the column the
+    # runtime dispatcher actually reads (credential_broker/dispatcher.py).
+    _server_injection_mode = server_row.injection_mode or "none"
+    _kc_audience = resolve_kc_token_audience(_server_injection_mode, server_row.upstream_idp_config)
+
     # N3 fix: SSRF re-validation at call time (closes DNS-rebind window).
     # Step 2a: Static SSRF allowlist check.
+    # B-02 fix (same pattern as submission.py's provide_running_url): dev-mode lab
+    # backends serve plain HTTP internally, so re-validation at discovery time must
+    # accept what registration time already accepted, or auto-provisioning (R-10)
+    # could never discover anything against any lab server.
+    from app.core.config import settings as _settings
     try:
-        validate_server_url(upstream_url)
+        validate_server_url(
+            upstream_url,
+            allow_http_localhost=(_settings.ENVIRONMENT == "development"),
+        )
     except SSRFError as _ssrf_exc:
         logger.warning(
             "discover_tools SSRF validation failed",
@@ -1574,7 +1835,13 @@ async def discover_tools(
                     },
                 },
             }
-            init_resp = await client.post(upstream_url, json=init_payload, timeout=10)
+            # MCP streamable-HTTP requires this Accept header to signal JSON/SSE
+            # response preference — spec-compliant servers (this platform's own
+            # lab fleet included) 406 without it. Mirrors services/invocation.py's
+            # handshake_headers, the reference implementation for this transport.
+            _mcp_accept_headers = {"Accept": "application/json, text/event-stream"}
+
+            init_resp = await client.post(upstream_url, json=init_payload, headers=_mcp_accept_headers, timeout=10)
             init_resp.raise_for_status()
 
             # Get tools/list (session_id from init may be needed)
@@ -1585,13 +1852,26 @@ async def discover_tools(
                 "method": "tools/list",
                 "params": {},
             }
-            headers = {}
+            headers = dict(_mcp_accept_headers)
             if session_id:
                 headers["Mcp-Session-Id"] = session_id
 
             tools_resp = await client.post(upstream_url, json=tools_payload, headers=headers, timeout=10)
             tools_resp.raise_for_status()
-            tools_data = tools_resp.json()
+            # MCP streamable-HTTP servers may answer JSON-RPC as an SSE frame
+            # (content-type: text/event-stream) instead of plain JSON — same
+            # dual-format handling as services/invocation.py, the reference
+            # implementation for this transport.
+            if "text/event-stream" in tools_resp.headers.get("content-type", ""):
+                tools_data = None
+                for _line in tools_resp.text.splitlines():
+                    if _line.startswith("data:"):
+                        tools_data = json.loads(_line[5:].strip())
+                        break
+                if tools_data is None:
+                    raise ValueError("SSE response contained no data frame")
+            else:
+                tools_data = tools_resp.json()
 
     except httpx.TimeoutException as exc:
         logger.warning(
@@ -1618,11 +1898,16 @@ async def discover_tools(
     # Step 3: Register each tool
     discovered = 0
     registered_tools = []
+    # Every skip gets a visible reason in the response — previously a colliding
+    # or malformed tool just vanished silently, leaving a submitter staring at
+    # "tools_provisioned: 1" with no idea 2 more tools existed and were dropped.
+    skipped_tools: list[dict[str, str]] = []
 
     for tool_data in tools_list:
         tool_name = tool_data.get("name")
         if not tool_name:
             logger.warning("Skipping tool with no name from upstream")
+            skipped_tools.append({"name": "(unnamed)", "reason": "upstream returned a tool with no name"})
             continue
 
         # Check if already registered for this server
@@ -1642,45 +1927,151 @@ async def discover_tools(
                     "Tool already registered for server",
                     extra={"server_id": server_id, "tool_name": tool_name},
                 )
+                skipped_tools.append({"name": tool_name, "reason": "already registered for this server"})
                 continue
         except Exception as exc:
             logger.error("duplicate check failed", extra={"error": str(exc)})
+            skipped_tools.append({"name": tool_name, "reason": f"duplicate check failed: {exc}"})
             continue
 
-        # Insert new tool with status='quarantined' (INV-005)
+        # Insert new tool with status='quarantined' (INV-005). AN-06 fix: run the
+        # same auditor + SBOM pipeline register_tool() uses, so discovered tools
+        # (the platform's actual onboarding path) aren't left with zero
+        # tool_audit_results/sbom_records rows — discovery always overrides the
+        # auditor's risk_level to 'quarantined' regardless of score (INV-005).
+        _sp = None  # this tool's savepoint (set once the DB writes begin)
         try:
             tool_id = str(uuid.uuid4())
             description = tool_data.get("description", f"{tool_name} from {server_row.service_name}")
             input_schema = tool_data.get("inputSchema", {"type": "object", "properties": {}})
-            risk_level = tool_data.get("risk", "medium")  # advisory, not enforced
+            tool_version = "1.0.0"  # Tools from discovery are versioned 1.0.0
 
+            try:
+                audit_result = await _run_audit(
+                    tool_id=tool_id,
+                    tool_name=tool_name,
+                    description=description,
+                    schema=input_schema,
+                    source_repo=None,
+                    tags=["discovered"],
+                )
+                risk_score = audit_result.risk_score
+                risk_level = audit_result.risk_level
+                static_analysis = audit_result.static_analysis or {}
+                llm_analysis = audit_result.llm_analysis or {}
+                auditor_version = getattr(audit_result, "auditor_version", "1.0.0")
+            except LLMAuditRequiredError as exc:
+                logger.error(
+                    "discover_tools auditor unavailable for '%s' — registering without an audit record: %s",
+                    tool_name, exc,
+                )
+                risk_score, risk_level = 20, "medium"
+                static_analysis, llm_analysis, auditor_version = {}, {}, "1.0.0"
+
+            # SAVEPOINT per tool: a failed INSERT (e.g. the global
+            # tool_registry_name_version_unique collision when the same
+            # physical upstream is already registered under another server
+            # row) must not invalidate the outer transaction — without it,
+            # every remaining tool's duplicate-check errors out and even the
+            # successfully-registered tools are lost at commit.
+            _sp = await db.begin_nested()
             await db.execute(
                 text(
                     """
                     INSERT INTO tool_registry (
                         tool_id, name, version, description, schema,
                         upstream_url, server_id, status, risk_level, risk_score,
-                        risk_reasons, registered_by, created_at, updated_at
+                        risk_reasons, registered_by, injection_mode, kc_token_audience,
+                        created_at, updated_at
                     ) VALUES (
                         :tool_id, :name, :version, :description, CAST(:schema AS jsonb),
-                        :upstream_url, :server_id, 'quarantined', :risk_level, 20,
-                        CAST(:risk_reasons AS jsonb), :registered_by, NOW(), NOW()
+                        :upstream_url, :server_id, 'quarantined', :risk_level, :risk_score,
+                        CAST(:risk_reasons AS jsonb), :registered_by, :injection_mode, :kc_token_audience,
+                        NOW(), NOW()
                     )
                     """
                 ),
                 {
                     "tool_id": tool_id,
                     "name": tool_name,
-                    "version": "1.0.0",  # Tools from discovery are versioned 1.0.0
+                    "version": tool_version,
                     "description": description,
                     "schema": json.dumps(input_schema),
                     "upstream_url": upstream_url,
                     "server_id": server_id,
                     "risk_level": risk_level,
+                    "risk_score": risk_score,
                     "risk_reasons": json.dumps(["discovered"]),
                     "registered_by": client_id,
+                    # F-14 fix: wire the wizard's mode + audience onto the tool row.
+                    "injection_mode": _server_injection_mode,
+                    "kc_token_audience": _kc_audience,
                 },
             )
+
+            bom_document, schema_hash, sbom_signature = generate_cyclonedx_sbom(
+                tool_id=tool_id,
+                tool_name=tool_name,
+                tool_version=tool_version,
+                description=description,
+                schema=input_schema,
+                source_repo=server_row.github_repo_url,
+                source_commit=None,
+                tags=["discovered"],
+                risk_score=risk_score,
+                risk_level=risk_level,
+                # R-9: manifest-parsed components from the submission scan,
+                # if this server came through the submission flow and had a
+                # repo to scan. NULL (no-code / never scanned) -> [] safely.
+                declared_components=server_row.sbom_components,
+            )
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO sbom_records
+                      (sbom_id, tool_id, bom_ref, cyclonedx_json,
+                       schema_hash, signature, auditor_version, generated_at)
+                    VALUES
+                      (:sbom_id, :tool_id, :bom_ref, CAST(:cyclonedx_json AS jsonb),
+                       :schema_hash, :signature, :auditor_version, NOW())
+                    """
+                ),
+                {
+                    "sbom_id": str(uuid.uuid4()),
+                    "tool_id": tool_id,
+                    "bom_ref": str(uuid.uuid4()),
+                    "cyclonedx_json": json.dumps(bom_document),
+                    "schema_hash": schema_hash,
+                    "signature": sbom_signature,
+                    "auditor_version": auditor_version,
+                },
+            )
+
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO tool_audit_results
+                      (audit_result_id, tool_id, auditor_version, risk_score, risk_level,
+                       findings, llm_analysis, static_analysis, created_at)
+                    VALUES
+                      (:audit_result_id, :tool_id, :auditor_version, :risk_score, :risk_level,
+                       CAST(:findings AS jsonb), CAST(:llm_analysis AS jsonb), CAST(:static_analysis AS jsonb),
+                       NOW())
+                    """
+                ),
+                {
+                    "audit_result_id": str(uuid.uuid4()),
+                    "tool_id": tool_id,
+                    "auditor_version": auditor_version,
+                    "risk_score": risk_score,
+                    "risk_level": risk_level,
+                    "findings": json.dumps([]),
+                    "llm_analysis": json.dumps(llm_analysis),
+                    "static_analysis": json.dumps(static_analysis),
+                },
+            )
+
+            await _sp.commit()  # release this tool's savepoint
             discovered += 1
             registered_tools.append({
                 "tool_id": tool_id,
@@ -1699,6 +2090,22 @@ async def discover_tools(
                 "Tool registration failed",
                 extra={"tool_name": tool_name, "server_id": server_id, "error": str(exc)},
             )
+            # Roll back to this tool's savepoint so the outer transaction (and
+            # the other tools registered in this loop) survive the failure.
+            try:
+                if _sp is not None and _sp.is_active:
+                    await _sp.rollback()
+            except Exception:
+                pass
+            # Most common real cause: tool_registry's global UNIQUE(name, version) —
+            # this exact tool name/version is already registered under a DIFFERENT
+            # server. Surface that plainly rather than a raw exception string.
+            _exc_str = str(exc)
+            if "tool_registry_name_version_unique" in _exc_str or "duplicate key" in _exc_str.lower():
+                reason = f"name '{tool_name}' (version {tool_version}) is already registered by another server"
+            else:
+                reason = f"registration failed: {_exc_str}"
+            skipped_tools.append({"name": tool_name, "reason": reason})
             continue
 
     # Commit all registrations
@@ -1713,5 +2120,31 @@ async def discover_tools(
         content={
             "discovered": discovered,
             "tools": registered_tools,
+            "skipped": skipped_tools,
         },
     )
+
+
+@servers_router.post("/{server_id}/discover-tools", status_code=200)
+async def discover_tools(
+    server_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """
+    Discover tools from an approved upstream MCP server (admin-only HTTP route).
+    Thin wrapper around _run_tool_discovery — see that function for the full
+    discovery/registration logic shared with R-10's auto-provisioning call site.
+
+    Required role: admin (platform_admin)
+    """
+    roles: list[str] = getattr(request.state, "client_roles", [])
+    client_id: str = getattr(request.state, "client_id", "unknown")
+
+    if "admin" not in roles and "platform_admin" not in roles:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "FORBIDDEN", "message": "Requires admin role."},
+        )
+
+    return await _run_tool_discovery(server_id, db, actor_client_id=client_id)

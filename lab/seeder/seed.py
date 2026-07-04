@@ -219,11 +219,20 @@ def setup_vault_secret(existing_cred_rows: int = 0) -> str:
             mount_point="secret",
             raise_on_deleted_version=True,
         )
-        master_value = existing["data"]["data"].get("master_secret", "")
+        # Field-name mismatch bug fix: vault-init.sh writes this secret under
+        # "value" (not "master_secret") — kms.py's runtime reader already
+        # accepts either (`data.get("master_secret") or data["value"]`), but
+        # this check only ever looked for "master_secret", so it silently
+        # never recognized a "value"-keyed secret as existing. That made this
+        # refuse-to-rotate guard fire on every run with a non-empty
+        # credential_store, even though the real secret was sitting right
+        # there — match kms.py's read exactly.
+        data = existing["data"]["data"]
+        master_value = data.get("master_secret") or data.get("value", "")
         if master_value:
             log.info("Broker master secret already exists in Vault — reusing")
             return master_value
-        # Path exists but has no master_secret field — treat as absent, fall through.
+        # Path exists but has neither field — treat as absent, fall through.
     except hvac.exceptions.InvalidPath:
         pass  # KV path not found → genuinely first run; safe to generate below.
 

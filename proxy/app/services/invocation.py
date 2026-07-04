@@ -276,6 +276,38 @@ async def invoke_tool(
         raise ToolDeprecatedError(tool_id, tool_name)
 
     # -------------------------------------------------------------------------
+    # Step 1.1: Debug/maintenance mode — hard deny for everyone except the
+    # server's owner and its (max 2) maintainers. No role-based bypass: an
+    # admin is not exempt, by explicit product requirement. Fail closed if
+    # the lookup itself errors (a DB hiccup must not silently grant access
+    # to a server someone deliberately locked down).
+    # -------------------------------------------------------------------------
+    if tool_server_id:
+        from app.core.database import AsyncSessionLocal as _MaintDBSession
+        from sqlalchemy import text as _maint_sql
+
+        try:
+            async with _MaintDBSession() as _mconn:
+                _mrow = (await _mconn.execute(
+                    _maint_sql(
+                        "SELECT debug_mode, owner_sub, maintainers FROM server_registry "
+                        "WHERE server_id = :sid AND deleted_at IS NULL"
+                    ),
+                    {"sid": tool_server_id},
+                )).fetchone()
+        except Exception as exc:
+            logger.error(
+                "Debug-mode lookup failed for server_id=%s — failing closed",
+                tool_server_id, extra={"error": str(exc)},
+            )
+            raise ServerInMaintenanceError(tool_id, tool_name, tool_server_id) from exc
+
+        if _mrow and _mrow.debug_mode:
+            allowed = {_mrow.owner_sub, *(_mrow.maintainers or [])}
+            if client_id not in allowed:
+                raise ServerInMaintenanceError(tool_id, tool_name, tool_server_id)
+
+    # -------------------------------------------------------------------------
     # Step 1.2: Supply-chain scan freshness gate (Stage 3).
     # If the tool is linked to a server and SCAN_FRESHNESS_ENFORCED=True,
     # deny calls to servers whose last_rescanned_at is older than
@@ -1572,6 +1604,21 @@ class ScanFreshnessError(Exception):
             f"Tool '{tool_name}' denied: server supply-chain scan is stale "
             f"(last_rescanned_at={last_rescanned_at})."
         )
+
+
+class ServerInMaintenanceError(Exception):
+    """
+    Raised when a server is in debug/maintenance mode and the caller is not
+    the owner or a listed maintainer. Hard deny — no role-based bypass, per
+    explicit product requirement: while debug mode is on, ONLY the owner and
+    maintainers may use the server; everyone else sees "in maintenance".
+    """
+
+    def __init__(self, tool_id: str, tool_name: str, server_id: str) -> None:
+        self.tool_id = tool_id
+        self.tool_name = tool_name
+        self.server_id = server_id
+        super().__init__(f"Tool '{tool_name}' denied: server {server_id} is in maintenance mode.")
 
 
 class TaintFloorDenyError(Exception):

@@ -11,8 +11,10 @@ Pipeline:
 Writes results to server_registry.scan_report (jsonb) and sets scan_status.
 Called as an asyncio background task from the submission router.
 
-If trufflehog or git is absent, the scanner degrades gracefully:
-  - missing git/trufflehog → scan_status='passed', warning in report
+If a scanner binary is absent, the scan fails closed:
+  - missing git → scan_status='blocked' (cannot even clone)
+  - missing trufflehog/pip-audit → scan_status='error' (never 'passed'); the
+    submission cannot be approved until scanner tooling is available
   - clone failure (private repo, no access) → scan_status='blocked', clear message
 """
 from __future__ import annotations
@@ -121,8 +123,16 @@ async def _run_trufflehog(repo_path: str, config: dict) -> list[dict]:
     if not th_cfg.get("enabled", True):
         return []
     if not shutil.which("trufflehog"):
-        logger.warning("trufflehog not found; skipping secret scan")
-        return []
+        logger.error("trufflehog not found; scan cannot certify this submission")
+        return [{
+            "scanner": "trufflehog",
+            "severity": "critical",
+            "block": False,
+            "missing_tool": True,
+            "file": "",
+            "line": 0,
+            "message": "trufflehog binary not found in scanner environment; secret scan did not run",
+        }]
 
     only_verified = th_cfg.get("block_on", "verified") == "verified"
     cmd = ["trufflehog", "filesystem", repo_path, "--json", "--no-update"]
@@ -209,18 +219,35 @@ async def _run_pip_audit(repo_path: str, config: dict) -> list[dict]:
         return []
     if "pip" not in dep_cfg.get("ecosystems", ["pip"]):
         return []
+    # Find requirements files
+    req_files = list(Path(repo_path).glob("requirements*.txt")) + list(Path(repo_path).glob("pyproject.toml"))
+    if not req_files:
+        return [{
+            "scanner": "pip-audit",
+            "severity": "info",
+            "block": False,
+            "skipped": True,
+            "file": "",
+            "line": 0,
+            "message": "No requirements.txt/pyproject.toml found — dependency-CVE scan did not run "
+                       "(this repo may use a different ecosystem, e.g. npm, which is not CVE-audited here)",
+        }]
+
     if not shutil.which("pip-audit"):
-        logger.warning("pip-audit not found; skipping dependency scan")
-        return []
+        logger.error("pip-audit not found; scan cannot certify this submission")
+        return [{
+            "scanner": "pip-audit",
+            "severity": "critical",
+            "block": False,
+            "missing_tool": True,
+            "file": "",
+            "line": 0,
+            "message": "pip-audit binary not found in scanner environment; dependency scan did not run",
+        }]
 
     block_on = dep_cfg.get("block_on", "critical")
     severity_order = ["low", "medium", "high", "critical"]
     block_threshold = severity_order.index(block_on) if block_on in severity_order else 3
-
-    # Find requirements files
-    req_files = list(Path(repo_path).glob("requirements*.txt")) + list(Path(repo_path).glob("pyproject.toml"))
-    if not req_files:
-        return []
 
     rc, stdout, stderr = await _run(
         ["pip-audit", "--format=json", "-r", str(req_files[0])],
@@ -249,6 +276,179 @@ async def _run_pip_audit(repo_path: str, config: dict) -> list[dict]:
     return findings
 
 
+# ---------------------------------------------------------------------------
+# R-9: textual-only SBOM manifest parsing (declared, unresolved dependencies)
+#
+# No `pip install`/`npm install`, no code execution — regex/stdlib line
+# parsing only, run in the same trust boundary R-0 already accepts for
+# trufflehog/pip-audit (attacker-controlled repo content, bounded I/O).
+# ---------------------------------------------------------------------------
+
+_SBOM_MAX_FILE_BYTES = 2 * 1024 * 1024  # 2 MB — malformed/huge manifest guard
+_SBOM_MAX_COMPONENTS = 500
+
+# name[extras]specifier, e.g. "requests[security]==2.31.0" / "flask>=2.0" / "click"
+_REQ_LINE_RE = re.compile(
+    r'^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(==|>=|<=|~=|!=|>|<)?\s*([A-Za-z0-9._*+!-]*)'
+)
+
+
+def _parse_requirements_txt(text_content: str) -> list[dict]:
+    out = []
+    for raw in text_content.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(("-r", "-e", "--", "git+", "http://", "https://")):
+            continue
+        m = _REQ_LINE_RE.match(line)
+        if not m:
+            continue
+        name, _op, version = m.groups()
+        version = version.strip() or "*"
+        out.append({
+            "name": name,
+            "version": version,
+            "purl": f"pkg:pypi/{name.lower()}@{version}" if version != "*" else f"pkg:pypi/{name.lower()}",
+        })
+    return out
+
+
+def _parse_pyproject_toml(text_content: str) -> list[dict]:
+    try:
+        import tomllib
+    except ImportError:
+        return []
+    try:
+        data = tomllib.loads(text_content)
+    except Exception:
+        return []
+    out = []
+    # PEP 621: [project.dependencies] = ["name>=1.0", ...]
+    for dep in data.get("project", {}).get("dependencies", []) or []:
+        m = _REQ_LINE_RE.match(str(dep).strip())
+        if not m:
+            continue
+        name, _op, version = m.groups()
+        version = version.strip() or "*"
+        out.append({
+            "name": name,
+            "version": version,
+            "purl": f"pkg:pypi/{name.lower()}@{version}" if version != "*" else f"pkg:pypi/{name.lower()}",
+        })
+    # Poetry: [tool.poetry.dependencies] name = "^1.0" (table of name -> spec)
+    poetry_deps = data.get("tool", {}).get("poetry", {}).get("dependencies", {}) or {}
+    for name, spec in poetry_deps.items():
+        if name.lower() == "python":
+            continue
+        if isinstance(spec, dict):
+            version = str(spec.get("version", "*")).lstrip("^~>=< ") or "*"
+        else:
+            version = str(spec).lstrip("^~>=< ") or "*"
+        out.append({
+            "name": name,
+            "version": version,
+            "purl": f"pkg:pypi/{name.lower()}@{version}" if version != "*" else f"pkg:pypi/{name.lower()}",
+        })
+    return out
+
+
+def _parse_package_json(text_content: str) -> list[dict]:
+    try:
+        data = json.loads(text_content)
+    except Exception:
+        return []
+    out = []
+    for section in ("dependencies", "devDependencies"):
+        for name, version in (data.get(section) or {}).items():
+            version = str(version).lstrip("^~>=< ") or "*"
+            out.append({
+                "name": name,
+                "version": version,
+                "purl": f"pkg:npm/{name}@{version}" if version != "*" else f"pkg:npm/{name}",
+            })
+    return out
+
+
+_GO_REQUIRE_LINE_RE = re.compile(r'^([^\s]+)\s+(v[^\s]+)')
+
+
+def _parse_go_mod(text_content: str) -> list[dict]:
+    """
+    Parse `require` module/version pairs from a go.mod file — both the
+    single-line form (`require module v1.2.3`) and the grouped block form
+    (`require (\n  module v1.2.3\n)`). Comments (`// indirect` etc.) and
+    blank lines are ignored; malformed lines are skipped, not fatal.
+    """
+    out = []
+    in_block = False
+    for raw in text_content.splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if line == "require (":
+            in_block = True
+            continue
+        if in_block and line == ")":
+            in_block = False
+            continue
+        if in_block:
+            m = _GO_REQUIRE_LINE_RE.match(line)
+        elif line.startswith("require "):
+            m = _GO_REQUIRE_LINE_RE.match(line[len("require "):].strip())
+        else:
+            m = None
+        if not m:
+            continue
+        name, version = m.groups()
+        out.append({
+            "name": name,
+            "version": version,
+            "purl": f"pkg:golang/{name}@{version}",
+        })
+    return out
+
+
+def parse_sbom_components(repo_path: str) -> list[dict]:
+    """
+    Best-effort, bounded parse of declared (unresolved) dependencies from
+    common manifest files at the repo root. Never raises — a malformed or
+    oversized manifest degrades to "nothing parsed from that file", never a
+    scan failure (this is inventory metadata, not a security gate; unlike
+    trufflehog/pip-audit above, a parse miss here is silent, not `error`).
+    """
+    components: list[dict] = []
+    manifests = [
+        ("requirements.txt", _parse_requirements_txt),
+        ("pyproject.toml", _parse_pyproject_toml),
+        ("package.json", _parse_package_json),
+        ("go.mod", _parse_go_mod),
+    ]
+    for filename, parser in manifests:
+        fpath = Path(repo_path) / filename
+        try:
+            if not fpath.is_file() or fpath.stat().st_size > _SBOM_MAX_FILE_BYTES:
+                continue
+            content = fpath.read_text(errors="replace")
+            components.extend(parser(content))
+        except OSError:
+            continue
+        except Exception as exc:
+            logger.warning("SBOM manifest parse error for %s: %s", filename, exc)
+        if len(components) >= _SBOM_MAX_COMPONENTS:
+            break
+    # De-dupe by (name, version); cap regardless of source file mix.
+    seen = set()
+    deduped = []
+    for c in components:
+        key = (c["name"].lower(), c["version"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(c)
+    return deduped[:_SBOM_MAX_COMPONENTS]
+
+
 async def scan_submission(server_id: str, github_url: str) -> None:
     """
     Clone the repo and run all enabled scanners.
@@ -264,7 +464,7 @@ async def scan_submission(server_id: str, github_url: str) -> None:
             await session.execute(text("""
                 UPDATE server_registry
                 SET scan_status = :scan_status,
-                    scan_report = :report::jsonb,
+                    scan_report = CAST(:report AS jsonb),
                     submission_status = :subm_status,
                     updated_at = now()
                 WHERE server_id = :sid
@@ -308,6 +508,22 @@ async def scan_submission(server_id: str, github_url: str) -> None:
             await _set_status("blocked", report)
             return
 
+        # R-9: best-effort manifest parse, independent of scan pass/fail —
+        # inventory metadata, not a security gate (FM: never blocks approval).
+        try:
+            sbom_components = parse_sbom_components(repo_path)
+        except Exception as exc:
+            logger.warning("SBOM component parse failed for server_id=%s: %s", server_id, exc)
+            sbom_components = []
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("""
+                UPDATE server_registry
+                SET sbom_components = CAST(:components AS jsonb),
+                    updated_at = now()
+                WHERE server_id = :sid
+            """), {"components": json.dumps(sbom_components), "sid": server_id})
+            await session.commit()
+
         findings: list[dict] = []
         th, custom, pip_f = await asyncio.gather(
             _run_trufflehog(repo_path, config),
@@ -319,10 +535,13 @@ async def scan_submission(server_id: str, github_url: str) -> None:
         findings.extend(pip_f)
 
         blocked = any(f.get("block") for f in findings)
-        await _set_status("blocked" if blocked else "passed", findings)
+        missing_tool = any(f.get("missing_tool") for f in findings)
+        # R-0 fix: a scanner that couldn't run is not a pass — fail closed.
+        status = "blocked" if blocked else ("error" if missing_tool else "passed")
+        await _set_status(status, findings)
         logger.info(
             "Scan complete server_id=%s status=%s findings=%d",
-            server_id, "blocked" if blocked else "passed", len(findings),
+            server_id, status, len(findings),
         )
     except Exception as exc:
         # C1 fix: fail-closed — a scanner crash is unknown, not a pass.
@@ -371,7 +590,9 @@ async def scan_repo(github_url: str) -> tuple[list[dict], str]:
             _run_pip_audit(repo_path, config),
         )
         findings = th + custom + pip_f
-        status = "blocked" if any(f.get("block") for f in findings) else "passed"
+        blocked = any(f.get("block") for f in findings)
+        missing_tool = any(f.get("missing_tool") for f in findings)
+        status = "blocked" if blocked else ("error" if missing_tool else "passed")
         return findings, status
     except Exception as exc:
         return ([{

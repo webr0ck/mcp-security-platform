@@ -24,6 +24,7 @@ The only thing in ~/.mcp.json is the gateway URL:
 from __future__ import annotations
 
 import logging
+from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
@@ -110,6 +111,18 @@ def _proxy_base(request: Request) -> str:
     return settings.PROXY_BASE_URL.rstrip("/") if settings.PROXY_BASE_URL else str(request.base_url).rstrip("/")
 
 
+def _replace_str(value: Any, old: str, new: str) -> Any:
+    """Recursively replace `old` with `new` in every string value, including
+    nested dicts/lists (e.g. Keycloak's mtls_endpoint_aliases object)."""
+    if isinstance(value, str):
+        return value.replace(old, new)
+    if isinstance(value, dict):
+        return {k: _replace_str(v, old, new) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_str(v, old, new) for v in value]
+    return value
+
+
 async def _fetch_idp_discovery() -> dict:
     """
     Fetch Keycloak's OIDC discovery document.
@@ -128,20 +141,14 @@ async def _fetch_idp_discovery() -> dict:
                 if resp.status_code == 200:
                     data = resp.json()
                     if internal != public:
-                        data = {
-                            k: v.replace(internal, public) if isinstance(v, str) else v
-                            for k, v in data.items()
-                        }
+                        data = _replace_str(data, internal, public)
                     # KC dev-mode may return a different base URL than `internal`
                     # (e.g. "localhost:8082" when it inferred the frontend URL from
                     # an early browser request). Rewrite whatever KC actually returned
                     # as its issuer so all endpoints point at the public address.
                     actual_issuer = data.get("issuer", "").rstrip("/")
                     if actual_issuer and actual_issuer != public:
-                        data = {
-                            k: v.replace(actual_issuer, public) if isinstance(v, str) else v
-                            for k, v in data.items()
-                        }
+                        data = _replace_str(data, actual_issuer, public)
                     return data
         except Exception as exc:
             logger.debug("IdP discovery at %s%s unavailable: %s", internal, path, exc)
@@ -251,13 +258,16 @@ async def dynamic_client_registration(request: Request):
     )
 
 
-@router.get("/.well-known/oauth-protected-resource")
-async def oauth_protected_resource(request: Request):
+def _protected_resource_metadata(request: Request, resource_path: str = "") -> dict:
     """
     RFC 9728 protected resource metadata.
     Points MCP clients at the Keycloak authorization server.
     The client needs only this URL (from the 401 WWW-Authenticate header) to
     discover the complete auth stack — no pre-configured credentials required.
+
+    `resource_path` (e.g. "/mcp") makes "resource" the EXACT protected URL —
+    some clients (Codex) reject metadata whose "resource" is just the origin
+    when they're calling a specific path.
     """
     proxy = _proxy_base(request)
     issuer = _public_issuer()
@@ -268,9 +278,20 @@ async def oauth_protected_resource(request: Request):
     # /.well-known/oauth-authorization-server overrides scopes_supported to only
     # the scopes enabled on the claude-code public client.
     return {
-        "resource": proxy,
+        "resource": proxy + resource_path,
         "authorization_servers": [proxy],
-        "bearer_methods_supported": ["header", "cookie"],
+        "bearer_methods_supported": ["header"],
         "resource_documentation": f"{proxy}/docs",
         "introspection_endpoint": f"{issuer}/protocol/openid-connect/token/introspect" if issuer else None,
     }
+
+
+@router.get("/.well-known/oauth-protected-resource")
+async def oauth_protected_resource(request: Request):
+    return _protected_resource_metadata(request)
+
+
+@router.get("/.well-known/oauth-protected-resource/{resource_path:path}")
+async def oauth_protected_resource_scoped(request: Request, resource_path: str):
+    """Resource-specific variant (RFC 9728 §3.1), e.g. /.well-known/oauth-protected-resource/mcp."""
+    return _protected_resource_metadata(request, "/" + resource_path)

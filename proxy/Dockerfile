@@ -16,11 +16,20 @@ RUN groupadd --gid 1001 appgroup && \
 
 WORKDIR /app
 
-# Install system dependencies (curl for healthcheck; ca-certificates for TLS)
+# Install system dependencies:
+#   curl/ca-certificates - healthcheck + TLS
+#   git                  - submission scanner repo clone (R-0)
+# ponytail: trufflehog installed via upstream script below; sidecar image that
+# isolates untrusted-repo parsing from the enforcement point is the P1 follow-up
+# (PRD-0003 R-0) — this is the interim in-proxy fix so scans fail closed with
+# tooling present rather than silently skipping.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    git \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+       | sh -s -- -b /usr/local/bin v3.82.13
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
 FROM base AS builder

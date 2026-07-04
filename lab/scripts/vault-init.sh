@@ -95,12 +95,26 @@ ${VAULT_EXEC} secrets enable -path=secret kv-v2 2>/dev/null || {
 }
 
 # ---------------------------------------------------------------------------
-# Write broker master secret
+# Write broker master secret — ONLY if genuinely absent.
+#
+# Bug fixed here: this used to unconditionally `kv put` a fresh random value
+# on every run (every lab-up), silently rotating the live KEK out from under
+# any already-encrypted credential_store rows (kms.py::get_master_secret
+# always reads whatever is *current*, dynamically — there is no pinning).
+# lab/seeder/seed.py's own setup_vault_secret() already does this correctly
+# (read-existing-first, refuse-to-rotate-if-credentials-exist) — this script
+# must not race ahead of it and clobber the secret before the seeder even
+# gets a chance to check.
 # ---------------------------------------------------------------------------
-MASTER_VALUE="$(openssl rand -hex 32)"
-echo "[vault-init] Writing broker master secret to secret/mcp/broker-master ..."
-${VAULT_EXEC} kv put secret/mcp/broker-master value="${MASTER_VALUE}"
-echo "[vault-init] Broker master secret written."
+echo "[vault-init] Checking for an existing broker master secret ..."
+if ${VAULT_EXEC} kv get secret/mcp/broker-master >/dev/null 2>&1; then
+    echo "[vault-init] Broker master secret already exists — reusing (not rotating)."
+else
+    MASTER_VALUE="$(openssl rand -hex 32)"
+    echo "[vault-init] No existing secret found — writing a fresh broker master secret ..."
+    ${VAULT_EXEC} kv put secret/mcp/broker-master value="${MASTER_VALUE}"
+    echo "[vault-init] Broker master secret written."
+fi
 
 # ---------------------------------------------------------------------------
 # Write lab service config (informational — actual credentials set by seeder)

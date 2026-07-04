@@ -288,7 +288,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     status_code=302,
                 )
             _base = settings.PROXY_BASE_URL.rstrip("/") if settings.PROXY_BASE_URL else str(request.base_url).rstrip("/")
-            resource_metadata_url = _base + "/.well-known/oauth-protected-resource"
+            # RFC 9728 §3.1: point at the resource-specific metadata document
+            # (path-suffixed) so its "resource" field can be the exact protected
+            # URL (e.g. ".../mcp"), not just the origin — some clients (Codex)
+            # reject protected-resource metadata whose "resource" doesn't match
+            # the URL they're calling.
+            resource_metadata_url = _base + "/.well-known/oauth-protected-resource" + request.url.path
             return JSONResponse(
                 status_code=401,
                 content={
@@ -736,11 +741,19 @@ async def _load_roles(client_id: str) -> list[str]:
         from app.core.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as session:
+            # Append-only model (INV-011, V050): a role may have multiple
+            # grant/revoke event rows over time; the most recent event per
+            # role determines current state (revoked / expired / active).
             result = await session.execute(
                 text(
                     """
-                    SELECT role FROM role_assignments
-                    WHERE client_id = :client_id
+                    SELECT role FROM (
+                        SELECT DISTINCT ON (role) role, revoked, expires_at
+                        FROM role_assignments
+                        WHERE client_id = :client_id
+                        ORDER BY role, created_at DESC
+                    ) latest
+                    WHERE revoked = false
                       AND (expires_at IS NULL OR expires_at > NOW())
                     """
                 ),

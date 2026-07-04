@@ -854,7 +854,13 @@ services:
       - RELOAD=true
       # SEC-05: reject inbound to proxy:8000 from anything but the gateway/loopback,
       # so MCP backends can't dial the proxy back over their per-backend network.
+      # lab-mcp-self-service is a deliberate exception: it lives on the pairwise
+      # mcp-self-service-net specifically to call back into /api/v1/design-assist
+      # and /api/v1/submissions (see lab/mcp-servers/self-service/server.py), and
+      # every such call still carries the caller's real OAuth bearer token — this
+      # only grants network-level ingress, not an authn bypass.
       - PROXY_INGRESS_ALLOWLIST_ENABLED=true
+      - PROXY_INGRESS_TRUSTED_HOSTS=gateway,lab-mcp-self-service
       # Option B: derive the OIDC callback URL from the incoming request's Host
       # header so the proxy works from any IP (LAN, Tailscale, localhost) without
       # reconfiguring PROXY_BASE_URL. Safe here because all traffic is on trusted

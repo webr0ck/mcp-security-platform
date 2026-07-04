@@ -21,7 +21,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,7 @@ router = APIRouter(prefix="/portal", tags=["Portal"])
 # regardless of CWD at runtime.
 _HERE = Path(__file__).resolve().parent
 _DATA_JSON = (_HERE / "../../../../policies/rego/data.json").resolve()
+_REGO_DIR = (_HERE / "../../../../policies/rego").resolve()
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -89,6 +92,7 @@ def _require_admin(request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 _HTMX_TAG = '<script src="/static/htmx.min.js"></script>'
+_FAVICON_LINK = '<link rel="icon" type="image/png" href="/static/owl-icon.png">'
 
 _FONTS_LINK = (
     # Non-blocking async font load: media="print" + onload swap prevents blocking
@@ -950,6 +954,8 @@ _TAB_MAP_PY = {
     "detections":  "Detections",
     "sbom":        "SBOM",
     "submissions": "Submissions",
+    "profile":     "Profile",
+    "access":      "Access",
 }
 _VALID_TABS = frozenset(_TAB_MAP_PY)
 
@@ -984,14 +990,11 @@ async def portal_admin_tab(tab: str, request: Request):
 
 
 def _aegis_logo_mark(size: int = 24, glow: bool = True) -> str:
-    shadow = "box-shadow:0 3px 10px rgba(37,99,235,0.45);" if glow else ""
-    sqsz = int(size * 0.42)
-    dotsz = int(size * 0.125)
+    """Brand mark — owl icon (docs/assets/owl-icon.png, served at /static/owl-icon.png)."""
+    shadow = "filter:drop-shadow(0 3px 6px rgba(103,80,148,0.45));" if glow else ""
     return (
-        f'<div class="adm-logo-mark" style="width:{size}px;height:{size}px;{shadow}">'
-        f'<div style="width:{sqsz}px;height:{sqsz}px;border:2px solid #fff;border-radius:2px;transform:rotate(45deg)"></div>'
-        f'<div style="position:absolute;width:{dotsz}px;height:{dotsz}px;border-radius:50%;background:#fff"></div>'
-        f'</div>'
+        f'<img src="/static/owl-icon.png" alt="MCP Security Platform" width="{size}" '
+        f'style="height:{size}px;width:auto;object-fit:contain;flex:none;{shadow}">'
     )
 
 
@@ -1014,6 +1017,7 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MCP Security Platform · Admin</title>
+  {_FAVICON_LINK}
   {_FONTS_LINK}
   {_HTMX_TAG}
   <style>{_CSS}</style>
@@ -1030,18 +1034,20 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
     </div>
 
     <div class="adm-nav-group">SECURITY</div>
-    {_nav("Dashboard",  "dashboard")}
-    {_nav("Detections", "detections")}
-    {_nav("SBOM",       "sbom")}
+    {_nav("Dashboard",  "dashboard",  active=initial_tab == "dashboard")}
+    {_nav("Detections", "detections", active=initial_tab == "detections")}
+    {_nav("SBOM",       "sbom",       active=initial_tab == "sbom")}
 
     <div class="adm-nav-group">ADMIN</div>
-    {_nav("Identity (OIDC)", "identity")}
-    {_nav("MCP Servers",     "servers", active=True)}
-    {_nav("Submissions",     "submissions")}
-    {_nav("Credentials",     "credentials")}
-    {_nav("Request Limits",  "limits")}
+    {_nav("Identity (OIDC)", "identity",    active=initial_tab == "identity")}
+    {_nav("MCP Servers",     "servers",     active=initial_tab == "servers")}
+    {_nav("Access",          "access",      active=initial_tab == "access")}
+    {_nav("Submissions",     "submissions", active=initial_tab == "submissions")}
+    {_nav("Credentials",     "credentials", active=initial_tab == "credentials")}
+    {_nav("Request Limits",  "limits",      active=initial_tab == "limits")}
+    {_nav("Profile",         "profile",     active=initial_tab == "profile")}
 
-    <div class="adm-user-panel">
+    <div class="adm-user-panel" onclick="loadAdminTab('profile')" style="cursor:pointer" title="View profile">
       <div class="adm-avatar">{esc_py(initials)}</div>
       <div>
         <div class="adm-user-name">{esc_py(display_name)}</div>
@@ -1086,8 +1092,11 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
     detections:  'Detections',
     sbom:        'SBOM',
     submissions: 'Submissions',
+    profile:     'Profile',
+    access:      'Access',
   }};
-  function loadAdminTab(name) {{
+  function loadAdminTab(name, opts) {{
+    opts = opts || {{}};
     // Update breadcrumb
     const bc = document.getElementById('adm-breadcrumb-page');
     if (bc) bc.textContent = _TAB_MAP[name] || name;
@@ -1105,7 +1114,24 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
     }});
     // Load fragment
     htmx.ajax('GET', '/portal/fragments/admin/' + name, {{target: '#adm-content', swap: 'innerHTML'}});
+    // Browser back/forward support: tab switches previously pushed no history
+    // entry at all, so Back skipped straight past the whole admin console to
+    // whatever page loaded before it. /portal/admin/{{tab}} is a real,
+    // server-rendered route for every tab (see portal_admin_tab), so pushing
+    // it here means Back/Forward can just do a normal reload at that URL and
+    // get the correct page every time — no fragile client-side state to keep
+    // in sync, no reliance on this htmx build's undocumented ajax() history
+    // options (tested empirically: passing pushUrl to htmx.ajax() here had no
+    // effect on this bundled htmx version).
+    if (!opts.fromPopState) {{
+      history.pushState({{admTab: name}}, '', '/portal/admin/' + name);
+    }}
   }}
+  window.addEventListener('popstate', function(e) {{
+    if (e.state && e.state.admTab) {{
+      location.reload();
+    }}
+  }});
   // Legacy alias used by existing admin sub-fragments
   function activateAdminTab(name) {{ loadAdminTab(name); }}
 </script>
@@ -1123,6 +1149,7 @@ def _build_agent_shell(cid: str, roles: list) -> str:
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MCP Security Platform · Portal</title>
+  {_FAVICON_LINK}
   {_FONTS_LINK}
   {_HTMX_TAG}
   <style>{_CSS}</style>
@@ -1140,7 +1167,9 @@ def _build_agent_shell(cid: str, roles: list) -> str:
         <span class="portal-role-dot"></span>
         {esc_py(role_label.capitalize())}
       </div>
-      <div style="display:flex;align-items:center;gap:9px">
+      <div style="display:flex;align-items:center;gap:9px;cursor:pointer"
+           hx-get="/portal/fragments/profile" hx-target="#portal-body" hx-swap="innerHTML"
+           title="View profile">
         <div class="portal-uid-block">
           <div class="portal-uid">{esc_py(cid)}</div>
           <div class="portal-uid-sub">service account</div>
@@ -1481,6 +1510,315 @@ async def fragment_my_access(request: Request):
     return HTMLResponse(await _build_portal_access(cid, api_key, _is_auditor_only(request)))
 
 
+# ---------------------------------------------------------------------------
+# Fragment: Profile (R-3) — identity, all roles, session, sign-out
+# ---------------------------------------------------------------------------
+
+async def _build_profile_fragment(request: Request, back_target: str) -> str:
+    """Profile content shared by the admin 'Profile' tab and the agent portal."""
+    cid = _client_id(request)
+    roles = _roles(request)
+    can_manage_mcp_profiles = "admin" in roles or "platform_admin" in roles
+
+    session_info = None
+    try:
+        from app.routers.oidc_browser import _decode_session_jwt
+        from app.core.config import settings
+        token = request.cookies.get(settings.SESSION_COOKIE_NAME)
+        if token:
+            session_info = _decode_session_jwt(token)
+    except Exception as exc:
+        logger.warning("portal profile: could not decode session: %s", exc)
+
+    roles_html = "".join(
+        f'<span style="background:#1e293b;border-radius:20px;padding:3px 10px;font-size:12px;margin-right:6px">{esc_py(r)}</span>'
+        for r in roles
+    ) or '<span style="color:var(--muted);font-size:12px">no roles assigned</span>'
+
+    if session_info:
+        exp = session_info.get("exp")
+        exp_str = datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if exp else "—"
+        auth_method = session_info.get("auth_method", "—")
+        session_html = f"""
+        <div style="margin-top:0.4rem;font-size:13px;color:var(--muted)">
+          Auth method: <span style="color:var(--text)">{esc_py(str(auth_method))}</span><br>
+          Session expires: <span style="color:var(--text)">{esc_py(exp_str)}</span>
+        </div>"""
+    else:
+        session_html = '<div style="margin-top:0.4rem;font-size:13px;color:var(--muted)">Session details unavailable.</div>'
+
+    # MCP profiles: curated named subsets of servers/tools a user can bind
+    # their session to at login (?profile=<name>) so their MCP client only
+    # sees that subset instead of everything they're entitled to.
+    try:
+        from app.routers.profiles import _list_named_profiles, _get_profile_mcp_bindings
+        mcp_profiles = await _list_named_profiles(active_only=True)
+        for p in mcp_profiles:
+            p["bindings"] = await _get_profile_mcp_bindings(str(p["id"]))
+    except Exception as exc:
+        logger.error("portal profile: could not load MCP profiles: %s", exc)
+        mcp_profiles = []
+
+    login_base = str(request.base_url).rstrip("/") + "/api/v1/auth/oidc/login?profile="
+    profile_rows_html = []
+    for p in mcp_profiles:
+        enabled_tools = [b["mcp_name"] for b in p["bindings"] if b["enabled"]]
+        tools_html = ", ".join(esc_py(t) for t in enabled_tools[:8]) or '<span style="color:var(--muted)">no tools bound yet</span>'
+        manage_btn = (
+            f'<button class="btn-secondary btn-sm" hx-get="/portal/fragments/mcp-profile/{esc_py(p["name"])}" '
+            f'hx-target="#mcpprof-detail-{esc_py(_slugify(p["name"]))}" hx-swap="innerHTML" '
+            f'onclick="document.getElementById(\'mcpprof-detail-{esc_py(_slugify(p["name"]))}\').style.display=\'block\'">Manage</button>'
+            if can_manage_mcp_profiles else ""
+        )
+        profile_rows_html.append(f"""
+        <div style="border-bottom:1px solid #1e293b;padding:0.6rem 0">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <div style="font-size:13px;font-weight:600">{esc_py(p.get("display_name") or p["name"])}</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:2px">{esc_py(p.get("description") or "")}</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px">Tools: {tools_html}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.5rem">
+              <button class="btn-secondary btn-sm" onclick="navigator.clipboard.writeText('{esc_py(login_base + p['name'])}').then(()=>{{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy login link',1500)}})">Copy login link</button>
+              {manage_btn}
+            </div>
+          </div>
+          <div id="mcpprof-detail-{esc_py(_slugify(p["name"]))}" style="display:none;margin-top:0.5rem"></div>
+        </div>""")
+
+    create_form_html = ""
+    if can_manage_mcp_profiles:
+        create_form_html = """
+        <div style="margin-top:0.75rem;display:flex;gap:0.5rem">
+          <input id="mcpprof-new-name" placeholder="profile-name (a-z0-9-_)" class="wiz-input" style="max-width:200px">
+          <input id="mcpprof-new-display" placeholder="Display name (optional)" class="wiz-input" style="max-width:220px">
+          <button class="btn-primary btn-sm" onclick="createMcpProfile()">+ New profile</button>
+        </div>
+        <div id="mcpprof-new-msg" style="font-size:12px;margin-top:6px"></div>"""
+
+    help_html = """
+    <details style="margin-top:0.75rem">
+      <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--cyan)">How do I use a profile?</summary>
+      <div style="font-size:12px;color:var(--muted);line-height:1.7;margin-top:0.5rem">
+        1. Pick or create a profile below and enable the servers/tools it should expose.<br>
+        2. Click <strong>Copy login link</strong> on that profile.<br>
+        3. In your MCP client's login/auth config, use that link instead of the plain login URL
+           (it's the same PKCE login, with <code>?profile=&lt;name&gt;</code> appended).<br>
+        4. Your session is then scoped to only that profile's enabled tools — everything else
+           you're normally entitled to stays hidden for the life of that session.<br>
+        A session with no <code>?profile=</code> behaves as before (your full entitlement set).
+      </div>
+    </details>"""
+
+    mcp_profiles_html = f"""
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1.25rem 1.5rem;max-width:640px;margin-top:1rem">
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">MCP profiles</div>
+      <p style="font-size:12px;color:var(--muted);margin:0.4rem 0 0.6rem">
+        Curated subsets of servers/tools. Point your MCP client's login at a profile's link
+        below to see only that profile's tools instead of everything you're entitled to.
+      </p>
+      {help_html}
+      <div style="margin-top:0.75rem">
+      {"".join(profile_rows_html) if profile_rows_html else '<div style="color:var(--muted);font-size:12px">No MCP profiles defined yet.</div>'}
+      </div>
+      {create_form_html if can_manage_mcp_profiles else '<div style="font-size:11px;color:var(--muted);margin-top:0.5rem">Ask an admin to create or edit MCP profiles.</div>'}
+    </div>
+    <script>
+      async function createMcpProfile() {{
+        const name = document.getElementById('mcpprof-new-name').value.trim();
+        const display = document.getElementById('mcpprof-new-display').value.trim();
+        const msgEl = document.getElementById('mcpprof-new-msg');
+        if (!name) {{ msgEl.style.color = '#fca5a5'; msgEl.textContent = 'Name is required.'; return; }}
+        try {{
+          const r = await fetch('/api/v1/profiles/named', {{
+            method: 'POST', credentials: 'include', headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{name: name, display_name: display || null}}),
+          }});
+          if (!r.ok) {{ const d = await r.json().catch(()=>({{}})); throw new Error(d.detail || ('HTTP ' + r.status)); }}
+          const created = await r.json();
+          // Reload just the profile fragment in place (not the whole page) so the admin
+          // stays on Profile instead of bouncing to whatever the shell's default tab is.
+          const isAdmin = !!document.getElementById('adm-content');
+          const url = isAdmin ? '/portal/fragments/admin/profile' : '/portal/fragments/profile';
+          const target = isAdmin ? '#adm-content' : '#portal-body';
+          await htmx.ajax('GET', url, {{target: target, swap: 'innerHTML'}});
+          // Auto-open the Manage panel for the profile just created, so its (empty)
+          // configuration is immediately visible instead of requiring another click.
+          const slug = created.name.replace(/[^a-zA-Z0-9]/g, '_');
+          const detailEl = document.getElementById('mcpprof-detail-' + slug);
+          if (detailEl) {{
+            detailEl.style.display = 'block';
+            htmx.ajax('GET', '/portal/fragments/mcp-profile/' + encodeURIComponent(created.name),
+                       {{target: '#mcpprof-detail-' + slug, swap: 'innerHTML'}});
+            detailEl.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+          }}
+        }} catch (err) {{ msgEl.style.color = '#fca5a5'; msgEl.textContent = err.message; }}
+      }}
+    </script>"""
+
+    return f"""
+    <div class="section-title">&#x1F464; Profile</div>
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1.25rem 1.5rem;max-width:520px">
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Principal</div>
+      <div style="font-size:16px;font-weight:600;margin-top:0.15rem">{esc_py(cid)}</div>
+
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-top:1rem">Roles</div>
+      <div style="margin-top:0.4rem">{roles_html}</div>
+
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-top:1rem">Session</div>
+      {session_html}
+
+      <div style="margin-top:1.5rem;display:flex;gap:0.5rem">
+        {'<button class="btn-secondary" hx-get="' + esc_py(back_target) + '" hx-target="#portal-body" hx-swap="innerHTML">&#x2190; Back</button>' if back_target else ''}
+        <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:13px;padding:0.5rem 1rem"
+                onclick="portalSignOut()">Sign out</button>
+      </div>
+    </div>
+
+    {mcp_profiles_html}
+
+    <script>
+      function portalSignOut() {{
+        fetch('/api/v1/auth/oidc/logout', {{method:'POST', credentials:'include'}})
+          .finally(() => {{ window.location.href = '/'; }});
+      }}
+    </script>"""
+
+
+@router.get("/fragments/profile", response_class=HTMLResponse)
+async def fragment_profile(request: Request):
+    """Agent-portal profile view."""
+    _require_portal_access(request)
+    return HTMLResponse(await _build_profile_fragment(request, back_target="/portal/fragments/my-access"))
+
+
+@router.get("/fragments/admin/profile", response_class=HTMLResponse)
+async def fragment_admin_profile(request: Request):
+    """Admin-shell profile tab."""
+    _require_portal_access(request)
+    return HTMLResponse(await _build_profile_fragment(request, back_target=""))
+
+
+@router.get("/fragments/mcp-profile/{name}", response_class=HTMLResponse)
+async def fragment_mcp_profile_manage(name: str, request: Request):
+    """Per-tool toggle list for one named MCP profile — admin/platform_admin only."""
+    _require_portal_access(request)
+    if not any(r in ("admin", "platform_admin") for r in _roles(request)):
+        return HTMLResponse('<div style="color:var(--muted);font-size:12px">Admin role required.</div>')
+
+    try:
+        from collections import defaultdict
+        from app.routers.profiles import _get_named_profile, _get_profile_mcp_bindings
+        from sqlalchemy import text as _sql_text
+        from app.core.database import AsyncSessionLocal as _ASL
+        profile = await _get_named_profile(name)
+        if profile is None:
+            return HTMLResponse('<div style="color:#fca5a5;font-size:12px">Profile not found.</div>')
+        bindings = {b["mcp_name"]: b["enabled"] for b in await _get_profile_mcp_bindings(str(profile["id"]))}
+        async with _ASL() as session:
+            rows = (await session.execute(_sql_text("""
+                SELECT t.name AS tool_name, COALESCE(s.name, t.service_name, t.name) AS server_name
+                FROM tool_registry t
+                LEFT JOIN server_registry s ON s.server_id = t.server_id
+                WHERE t.deleted_at IS NULL
+                ORDER BY server_name, t.name
+            """))).fetchall()
+        by_server: dict[str, list[str]] = defaultdict(list)
+        for r in rows:
+            by_server[r.server_name].append(r.tool_name)
+    except Exception as exc:
+        logger.error("portal mcp-profile manage error for %r: %s", name, exc)
+        return HTMLResponse(_error_fragment("Could not load this profile's tool bindings."))
+
+    slug = _slugify(name)
+    server_sections = []
+    for server_name, tool_names in sorted(by_server.items()):
+        tool_rows = []
+        for tool_name in tool_names:
+            enabled = bindings.get(tool_name, False)
+            tool_rows.append(f"""
+            <tr>
+              <td style="font-size:12px;padding-left:1rem">{esc_py(tool_name)}</td>
+              <td style="text-align:right">
+                <button class="btn-secondary btn-sm mcpprof-toggle-btn"
+                        data-profile="{esc_py(name)}" data-mcp="{esc_py(tool_name)}" data-enabled="{"true" if enabled else "false"}"
+                        data-container="mcpprof-detail-{esc_py(slug)}">
+                  {"Enabled — click to disable" if enabled else "Disabled — click to enable"}
+                </button>
+              </td>
+            </tr>""")
+        n_enabled = sum(1 for t in tool_names if bindings.get(t, False))
+        server_sections.append(f"""
+        <div style="margin-top:0.6rem">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:0.3rem 0;border-bottom:1px solid #1e293b">
+            <div style="font-size:12px;font-weight:600">{esc_py(server_name)}
+              <span style="color:var(--muted);font-weight:400">({n_enabled}/{len(tool_names)} tools enabled)</span>
+            </div>
+            <div style="display:flex;gap:0.4rem">
+              <button class="btn-secondary btn-sm mcpprof-bulk-btn" data-profile="{esc_py(name)}"
+                      data-container="mcpprof-detail-{esc_py(slug)}" data-action="enable"
+                      data-tools='{esc_py(json.dumps(tool_names))}'>Enable all</button>
+              <button class="btn-secondary btn-sm mcpprof-bulk-btn" data-profile="{esc_py(name)}"
+                      data-container="mcpprof-detail-{esc_py(slug)}" data-action="disable"
+                      data-tools='{esc_py(json.dumps(tool_names))}'>Disable all</button>
+            </div>
+          </div>
+          <table class="tbl-wrap" style="width:100%">
+            <tbody>{"".join(tool_rows)}</tbody>
+          </table>
+        </div>""")
+
+    return HTMLResponse(f"""
+    <div>{"".join(server_sections) if server_sections else '<div style="color:var(--muted);font-size:12px;padding:0.5rem 0">No servers/tools registered.</div>'}</div>
+    <script>
+      (function() {{
+        function reload(container, profile) {{
+          htmx.ajax('GET', '/portal/fragments/mcp-profile/' + encodeURIComponent(profile),
+                     {{target: '#' + container, swap: 'innerHTML'}});
+        }}
+        document.querySelectorAll('.mcpprof-toggle-btn').forEach(function(btn) {{
+          btn.addEventListener('click', async function() {{
+            const profile = btn.dataset.profile, mcpName = btn.dataset.mcp;
+            const newEnabled = btn.dataset.enabled !== 'true';
+            btn.disabled = true;
+            try {{
+              const r = await fetch('/api/v1/profiles/named/' + encodeURIComponent(profile) + '/mcps/' + encodeURIComponent(mcpName), {{
+                method: 'PUT', credentials: 'include', headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{enabled: newEnabled}}),
+              }});
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              reload(btn.dataset.container, profile);
+            }} catch (err) {{
+              btn.disabled = false;
+              alert('Failed to update: ' + err.message);
+            }}
+          }});
+        }});
+        document.querySelectorAll('.mcpprof-bulk-btn').forEach(function(btn) {{
+          btn.addEventListener('click', async function() {{
+            const profile = btn.dataset.profile;
+            const enabled = btn.dataset.action === 'enable';
+            const tools = JSON.parse(btn.dataset.tools);
+            btn.disabled = true;
+            try {{
+              for (const mcpName of tools) {{
+                const r = await fetch('/api/v1/profiles/named/' + encodeURIComponent(profile) + '/mcps/' + encodeURIComponent(mcpName), {{
+                  method: 'PUT', credentials: 'include', headers: {{'Content-Type': 'application/json'}},
+                  body: JSON.stringify({{enabled: enabled}}),
+                }});
+                if (!r.ok) throw new Error('HTTP ' + r.status + ' on ' + mcpName);
+              }}
+              reload(btn.dataset.container, profile);
+            }} catch (err) {{
+              btn.disabled = false;
+              alert('Failed to update all tools: ' + err.message);
+            }}
+          }});
+        }});
+      }})();
+    </script>""")
+
+
 async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = False) -> str:  # noqa: C901
     """Build the 'Your access' card grid for the user portal."""
     from collections import defaultdict
@@ -1511,6 +1849,8 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
                        t.description, t.service_name,
                        s.status AS srv_status, s.name AS srv_name,
                        s.injection_mode AS srv_injection_mode,
+                       s.debug_mode AS srv_debug_mode, s.owner_sub AS srv_owner_sub,
+                       s.maintainers AS srv_maintainers,
                        EXISTS (
                          SELECT 1 FROM credential_store c
                          WHERE c.tool_id = t.tool_id
@@ -1533,9 +1873,15 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
                 })
                 if svc not in server_meta:
                     srv_st = (row.srv_status or row.status or "active").lower()
+                    # R-2 debug mode: locked to owner + maintainers only. Everyone
+                    # else sees "maintenance", not the underlying deny reason.
+                    locked_out = bool(row.srv_debug_mode) and cid not in (
+                        {row.srv_owner_sub} | set(row.srv_maintainers or [])
+                    )
                     server_meta[svc] = {
                         "status": srv_st,
                         "injection_mode": row.srv_injection_mode or row.injection_mode or "none",
+                        "in_maintenance": locked_out,
                     }
 
             # Profile states (enable/disable per server alias)
@@ -1545,12 +1891,28 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             )
             for prow in pres.fetchall():
                 profile_states[prow.mcp_name] = bool(prow.enabled)
+
+            # R-6: caller's own in-flight submissions (not yet active/rejected),
+            # so "submitted successfully" isn't the last thing a submitter ever sees.
+            mine_result = await session.execute(text("""
+                SELECT server_id, name, submission_status, scan_status, scan_report, updated_at
+                FROM server_registry
+                WHERE owner_sub = :cid
+                  AND submission_status NOT IN ('draft')
+                  AND deleted_at IS NULL
+                ORDER BY updated_at DESC
+                LIMIT 10
+            """), {"cid": cid})
+            my_submissions = [dict(r._mapping) for r in mine_result.fetchall()]
     except Exception as exc:
         logger.error("portal my-access DB error: %s", exc)
+        my_submissions = []
 
     # 3. Determine card-level status
     def _card_status(svc: str) -> str:
         meta = server_meta.get(svc, {})
+        if meta.get("in_maintenance"):
+            return "maintenance"
         srv_st = meta.get("status", "active")
         if srv_st == "pending":
             return "awaiting"
@@ -1592,21 +1954,25 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
         mode    = meta.get("injection_mode", "none")
         enabled = profile_states.get(svc, True)
 
-        card_extra_cls = {"suspended": "card-suspended", "awaiting": "card-awaiting"}.get(cstatus, "")
+        card_extra_cls = {"suspended": "card-suspended", "awaiting": "card-awaiting",
+                           "maintenance": "card-suspended"}.get(cstatus, "")
         icon_cls = "" if cstatus == "active" else "dim"
         name_cls = "" if cstatus == "active" else "dim"
         desc_cls = "" if cstatus == "active" else "dim"
 
         # Status pill
-        pill_cls = {"active": "cpill-active", "suspended": "cpill-suspended", "awaiting": "cpill-awaiting"}[cstatus]
-        pill_lbl = {"active": "Active", "suspended": "Suspended", "awaiting": "Awaiting"}[cstatus]
+        pill_cls = {"active": "cpill-active", "suspended": "cpill-suspended", "awaiting": "cpill-awaiting",
+                    "maintenance": "cpill-suspended"}[cstatus]
+        pill_lbl = {"active": "Active", "suspended": "Suspended", "awaiting": "Awaiting",
+                    "maintenance": "Maintenance"}[cstatus]
         pill_html = f'<span class="cpill {pill_cls}"><span class="cpill-dot"></span>{pill_lbl}</span>'
 
         # Description
         desc_map = {
-            "active":    f"Tools available via {esc_py(mode)} injection.",
-            "suspended": "Temporarily blocked by an administrator pending security review.",
-            "awaiting":  "Waiting for an admin to approve this server. We’ll notify you.",
+            "active":      f"Tools available via {esc_py(mode)} injection.",
+            "suspended":   "Temporarily blocked by an administrator pending security review.",
+            "awaiting":    "Waiting for an admin to approve this server. We’ll notify you.",
+            "maintenance": "MCP server in maintenance — only the owner and maintainers can use it right now.",
         }
         desc_text = desc_map[cstatus]
 
@@ -1645,6 +2011,9 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
         elif cstatus == "suspended":
             footer_lbl = '<a class="srv-card-footer-link" href="#">Contact admin →</a>'
             toggle_html = '<button class="srv-toggle off" disabled></button>'
+        elif cstatus == "maintenance":
+            footer_lbl = '<span class="srv-card-footer-pend">In maintenance</span>'
+            toggle_html = '<button class="srv-toggle off" disabled></button>'
         else:  # awaiting
             footer_lbl = '<span class="srv-card-footer-pend">Pending review</span>'
             toggle_html = '<button class="srv-toggle off" disabled></button>'
@@ -1670,6 +2039,58 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             {toggle_html}
           </div>
         </div>""")
+
+    # 4b. My submissions strip (R-6 — scan status visible to the submitter)
+    _SUB_CHIP = {
+        "awaiting_review":      ("#2563eb", "Awaiting review"),
+        "scan_pending":         ("#6b7280", "Queued for scan"),
+        "scan_running":         ("#d97706", "Scanning…"),
+        "scan_blocked":         ("#dc2626", "Scan blocked"),
+        "changes_requested":    ("#d97706", "Changes requested"),
+        "approved_pending_url": ("#16a34a", "Approved — needs URL"),
+        # R-10/F-15: no-code submissions have no server to run — terminal state is
+        # honestly labeled distinct from "active"/"running".
+        "scaffold_ready":       ("#0891b2", "Approved — scaffold only (not running)"),
+        "active":               ("#16a34a", "Active"),
+        "rejected":             ("#dc2626", "Rejected"),
+    }
+    my_submissions_html = ""
+    if my_submissions:
+        rows_html = []
+        for sub in my_submissions:
+            st = sub.get("submission_status") or "draft"
+            color, label = _SUB_CHIP.get(st, ("#6b7280", st.replace("_", " ").title()))
+            findings = sub.get("scan_report") or []
+            n_block = sum(1 for f in findings if isinstance(f, dict) and f.get("block")) if isinstance(findings, list) else 0
+            finding_note = f' · <span style="color:#fca5a5">{n_block} blocking finding{"s" if n_block != 1 else ""}</span>' if n_block else ""
+            scaffold_note = ""
+            if st == "scaffold_ready":
+                _ssid = esc_py(str(sub.get("server_id") or ""))
+                scaffold_note = (
+                    f'<div style="font-size:11px;color:var(--muted);margin-top:2px">'
+                    f'No server is running yet — build it from the scaffold, then submit '
+                    f'it as a new, repo-backed submission to go live. '
+                    f'<a href="/api/v1/submissions/{_ssid}/scaffold" style="color:var(--cyan)">Download scaffold.zip</a>'
+                    f'</div>'
+                )
+            rows_html.append(f"""
+            <div style="padding:0.5rem 0;border-bottom:1px solid #1e293b">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:13px">{esc_py(sub.get("name") or "")}</span>
+                <span style="font-size:12px;color:var(--muted)">
+                  <span style="background:{color}22;color:{color};border:1px solid {color}44;
+                               border-radius:20px;padding:1px 8px;font-weight:600">{esc_py(label)}</span>{finding_note}
+                </span>
+              </div>
+              {scaffold_note}
+            </div>""")
+        my_submissions_html = f"""
+        <details style="margin-bottom:1rem" open>
+          <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#9aa1ab;padding:6px 0">
+            My submissions <span class="count">{len(my_submissions)}</span>
+          </summary>
+          <div style="margin-top:0.25rem">{"".join(rows_html)}</div>
+        </details>"""
 
     # 5. MCP config snippet (compact, below cards)
     platform_host = os.environ.get("PLATFORM_HOST", "https://mcp.example.com")
@@ -1722,6 +2143,8 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
       <div class="srv-strip-item"><span class="dot-red"></span>{n_suspended} suspended</div>
       <div class="srv-strip-item"><span class="dot-amber"></span>{n_awaiting} awaiting approval</div>
     </div>
+
+    {my_submissions_html}
 
     <!-- Submit server CTA (hidden for read-only auditor) -->
     {"" if is_auditor else '''<div style="display:flex;justify-content:flex-end;margin-bottom:1rem">
@@ -1909,7 +2332,7 @@ async def fragment_admin_servers(request: Request):
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
                 SELECT server_id, name, upstream_url, status, owner_sub,
-                       injection_mode, updated_at
+                       injection_mode, updated_at, maintainers, debug_mode
                 FROM server_registry
                 ORDER BY name
             """))
@@ -1983,6 +2406,10 @@ async def fragment_admin_servers(request: Request):
                       "api_key": "API key", "none": "None", "header": "Header"}.get(mode, mode)
 
         sid = esc_py(str(s.server_id))
+        maint_badge = (
+            ' <span class="pill pill-quarantined" title="Only the owner and maintainers can invoke this server right now">'
+            '&#x1F527; maintenance</span>' if s.debug_mode else ''
+        )
         if st == "pending":
             action_html = (
                 f'<div style="display:flex;gap:6px;justify-content:flex-end">'
@@ -1997,10 +2424,22 @@ async def fragment_admin_servers(request: Request):
                 f'</div>'
             )
         else:
+            maintainers = s.maintainers or []
+            debug_on = bool(s.debug_mode)
+            # R-11: maintainers/debug-mode admin UI on top of the already-built
+            # server_registry.py backend (migration V048). Owner/maintainer-only
+            # gate is enforced server-side; a 403 here surfaces as an alert(), not
+            # a silent no-op.
+            maint_json = esc_py(json.dumps(maintainers))
             action_html = (
                 f'<div style="position:relative;text-align:right">'
                 f'<button class="btn-menu" onclick="srvMenuToggle(event,\'{sid}\')">⋯</button>'
                 f'<div class="srv-dropdown" id="srv-dd-{sid}" style="display:none">'
+                f'<button onclick="htmx.ajax(\'GET\',\'/portal/fragments/admin/detections?server_id={sid}\','
+                f'{{target:\'#adm-content\',swap:\'innerHTML\'}})">Detections</button>'
+                f'<button onclick="adminSetMaintainers(\'{sid}\',{maint_json})">Maintainers…</button>'
+                f'<button onclick="adminToggleDebug(\'{sid}\',{"false" if debug_on else "true"})">'
+                f'{"Disable" if debug_on else "Enable"} debug mode</button>'
                 f'<button onclick="adminQuarantineSrv(\'{sid}\')">Quarantine</button>'
                 f'<button class="danger" onclick="adminDeleteSrv(\'{sid}\')">Delete</button>'
                 f'</div></div>'
@@ -2013,7 +2452,7 @@ async def fragment_admin_servers(request: Request):
             <div class="srv-cell-alias">{esc_py(s.name or "")}</div>
           </div>
           <div class="srv-cell-url">{esc_py(s.upstream_url or "—")}</div>
-          <div><span class="pill {pill_cls}"><span class="pill-dot"></span>{pill_label}</span></div>
+          <div><span class="pill {pill_cls}"><span class="pill-dot"></span>{pill_label}</span>{maint_badge}</div>
           <div class="srv-cell-owner">{esc_py(s.owner_sub or "—")}</div>
           <div><span class="mode-chip">{esc_py(mode_label)}</span></div>
           <div class="srv-cell-updated">{esc_py(_fmt_time(s.updated_at))}</div>
@@ -2093,6 +2532,27 @@ async def fragment_admin_servers(request: Request):
       if (!confirm('Delete this server? This cannot be undone.')) return;
       fetch('/api/v1/admin/servers/' + id, {{method:'DELETE'}})
         .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.detail?.message || 'Error')))
+        .catch(e => alert('Network error: ' + e));
+    }}
+    function adminSetMaintainers(id, current) {{
+      document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
+      const raw = prompt('Maintainer client_ids, comma-separated (max 2):', current.join(', '));
+      if (raw === null) return;
+      const maintainers = raw.split(',').map(s => s.trim()).filter(Boolean);
+      fetch('/api/v1/servers/' + id + '/maintainers', {{
+        method: 'PUT', headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{maintainers}}),
+      }}).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
+        .catch(e => alert('Network error: ' + e));
+    }}
+    function adminToggleDebug(id, enable) {{
+      document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
+      if (!confirm((enable ? 'Enable' : 'Disable') + ' debug/maintenance mode for this server?' +
+          (enable ? ' Only the owner and maintainers will be able to invoke it while enabled.' : ''))) return;
+      fetch('/api/v1/servers/' + id + '/debug-mode', {{
+        method: 'POST', headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{enabled: enable}}),
+      }}).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
         .catch(e => alert('Network error: ' + e));
     }}
     function srvMenuToggle(evt, id) {{
@@ -2425,11 +2885,80 @@ _BRUTE_DENY_MINUTES = 15
 _SPRAY_TOOL_COUNT   = 5    # distinct tools per client in the spray window
 _SPRAY_HOURS        = 1
 
+# Only reason codes come from here — never render params/free text through this path.
+_REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _find_rego_rule(reason_code: str) -> dict[str, Any] | None:
+    """
+    Read-only lookup: find the `deny contains "<reason_code>" if { ... }` rule
+    body for a detection's reason code, so an admin can see exactly what
+    fired without leaving the portal or grepping the repo by hand.
+
+    Brace-balanced extraction (not just "next line with a bare '}'") because
+    some deny rules contain nested `{...}` (comprehensions, object literals).
+    """
+    if not _REASON_CODE_RE.match(reason_code):
+        return None
+    head_re = re.compile(
+        r'^\s*(?:deny|allow)\s+contains\s+"' + re.escape(reason_code) + r'"\s+if\s*\{'
+    )
+    try:
+        for path in sorted(_REGO_DIR.glob("*.rego")):
+            if path.name.endswith("_test.rego"):
+                continue
+            lines = path.read_text().splitlines()
+            for i, line in enumerate(lines):
+                if not head_re.match(line):
+                    continue
+                depth = line.count("{") - line.count("}")
+                end = i
+                for j in range(i + 1, len(lines)):
+                    depth += lines[j].count("{") - lines[j].count("}")
+                    end = j
+                    if depth <= 0:
+                        break
+                return {
+                    "found": True,
+                    "file": path.name,
+                    "line": i + 1,
+                    "source": "\n".join(lines[i:end + 1]),
+                }
+    except OSError as exc:
+        logger.warning("policy-rule lookup failed: %s", exc)
+        return None
+    return None
+
+
+@router.get("/policy-rule", response_class=JSONResponse)
+async def get_policy_rule(reason: str, request: Request):
+    """Read-only: source of the OPA rule behind a detection's reason code."""
+    _require_admin(request)
+    rule = _find_rego_rule(reason)
+    if rule is None:
+        return JSONResponse({
+            "found": False,
+            "reason": reason,
+            "note": "No matching OPA rule (this detection may come from the response filter "
+                    "or the anomaly-pattern scorer, not a policy.rego deny rule).",
+        })
+    return JSONResponse({**rule, "reason": reason})
+
 
 @router.get("/fragments/admin/detections", response_class=HTMLResponse)
-async def fragment_admin_detections(request: Request, days: int = 7):
+async def fragment_admin_detections(request: Request, days: int = 7, server_id: str = "", reason: str = ""):
     _require_admin(request)
     days = max(1, min(days, 90))  # clamp to [1, 90]
+
+    # R-7: validate server_id is a real UUID before using it in a query filter —
+    # an invalid value degrades to "no filter" rather than a 500.
+    server_filter = ""
+    try:
+        import uuid as _uuid
+        if server_id:
+            server_filter = str(_uuid.UUID(server_id))
+    except ValueError:
+        server_filter = ""
 
     try:
         from sqlalchemy import text
@@ -2454,15 +2983,35 @@ async def fragment_admin_detections(request: Request, days: int = 7):
             """), {"days": days})).fetchone()
             rf_count = rf_row.n if rf_row else 0
 
-            # B) recent detections feed
-            feed_rows = (await session.execute(text("""
-                SELECT event_ts, client_id, tool_name, opa_reasons, original_outcome
-                FROM audit_events
-                WHERE (outcome = 'deny' OR original_outcome = 'error')
-                  AND event_ts > now() - (interval '1 day' * :days)
-                ORDER BY event_ts DESC
-                LIMIT 100
-            """), {"days": days})).fetchall()
+            # B) recent detections feed — R-7: attribute via tool_id → server_id
+            # (audit_events.tool_id / tool_registry.server_id), never tool_name
+            # (ambiguous under UNIQUE(name, version)). tool_id NULL (legacy rows,
+            # or tool deleted since) renders as unattributed, never guessed.
+            server_name_for_filter = None
+            feed_query = """
+                SELECT a.event_id, a.event_ts, a.client_id, a.tool_name, a.opa_reasons,
+                       a.original_outcome, a.sha256_hash, a.tool_id,
+                       t.server_id, s.name AS server_name
+                FROM audit_events a
+                LEFT JOIN tool_registry t ON t.tool_id = a.tool_id
+                LEFT JOIN server_registry s ON s.server_id = t.server_id
+                WHERE (a.outcome = 'deny' OR a.original_outcome = 'error')
+                  AND a.event_ts > now() - (interval '1 day' * :days)
+            """
+            feed_params: dict = {"days": days}
+            if server_filter:
+                feed_query += " AND t.server_id = :server_id"
+                feed_params["server_id"] = server_filter
+                srow = (await session.execute(
+                    text("SELECT name FROM server_registry WHERE server_id = :sid"),
+                    {"sid": server_filter},
+                )).fetchone()
+                server_name_for_filter = srow.name if srow else server_filter
+            if reason:
+                feed_query += " AND a.opa_reasons ? :reason"
+                feed_params["reason"] = reason
+            feed_query += " ORDER BY a.event_ts DESC LIMIT 100"
+            feed_rows = (await session.execute(text(feed_query), feed_params)).fetchall()
 
             # P2-T2.1) brute-force: ≥ N denies per client in last M minutes
             brute_rows = (await session.execute(text("""
@@ -2549,15 +3098,19 @@ async def fragment_admin_detections(request: Request, days: int = 7):
       <div style="{_card}"><div style="{_sev_num('low')}">{sev_totals['low']}</div><div style="{_lbl}">Low severity</div></div>
     </div>"""
 
-    # --- Top detections breakdown ---
+    # --- Top detections breakdown (R-7: rows filter the feed below) ---
     top_rows_html = ""
-    for reason, n in sorted(reason_counts.items(), key=lambda x: -x[1])[:15]:
-        name, sev = _classify(reason)
+    for reason_key, n in sorted(reason_counts.items(), key=lambda x: -x[1])[:15]:
+        name, sev = _classify(reason_key)
         sev_badge = _badge(sev.upper(), f"badge-risk-{sev}")
+        _filter_url = (f"/portal/fragments/admin/detections?days={days}&reason={esc_py(reason_key)}"
+                       + (f"&server_id={esc_py(server_filter)}" if server_filter else ""))
+        row_active = 'background:rgba(59,130,246,0.12)' if reason_key == reason else ''
         top_rows_html += f"""
-        <tr>
+        <tr style="cursor:pointer;{row_active}" title="Filter feed to this detection"
+            onclick="htmx.ajax('GET','{_filter_url}',{{target:'#adm-content',swap:'innerHTML'}})">
           <td>{esc_py(name)}</td>
-          <td><span style="font-family:var(--ff-mono);font-size:0.75rem;color:var(--muted)">{esc_py(reason)}</span></td>
+          <td><span style="font-family:var(--ff-mono);font-size:0.75rem;color:var(--muted)">{esc_py(reason_key)}</span></td>
           <td>{sev_badge}</td>
           <td style="text-align:right;font-weight:600">{n}</td>
         </tr>"""
@@ -2575,9 +3128,10 @@ async def fragment_admin_detections(request: Request, days: int = 7):
       No detections in the last {days} day{'s' if days != 1 else ''}. &#x2705;
     </div>"""
 
-    # --- Recent feed ---
+    # --- Recent feed (R-7: clickable rows, server attribution, INV-001-safe) ---
     import json as _json
     feed_html_rows = []
+    drawer_data: dict[str, dict] = {}
     for row in feed_rows:
         ts = row.event_ts.strftime("%Y-%m-%d %H:%M") if row.event_ts else "—"
         reasons = []
@@ -2596,22 +3150,113 @@ async def fragment_admin_detections(request: Request, days: int = 7):
         badges = " ".join(_badge(name[:30], f"badge-risk-{sev}") for _, name, sev in reasons[:3])
         if not badges:
             badges = '<span style="color:var(--muted);font-size:0.75rem">deny</span>'
+
+        eid = str(row.event_id)
+        server_cell = (
+            f'<a href="#" onclick="event.stopPropagation();htmx.ajax(\'GET\','
+            f'\'/portal/fragments/admin/detections?days={days}&server_id={esc_py(str(row.server_id))}\','
+            f'{{target:\'#adm-content\',swap:\'innerHTML\'}});return false" style="color:var(--cyan)">'
+            f'{esc_py(row.server_name or "server")}</a>'
+        ) if row.server_id else '<span style="color:var(--muted)">unattributed</span>'
+
+        drawer_data[eid] = {
+            "ts": ts,
+            "client_id": row.client_id or "—",
+            "tool_name": row.tool_name or "—",
+            "reasons": [rr[0] for rr in reasons] or ["deny"],
+            "digest": row.sha256_hash or "—",
+            "server_name": row.server_name,
+            "server_id": str(row.server_id) if row.server_id else None,
+        }
+
         feed_html_rows.append(f"""
-        <tr>
+        <tr style="cursor:pointer" onclick="openDetectionDrawer('{esc_py(eid)}')">
           <td style="white-space:nowrap;color:var(--muted);font-size:0.78rem">{esc_py(ts)}</td>
           <td style="font-family:var(--ff-mono);font-size:0.78rem">{esc_py(row.client_id or "—")}</td>
           <td style="font-size:0.78rem">{esc_py(row.tool_name or "—")}</td>
+          <td style="font-size:0.78rem">{server_cell}</td>
           <td>{badges}</td>
         </tr>""")
 
+    filter_pill = ""
+    if server_filter or reason:
+        parts = []
+        if server_name_for_filter:
+            parts.append(f"server: {esc_py(server_name_for_filter)}")
+        if reason:
+            parts.append(f"reason: {esc_py(reason)}")
+        filter_pill = f"""
+        <div style="margin-bottom:0.5rem;font-size:12px;color:var(--muted)">
+          Filtered by {' &middot; '.join(parts)}
+          <a href="#" onclick="htmx.ajax('GET','/portal/fragments/admin/detections?days={days}',
+             {{target:'#adm-content',swap:'innerHTML'}});return false" style="color:var(--cyan);margin-left:6px">&times; clear</a>
+        </div>"""
+
     feed_table = f"""
     <div style="font-size:13px;font-weight:600;color:#e7e9ec;margin-bottom:0.5rem">Recent detections</div>
+    {filter_pill}
     <div class="tbl-wrap" style="margin-bottom:1.25rem">
       <table>
-        <thead><tr><th>Time</th><th>Principal</th><th>Tool</th><th>Detection(s)</th></tr></thead>
-        <tbody>{"".join(feed_html_rows) if feed_html_rows else '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:1.5rem">No recent detections.</td></tr>'}</tbody>
+        <thead><tr><th>Time</th><th>Principal</th><th>Tool</th><th>Server</th><th>Detection(s)</th></tr></thead>
+        <tbody>{"".join(feed_html_rows) if feed_html_rows else '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:1.5rem">No recent detections.</td></tr>'}</tbody>
       </table>
-    </div>"""
+    </div>
+    <div id="det-drawer" style="display:none;margin-bottom:1.25rem;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1rem 1.25rem">
+      <div id="det-drawer-body" style="font-size:13px;line-height:1.7"></div>
+      <div id="det-drawer-rule" style="display:none;margin-top:0.75rem;background:#050810;border:1px solid #1e293b;border-radius:6px;padding:0.75rem 1rem">
+        <div id="det-drawer-rule-hdr" style="font-size:11px;color:var(--muted);margin-bottom:0.4rem"></div>
+        <pre id="det-drawer-rule-src" style="margin:0;font-size:11px;line-height:1.6;color:#93c5fd;overflow-x:auto;white-space:pre"></pre>
+      </div>
+      <button class="btn-secondary btn-sm" style="margin-top:0.5rem" onclick="document.getElementById('det-drawer').style.display='none'">Close</button>
+    </div>
+    <script>
+      window._detDrawerData = {_json.dumps(drawer_data).replace("</", "<\\/")};
+      function _escHtml(s) {{
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+      }}
+      function openDetectionDrawer(eid) {{
+        const d = window._detDrawerData[eid];
+        if (!d) return;
+        document.getElementById('det-drawer-rule').style.display = 'none';
+        const reasonsHtml = d.reasons.map(r =>
+          '<code style="font-size:11px;background:#1e293b;border-radius:4px;padding:1px 5px;margin-right:4px">' + _escHtml(r) + '</code>' +
+          '<a href="#" style="font-size:11px;color:var(--cyan);margin-right:10px" onclick="viewPolicyRule(' + JSON.stringify(r) + ');return false">view rule</a>'
+        ).join(' ');
+        const serverHtml = d.server_id
+          ? '<a href="#" style="color:var(--cyan)" onclick="htmx.ajax(\\'GET\\',\\'/portal/fragments/admin/servers\\',{{target:\\'#adm-content\\',swap:\\'innerHTML\\'}});return false">' + _escHtml(d.server_name) + '</a>'
+          : '<span style="color:var(--muted)">unattributed (legacy row or tool deleted)</span>';
+        document.getElementById('det-drawer-body').innerHTML =
+          '<div><strong>Time</strong> — ' + _escHtml(d.ts) + '</div>' +
+          '<div><strong>Principal</strong> — <span style="font-family:var(--ff-mono)">' + _escHtml(d.client_id) + '</span></div>' +
+          '<div><strong>Tool</strong> — ' + _escHtml(d.tool_name) + '</div>' +
+          '<div><strong>MCP Server</strong> — ' + serverHtml + '</div>' +
+          '<div><strong>Deny reason(s)</strong> — ' + reasonsHtml + '</div>' +
+          '<div style="margin-top:6px"><strong>Digest</strong> — <span style="font-family:var(--ff-mono);font-size:11px;color:var(--muted)">' + _escHtml(d.digest) + '</span></div>';
+        document.getElementById('det-drawer').style.display = 'block';
+      }}
+      async function viewPolicyRule(reason) {{
+        const panel = document.getElementById('det-drawer-rule');
+        const hdr = document.getElementById('det-drawer-rule-hdr');
+        const src = document.getElementById('det-drawer-rule-src');
+        panel.style.display = 'block';
+        hdr.textContent = 'Loading rule for ' + reason + '…';
+        src.textContent = '';
+        try {{
+          const r = await fetch('/portal/policy-rule?reason=' + encodeURIComponent(reason), {{credentials: 'include'}});
+          const d = await r.json();
+          if (d.found) {{
+            hdr.textContent = d.file + ':' + d.line + ' (read-only)';
+            src.textContent = d.source;
+          }} else {{
+            hdr.textContent = 'No OPA rule found for "' + reason + '"';
+            src.textContent = d.note || '';
+          }}
+        }} catch (err) {{
+          hdr.textContent = 'Failed to load rule';
+          src.textContent = String(err);
+        }}
+      }}
+    </script>"""
 
     # --- Phase 2: Behavioural panel ---
     behav_sections = []
@@ -2968,8 +3613,10 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
                 SELECT t.tool_id, t.name, t.version, t.status, t.risk_level,
+                       t.server_id, sv.name AS server_name,
                        s.component_count, s.signed, s.auditor_version, s.generated_at
                 FROM tool_registry t
+                LEFT JOIN server_registry sv ON sv.server_id = t.server_id
                 LEFT JOIN LATERAL (
                     SELECT COALESCE(jsonb_array_length(sr.cyclonedx_json->'components'), 0)
                                AS component_count,
@@ -2995,17 +3642,24 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
     total_components = sum((r.component_count or 0) for r in recs)
 
     rows = []
+    servers_seen: dict[str, str] = {}
     for r in recs:
         tool_id = str(r.tool_id)
         risk = (r.risk_level or "low").lower()
         has_sbom = r.generated_at is not None
+        server_name = r.server_name or "—"
+        if r.server_id:
+            servers_seen[str(r.server_id)] = server_name
         if not has_sbom:
             sbom_cell = _badge("MISSING", "badge-risk-high")
             comp_cell = '<span style="color:var(--muted)">—</span>'
             signed_cell = '<span style="color:var(--muted)">—</span>'
             ver_cell = '<span style="color:var(--muted)">—</span>'
             gen_cell = '<span style="color:var(--muted)">never</span>'
-            action_cell = '<span style="color:var(--muted);font-size:0.75rem">no SBOM</span>'
+            action_cell = (
+                f'<button class="btn-secondary btn-sm sbom-gen-btn" data-tool-id="{esc_py(tool_id)}">'
+                f'Generate SBOM</button>'
+            )
         else:
             sbom_cell = _badge("PRESENT", "badge-active")
             comp_cell = str(r.component_count if r.component_count is not None else 0)
@@ -3019,12 +3673,14 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
                 f'{{target:\'#adm-content\',swap:\'innerHTML\'}})">Components</button>'
                 f' <a class="btn-secondary btn-sm" target="_blank" rel="noopener" '
                 f'href="/api/v1/tools/{esc_py(tool_id)}/sbom">JSON</a>'
+                f' <button class="btn-secondary btn-sm sbom-gen-btn" data-tool-id="{esc_py(tool_id)}">Refresh</button>'
             )
 
         rows.append(f"""
         <tr>
           <td><strong>{esc_py(r.name or "")}</strong></td>
           <td style="color:var(--muted)">{esc_py(r.version or "")}</td>
+          <td style="color:var(--muted);font-size:0.78rem">{esc_py(server_name)}</td>
           <td>{_badge((r.status or "unknown"), f"badge-{r.status or 'unknown'}")}</td>
           <td>{_badge(risk.upper(), f"badge-risk-{risk}")}</td>
           <td>{sbom_cell}</td>
@@ -3054,14 +3710,79 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
       <table>
         <thead>
           <tr>
-            <th>Tool</th><th>Version</th><th>Status</th><th>Risk</th><th>SBOM</th>
+            <th>Tool</th><th>Version</th><th>Server</th><th>Status</th><th>Risk</th><th>SBOM</th>
             <th style="text-align:right">Components</th><th>Signature</th>
             <th>Auditor</th><th>Generated</th><th>Actions</th>
           </tr>
         </thead>
-        <tbody>{"".join(rows) if rows else '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:2rem">No tools registered.</td></tr>'}</tbody>
+        <tbody>{"".join(rows) if rows else '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:2rem">No tools registered.</td></tr>'}</tbody>
       </table>
     </div>"""
+
+    server_buttons = "".join(
+        f'<button class="btn-secondary btn-sm sbom-gen-server-btn" data-server-id="{esc_py(sid)}">'
+        f'Generate for {esc_py(sname)}</button>'
+        for sid, sname in sorted(servers_seen.items(), key=lambda kv: kv[1])
+    ) or '<span style="color:var(--muted);font-size:12px">No servers with tools yet.</span>'
+
+    collection_toolbar = f"""
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:0.75rem 1rem;margin-bottom:1rem">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.5rem">
+        <div style="font-size:12px;color:var(--muted)">
+          Most tools here were seeded directly into the registry and never went through
+          <code>POST /tools/register</code>'s inline SBOM step — that's why SBOM is MISSING for them.
+          Run collection below to generate one now.
+        </div>
+        <button class="btn-primary btn-sm" id="sbom-gen-all-btn">Generate All (one by one)</button>
+      </div>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap">{server_buttons}</div>
+      <div id="sbom-gen-msg" style="font-size:12px;margin-top:0.5rem"></div>
+    </div>
+    <script>
+      (function() {{
+        function refreshSbom() {{
+          htmx.ajax('GET', '/portal/fragments/admin/sbom', {{target: '#adm-content', swap: 'innerHTML'}});
+        }}
+        function report(msgEl, label, data) {{
+          const gen = (data.generated || []).length;
+          const fail = (data.failed || []).length;
+          msgEl.style.color = fail ? '#fbbf24' : '#4ade80';
+          msgEl.textContent = label + ': ' + gen + ' generated' + (fail ? (', ' + fail + ' failed') : '');
+        }}
+        document.querySelectorAll('.sbom-gen-btn').forEach(function(btn) {{
+          btn.addEventListener('click', function() {{
+            btn.disabled = true;
+            fetch('/api/v1/tools/' + encodeURIComponent(btn.dataset.toolId) + '/sbom/generate',
+                  {{method: 'POST', credentials: 'include'}})
+              .then(function(r) {{ if (!r.ok) return r.json().then(function(d) {{ throw new Error(d.detail && d.detail.message || ('HTTP ' + r.status)); }}); refreshSbom(); }})
+              .catch(function(err) {{ btn.disabled = false; alert(err.message); }});
+          }});
+        }});
+        document.querySelectorAll('.sbom-gen-server-btn').forEach(function(btn) {{
+          btn.addEventListener('click', function() {{
+            btn.disabled = true;
+            const msgEl = document.getElementById('sbom-gen-msg');
+            fetch('/api/v1/servers/' + encodeURIComponent(btn.dataset.serverId) + '/sbom/generate-all',
+                  {{method: 'POST', credentials: 'include'}})
+              .then(function(r) {{ if (!r.ok) return r.json().then(function(d) {{ throw new Error(d.detail && d.detail.message || ('HTTP ' + r.status)); }}); return r.json(); }})
+              .then(function(data) {{ report(msgEl, btn.textContent, data); refreshSbom(); }})
+              .catch(function(err) {{ btn.disabled = false; if (msgEl) {{ msgEl.style.color = '#fca5a5'; msgEl.textContent = err.message; }} }});
+          }});
+        }});
+        const allBtn = document.getElementById('sbom-gen-all-btn');
+        if (allBtn) {{
+          allBtn.addEventListener('click', function() {{
+            allBtn.disabled = true;
+            allBtn.textContent = 'Generating…';
+            const msgEl = document.getElementById('sbom-gen-msg');
+            fetch('/api/v1/tools/sbom/generate-all', {{method: 'POST', credentials: 'include'}})
+              .then(function(r) {{ if (!r.ok) return r.json().then(function(d) {{ throw new Error(d.detail && d.detail.message || ('HTTP ' + r.status)); }}); return r.json(); }})
+              .then(function(data) {{ report(msgEl, 'All tools', data); refreshSbom(); }})
+              .catch(function(err) {{ allBtn.disabled = false; allBtn.textContent = 'Generate All (one by one)'; if (msgEl) {{ msgEl.style.color = '#fca5a5'; msgEl.textContent = err.message; }} }});
+          }});
+        }}
+      }})();
+    </script>"""
 
     return HTMLResponse(f"""
     <div class="section-title">&#x1F4E6; SBOM Inventory</div>
@@ -3069,6 +3790,7 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
       Signed CycloneDX SBOMs per registered tool (INV-006). Tools missing an SBOM cannot be activated.
     </p>
     {summary}
+    {collection_toolbar}
     {search_box}
     {table_html}""")
 
@@ -3149,6 +3871,18 @@ async def fragment_admin_sbom_detail(tool_id: str, request: Request):
                 lic_parts.append(lic["expression"])
         lic_str = ", ".join(filter(None, lic_parts)) or "—"
         ctype = (c.get("type") or "unknown").lower()
+        # R-9: components sourced from manifest parsing (declared, unresolved
+        # — no download/hash) vs. the schema-digest attestation component
+        # (which always carries a real SHA-256 `hashes` entry).
+        is_declared = any(
+            p.get("name") == "mcp:sbom_source" and p.get("value") == "manifest-declared"
+            for p in (c.get("properties") or [])
+        )
+        resolved_badge = (
+            _badge("declared, unresolved", "badge-mode-none")
+            if is_declared or not c.get("hashes")
+            else _badge("attested", "badge-active")
+        )
         rows.append(f"""
         <tr>
           <td><strong>{esc_py(c.get('name') or '')}</strong></td>
@@ -3156,10 +3890,29 @@ async def fragment_admin_sbom_detail(tool_id: str, request: Request):
           <td>{_badge(ctype, "badge-info")}</td>
           <td style="color:var(--muted);font-size:0.75rem;word-break:break-all">{esc_py(c.get('purl') or '—')}</td>
           <td style="color:var(--muted);font-size:0.75rem">{esc_py(lic_str)}</td>
+          <td>{resolved_badge}</td>
         </tr>""")
 
     gen_str = rec.generated_at.strftime("%Y-%m-%d %H:%M") if rec.generated_at else "unknown"
     auditor = esc_py(rec.auditor_version or "—")
+
+    # R-9 empty-state distinction: only the schema-digest attestation
+    # component present (len==1) can mean either "no source repo to scan"
+    # (no vcs externalReference on that component) or "repo scanned but no
+    # requirements.txt/pyproject.toml/package.json found" (has a vcs ref).
+    only_attestation_note = ""
+    if len(components) == 1:
+        has_vcs_ref = any(
+            ref.get("type") == "vcs" for ref in (components[0].get("externalReferences") or [])
+        )
+        only_attestation_note = (
+            '<p style="color:var(--muted);font-size:0.78rem;margin:0 0 0.75rem">'
+            + ("No dependency manifest (requirements.txt / pyproject.toml / package.json) "
+               "found in the source repo — attestation only."
+               if has_vcs_ref else
+               "Attestation-only — no source repo to scan.")
+            + "</p>"
+        )
 
     return HTMLResponse(f"""
     <div class="section-title">&#x1F4E6; Components — {tool_name}</div>
@@ -3170,10 +3923,11 @@ async def fragment_admin_sbom_detail(tool_id: str, request: Request):
     <p style="color:var(--muted);font-size:0.82rem;margin:0 0 1rem">
       {len(components)} component(s) &nbsp;·&nbsp; generated {esc_py(gen_str)} &nbsp;·&nbsp; auditor {auditor}
     </p>
+    {only_attestation_note}
     <div class="tbl-wrap">
       <table>
         <thead>
-          <tr><th>Name</th><th>Version</th><th>Type</th><th>PURL</th><th>Licenses</th></tr>
+          <tr><th>Name</th><th>Version</th><th>Type</th><th>PURL</th><th>Licenses</th><th>Provenance</th></tr>
         </thead>
         <tbody>{"".join(rows)}</tbody>
       </table>
@@ -3585,6 +4339,527 @@ async def action_save_grants(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Access tab (R-2) — per-principal MCP/tool toggles + API-client grants,
+# shown as two honestly-labeled, separately-keyed dimensions (F-2).
+# ---------------------------------------------------------------------------
+
+_CROSS_PRINCIPAL_WRITE_ROLES = frozenset({"platform_admin", "profile_service"})
+
+
+@router.get("/fragments/admin/access", response_class=HTMLResponse)
+async def fragment_admin_access(request: Request):
+    """Admin Access tab: principals (profile toggles) + API clients (tool grants)."""
+    _require_admin(request)
+    can_write = any(r in _CROSS_PRINCIPAL_WRITE_ROLES for r in _roles(request))
+
+    try:
+        # Reuse the real endpoints in-process rather than an HTTP self-call —
+        # consistent with how other routers already import each other directly
+        # (e.g. rescan_scheduler → submission_scanner), and avoids the latency/
+        # cookie-forwarding fragility of looping a request back through the
+        # network stack. Both callees re-check RBAC on this same `request`.
+        from app.routers.admin_grants import list_principals, list_grants, list_role_assignments, list_api_keys
+        principals = (await list_principals(request)).get("principals", [])
+        grants = (await list_grants(request)).get("grants", [])
+        roles_resp = await list_role_assignments(request)
+        role_assignments = roles_resp.get("assignments", [])
+        valid_roles = roles_resp.get("valid_roles", [])
+        api_keys = (await list_api_keys(request)).get("keys", [])
+    except Exception as exc:
+        logger.error("portal admin/access load error: %s", exc)
+        return HTMLResponse(_error_fragment("Could not load access data."))
+
+    write_note = "" if can_write else """
+    <div class="helper-box" style="margin-bottom:1rem">
+      &#x26A0; You have <code>admin</code> but not <code>platform_admin</code> —
+      you can view access but cannot change another principal's profile (IDOR-005 guard).
+      Toggles are self-service-only for your own identity.
+    </div>"""
+
+    # RBAC role management now lives in-platform (below) — role_assignments is
+    # append-only (INV-011/V050), so grant/revoke are INSERT-only events, never
+    # UPDATE/DELETE. KC-sourced roles still resync on every login (oidc_browser.py),
+    # so revoking one here only sticks if it's also removed in Keycloak.
+    # Keycloak has KC_HOSTNAME_STRICT=true pinned to LAB_GATEWAY_URL (this
+    # gateway's own origin) — hitting the admin console on Keycloak's directly
+    # -exposed port (8082) fails strict-hostname validation and hangs forever
+    # on "Loading the Admin UI". The gateway now proxies /admin/mcp|master|realms/
+    # through to Keycloak (mcp-proxy-lab.conf) under the origin it actually
+    # expects, so the console link must point at the gateway, not port 8082.
+    role_admin_link = ""
+    oidc_issuer = os.environ.get("OIDC_ISSUER_URL", "")
+    if "/realms/" in oidc_issuer:
+        kc_base, _, kc_realm = oidc_issuer.partition("/realms/")
+        kc_realm = kc_realm.strip("/")
+        console_url = f"{kc_base}/admin/{kc_realm}/console/#/{kc_realm}/users"
+        role_admin_link = f"""
+        <a href="{esc_py(console_url)}" target="_blank" rel="noopener noreferrer"
+           class="btn-secondary btn-sm" style="text-decoration:none">
+          Manage roles in Keycloak &#x2197;
+        </a>"""
+
+    # One unified block per principal: identity + roles (grant/revoke inline,
+    # no more separate table + scroll-to-form hack) + MCP/tool access, all in
+    # one place — replaces the previously-separate "RBAC role assignments" /
+    # "Principals" sections that made it unclear where to actually manage
+    # someone (e.g. "make carol admin").
+    roles_by_pid: dict[str, list[dict]] = {}
+    for a in role_assignments:
+        roles_by_pid.setdefault(a["client_id"], []).append(a)
+
+    principal_rows = []
+    for p in principals:
+        pid = p["principal"]
+        my_roles = roles_by_pid.get(pid, [])
+        chip_items = []
+        for a in my_roles:
+            kc_note = (
+                ' <span title="Synced from Keycloak — revoking here only sticks if also '
+                'removed there" style="color:#fbbf24">&#x26A0;</span>'
+                if a.get("from_keycloak") else ""
+            )
+            chip_items.append(
+                f'<span class="mode-chip" style="display:inline-flex;align-items:center;gap:4px">'
+                f'{esc_py(a["role"])}'
+                f'<button class="role-x-btn" data-client-id="{esc_py(pid)}" data-role="{esc_py(a["role"])}" '
+                f'title="Revoke {esc_py(a["role"])}" '
+                f'style="background:none;border:none;color:inherit;cursor:pointer;padding:0;'
+                f'font-size:13px;line-height:1;opacity:0.7">&times;</button>{kc_note}</span>'
+            )
+        roles_html = " ".join(chip_items) or '<span style="color:var(--muted);font-size:11px">no role</span>'
+
+        held = {a["role"] for a in my_roles}
+        addable = [r for r in valid_roles if r not in held]
+        add_role_control = (
+            f'<select class="role-add-select" data-client-id="{esc_py(pid)}" '
+            f'style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);'
+            f'padding:2px 4px;font-size:11px">'
+            f'{"".join(f"<option value=\"{esc_py(r)}\">{esc_py(r)}</option>" for r in addable)}</select>'
+            f'<button class="role-add-btn btn-secondary btn-sm" data-client-id="{esc_py(pid)}" '
+            f'style="padding:2px 8px;font-size:11px">+ Add role</button>'
+            if addable and can_write
+            else ('<span style="color:var(--muted);font-size:10px">all roles held</span>' if not addable else "")
+        )
+
+        last_seen = p.get("last_session_at")
+        last_seen_str = last_seen[:16].replace("T", " ") if last_seen else "—"
+        principal_rows.append(f"""
+        <div class="access-principal-row" style="border-bottom:1px solid #1e293b">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:0.6rem 0;flex-wrap:wrap;gap:0.5rem">
+            <div>
+              <div style="font-family:var(--ff-mono);font-size:13px">{esc_py(pid)}</div>
+              <div style="margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                {roles_html}
+                {add_role_control}
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.75rem">
+              <span style="font-size:11px;color:var(--muted)">last session: {esc_py(last_seen_str)}</span>
+              <button class="btn-secondary btn-sm"
+                      hx-get="/portal/fragments/admin/access/{esc_py(pid)}"
+                      hx-target="#access-detail-{esc_py(_slugify(pid))}"
+                      hx-swap="innerHTML"
+                      onclick="document.getElementById('access-detail-{esc_py(_slugify(pid))}').style.display='block'">
+                Manage MCP &amp; tool access
+              </button>
+            </div>
+          </div>
+          <div id="access-detail-{esc_py(_slugify(pid))}" style="display:none;padding:0 0 0.75rem"></div>
+        </div>""")
+
+    principals_html = "".join(principal_rows) if principal_rows else (
+        '<div class="empty-state">No known principals yet (no role assignments, profile rows, or active sessions).</div>'
+    )
+
+    grant_rows = []
+    for g in grants:
+        tools_html = ", ".join(esc_py(t) for t in (g.get("allowed_tools") or [])[:6]) or "—"
+        tags_html = ", ".join(esc_py(t) for t in (g.get("allowed_tags") or [])[:6]) or "—"
+        grant_rows.append(f"""
+        <tr>
+          <td style="font-family:var(--ff-mono);font-size:12px">{esc_py(g["client_id"])}</td>
+          <td style="font-size:12px">{tools_html}</td>
+          <td style="font-size:12px">{tags_html}</td>
+          <td>{_badge(g.get("max_risk_level", "low").upper(), f"badge-risk-{g.get('max_risk_level', 'low')}")}</td>
+          <td style="text-align:right">
+            <button class="btn-secondary btn-sm grant-revoke-btn" data-client-id="{esc_py(g["client_id"])}">Revoke</button>
+          </td>
+        </tr>""")
+
+    grants_table = f"""
+    <div class="tbl-wrap" style="margin-top:0.5rem">
+      <table>
+        <thead><tr><th>client_id</th><th>Allowed tools</th><th>Allowed tags</th><th>Max risk</th><th style="text-align:right">Action</th></tr></thead>
+        <tbody>{"".join(grant_rows) if grant_rows else '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:1.5rem">No client grants configured.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <form id="grant-create-form" style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.75rem">
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block">client_id</label>
+        <input id="grant-create-client" type="text" placeholder="my-service-account" required
+               style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block">Allowed tools (comma-separated, blank = none)</label>
+        <input id="grant-create-tools" type="text" placeholder="ping, echo_args"
+               style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px;width:220px">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block">Allowed tags (comma-separated)</label>
+        <input id="grant-create-tags" type="text" placeholder="readonly"
+               style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px;width:160px">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block">Max risk</label>
+        <select id="grant-create-risk"
+                style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px">
+          <option value="low">low</option><option value="medium">medium</option>
+          <option value="high">high</option><option value="critical">critical</option>
+        </select>
+      </div>
+      <button type="submit" class="btn-secondary btn-sm">+ Add API client</button>
+    </form>
+    <div id="grant-create-msg" style="font-size:12px;margin-top:0.4rem"></div>"""
+
+    # API keys — the actual credential. client_grants above is authorization
+    # only (what an already-authenticated client may do); this is what lets a
+    # client_id authenticate in the first place. Previously there was no
+    # admin endpoint that minted one at all — api_keys was only ever
+    # populated by the lab seeder script.
+    key_rows = []
+    for k in api_keys:
+        roles_str = ", ".join(esc_py(r) for r in (k.get("roles") or [])) or "—"
+        key_rows.append(f"""
+        <tr>
+          <td style="font-family:var(--ff-mono);font-size:12px">{esc_py(k["client_id"])}</td>
+          <td style="font-size:12px">{roles_str}</td>
+          <td style="font-size:12px;color:var(--muted)">{k.get("rate_limit_rpm", "—")}/min</td>
+          <td style="font-size:11px;color:var(--muted)">{esc_py((k.get("created_at") or "")[:16].replace("T", " "))}</td>
+          <td style="text-align:right">
+            <button class="btn-secondary btn-sm apikey-revoke-btn" data-key-id="{esc_py(k["key_id"])}" data-client-id="{esc_py(k["client_id"])}">Revoke</button>
+          </td>
+        </tr>""")
+
+    valid_roles_options = "".join(f'<option value="{esc_py(r)}" {"selected" if r == "agent" else ""}>{esc_py(r)}</option>' for r in valid_roles)
+    api_keys_html = f"""
+    <div style="font-size:13px;font-weight:700;color:#e7e9ec;margin-bottom:0.25rem;
+         padding-top:0.75rem;border-top:1px solid var(--border,#222b3a)">
+      API keys (credentials) <span class="count">{len(api_keys)}</span>
+    </div>
+    <p style="color:var(--muted);font-size:0.78rem;margin:0 0 0.25rem">
+      This is the actual credential — the thing that lets a <code>client_id</code> authenticate at
+      all. "API clients" above is authorization only (what an already-authenticated client may do);
+      creating a key here also grants the selected roles via RBAC so the new client_id can
+      immediately do something.
+    </p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>client_id</th><th>Roles</th><th>Rate limit</th><th>Created</th><th style="text-align:right">Action</th></tr></thead>
+        <tbody id="apikey-table-body">{"".join(key_rows) if key_rows else '<tr id="apikey-empty-row"><td colspan="5" style="text-align:center;color:var(--muted);padding:1.5rem">No API keys issued.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <form id="apikey-create-form" style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.75rem">
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block">client_id</label>
+        <input id="apikey-create-client" type="text" placeholder="my-new-service" required
+               style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block">Role</label>
+        <select id="apikey-create-role"
+                style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px">
+          {valid_roles_options}
+        </select>
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block">Rate limit (req/min)</label>
+        <input id="apikey-create-ratelimit" type="number" value="120" min="1"
+               style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px;width:80px">
+      </div>
+      <button type="submit" class="btn-primary btn-sm">+ Create API key</button>
+    </form>
+    <div id="apikey-create-result" style="font-size:12px;margin-top:0.5rem"></div>
+    <script>
+      (function() {{
+        function refreshAccess() {{
+          htmx.ajax('GET', '/portal/fragments/admin/access', {{target: '#adm-content', swap: 'innerHTML'}});
+        }}
+        function bindApikeyRevoke(btn) {{
+          btn.addEventListener('click', function() {{
+            const keyId = btn.dataset.keyId, clientId = btn.dataset.clientId;
+            if (!confirm('Revoke API key for "' + clientId + '"? It stops authenticating immediately.')) return;
+            fetch('/api/v1/admin/api-keys/' + encodeURIComponent(keyId), {{method: 'DELETE', credentials: 'include'}})
+              .then(function(r) {{ if (!r.ok) return r.json().then(function(d) {{ throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }}); refreshAccess(); }})
+              .catch(function(err) {{ alert(err.message); }});
+          }});
+        }}
+        document.querySelectorAll('.apikey-revoke-btn').forEach(bindApikeyRevoke);
+        const form = document.getElementById('apikey-create-form');
+        if (form) {{
+          form.addEventListener('submit', function(e) {{
+            e.preventDefault();
+            const resultEl = document.getElementById('apikey-create-result');
+            const clientId = document.getElementById('apikey-create-client').value.trim();
+            const role = document.getElementById('apikey-create-role').value;
+            const rateLimit = parseInt(document.getElementById('apikey-create-ratelimit').value, 10) || 120;
+            fetch('/api/v1/admin/api-keys', {{
+              method: 'POST', credentials: 'include',
+              headers: {{'content-type': 'application/json'}},
+              body: JSON.stringify({{client_id: clientId, roles: [role], rate_limit_rpm: rateLimit}}),
+            }})
+              .then(function(r) {{ if (!r.ok) return r.json().then(function(d) {{ throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }}); return r.json(); }})
+              .then(function(data) {{
+                if (resultEl) {{
+                  resultEl.style.color = '#4ade80';
+                  resultEl.innerHTML = '&#x2713; Saved. Copy this key now — it will never be shown again:<br>' +
+                    '<code style="user-select:all;background:#0f172a;padding:4px 8px;border-radius:4px;display:inline-block;margin-top:4px">' +
+                    esc(data.api_key) + '</code>';
+                }}
+                // Reflect the new key in the table immediately — a full
+                // fragment refresh here would wipe the one-time key display
+                // above before the admin has a chance to copy it, which
+                // read as "created but not saved" even though it was.
+                const emptyRow = document.getElementById('apikey-empty-row');
+                if (emptyRow) emptyRow.remove();
+                const tbody = document.getElementById('apikey-table-body');
+                if (tbody) {{
+                  const tr = document.createElement('tr');
+                  const tdClient = document.createElement('td');
+                  tdClient.style.fontFamily = 'var(--ff-mono)'; tdClient.style.fontSize = '12px';
+                  tdClient.textContent = data.client_id;
+                  const tdRoles = document.createElement('td');
+                  tdRoles.style.fontSize = '12px'; tdRoles.textContent = (data.roles || []).join(', ');
+                  const tdRate = document.createElement('td');
+                  tdRate.style.fontSize = '12px'; tdRate.style.color = 'var(--muted)';
+                  tdRate.textContent = data.rate_limit_rpm + '/min';
+                  const tdCreated = document.createElement('td');
+                  tdCreated.style.fontSize = '11px'; tdCreated.style.color = 'var(--muted)';
+                  tdCreated.textContent = (data.created_at || '').slice(0, 16).replace('T', ' ');
+                  const tdAction = document.createElement('td');
+                  tdAction.style.textAlign = 'right';
+                  const revokeBtn = document.createElement('button');
+                  revokeBtn.className = 'btn-secondary btn-sm apikey-revoke-btn';
+                  revokeBtn.dataset.keyId = data.key_id;
+                  revokeBtn.dataset.clientId = data.client_id;
+                  revokeBtn.textContent = 'Revoke';
+                  bindApikeyRevoke(revokeBtn);
+                  tdAction.appendChild(revokeBtn);
+                  tr.append(tdClient, tdRoles, tdRate, tdCreated, tdAction);
+                  tbody.prepend(tr);
+                }}
+                form.reset();
+              }})
+              .catch(function(err) {{ if (resultEl) {{ resultEl.style.color = '#fca5a5'; resultEl.textContent = err.message; }} }});
+          }});
+        }}
+      }})();
+    </script>"""
+
+    return HTMLResponse(f"""
+    <div class="section-title">&#x1F510; Access</div>
+    <p style="color:var(--muted);font-size:0.82rem;margin:0 0 1rem">
+      Effective access to a tool is <strong>entitlement AND profile-enabled</strong> — both layers
+      must allow it. Per-server entitlement grant/revoke lives on each server's card in
+      <a href="#" onclick="loadAdminTab('servers');return false" style="color:var(--cyan)">MCP Servers</a>.
+    </p>
+    {write_note}
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+      <div style="font-size:13px;font-weight:700;color:#e7e9ec">
+        Principals <span class="count">{len(principals)}</span>
+        <span style="font-weight:400;color:var(--muted);font-size:11px">— roles + MCP/tool access, all in one place</span>
+      </div>
+      {role_admin_link}
+    </div>
+    <p style="color:var(--muted);font-size:0.78rem;margin:0 0 0.5rem">
+      Role_assignments is append-only (INV-011/V050) — grant/revoke are both INSERT-only
+      events, never UPDATE/DELETE. Roles synced from Keycloak at login are marked &#x26A0;;
+      revoking one here only sticks if it's also removed in Keycloak (otherwise the next
+      login re-grants it).
+    </p>
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:0 1rem;margin-bottom:1.5rem">
+      {principals_html}
+    </div>
+    <script>
+      (function() {{
+        function refreshAccess() {{
+          htmx.ajax('GET', '/portal/fragments/admin/access', {{target: '#adm-content', swap: 'innerHTML'}});
+        }}
+        document.querySelectorAll('.role-x-btn').forEach(function(btn) {{
+          btn.addEventListener('click', function() {{
+            const clientId = btn.dataset.clientId, role = btn.dataset.role;
+            if (!confirm('Revoke role "' + role + '" from ' + clientId + '?')) return;
+            fetch('/api/v1/admin/roles/' + encodeURIComponent(clientId) + '/' + encodeURIComponent(role),
+                  {{method: 'DELETE', credentials: 'include'}})
+              .then(function(r) {{ if (!r.ok) return r.json().then(function(d) {{ throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }}); refreshAccess(); }})
+              .catch(function(err) {{ alert(err.message); }});
+          }});
+        }});
+        document.querySelectorAll('.role-add-btn').forEach(function(btn) {{
+          btn.addEventListener('click', function() {{
+            const clientId = btn.dataset.clientId;
+            const select = document.querySelector('.role-add-select[data-client-id="' + CSS.escape(clientId) + '"]');
+            const role = select ? select.value : null;
+            if (!role) return;
+            fetch('/api/v1/admin/roles', {{
+              method: 'POST', credentials: 'include',
+              headers: {{'content-type': 'application/json'}},
+              body: JSON.stringify({{client_id: clientId, role: role}}),
+            }})
+              .then(function(r) {{ if (!r.ok) return r.json().then(function(d) {{ throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }}); refreshAccess(); }})
+              .catch(function(err) {{ alert(err.message); }});
+          }});
+        }});
+      }})();
+    </script>
+
+    <div style="font-size:13px;font-weight:700;color:#e7e9ec;margin-bottom:0.25rem;
+         padding-top:0.75rem;border-top:1px solid var(--border,#222b3a)">
+      API clients <span class="count">{len(grants)}</span>
+    </div>
+    <p style="color:var(--muted);font-size:0.78rem;margin:0 0 0.25rem">
+      Keyed by OAuth <code>client_id</code> — this is a separate dimension from the principals
+      above. The portal's PKCE client is shared by all interactive humans, so a client grant here
+      cannot target one specific person.
+    </p>
+    {grants_table}
+    <script>
+      (function() {{
+        function refreshAccess() {{
+          htmx.ajax('GET', '/portal/fragments/admin/access', {{target: '#adm-content', swap: 'innerHTML'}});
+        }}
+        document.querySelectorAll('.grant-revoke-btn').forEach(function(btn) {{
+          btn.addEventListener('click', function() {{
+            const clientId = btn.dataset.clientId;
+            if (!confirm('Revoke API client grant for "' + clientId + '"? It will lose all tool/tag access immediately.')) return;
+            fetch('/api/v1/admin/grants/' + encodeURIComponent(clientId), {{method: 'DELETE', credentials: 'include'}})
+              .then(function(r) {{ if (!r.ok) return r.json().then(function(d) {{ throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }}); refreshAccess(); }})
+              .catch(function(err) {{ alert(err.message); }});
+          }});
+        }});
+        const form = document.getElementById('grant-create-form');
+        if (form) {{
+          form.addEventListener('submit', function(e) {{
+            e.preventDefault();
+            const msgEl = document.getElementById('grant-create-msg');
+            const clientId = document.getElementById('grant-create-client').value.trim();
+            const tools = document.getElementById('grant-create-tools').value.split(',').map(s => s.trim()).filter(Boolean);
+            const tags = document.getElementById('grant-create-tags').value.split(',').map(s => s.trim()).filter(Boolean);
+            const risk = document.getElementById('grant-create-risk').value;
+            fetch('/api/v1/admin/grants', {{
+              method: 'POST', credentials: 'include',
+              headers: {{'content-type': 'application/json'}},
+              body: JSON.stringify({{client_id: clientId, allowed_tools: tools, allowed_tags: tags, max_risk_level: risk}}),
+            }})
+              .then(function(r) {{ if (!r.ok) return r.json().then(function(d) {{ throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }}); refreshAccess(); }})
+              .catch(function(err) {{ if (msgEl) {{ msgEl.style.color = '#fca5a5'; msgEl.textContent = err.message; }} }});
+          }});
+        }}
+      }})();
+    </script>
+    {api_keys_html}
+    """)
+
+
+@router.get("/fragments/admin/access/{principal}", response_class=HTMLResponse)
+async def fragment_admin_access_detail(principal: str, request: Request):
+    """Per-principal tool toggle list — expands inline under the principal's row."""
+    _require_admin(request)
+    can_write = principal == _client_id(request) or any(
+        r in _CROSS_PRINCIPAL_WRITE_ROLES for r in _roles(request)
+    )
+
+    try:
+        import json as _json
+        from sqlalchemy import text as _sql_text
+        from app.core.database import AsyncSessionLocal as _ASL
+        from app.routers.profiles import list_profile_mcps
+        resp = await list_profile_mcps(principal, request)
+        mcps = _json.loads(resp.body).get("mcps", [])
+
+        # Group by server (tool_registry.name is what this legacy "mcp_name"
+        # column actually stores — one row per TOOL, not per server — so a
+        # flat list here reads as "no per-server structure at all" even
+        # though the toggle itself is already per-tool. Grouping fixes that.
+        async with _ASL() as session:
+            srv_result = await session.execute(_sql_text(
+                "SELECT t.name AS tool_name, COALESCE(sv.name, '(no server)') AS server_name "
+                "FROM tool_registry t LEFT JOIN server_registry sv ON sv.server_id = t.server_id "
+                "WHERE t.deleted_at IS NULL"
+            ))
+            tool_to_server = {r.tool_name: r.server_name for r in srv_result.fetchall()}
+    except Exception as exc:
+        logger.error("portal admin/access detail error for %r: %s", principal, exc)
+        return HTMLResponse(_error_fragment("Could not load this principal's tool toggles."))
+
+    by_server: dict[str, list] = {}
+    for m in mcps:
+        server_name = tool_to_server.get(m["mcp_name"], "(no server)")
+        by_server.setdefault(server_name, []).append(m)
+
+    group_blocks = []
+    for server_name in sorted(by_server):
+        rows = []
+        for m in by_server[server_name]:
+            name = m["mcp_name"]
+            enabled = m["enabled"]
+            toggle_action = "disable" if enabled else "enable"
+            toggle_label = "Disable" if enabled else "Enable"
+            state_badge = _badge("enabled" if enabled else "disabled", "badge-enrolled" if enabled else "badge-not-enrolled")
+            btn = (
+                f'<button class="btn-secondary btn-sm access-toggle-btn" '
+                f'data-principal="{esc_py(principal)}" data-mcp="{esc_py(name)}" data-action="{esc_py(toggle_action)}">'
+                f'{toggle_label}</button>'
+                if can_write else '<span style="color:var(--muted);font-size:11px">read-only</span>'
+            )
+            rows.append(f"""
+            <tr>
+              <td style="font-size:12px">{esc_py(name)}</td>
+              <td>{state_badge}</td>
+              <td style="text-align:right">{btn}</td>
+            </tr>""")
+        group_blocks.append(f"""
+        <div style="margin-bottom:0.75rem">
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;
+               letter-spacing:.04em;margin-bottom:0.25rem">{esc_py(server_name)}</div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>Tool</th><th>State</th><th style="text-align:right">Action</th></tr></thead>
+              <tbody>{"".join(rows)}</tbody>
+            </table>
+          </div>
+        </div>""")
+
+    return HTMLResponse(f"""
+    {"".join(group_blocks) if group_blocks else '<div style="text-align:center;color:var(--muted);padding:1rem">No tools registered.</div>'}
+    <div id="access-toggle-msg-{esc_py(_slugify(principal))}" style="font-size:12px;margin-top:6px"></div>
+    <script>
+      (function() {{
+        // Unobtrusive binding (not inline onclick=) — principal/mcp names come from the
+        // DB (OAuth client_id / tool_registry.name) and aren't guaranteed to be free of
+        // quote/script characters, so they must never be interpolated into a JS literal.
+        document.querySelectorAll('.access-toggle-btn').forEach(function(btn) {{
+          btn.addEventListener('click', function() {{
+            const principal = btn.dataset.principal;
+            const mcpName = btn.dataset.mcp;
+            const action = btn.dataset.action;
+            const slug = principal.replace(/[^a-zA-Z0-9]/g, '_');
+            const msgEl = document.getElementById('access-toggle-msg-' + slug);
+            fetch('/api/v1/profiles/' + encodeURIComponent(principal) + '/mcps/' + encodeURIComponent(mcpName) + '/' + encodeURIComponent(action),
+                  {{method: 'POST', credentials: 'include'}})
+              .then(function(r) {{
+                if (!r.ok) return r.json().then(function(d) {{ throw new Error(d.detail || ('HTTP ' + r.status)); }});
+                htmx.ajax('GET', '/portal/fragments/admin/access/' + encodeURIComponent(principal),
+                           {{target: '#access-detail-' + slug, swap: 'innerHTML'}});
+              }})
+              .catch(function(err) {{ if (msgEl) {{ msgEl.style.color = '#fca5a5'; msgEl.textContent = err.message; }} }});
+          }});
+        }});
+      }})();
+    </script>""")
+
+
+# ---------------------------------------------------------------------------
 # Submissions tab (admin review queue)
 # ---------------------------------------------------------------------------
 
@@ -3593,13 +4868,15 @@ async def fragment_admin_submissions(request: Request):
     """Security team review queue — all non-draft submissions."""
     _require_admin(request)
     try:
+        from collections import defaultdict
         from sqlalchemy import text
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             rows = (await session.execute(text("""
                 SELECT server_id, name, owner_sub, submission_status, scan_status,
                        injection_mode, data_categories, has_write_ops,
-                       github_repo_url, scan_report, review_notes, updated_at
+                       github_repo_url, scan_report, review_notes, updated_at,
+                       upstream_idp_config
                 FROM server_registry
                 WHERE submission_status NOT IN ('draft')
                   AND deleted_at IS NULL
@@ -3611,6 +4888,23 @@ async def fragment_admin_submissions(request: Request):
                     ELSE 4
                   END, updated_at DESC
             """))).fetchall()
+
+            # R-12: SBOM link needs to know whether this submission's
+            # provisioned tool(s) (R-10) have an sbom_records row yet — one
+            # extra query for the whole queue rather than N+1.
+            sids = [str(r.server_id) for r in rows]
+            sbom_by_server: dict[str, list[dict]] = defaultdict(list)
+            if sids:
+                tool_rows = (await session.execute(text("""
+                    SELECT t.server_id, t.tool_id, t.name,
+                           EXISTS(SELECT 1 FROM sbom_records sr WHERE sr.tool_id = t.tool_id) AS has_sbom
+                    FROM tool_registry t
+                    WHERE t.server_id = ANY(CAST(:sids AS uuid[])) AND t.deleted_at IS NULL
+                """), {"sids": sids})).fetchall()
+                for tr in tool_rows:
+                    sbom_by_server[str(tr.server_id)].append(
+                        {"tool_id": str(tr.tool_id), "name": tr.name, "has_sbom": bool(tr.has_sbom)}
+                    )
     except Exception as exc:
         logger.error("portal admin/submissions DB error: %s", exc)
         return HTMLResponse(_error_fragment("Database error loading submissions."))
@@ -3622,6 +4916,8 @@ async def fragment_admin_submissions(request: Request):
         "scan_running":       ("#d97706", "Scanning…"),
         "changes_requested":  ("#d97706", "Changes Requested"),
         "approved_pending_url": ("#16a34a", "Approved — Needs URL"),
+        # R-10/F-15: no-code terminal state — never "Active"/"running" language.
+        "scaffold_ready":     ("#0891b2", "Approved — Scaffold Only (Not Running)"),
         "rejected":           ("#dc2626", "Rejected"),
         "active":             ("#16a34a", "Active"),
     }
@@ -3631,6 +4927,21 @@ async def fragment_admin_submissions(request: Request):
         "email_calendar": "Email/Calendar", "infrastructure": "Infrastructure",
         "public": "Public",
     }
+    # R-12/F-14: allowlist the exact keys the wizard's _collectModeConfig
+    # writes (portal.py renderModeConfig) — never dump upstream_idp_config
+    # JSONB verbatim, so an unexpected/stray key (e.g. a future field that
+    # accidentally carries a secret reference) can't leak into admin HTML.
+    _IDP_CFG_LABELS = {
+        "audience": "Target audience",
+        "tenant_id": "Tenant ID",
+        "client_id": "Client ID",
+        "scopes": "Scopes",
+        "inject_header": "Header",
+        "inject_prefix": "Token prefix",
+        "issuer": "Issuer URL",
+        "token_url": "Token endpoint",
+    }
+    _SCAN_TERMINAL = {"passed", "blocked", "error"}
 
     if not rows:
         empty = '<div style="color:var(--muted);padding:2rem 0">No submissions in the queue.</div>'
@@ -3647,19 +4958,63 @@ async def fragment_admin_submissions(request: Request):
             f'{esc_py(_SENSE_LABEL.get(c, c))}</span>'
             for c in cats
         )
-        scan_findings = r.scan_report or []
-        blocked_count = sum(1 for f in scan_findings if f.get("block")) if isinstance(scan_findings, list) else 0
+        raw_report = r.scan_report if isinstance(r.scan_report, list) else []
+        # pip-audit silently no-ops when the repo has no requirements.txt/pyproject.toml
+        # (e.g. an npm/Node MCP server) — split that out as an informational note
+        # rather than either a red warning or a false "pip-audit ran" claim.
+        pip_skip_note = next(
+            (f.get("message", "") for f in raw_report if f.get("scanner") == "pip-audit" and f.get("skipped")),
+            None,
+        )
+        scan_findings = [f for f in raw_report if not (f.get("scanner") == "pip-audit" and f.get("skipped"))]
+        blocked_count = sum(1 for f in scan_findings if f.get("block"))
+        scanners_ran = ["trufflehog", "custom rules"] + (["pip-audit"] if pip_skip_note is None else [])
+        # R-12: render the scan report for any terminal scan status, not just
+        # 'scan_blocked' — a passed scan with zero findings is a fact worth
+        # showing a reviewer, not silence.
         scan_html = ""
-        if st == "scan_blocked" and scan_findings:
-            items = []
-            for f in (scan_findings if isinstance(scan_findings, list) else []):
-                items.append(
-                    f'<div style="font-size:11px;color:#fca5a5;padding:2px 0">'
-                    f'&#x26A0; {esc_py(f.get("scanner",""))} · '
-                    f'{esc_py(f.get("file",""))}:{f.get("line",0)} — '
-                    f'{esc_py(f.get("message",""))}</div>'
+        if (r.scan_status or "") in _SCAN_TERMINAL:
+            if scan_findings:
+                items = []
+                for f in scan_findings:
+                    items.append(
+                        f'<div style="font-size:11px;color:#fca5a5;padding:2px 0">'
+                        f'&#x26A0; {esc_py(f.get("scanner",""))} · '
+                        f'{esc_py(f.get("file",""))}:{f.get("line",0)} — '
+                        f'{esc_py(f.get("message",""))}</div>'
+                    )
+                scan_html = f'<div style="margin:0.5rem 0;background:#1a0000;border-radius:6px;padding:0.5rem 0.75rem">{"".join(items[:5])}</div>'
+            elif r.scan_status == "passed":
+                skip_line = f'<div>{esc_py(pip_skip_note)}</div>' if pip_skip_note else ""
+                scan_html = (
+                    '<div style="margin:0.5rem 0;background:#052e1b;border-radius:6px;'
+                    'padding:0.5rem 0.75rem;font-size:11px;color:#4ade80">'
+                    f'&#x2713; 0 findings — {len(scanners_ran)} scanners ran ({", ".join(scanners_ran)})'
+                    f'{skip_line}'
+                    '<div style="color:#86efac;margin-top:2px">Secret + known-CVE-dependency + basic pattern '
+                    'checks only — not a full code security audit.</div></div>'
                 )
-            scan_html = f'<div style="margin:0.5rem 0;background:#1a0000;border-radius:6px;padding:0.5rem 0.75rem">{"".join(items[:5])}</div>'
+
+        # R-12/F-14: show exactly what will be wired at approval time.
+        idp_cfg_html = ""
+        raw_cfg = r.upstream_idp_config
+        if raw_cfg and not isinstance(raw_cfg, dict):
+            try:
+                raw_cfg = json.loads(raw_cfg)
+            except (TypeError, ValueError):
+                raw_cfg = None
+        if isinstance(raw_cfg, dict):
+            cfg_items = [
+                f'<span>{esc_py(label)}: <span style="color:var(--text)">{esc_py(raw_cfg[key])}</span></span>'
+                for key, label in _IDP_CFG_LABELS.items()
+                if raw_cfg.get(key)
+            ]
+            if cfg_items:
+                idp_cfg_html = (
+                    '<div style="margin-top:0.4rem;display:flex;gap:1rem;flex-wrap:wrap;'
+                    'font-size:11px;color:var(--muted);background:#0b1220;border-radius:6px;'
+                    f'padding:0.4rem 0.6rem">{"".join(cfg_items)}</div>'
+                )
 
         review_action = ""
         if st == "awaiting_review":
@@ -3688,6 +5043,33 @@ async def fragment_admin_submissions(request: Request):
             else:
                 github_link = f'<span style="color:#fca5a5;font-size:12px">&#x26A0; invalid repo URL</span>'
 
+        # R-12: SBOM link gets equal visual weight to the repo link — once R-9
+        # (manifest parsing) + R-10 (auto-provisioning) land, an approved
+        # submission's tool(s) have sbom_records; before that, say so plainly
+        # rather than showing nothing.
+        sbom_tools = sbom_by_server.get(sid, [])
+        if sbom_tools:
+            sbom_links = " · ".join(
+                f'<a href="/api/v1/tools/{esc_py(t["tool_id"])}/sbom" target="_blank" rel="noopener noreferrer" '
+                f'style="color:var(--cyan)">{esc_py(t["name"])}</a>'
+                for t in sbom_tools if t["has_sbom"]
+            )
+            sbom_link = (
+                f'<span style="font-size:12px">&#x1F4E6; View SBOM: {sbom_links}</span>' if sbom_links else
+                '<span style="font-size:12px;color:var(--muted)">&#x1F4E6; SBOM pending (tool(s) provisioned, not yet generated)</span>'
+            )
+        else:
+            sbom_link = '<span style="font-size:12px;color:var(--muted)">&#x1F4E6; SBOM: not yet provisioned</span>'
+
+        scaffold_link = ""
+        if st == "scaffold_ready":
+            scaffold_link = (
+                f'<div style="margin-top:0.4rem;font-size:12px;color:var(--muted)">'
+                f'No-code submission — nothing is running. '
+                f'<a href="/api/v1/submissions/{sid}/scaffold" style="color:var(--cyan)">Download scaffold.zip</a> '
+                f'(submitter must build, self-host, and submit a new repo-backed submission to go live)</div>'
+            )
+
         cards_html.append(f"""
         <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1rem 1.25rem;margin-bottom:0.75rem">
           <div style="display:flex;justify-content:space-between;align-items:flex-start">
@@ -3703,7 +5085,12 @@ async def fragment_admin_submissions(request: Request):
             <span>Write ops: <span style="color:var(--text)">{'Yes' if r.has_write_ops else 'No'}</span></span>
           </div>
           {f'<div style="margin-top:0.4rem">{cats_html}</div>' if cats_html else ''}
-          {f'<div style="margin-top:0.4rem">{github_link}</div>' if github_link else ''}
+          {idp_cfg_html}
+          <div style="margin-top:0.4rem;display:flex;gap:1.25rem;flex-wrap:wrap;align-items:center">
+            {github_link}
+            {sbom_link}
+          </div>
+          {scaffold_link}
           {scan_html}
           {f'<div style="margin-top:0.4rem;font-size:12px;color:#d97706">Reviewer notes: {esc_py(r.review_notes)}</div>' if r.review_notes else ''}
           {review_action}
@@ -3758,6 +5145,7 @@ async def submit_wizard_page(request: Request):
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Submit MCP Server · MCP Security Platform</title>
+  {_FAVICON_LINK}
   {_FONTS_LINK}
   {_HTMX_TAG}
   <style>
@@ -3806,7 +5194,7 @@ async def submit_wizard_page(request: Request):
   </style>
 </head>
 <body>
-<div class="adm-layout" style="background:#080b14;min-height:100vh">
+<div class="adm-layout" style="background:#080b14;min-height:100vh;height:auto;overflow:visible">
   <div class="wiz-shell">
     <div class="wiz-header">
       <a href="/portal" style="color:var(--muted);font-size:13px;text-decoration:none">&#x2190; Portal</a>
@@ -3910,7 +5298,7 @@ function submitStep1() {{
 // ── Step 2: Auth ─────────────────────────────────────────────────────────────
 
 const _MODE_CARDS = [
-  {{ id:'kc_token_exchange',       title:'Same IdP (Keycloak)', desc:'Token exchange — no secret stored. Full per-user attribution. Best for internal services.' }},
+  {{ id:'kc_token_exchange',       title:'Same IdP', desc:'Token exchange — no secret stored. Full per-user attribution. Best for internal services.' }},
   {{ id:'entra_client_credentials', title:'External IdP — Machine', desc:'Microsoft Entra client credentials. App identity, no per-user attribution in upstream.' }},
   {{ id:'entra_user_token',         title:'External IdP — Delegated', desc:'Microsoft Entra per-user delegated token. Full per-user attribution via Entra.' }},
   {{ id:'service',                  title:'Service account', desc:'One shared credential injected for all callers. Attribution at gateway level only.' }},
@@ -4481,6 +5869,17 @@ def esc_py(value: Any) -> str:
     """HTML-escape a value for safe insertion into HTML attributes and text nodes."""
     import html
     return html.escape(str(value) if value is not None else "", quote=True)
+
+
+def _slugify(value: str) -> str:
+    """Turn an arbitrary principal/client id into a safe DOM id fragment.
+
+    Must match the JS-side regex in the Access tab (accessToggleMcp) exactly —
+    both replace every non-alphanumeric character with '_' — so server-rendered
+    element ids and client-computed target ids agree.
+    """
+    import re
+    return re.sub(r"[^a-zA-Z0-9]", "_", value)
 
 
 def _badge(label: str, css_class: str) -> str:

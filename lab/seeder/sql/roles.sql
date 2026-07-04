@@ -53,12 +53,23 @@ VALUES
 ON CONFLICT (key_id) DO NOTHING;
 
 -- Lab user role assignments. Table DDL is owned by V008 migration.
+-- V050 made role_assignments append-only (grant/revoke are both INSERT-only
+-- event rows; the RBAC admin panel needs to re-grant a role after a revoke,
+-- which the old UNIQUE(client_id, role) constraint would have blocked) — so
+-- there's no longer a matching constraint for ON CONFLICT. Guard with
+-- NOT EXISTS instead: only seed a role if this client has no event row for
+-- it yet at all (first run), never overwrite/duplicate on reseed.
 INSERT INTO role_assignments (client_id, role, granted_by)
-VALUES
-    ('alice@corp', 'agent',   'lab-seeder'),
-    ('bob@corp',   'agent',   'lab-seeder'),
-    ('bootstrap',  'admin',   'lab-seeder')
-ON CONFLICT (client_id, role) DO NOTHING;
+SELECT v.client_id, v.role, 'lab-seeder'
+FROM (VALUES
+    ('alice@corp', 'agent'),
+    ('bob@corp',   'agent'),
+    ('bootstrap',  'admin')
+) AS v(client_id, role)
+WHERE NOT EXISTS (
+    SELECT 1 FROM role_assignments r
+    WHERE r.client_id = v.client_id AND r.role = v.role
+);
 
 -- OPA client grants — max_risk_level drives the risk_level_within_threshold gate.
 -- alice gets 'critical' so all lab tools are reachable; add per-user rows for

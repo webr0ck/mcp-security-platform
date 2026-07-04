@@ -311,6 +311,32 @@ async def oidc_callback(
         return JSONResponse(status_code=500, content={"error": "db_error"})
 
     if row is None:
+        # Browser back-button UX (not a security issue): Chromium keeps this
+        # callback URL — with its one-time code/state — as a distinct,
+        # back-reachable history entry even though the login flow already
+        # completed via a normal 302 chain (reproduced directly; not
+        # collapsed out of history the way a single-origin redirect chain
+        # usually is). Pressing Back after a successful login replays this
+        # exact URL, which correctly fails the anti-replay check below —
+        # but showing a raw JSON error is a bad, confusing experience for
+        # what is actually a no-op (the user is already logged in). If a
+        # still-valid session cookie is present, this is that case: bounce
+        # to the portal instead of erroring. Anti-replay itself is untouched
+        # — a genuinely invalid/expired/forged state with NO valid session
+        # still hits the branch below.
+        session_token = request.cookies.get(settings.SESSION_COOKIE_NAME, "")
+        if session_token:
+            try:
+                import jwt as jose_jwt
+                jose_jwt.decode(
+                    session_token,
+                    settings.PROXY_SECRET_KEY,
+                    algorithms=["HS256"],
+                    audience="mcp-proxy-session",
+                )
+                return RedirectResponse(url="/portal", status_code=302)
+            except Exception:
+                pass  # fall through to the normal error below
         return JSONResponse(status_code=400, content={"error": "invalid_state", "message": "State not found or already used."})
 
     verifier = row.pkce_code_verifier
@@ -517,7 +543,10 @@ async def oidc_callback(
         roles = [roles]
 
     # Map KC roles to proxy roles
-    _ROLE_MAP = {"admin": "admin", "agent": "agent", "auditor": "auditor", "readonly": "readonly"}
+    _ROLE_MAP = {
+        "admin": "admin", "agent": "agent", "auditor": "auditor", "readonly": "readonly",
+        "security_reviewer": "security_reviewer",
+    }
     proxy_roles = [_ROLE_MAP[r] for r in roles if r in _ROLE_MAP]
     client_id = verified_oidc_identity(subject, email, email_verified)
 
@@ -595,7 +624,14 @@ async def oidc_callback(
             detail="Session registration failed — please try logging in again.",
         ) from exc
 
-    # Also register the session JWT client_id in role_assignments if not present
+    # Sync KC-held roles into role_assignments (append-only, INV-011/V050 — no
+    # UPDATE/DELETE available). Only insert a fresh 'keycloak' grant event when
+    # the latest event for this (client_id, role) isn't already an active
+    # keycloak-sourced grant — otherwise every login would insert a duplicate
+    # row forever. This also means: if an admin revokes a KC-sourced role via
+    # the RBAC panel but Keycloak still grants it, the next login re-activates
+    # it (documented in the panel UI, not a bug — KC remains the identity
+    # source of truth for KC-mapped roles).
     try:
         from sqlalchemy import text
         from app.core.database import AsyncSessionLocal
@@ -604,8 +640,17 @@ async def oidc_callback(
                 await session.execute(
                     text("""
                         INSERT INTO role_assignments (client_id, role, granted_by)
-                        VALUES (:cid, :role, 'keycloak')
-                        ON CONFLICT DO NOTHING
+                        SELECT :cid, :role, 'keycloak'
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM role_assignments
+                            WHERE client_id = :cid AND role = :role
+                            ORDER BY created_at DESC LIMIT 1
+                        ) OR (
+                            SELECT revoked = false AND granted_by = 'keycloak'
+                            FROM role_assignments
+                            WHERE client_id = :cid AND role = :role
+                            ORDER BY created_at DESC LIMIT 1
+                        ) = false
                     """),
                     {"cid": client_id, "role": role},
                 )

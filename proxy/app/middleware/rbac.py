@@ -86,6 +86,13 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     ("GET",    "/api/v1/servers/mine",                   {"admin", "platform_admin", "server_owner", "manager"}),
     ("GET",    "/api/v1/servers/{id}/entitlements",      {"admin", "platform_admin", "server_owner", "manager"}),
     ("POST",   "/api/v1/servers/{id}/entitlements",      {"admin", "platform_admin", "server_owner", "manager"}),
+    # Debug mode / maintainers — self-service submitters hold "agent"/"user"
+    # roles (not "server_owner"), so this must admit those too; the actual
+    # per-server ownership check is enforced in the handler
+    # (_require_owner_or_maintainer in routers/server_registry.py), RBAC here
+    # only needs to let a plausible owner's role through.
+    ("PUT",    "/api/v1/servers/{id}/maintainers",       {"admin", "platform_admin", "server_owner", "manager", "user", "agent"}),
+    ("POST",   "/api/v1/servers/{id}/debug-mode",        {"admin", "platform_admin", "server_owner", "manager", "user", "agent"}),
     # DELETE /{id}/entitlements/{ent_id}: use plain prefix matching (two path params not
     # supported by parameterized rule logic). The /entitlements/ infix ensures this only
     # matches entitlement DELETE operations, not other /servers/* DELETEs.

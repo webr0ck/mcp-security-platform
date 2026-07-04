@@ -112,18 +112,23 @@ async def list_anomaly_alerts(
     _require_roles(request, {"admin", "auditor"})
 
     conditions = ["1=1"]
+    joined_conditions = ["1=1"]
     params: dict = {}
 
     if client_id:
         conditions.append("client_id = :client_id")
+        joined_conditions.append("a.client_id = :client_id")
         params["client_id"] = client_id
     if not resolved:
         conditions.append("resolved = false")
+        joined_conditions.append("a.resolved = false")
     if from_date:
-        conditions.append("detected_at >= :from_date::timestamptz")
+        conditions.append("detected_at >= CAST(:from_date AS timestamptz)")
+        joined_conditions.append("a.detected_at >= CAST(:from_date AS timestamptz)")
         params["from_date"] = from_date
 
     where_clause = " AND ".join(conditions)
+    joined_where_clause = " AND ".join(joined_conditions)
     offset = (page - 1) * page_size
 
     try:
@@ -136,12 +141,15 @@ async def list_anomaly_alerts(
         rows_result = await db.execute(
             text(
                 f"""
-                SELECT alert_id, client_id, detected_at, anomaly_score,
-                       pattern, description, invocation_ids, resolved,
-                       resolved_at, resolved_by, resolution_note
-                FROM anomaly_alerts
-                WHERE {where_clause}
-                ORDER BY detected_at DESC
+                SELECT a.alert_id, a.client_id, a.detected_at, a.anomaly_score,
+                       a.pattern, a.description, a.invocation_ids, a.resolved,
+                       a.resolved_at, a.resolved_by, a.resolution_note,
+                       a.tool_name, a.tool_id, t.server_id, s.name AS server_name
+                FROM anomaly_alerts a
+                LEFT JOIN tool_registry t ON t.tool_id = a.tool_id
+                LEFT JOIN server_registry s ON s.server_id = t.server_id
+                WHERE {joined_where_clause}
+                ORDER BY a.detected_at DESC
                 LIMIT :limit OFFSET :offset
                 """
             ),
@@ -165,6 +173,10 @@ async def list_anomaly_alerts(
             "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
             "resolved_by": row.resolved_by,
             "resolution_note": row.resolution_note,
+            "tool_name": row.tool_name,
+            "tool_id": str(row.tool_id) if row.tool_id else None,
+            "server_id": str(row.server_id) if row.server_id else None,
+            "server_name": row.server_name,
         }
         for row in rows
     ]
@@ -177,6 +189,89 @@ async def list_anomaly_alerts(
             "total_items": total_items,
             "total_pages": max(1, -(-total_items // page_size)),
         },
+    })
+
+
+@router.get("/alerts/{alert_id}")
+async def get_anomaly_alert(
+    alert_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """
+    Alert detail — resolves tool/server attribution and the implicated
+    invocation window. Required role: admin, auditor.
+
+    INV-001: invocation rows expose only hashed digests / deny reasons, never
+    raw tool arguments — audit_events never stored raw arguments to begin with.
+    """
+    _require_roles(request, {"admin", "auditor"})
+
+    try:
+        row = (await db.execute(
+            text("""
+                SELECT a.alert_id, a.client_id, a.detected_at, a.anomaly_score,
+                       a.pattern, a.description, a.invocation_ids, a.resolved,
+                       a.resolved_at, a.resolved_by, a.resolution_note,
+                       a.tool_name, a.tool_id, t.server_id, s.name AS server_name
+                FROM anomaly_alerts a
+                LEFT JOIN tool_registry t ON t.tool_id = a.tool_id
+                LEFT JOIN server_registry s ON s.server_id = t.server_id
+                WHERE a.alert_id = :alert_id
+            """),
+            {"alert_id": str(alert_id)},
+        )).fetchone()
+    except Exception as exc:
+        logger.error("anomaly_alert detail error", extra={"error": str(exc)})
+        raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Query failed."})
+
+    if row is None:
+        raise HTTPException(404, {"code": "NOT_FOUND", "message": f"Alert '{alert_id}' not found."})
+
+    invocation_ids = [str(i) for i in (row.invocation_ids or [])]
+    invocations: list[dict] = []
+    if invocation_ids:
+        try:
+            inv_rows = (await db.execute(
+                text("""
+                    SELECT event_id, event_ts, tool_name, outcome, opa_reasons, sha256_hash
+                    FROM audit_events
+                    WHERE event_id = ANY(CAST(:ids AS uuid[]))
+                    ORDER BY event_ts DESC
+                """),
+                {"ids": invocation_ids},
+            )).fetchall()
+            invocations = [
+                {
+                    "event_id": str(r.event_id),
+                    "event_ts": r.event_ts.isoformat() if r.event_ts else None,
+                    "tool_name": r.tool_name,
+                    "outcome": r.outcome,
+                    "opa_reasons": r.opa_reasons or [],
+                    "digest": r.sha256_hash,
+                }
+                for r in inv_rows
+            ]
+        except Exception as exc:
+            logger.error("anomaly_alert invocation lookup error", extra={"error": str(exc)})
+
+    return JSONResponse(content={
+        "alert_id": str(row.alert_id),
+        "client_id": row.client_id,
+        "detected_at": row.detected_at.isoformat(),
+        "anomaly_score": float(row.anomaly_score),
+        "pattern": row.pattern,
+        "description": row.description,
+        "resolved": row.resolved,
+        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+        "resolved_by": row.resolved_by,
+        "resolution_note": row.resolution_note,
+        "tool_name": row.tool_name,
+        "tool_id": str(row.tool_id) if row.tool_id else None,
+        "server_id": str(row.server_id) if row.server_id else None,
+        "server_name": row.server_name,
+        "attributed": row.tool_id is not None,
+        "invocations": invocations,
     })
 
 

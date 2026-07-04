@@ -310,6 +310,7 @@ def _validate_resolved_ips_against_allowlist(
 async def validate_upstream_url_ssrf(
     upstream_url: str,
     private_cidr_allowlist: list[str] | None = None,
+    allow_http_dev: bool = False,
 ) -> str | None:
     """
     Validate upstream URL against SSRF, with fail-closed DNS resolution.
@@ -326,7 +327,7 @@ async def validate_upstream_url_ssrf(
 
     Checks performed:
       1. URL must be parseable
-      2. Scheme must be HTTPS (no HTTP for upstream services)
+      2. Scheme must be HTTPS (plain HTTP only via allow_http_dev, see below)
       3. Host must not be raw private/reserved IP (unless in allowlist)
       4. DNS resolution must succeed
       5. ALL resolved IPs must be public OR ALL within a single allowlist CIDR
@@ -338,6 +339,14 @@ async def validate_upstream_url_ssrf(
         private_cidr_allowlist: optional list of CIDR strings that permit private
             upstream addresses.  Default None / empty list = current behaviour
             (all private IPs blocked).
+        allow_http_dev: dev-environment-only relaxation (callers must gate it on
+            settings.ENVIRONMENT == "development").  Permits scheme http, but
+            ONLY when every resolved IP is private AND covered by a single
+            private_cidr_allowlist entry — a plain-HTTP URL whose target is
+            public, or private-but-not-allowlisted, is still denied.  This is
+            deliberately STRICTER than ssrf.validate_server_url's dev-mode
+            branch: dev HTTP here always yields a persistable allowlist-entry
+            provenance record, never a public or unrecorded target.
 
     Returns:
         The matched allowlist CIDR string if a private upstream was allowlisted,
@@ -364,11 +373,13 @@ async def validate_upstream_url_ssrf(
     if parsed.username or parsed.password:
         raise InvalidOnboardingConfig("URL must not contain credentials (user:pass@)")
 
-    # HTTPS only
-    if parsed.scheme != "https":
+    # HTTPS only (plain HTTP only in dev mode, and even then only for
+    # allowlisted private targets — enforced further down)
+    if parsed.scheme != "https" and not (allow_http_dev and parsed.scheme == "http"):
         raise InvalidOnboardingConfig(
             f"Scheme '{parsed.scheme}' is not allowed for upstream; use HTTPS"
         )
+    _is_dev_http = parsed.scheme == "http"
 
     # Build the parsed allowlist networks (raises InvalidOnboardingConfig on bad CIDR)
     allowlist: list[str] = private_cidr_allowlist or []
@@ -420,6 +431,15 @@ async def validate_upstream_url_ssrf(
         matched_entry = _validate_resolved_ips_against_allowlist(
             host, ip_addresses, allowlist_networks
         )
+        if _is_dev_http and not matched_entry:
+            # Dev-mode HTTP is ONLY for internal/private lab targets. A plain-HTTP
+            # URL that resolves public would otherwise register with no allowlist
+            # provenance and an unencrypted, attacker-reachable upstream.
+            raise InvalidOnboardingConfig(
+                f"Plain-HTTP upstream '{host}' resolves to public IP(s) — "
+                "dev-mode HTTP is only permitted for private targets covered by "
+                "UPSTREAM_PRIVATE_CIDR_ALLOWLIST. Use HTTPS for public upstreams."
+            )
         if matched_entry:
             logger.info(
                 "validate_upstream_url_ssrf: private upstream allowed via CIDR allowlist",
@@ -433,6 +453,14 @@ async def validate_upstream_url_ssrf(
         return matched_entry
     else:
         # Legacy path: block any private IP (no allowlist)
+        if _is_dev_http:
+            # No allowlist configured → no provenance record is possible, so
+            # dev-mode HTTP has nothing safe to bind to. Fail closed.
+            raise InvalidOnboardingConfig(
+                f"Plain-HTTP upstream '{host}' requires UPSTREAM_PRIVATE_CIDR_ALLOWLIST "
+                "to be configured with the CIDR covering the private target. "
+                "Use HTTPS for public upstreams."
+            )
         for ip_str in ip_addresses:
             if _is_blocked_ip(ip_str):
                 raise InvalidOnboardingConfig(

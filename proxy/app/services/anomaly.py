@@ -140,7 +140,7 @@ async def detect(client_id: str, tool_name: str) -> AnomalyDetectionResult:
         )
         # Write-behind: don't block the request path on DB write
         try:
-            await _persist_alert(client_id, score, pattern or "unknown", description or "")
+            await _persist_alert(client_id, tool_name, score, pattern or "unknown", description or "")
         except Exception as exc:
             logger.error(
                 "Failed to persist anomaly alert",
@@ -157,6 +157,7 @@ async def detect(client_id: str, tool_name: str) -> AnomalyDetectionResult:
 
 async def _persist_alert(
     client_id: str,
+    tool_name: str,
     score: float,
     pattern: str,
     description: str,
@@ -164,36 +165,61 @@ async def _persist_alert(
     """
     Persist an AnomalyAlert row to PostgreSQL.
     Called asynchronously from detect() when threshold is exceeded.
+
+    R-7 fix: this previously always wrote invocation_ids='{}' and dropped
+    tool_name, so an alert could never be traced to the MCP server it fired
+    on. tool_id is resolved from the triggering tool_name (best-effort — the
+    tool may be unregistered/renamed since); invocation_ids are the most
+    recent audit_events rows for this client, since detect() runs before the
+    *current* invocation's own audit_events row is written (best-effort
+    correlation on client_id + recency, not exact).
     """
     from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
 
     alert_id = uuid4()
     async with AsyncSessionLocal() as session:
+        tool_row = (await session.execute(
+            text("SELECT tool_id FROM tool_registry WHERE name = :name AND deleted_at IS NULL "
+                 "ORDER BY created_at DESC LIMIT 1"),
+            {"name": tool_name},
+        )).fetchone()
+        tool_id = str(tool_row.tool_id) if tool_row else None
+
+        recent_events = (await session.execute(
+            text("SELECT event_id FROM audit_events WHERE client_id = :cid "
+                 "ORDER BY event_ts DESC LIMIT 20"),
+            {"cid": client_id},
+        )).fetchall()
+        invocation_ids = [str(r.event_id) for r in recent_events]
+
         await session.execute(
             text(
                 """
                 INSERT INTO anomaly_alerts
-                  (alert_id, client_id, anomaly_score, pattern, description,
+                  (alert_id, client_id, tool_name, tool_id, anomaly_score, pattern, description,
                    invocation_ids, resolved, detected_at, created_at, updated_at)
                 VALUES
-                  (:alert_id, :client_id, :score, :pattern, :description,
-                   ARRAY[]::UUID[], false, NOW(), NOW(), NOW())
+                  (:alert_id, :client_id, :tool_name, :tool_id, :score, :pattern, :description,
+                   :invocation_ids, false, NOW(), NOW(), NOW())
                 """
             ),
             {
                 "alert_id": str(alert_id),
                 "client_id": client_id,
+                "tool_name": tool_name,
+                "tool_id": tool_id,
                 "score": score,
                 "pattern": pattern,
                 "description": description,
+                "invocation_ids": invocation_ids,
             },
         )
         await session.commit()
 
     logger.info(
         "Anomaly alert persisted",
-        extra={"alert_id": str(alert_id), "client_id": client_id, "score": score},
+        extra={"alert_id": str(alert_id), "client_id": client_id, "score": score, "tool_id": tool_id},
     )
 
 

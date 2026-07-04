@@ -156,15 +156,44 @@ _IP_RL_LIMIT = 100
 _IP_RL_WINDOW = 60
 
 
+def _real_client_ip(request: Request) -> str:
+    """
+    Resolve the real client IP for rate-limit keying.
+
+    This app sits behind exactly one trusted reverse-proxy hop (nginx —
+    lab/nginx/conf.d/mcp-proxy-lab.conf sets
+    ``X-Forwarded-For: $proxy_add_x_forwarded_for``, which APPENDS the peer IP
+    nginx itself observed to whatever the client sent). Without this, every
+    request's ``request.client.host`` is nginx's own container IP — identical
+    for every browser tab, every user, and every background job — so the
+    entire deployment shares one rate-limit bucket. Normal multi-tab usage
+    (several concurrent htmx fragment loads per tab) then trips the limit
+    almost immediately, which is what was actually happening here, not a real
+    flood.
+
+    Trusting the LAST X-Forwarded-For entry (not the first) is safe even
+    against a client that sets its own fake XFF header: nginx appends, never
+    replaces, so the rightmost entry is always the TCP peer nginx itself saw
+    — an attacker can pad the list with spoofed values but cannot control the
+    last one.
+    """
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        last = xff.split(",")[-1].strip()
+        if last:
+            return last
+    return request.client.host if request.client else "unknown"
+
+
 class IPRateLimitMiddleware(BaseHTTPMiddleware):
     """
     Global per-source-IP rate limiter. Runs before auth and RBAC so it covers
     unauthenticated flooding of any endpoint, including discovery endpoints,
     /oauth/register, and the MCP endpoint.
 
-    Keyed by the real client IP (request.client.host). In production behind a
-    reverse proxy, ensure the proxy sets X-Forwarded-For and that Starlette's
-    ProxyHeadersMiddleware is added so request.client.host reflects the real IP.
+    Keyed by the real client IP, resolved via _real_client_ip() (trusts the
+    last X-Forwarded-For hop — see that function's docstring for why this is
+    safe given the single-reverse-proxy topology).
 
     Health/metrics paths are exempted to avoid interfering with load balancer probes.
     Fails open if Redis is unavailable.
@@ -179,7 +208,7 @@ class IPRateLimitMiddleware(BaseHTTPMiddleware):
         if request.url.path in _IP_RL_EXEMPT_PATHS:
             return await call_next(request)  # type: ignore[misc]
 
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = _real_client_ip(request)
         try:
             rl_client = redis_pool.rate_limit_client
             key = f"rl:ip:{client_ip}"

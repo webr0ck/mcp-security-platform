@@ -32,8 +32,9 @@ from pydantic import BaseModel, HttpUrl, field_validator
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
+from app.services.admin_audit import emit_admin_config_event
 from app.services.scaffold_generator import generate_prompts, generate_scaffold
-from app.services.ssrf import SSRFError, validate_server_url
+from app.services.server_onboarding import InvalidOnboardingConfig, validate_upstream_url_ssrf
 from app.services.submission_scanner import GITHUB_CLONE_ACCOUNT, scan_submission
 
 # Same regex as submission_scanner — enforced at API boundary before any storage
@@ -81,6 +82,24 @@ def _require_admin(request: Request) -> None:
     roles = list(getattr(request.state, "client_roles", []) or [])
     if not any(r in {"admin", "platform_admin"} for r in roles):
         raise HTTPException(status_code=403, detail="admin role required")
+
+
+def _require_submission_reviewer(request: Request) -> None:
+    """Approve/reject/request-changes: admin, platform_admin, or the dedicated
+    security_reviewer role (read-only auditors do not get mutate rights)."""
+    roles = list(getattr(request.state, "client_roles", []) or [])
+    if not any(r in {"admin", "platform_admin", "security_reviewer"} for r in roles):
+        raise HTTPException(status_code=403, detail="reviewer role required")
+
+
+def _require_not_self_review(sub: dict[str, Any], reviewer: str) -> None:
+    """Segregation of duties: a submitter may not approve/reject/request-changes
+    on their own submission, even if they hold a reviewer/admin role."""
+    if sub.get("owner_sub") == reviewer:
+        raise HTTPException(
+            status_code=403,
+            detail="cannot review your own submission — ask another reviewer to approve/reject/request changes",
+        )
 
 
 def _require_reviewer(request: Request) -> None:
@@ -222,7 +241,7 @@ async def update_draft(server_id: str, body: DraftUpdate, request: Request) -> J
     _set("has_write_ops", body.has_write_ops)
 
     if body.upstream_idp_config is not None:
-        fields.append("upstream_idp_config = :idp_config::jsonb")
+        fields.append("upstream_idp_config = CAST(:idp_config AS jsonb)")
         updates["idp_config"] = json.dumps(body.upstream_idp_config)
 
     if body.data_categories is not None:
@@ -266,7 +285,7 @@ async def submit_for_review(
                 scan_status  = CASE
                     WHEN github_repo_url IS NOT NULL AND github_repo_url != ''
                     THEN 'pending'
-                    ELSE scan_status
+                    ELSE 'not_applicable'
                 END,
                 scan_report  = CASE
                     WHEN github_repo_url IS NOT NULL AND github_repo_url != ''
@@ -344,9 +363,17 @@ async def get_design_prompts(server_id: str, request: Request) -> JSONResponse:
 
 @router.get("/api/v1/submissions/{server_id}/scaffold")
 async def download_scaffold(server_id: str, request: Request) -> StreamingResponse:
-    """Download a scaffold zip for the no-code path."""
-    owner = _client_id(request)
-    sub = await _get_submission(server_id, owner_sub=owner)
+    """
+    Download a scaffold zip for the no-code path.
+
+    Owner or reviewer (admin/platform_admin) — a reviewer needs to see exactly
+    what a no-code submitter will receive as part of reviewing the submission
+    (the admin review UI links here); owner-only access made that 404.
+    """
+    caller = _client_id(request)
+    caller_roles = list(getattr(request.state, "client_roles", []) or [])
+    is_reviewer = any(r in {"admin", "platform_admin"} for r in caller_roles)
+    sub = await _get_submission(server_id, owner_sub=None if is_reviewer else caller)
     mode = sub.get("injection_mode") or "none"
     name = sub["name"]
     files = generate_scaffold(name, mode)
@@ -392,34 +419,48 @@ async def list_review_queue(request: Request) -> JSONResponse:
 
 @router.post("/api/v1/admin/submissions/{server_id}/approve")
 async def approve_submission(server_id: str, body: ReviewAction, request: Request) -> JSONResponse:
-    """Approve submission — moves to approved_pending_url state."""
-    _require_admin(request)
+    """Approve submission — repo path moves to approved_pending_url (submitter still
+    supplies the running URL); no-code path (F-15) has no URL to ever supply, so it
+    goes straight to the terminal 'scaffold_ready' state instead — never
+    approved_pending_url, never "active"/"running" language."""
+    _require_submission_reviewer(request)
     reviewer = _client_id(request)
     sub = await _get_submission(server_id)
+    _require_not_self_review(sub, reviewer)
     if sub["submission_status"] != "awaiting_review":
         raise HTTPException(status_code=409, detail="submission is not awaiting review")
-    # L2 fix: block approving a scan-blocked submission (e.g. if state was set externally).
-    if sub.get("scan_status") == "blocked":
+    # A-06 fix: scan must have completed (or been genuinely not-applicable — no
+    # repo to scan) before human approval. Blocks 'blocked', 'pending', 'scan_running'.
+    if sub.get("scan_status") not in ("passed", "not_applicable"):
         raise HTTPException(status_code=409, detail="cannot approve a scan-blocked submission")
+
+    # R-10/F-15: no-code submissions (no repo) can never reach provide_running_url —
+    # there is no server anywhere to supply a URL for.
+    new_status = "approved_pending_url" if sub.get("github_repo_url") else "scaffold_ready"
+
     async with AsyncSessionLocal() as session:
         await session.execute(text("""
             UPDATE server_registry
-            SET submission_status = 'approved_pending_url',
+            SET submission_status = :new_status,
                 review_notes = :notes,
                 reviewed_by = :reviewer,
                 reviewed_at = now(),
                 updated_at = now()
             WHERE server_id = :sid
-        """), {"notes": body.notes, "reviewer": reviewer, "sid": server_id})
+        """), {"notes": body.notes, "reviewer": reviewer, "sid": server_id, "new_status": new_status})
         await session.commit()
-    return JSONResponse({"server_id": server_id, "submission_status": "approved_pending_url"})
+    await emit_admin_config_event(
+        reviewer, "submission_approve", server_id, {"notes": body.notes, "submission_status": new_status},
+    )
+    return JSONResponse({"server_id": server_id, "submission_status": new_status})
 
 
 @router.post("/api/v1/admin/submissions/{server_id}/reject")
 async def reject_submission(server_id: str, body: ReviewAction, request: Request) -> JSONResponse:
     """Reject a submission permanently."""
-    _require_admin(request)
+    _require_submission_reviewer(request)
     reviewer = _client_id(request)
+    _require_not_self_review(await _get_submission(server_id), reviewer)
     async with AsyncSessionLocal() as session:
         # M3 fix: state guard prevents corrupting active servers via reject API.
         result = await session.execute(text("""
@@ -436,14 +477,18 @@ async def reject_submission(server_id: str, body: ReviewAction, request: Request
         await session.commit()
     if result.rowcount == 0:
         raise HTTPException(status_code=409, detail="submission is not in a rejectable state")
+    await emit_admin_config_event(
+        reviewer, "submission_reject", server_id, {"notes": body.notes},
+    )
     return JSONResponse({"server_id": server_id, "submission_status": "rejected"})
 
 
 @router.post("/api/v1/admin/submissions/{server_id}/request-changes")
 async def request_changes(server_id: str, body: ReviewAction, request: Request) -> JSONResponse:
     """Return a submission to the submitter with change notes."""
-    _require_admin(request)
+    _require_submission_reviewer(request)
     reviewer = _client_id(request)
+    _require_not_self_review(await _get_submission(server_id), reviewer)
     async with AsyncSessionLocal() as session:
         # M3 fix: state guard prevents request-changes on already-approved servers.
         result = await session.execute(text("""
@@ -460,6 +505,9 @@ async def request_changes(server_id: str, body: ReviewAction, request: Request) 
         await session.commit()
     if result.rowcount == 0:
         raise HTTPException(status_code=409, detail="submission is not in a state that allows requesting changes")
+    await emit_admin_config_event(
+        reviewer, "submission_request_changes", server_id, {"notes": body.notes},
+    )
     return JSONResponse({"server_id": server_id, "submission_status": "changes_requested"})
 
 
@@ -479,23 +527,102 @@ async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
         raise HTTPException(status_code=409, detail="submission is not in approved_pending_url state")
 
     # SSRF guard runs after ownership is confirmed (H2 fix).
+    #
+    # R-10 provenance fix: this endpoint is the self-service equivalent of the
+    # admin registration route (server_registry.py create_server), so it must
+    # use the SAME SSRF mechanism — validate_upstream_url_ssrf with the
+    # UPSTREAM_PRIVATE_CIDR_ALLOWLIST — and persist the matched CIDR into
+    # server_registry.upstream_allowlist_entry. That column is the provenance
+    # record revalidate_upstream_ip_at_invoke checks on EVERY discovery and
+    # invocation (DNS-rebind/TOCTOU guard); without it, any private upstream
+    # registered here is permanently denied at discovery time. Dev-mode lab
+    # backends (lab-mcp-*) serve plain HTTP internally, so allow_http_dev is
+    # gated on ENVIRONMENT == "development" — but even then the target must
+    # resolve entirely inside an explicit allowlist CIDR (stricter than the
+    # old validate_server_url dev branch: a public or un-allowlisted-private
+    # HTTP target is rejected, and every accepted private target leaves a
+    # persisted allowlist-entry record).
+    from app.core.config import settings as _settings
     try:
-        validate_server_url(upstream_url)
-    except SSRFError as exc:
+        _matched_entry = await validate_upstream_url_ssrf(
+            upstream_url,
+            private_cidr_allowlist=_settings.upstream_private_cidr_allowlist_parsed,
+            allow_http_dev=(_settings.ENVIRONMENT == "development"),
+        )
+    except InvalidOnboardingConfig as exc:
         raise HTTPException(status_code=422, detail=f"upstream_url rejected: {exc}") from exc
+    upstream_allowlist_entry: str | None = _matched_entry if _matched_entry else None
 
+    # B-03 fix: 'status' (not 'submission_status') is what the rest of the
+    # platform actually gates on — Registry.refresh(), credential_broker,
+    # entitlement checks, and discover-tools all filter on status='approved'.
+    # The §A human review (admin approve, reviewed_by=sub["reviewed_by"]) is
+    # this lifecycle's equivalent of that gate, so provide-url is where the
+    # submission flow must set status='approved' — otherwise a submission
+    # that completes the whole documented §A/§B REST flow is still invisible
+    # to every downstream system and can never become tool-discoverable.
     async with AsyncSessionLocal() as session:
         await session.execute(text("""
             UPDATE server_registry
             SET upstream_url = :url,
+                upstream_allowlist_entry = :allowlist_entry,
                 submission_status = 'active',
-                status = 'pending',
+                status = 'approved',
+                approved_at = now(),
+                approved_by = :approved_by,
                 updated_at = now()
             WHERE server_id = :sid
-        """), {"url": upstream_url, "sid": server_id})
+        """), {"url": upstream_url, "sid": server_id, "allowlist_entry": upstream_allowlist_entry,
+               "approved_by": sub.get("reviewed_by") or owner})
         await session.commit()
-    return JSONResponse({"server_id": server_id, "submission_status": "active",
-                         "next": "Tool discovery will run shortly."})
+
+    # R-10: provisioning is synchronous (the submitter is waiting on this response) —
+    # discover the upstream's tools right now and register them quarantined
+    # (INV-005 unchanged: auto-provisioning is not an auto-quarantine-release).
+    # FM: if the upstream is unreachable at this exact moment, the approval above
+    # already committed — a discovery failure here must not roll that back or
+    # fail this request; tools_provisioned=0 is reported and the existing manual
+    # discover-tools admin route remains the retry path.
+    tools_provisioned = 0
+    tools_skipped: list[dict] = []
+    try:
+        from app.routers.tools import _run_tool_discovery
+        async with AsyncSessionLocal() as disc_session:
+            disc_response = await _run_tool_discovery(
+                server_id, disc_session, actor_client_id=sub.get("reviewed_by") or owner,
+            )
+        if disc_response.status_code == 200:
+            _disc_body = json.loads(disc_response.body)
+            tools_provisioned = _disc_body.get("discovered", 0)
+            tools_skipped = _disc_body.get("skipped", [])
+        else:
+            logger.warning(
+                "R-10 auto-provisioning: discovery returned %s for server_id=%s",
+                disc_response.status_code, server_id,
+            )
+    except Exception as exc:
+        logger.warning(
+            "R-10 auto-provisioning: discovery failed for server_id=%s (approval already committed): %s",
+            server_id, exc,
+        )
+
+    next_msg = (
+        f"{tools_provisioned} tool(s) discovered and registered quarantined; "
+        "an admin must review and release the quarantine before they're invocable."
+        if tools_provisioned
+        else "No tools discovered yet — check the upstream server and retry via the admin discover-tools action."
+    )
+    if tools_skipped:
+        next_msg += f" {len(tools_skipped)} tool(s) were skipped — see 'tools_skipped' for why."
+
+    return JSONResponse({
+        "server_id": server_id,
+        "submission_status": "active",
+        "tools_provisioned": tools_provisioned,
+        "tools_skipped": tools_skipped,
+        "quarantined": True,
+        "next": next_msg,
+    })
 
 
 # ── Agent-native self-service endpoints ───────────────────────────────────────

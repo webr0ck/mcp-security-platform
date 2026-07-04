@@ -272,6 +272,12 @@ services:
     environment:
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Global per-IP anti-flood limit (middleware/audit.py::IPRateLimitMiddleware).
+      # Keep production tight; the lab raises this because rootless-podman NAT +
+      # Tailscale port-forwarding means every client behind that path can share
+      # one apparent source IP, so a strict per-IP budget throttles ALL lab
+      # traffic together rather than one real abuser.
+      - IP_RATE_LIMIT_PER_MIN=${IP_RATE_LIMIT_PER_MIN:-100}
       # PRD-0001 M3: trust envelope labeler (disabled by default; run make labeler-init first)
       - TRUST_ENVELOPE_ENABLED=${TRUST_ENVELOPE_ENABLED:-false}
       - LABELER_CERT_PATH=/labeler/leaf.crt

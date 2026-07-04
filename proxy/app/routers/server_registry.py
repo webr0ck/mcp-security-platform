@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 import logging
 import re
 import uuid
@@ -304,7 +305,7 @@ async def create_server(body: ServerCreate, request: Request):
             text(
                 "INSERT INTO server_registry "
                 "(name, upstream_url, injection_mode, service_name, owner_sub, status, upstream_allowlist_entry) "
-                "VALUES (:name, :url, :mode::injection_mode_enum, :svc, :owner, 'pending', :allowlist_entry) "
+                "VALUES (:name, :url, CAST(:mode AS injection_mode_enum), :svc, :owner, 'pending', :allowlist_entry) "
                 "RETURNING server_id, name, status, created_at"
             ),
             {"name": body.name, "url": body.upstream_url, "mode": body.injection_mode,
@@ -372,6 +373,133 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
     if rows_updated == 0:
         raise HTTPException(status_code=404, detail="Server not found")
     return JSONResponse({"server_id": server_id, "updated": list(updates)})
+
+
+async def _get_server_owner_row(server_id: str) -> dict | None:
+    async with AsyncSessionLocal() as db:
+        row = (await db.execute(
+            text("SELECT owner_sub, maintainers, debug_mode FROM server_registry "
+                 "WHERE server_id = :sid AND deleted_at IS NULL"),
+            {"sid": server_id},
+        )).fetchone()
+    return dict(row._mapping) if row else None
+
+
+def _require_owner_or_maintainer(row: dict, request: Request, *, allow_platform_admin: bool = False) -> None:
+    """
+    Per-server ownership check (distinct from the role-based
+    _require_server_owner_or_admin above) — the caller must actually be
+    *this* server's owner_sub or one of its listed maintainers, not merely
+    hold a role called "server_owner". platform_admin is only an allowed
+    override where explicitly opted in (e.g. force-clearing a stuck
+    maintenance lock), never for enabling it in the first place.
+    """
+    client_id = getattr(request.state, "client_id", "") or ""
+    if client_id == row["owner_sub"] or client_id in (row.get("maintainers") or []):
+        return
+    if allow_platform_admin:
+        roles = getattr(request.state, "client_roles", [])
+        if any(r in _ADMIN_ROLES for r in roles):
+            return
+    raise HTTPException(status_code=403, detail="only the server owner or a maintainer may do this")
+
+
+class MaintainersUpdate(BaseModel):
+    maintainers: list[str]
+
+    @field_validator("maintainers")
+    @classmethod
+    def max_two(cls, v: list[str]) -> list[str]:
+        if len(v) > 2:
+            raise ValueError("at most 2 maintainers are allowed")
+        if len(set(v)) != len(v):
+            raise ValueError("duplicate maintainer entries")
+        return v
+
+
+@router.put("/api/v1/servers/{server_id}/maintainers")
+async def set_server_maintainers(server_id: str, body: MaintainersUpdate, request: Request):
+    """
+    Set (replace) a server's maintainer list. Owner or existing maintainer only.
+
+    Security fix: platform_admin may only CLEAR the list (body.maintainers == []),
+    as a rescue valve — never set an arbitrary new list. Allowing an admin to set
+    an arbitrary list would let them insert their own client_id and self-grant
+    access to a server while debug_mode=true, defeating the "no admin bypass"
+    invariant enforced in services/invocation.py Step 1.1.
+    """
+    row = await _get_server_owner_row(server_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Server not found")
+    is_rescue_clear = not body.maintainers
+    _require_owner_or_maintainer(row, request, allow_platform_admin=is_rescue_clear)
+
+    actor = getattr(request.state, "client_id", "unknown")
+    async with AsyncSessionLocal() as db:
+        try:
+            await db.execute(
+                text("UPDATE server_registry SET maintainers = :m WHERE server_id = :sid"),
+                {"m": body.maintainers, "sid": server_id},
+            )
+            await db.commit()
+        except Exception as exc:
+            # CHECK constraint (max 2) is the DB-side backstop; the Pydantic
+            # validator above should already have caught this.
+            raise HTTPException(status_code=422, detail=f"could not set maintainers: {exc}") from exc
+
+    from app.services.admin_audit import emit_admin_config_event
+    await emit_admin_config_event(
+        actor=actor, action="server_maintainers_set", client_id=server_id,
+        details={"maintainers": body.maintainers},
+    )
+    return JSONResponse({"server_id": server_id, "maintainers": body.maintainers})
+
+
+class DebugModeUpdate(BaseModel):
+    enabled: bool
+
+
+@router.post("/api/v1/servers/{server_id}/debug-mode")
+async def set_server_debug_mode(server_id: str, body: DebugModeUpdate, request: Request):
+    """
+    Toggle a server's debug/maintenance mode.
+
+    While enabled, ONLY the owner and its maintainers may invoke this
+    server's tools (enforced in services/invocation.py) — everyone else,
+    including admins, is denied SERVER_IN_MAINTENANCE. Enabling requires
+    being the owner or a maintainer (manual, deliberate action — never
+    automatic); disabling additionally allows platform_admin, as a rescue
+    valve if an owner is unreachable and a server is stuck locked down.
+    """
+    row = await _get_server_owner_row(server_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Server not found")
+    _require_owner_or_maintainer(row, request, allow_platform_admin=not body.enabled)
+
+    actor = getattr(request.state, "client_id", "unknown")
+    async with AsyncSessionLocal() as db:
+        if body.enabled:
+            await db.execute(
+                text("UPDATE server_registry SET debug_mode = TRUE, "
+                     "debug_enabled_by = :actor, debug_enabled_at = now() "
+                     "WHERE server_id = :sid"),
+                {"actor": actor, "sid": server_id},
+            )
+        else:
+            await db.execute(
+                text("UPDATE server_registry SET debug_mode = FALSE, "
+                     "debug_enabled_by = NULL, debug_enabled_at = NULL "
+                     "WHERE server_id = :sid"),
+                {"sid": server_id},
+            )
+        await db.commit()
+
+    from app.services.admin_audit import emit_admin_config_event
+    await emit_admin_config_event(
+        actor=actor, action="server_debug_mode_" + ("enabled" if body.enabled else "disabled"),
+        client_id=server_id, details={"server_id": server_id},
+    )
+    return JSONResponse({"server_id": server_id, "debug_mode": body.enabled})
 
 
 @router.delete("/api/v1/admin/servers/{server_id}", status_code=204, response_class=Response)
@@ -727,8 +855,8 @@ async def register_server_self_service(body: ServerRegister, request: Request):
                     upstream_idp_type, upstream_idp_config, adapter_name,
                     owner_sub, status, upstream_allowlist_entry
                 ) VALUES (
-                    :server_id, :service_name, :upstream_url, :injection_mode::injection_mode_enum,
-                    :upstream_idp_type, :upstream_idp_config::jsonb, :adapter_name,
+                    :server_id, :service_name, :upstream_url, CAST(:injection_mode AS injection_mode_enum),
+                    :upstream_idp_type, CAST(:upstream_idp_config AS jsonb), :adapter_name,
                     :owner_sub, 'pending', :upstream_allowlist_entry
                 )
                 RETURNING server_id, service_name, status, created_at
@@ -740,7 +868,7 @@ async def register_server_self_service(body: ServerRegister, request: Request):
                 "upstream_url": body.upstream_url,
                 "injection_mode": body.injection_mode,
                 "upstream_idp_type": body.upstream_idp_type,
-                "upstream_idp_config": body.upstream_idp_config,
+                "upstream_idp_config": json.dumps(body.upstream_idp_config) if body.upstream_idp_config is not None else None,
                 "adapter_name": body.adapter_name,
                 "owner_sub": client_id,
                 "upstream_allowlist_entry": upstream_allowlist_entry,

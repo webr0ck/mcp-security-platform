@@ -355,7 +355,11 @@ async def list_available_mcps(request: Request) -> JSONResponse:
             "description": r["description"] or "",
             "status": r["status"] or "unknown",
             "risk_level": r["risk_level"] or "unknown",
-            "enabled_for_account": enabled_map.get(r["name"], False),
+            # Absence of an mcp_profiles row = no explicit restriction (platform
+            # default = enabled) — see _lookup_profile_row in mcp_server.py.
+            # Defaulting to False here previously showed "disabled" for tools
+            # that a real invoke would actually allow.
+            "enabled_for_account": enabled_map.get(r["name"], True),
         }
         for r in rows
     ])
@@ -400,6 +404,54 @@ async def get_my_profile(request: Request) -> JSONResponse:
             "functions": functions,
         })
 
+    return JSONResponse({"principal": principal, "mcps": mcps})
+
+
+@router.get("/{principal}/mcps")
+async def list_profile_mcps(principal: str, request: Request) -> JSONResponse:
+    """
+    Bulk view of every registered tool's enabled state for one principal
+    (PRD-0003 R-2 — admin Access UI; there was previously no way to see a
+    principal's full toggle state in one call, only per-tool via
+    GET /{principal}/mcps/{mcp_name}).
+
+    Unset tools default to enabled=true (same default as the per-tool GET).
+
+    RBAC: self-service read; admin/auditor/profile_service for others.
+    """
+    _assert_may_read(request, principal)
+
+    try:
+        async with AsyncSessionLocal() as db:
+            tools = await db.execute(
+                text(
+                    "SELECT name FROM tool_registry WHERE deleted_at IS NULL ORDER BY name"
+                )
+            )
+            names = [r["name"] for r in tools.mappings().all()]
+
+            explicit_map: dict[str, bool] = {}
+            if names:
+                prof_result = await db.execute(
+                    text(
+                        "SELECT mcp_name, enabled FROM mcp_profiles "
+                        "WHERE profile_id = :pid AND mcp_name = ANY(:names)"
+                    ),
+                    {"pid": principal, "names": names},
+                )
+                explicit_map = {r["mcp_name"]: bool(r["enabled"]) for r in prof_result.mappings().all()}
+    except Exception as exc:
+        logger.error("list_profile_mcps DB error for %r: %s", principal, exc)
+        raise HTTPException(status_code=500, detail="Failed to fetch profile") from exc
+
+    mcps = [
+        {
+            "mcp_name": name,
+            "enabled": explicit_map.get(name, True),
+            "explicit_row": name in explicit_map,
+        }
+        for name in names
+    ]
     return JSONResponse({"principal": principal, "mcps": mcps})
 
 
@@ -974,9 +1026,13 @@ async def list_named_profiles(request: Request) -> JSONResponse:
     """
     List all active named profiles.
 
-    RBAC: admin/platform_admin only.
+    RBAC: any authenticated caller may READ the catalog (they need this to
+    pick a profile for their MCP client via ?profile=<name> at login);
+    only admin/platform_admin may create profiles or edit their bindings
+    (see create_named_profile / upsert_named_profile_mcp below).
     """
-    _assert_admin(request)
+    if not getattr(request.state, "client_id", ""):
+        raise HTTPException(status_code=401, detail="unauthenticated")
     profiles_list = await _list_named_profiles(active_only=True)
     # Convert UUID and datetime objects to strings for JSON serialization.
     def _serialise(p: dict) -> dict:
@@ -1022,9 +1078,11 @@ async def get_named_profile(name: str, request: Request) -> JSONResponse:
     """
     Get a named profile with its MCP bindings.
 
-    RBAC: admin/platform_admin only.
+    RBAC: any authenticated caller may read (see list_named_profiles above) —
+    seeing which tools a profile contains is what lets someone choose it.
     """
-    _assert_admin(request)
+    if not getattr(request.state, "client_id", ""):
+        raise HTTPException(status_code=401, detail="unauthenticated")
 
     profile = await _get_named_profile(name)
     if profile is None:

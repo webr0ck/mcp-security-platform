@@ -289,6 +289,10 @@
         "description": "Read-only audit and reporting"
       },
       {
+        "name": "security_reviewer",
+        "description": "Can approve/reject/request-changes on server submissions (not the submitter's own)"
+      },
+      {
         "name": "readonly",
         "description": "Read-only tool catalogue"
       },
@@ -360,6 +364,7 @@
       ],
       "realmRoles": [
         "auditor",
+        "security_reviewer",
         "grafana-viewer"
       ],
       "emailVerified": true
