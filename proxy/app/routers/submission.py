@@ -151,6 +151,15 @@ async def _clone_and_read_repo(
                 fpath = os.path.join(root, fname)
                 rel = os.path.relpath(fpath, repo_path)
                 tree.append(rel)
+                # os.walk lists symlinked files (unlike symlinked dirs, which it
+                # doesn't descend into) — a malicious repo can commit a symlink
+                # to an arbitrary host path (e.g. /etc/passwd) and have it
+                # checked out as-is by git. List it in the tree so the reviewer
+                # sees it exists, but never follow it to read the target's
+                # content: no legitimate MCP server repo needs to symlink to a
+                # real file it wants scanned.
+                if os.path.islink(fpath):
+                    continue
                 try:
                     size = os.path.getsize(fpath)
                 except OSError:

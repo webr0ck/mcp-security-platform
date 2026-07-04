@@ -8,13 +8,15 @@ middleware RBAC tests; here we test the route's own logic: config shaping,
 the repo clone/read branch, and clone-failure surfacing.
 """
 import json
+import os
+import tempfile
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.routers.submission import review_submission_detail
+from app.routers.submission import _clone_and_read_repo, review_submission_detail
 
 
 def _fake_submission(github_repo_url=None):
@@ -82,3 +84,39 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         body = _body(resp)
         assert body["repo"]["error"] == "clone failed: repository not found"
+
+
+class TestCloneAndReadRepoSymlinks:
+    @pytest.mark.asyncio
+    async def test_symlinked_file_content_is_never_read(self):
+        """A malicious submitted repo can contain a symlink checked out by git
+        pointing at an arbitrary host path (e.g. /etc/passwd). The file-walk
+        loop must skip reading through symlinks — the file may still be
+        *listed* in the tree, but its target's content must never end up in
+        `files`."""
+        with tempfile.TemporaryDirectory() as outside_dir:
+            secret_path = os.path.join(outside_dir, "secret.txt")
+            with open(secret_path, "w") as f:
+                f.write("SENTINEL_SECRET_CONTENT")
+
+            async def fake_clone(_url, repo_path):
+                os.makedirs(repo_path)
+                with open(os.path.join(repo_path, "real.txt"), "w") as f:
+                    f.write("real file content")
+                os.symlink(secret_path, os.path.join(repo_path, "evil_link.txt"))
+                return True, ""
+
+            with patch(
+                "app.routers.submission.submission_scanner._clone_repo",
+                new=AsyncMock(side_effect=fake_clone),
+            ):
+                success, err, tree, files, truncated = await _clone_and_read_repo(
+                    "https://github.com/example/repo"
+                )
+
+        assert success is True
+        assert "real.txt" in tree
+        assert "evil_link.txt" in tree  # still listed, so reviewer sees it exists
+        assert files.get("real.txt") == "real file content"
+        assert "evil_link.txt" not in files  # target content never read
+        assert "SENTINEL_SECRET_CONTENT" not in files.values()
