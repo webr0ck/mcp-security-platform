@@ -1,6 +1,6 @@
 # Implementation Lessons: How to Get It Right
 
-**Status: matches code at HEAD (`4dfa7b5`).**
+**Status: matches code at HEAD (`4819fe2`).**
 
 This is the "pitfalls a re-implementer WILL hit" chapter. Each lesson is written as **Symptom → Root
 cause → Rule** (the rule is language-agnostic and normative, RFC 2119 keywords). Every lesson is
@@ -224,6 +224,32 @@ methods **MUST NOT** reset the taint floor. Reference: `services/invocation.py` 
 (`is_tainted_for_principal(client_id)` with the inline note "keyed on logical identity, not
 auth-method (LOGIC-005)"), taint write at ~L1033–L1042, `services/taint_store.py`. The taint floor
 itself is the RFC-0001 §8.1 trust-tier mechanism; keying is the security-critical detail.
+
+---
+
+## 10. Reading files from an attacker-controlled clone must skip symlinks
+
+**Symptom.** A reviewer-facing endpoint shallow-clones a submitted MCP server's repo and returns its
+file tree/contents so a human can read the source before approving it. A submitter commits a symlink
+(e.g. a file named `notes.txt` pointing at `/etc/passwd`, or any other path reachable from the
+container) into their repo. When the platform clones and walks that repo, the symlink resolves and its
+*target's* content — not anything the submitter actually wrote — is read and returned to the reviewer.
+
+**Root cause.** `os.walk()` does not descend into symlinked *directories* by default
+(`followlinks=False`), so directory traversal is already closed — but it still lists symlinked *files*
+in `filenames`, and neither `os.path.getsize()` nor `open(path, "r")` refuse to follow a symlink. Any
+code that walks a clone of **untrusted input** (a submitted repo, not the platform's own source) and
+opens what it finds must not assume "found via `os.walk`" implies "a real file the submitter wrote."
+
+**Rule.** Any file-reading loop over a clone/checkout of externally-supplied content **MUST** check
+`os.path.islink(path)` — or equivalent — **before** any size or read call on that path, and skip
+symlinked files entirely (list them in a tree/manifest view if one exists, so their presence is still
+visible, but never dereference their target). Do not attempt a "resolve and allow if still inside the
+checkout" variant: a legitimate submission has no reason to symlink to a file it wants reviewed, so the
+simplest fix (skip, don't resolve) is also the correct one. Reference:
+`proxy/app/routers/submission.py::_clone_and_read_repo`, fixed in commit `4819fe2` ("fix: skip
+symlinked files in _clone_and_read_repo to prevent host-file read"), covered by
+`tests/unit/test_submission_review_endpoint.py::TestCloneAndReadRepoSymlinks`.
 
 ---
 
