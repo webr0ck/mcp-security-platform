@@ -9,6 +9,11 @@ shipped. The **[README Enforced-vs-Roadmap table](../README.md#enforced-today-vs
 authoritative per-control status; this doc explains *how the pieces fit together*, and §10 lists the
 security invariants any faithful re-implementation must preserve.
 
+For the full language-agnostic re-implementation spec — authentication, credential broker,
+policy & detections, audit, integrations, implementation lessons, and the test/QA program — see
+**[`docs/spec/`](spec/README.md)**. This document stays the overview; the spec set carries the
+normative detail.
+
 ---
 
 ## 1. Thesis & scope
@@ -80,6 +85,11 @@ inbound route to it (see §4).
 | Identity | `keycloak` (+ `dex` in lab) | Keycloak 24 | OIDC, PKCE S256, Grafana SSO |
 | Observability | `loki`/`promtail`/`grafana`/`alertmanager`/`minio` | — | audit pipeline + archival |
 | Compliance | `compliance-checker` | Python (cron) | daily sampled audit-integrity check |
+
+**Adding a new MCP server?** See [`mcp-server-onboarding.md`](mcp-server-onboarding.md)
+for the registry-granularity, entitlement, ingress-allowlist, and OAuth-discovery
+checklist — derived from a full-functionality audit that found six onboarding
+gaps the hard way.
 
 ---
 
@@ -179,6 +189,82 @@ not affected** — the LLM auditor only runs at registration.
   table consumed by middleware, not pushed to OPA.
 - **Discovery == invoke**: server-linked tools are entitlement-checked on invoke
   (`enforce_tool_entitlement`), with no admin exception.
+
+### 6.5 RBAC roles
+
+Two layers, not one — conflating them is the usual source of confusion:
+
+1. **KC realm roles** — what Keycloak issues in the token (`admin`, `agent`, `auditor`,
+   `security_reviewer`, `readonly`, ...).
+2. **Platform RBAC roles** — what `middleware/rbac.py` actually checks against
+   (`admin`/`platform_admin`, `manager`, `server_owner`, `user`, `auditor`, `agent`, `readonly`).
+
+The KC role is translated into a platform role via an explicit allowlist
+(`routers/oidc_browser.py::_ROLE_MAP`). A KC role missing from that dict is silently dropped —
+fail-closed by design, so an IdP-side role can never grant platform access without an explicit
+code change on this side.
+
+**Role table** (`middleware/rbac.py::ROLE_LEVELS`, `services/entitlement.py::ROLE_LEVELS`):
+
+| Role | Level | Grants |
+|---|---|---|
+| `admin` / `platform_admin` | 4 (max) | **Same role, two names — with one deliberate exception.** `admin` is the legacy/KC-facing name, `platform_admin` the "v3" canonical one; almost every RBAC check treats them as synonyms (admin UI, credential store, server-registry admin, grants/OPA policy editing, anomaly review, submission approve/reject). **Exception**: `routers/profiles.py::_CROSS_PROFILE_WRITE_ROLES` requires specifically `platform_admin` (not plain `admin`) to mutate *another principal's* profile — a past IDOR-005 fix deliberately narrowed trust for that one cross-user write, since KC only ever issues `admin` in this lab, no KC-mapped human held `platform_admin` until it was granted directly via the RBAC panel (§6.6). |
+| `security_reviewer` | — | Narrow, single-purpose: approve/reject/request-changes on server **submissions only**, nothing else in the admin surface — and never on a submission the reviewer themself owns (`submission.py::_require_not_self_review`), even if they also hold `admin`. |
+| `auditor` | 3 | Read-only: audit logs, anomaly alerts, compliance, policy rules, submission review queue. No mutation rights anywhere. |
+| `server_owner` | 2 | Conceptual "owns a specific server" tier. Ownership itself is **not** granted by this RBAC role — it's enforced per-row via `owner_sub` checks in the handler (e.g. maintainers/debug-mode toggles). Self-service submitters actually hold `agent`/`user`, not `server_owner`; this role exists mainly for future multi-server-owner accounts. |
+| `manager` | 1 | Can manage entitlements for servers alongside `server_owner`/`admin` — an ops tier above a plain user, below owning/reviewing. Not assigned to any lab user today. |
+| `user` / `agent` / `readonly` | 0 | Base tier: invoke tools, submit/see only your own server drafts and submissions. `agent` and `readonly` are legacy aliases at the same level — `agent` historically meant a programmatic/service-client identity, `readonly` a human view-only identity. |
+
+**Lab mapping** (`lab/keycloak/realm-mcp.json`):
+
+| User | KC realm roles | Effective platform role | Can do |
+|---|---|---|---|
+| alice | `admin` (KC) + `platform_admin` (granted directly via the RBAC panel §6.6, since KC never issues it) | `admin` + `platform_admin` | Everything admin, **including** cross-principal profile writes (needs `platform_admin` specifically — see the IDOR-005 exception above). Before the `platform_admin` grant, she could view but not toggle another user's profile. |
+| bob | `agent` | `agent` (level 0) | Invoke registered tools, submit his own server for review, see only his own submissions/servers. RBAC returns 403 on `/api/v1/admin/*` (covered by `AC-07` in the acceptance suite). |
+| carol | `auditor` + `security_reviewer` | `auditor` (read-only everywhere) + submission-review mutate rights | Views audit/anomaly/compliance read-only, **and** can approve/reject/request-changes on submissions she didn't file — but cannot touch credentials, grants, or server-registry admin. |
+
+**Worked example**: `test123` was submitted *and* approved by alice — legal under the pre-fix
+code (`approve_submission` only checked for an admin role, never who owned the submission). Now,
+alice hitting `/approve` on her own submission gets `403 cannot review your own submission`;
+carol, holding the narrow `security_reviewer` role rather than full admin, approves/rejects it
+instead — a real segregation-of-duties boundary, not just a UI convention.
+
+### 6.6 RBAC management panel (in-platform, admin-only)
+
+`role_assignments` is **append-only** — `V009__role_assignments_grants.sql` explicitly revokes
+`UPDATE`/`DELETE` on the table from the app's own DB role (INV-011: single-writer, no hard
+delete), so neither the panel nor anything else in the app can literally overwrite or delete a
+row. `V050__role_assignments_append_only_revoke.sql` builds grant/revoke on top of that
+constraint instead of around it:
+
+- **Grant** = `INSERT` a new active event row (`revoked=false`).
+- **Revoke** = `INSERT` a *tombstone* event row (`revoked=true`) for the same `(client_id, role)`
+  — never an `UPDATE`/`DELETE` of the original grant.
+- **Current state** is resolved at read time: the most recent row per `(client_id, role)` (by
+  `created_at`) wins. `middleware/auth.py::_load_roles` and `routers/admin_grants.py`'s
+  `_ACTIVE_ROLE_ASSIGNMENTS_SQL` both implement this "latest event wins" read, via
+  `DISTINCT ON (client_id, role) ... ORDER BY created_at DESC`, filtering `revoked=false` and
+  unexpired.
+- The old `UNIQUE INDEX (client_id, role)` (V008) is dropped — it would have blocked ever
+  re-granting a role after a revoke, or re-syncing the same role from Keycloak twice.
+
+**KC-resync tension**: `oidc_browser.py`'s login flow inserts an active `granted_by='keycloak'`
+row for every KC-derived role on every login (only when the latest event for that pair isn't
+already an active keycloak grant, to avoid unbounded row growth). This means revoking a
+KC-sourced role via the panel only sticks if the role is **also** removed in Keycloak — otherwise
+the next login re-grants it. The panel surfaces this inline (`from_keycloak` flag → a visible
+warning next to the revoke button) rather than hiding it.
+
+**Endpoints** (`routers/admin_grants.py`, gated `admin`/`platform_admin` via `_require_admin`):
+`GET/POST /api/v1/admin/roles`, `DELETE /api/v1/admin/roles/{client_id}/{role}`. Revoking
+`admin`/`platform_admin` is blocked with `409` if it would zero out every admin grant on the
+platform (counts active admin/platform_admin holders across all clients, excluding the one being
+revoked) — a real lockout guard, not just a self-lockout check, verified live against the lab's
+`bootstrap` service-account admin grant.
+
+**UI**: a new "RBAC role assignments" table + grant form inside the existing Access tab
+(`routers/portal.py::fragment_admin_access`) — no new nav tab, follows the existing
+`fragment_admin_*` HTMX-fragment convention.
 
 ---
 
