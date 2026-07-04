@@ -1,0 +1,84 @@
+"""Unit tests for GET /api/v1/admin/submissions/{server_id}/review.
+
+These call the route coroutine directly with a mock Request — the same
+router-unit-test pattern used by tests/unit/test_catalog_router.py — rather
+than going through TestClient + AuthMiddleware (which would require a real
+Keycloak JWT to get past the 401 gate). Auth is exercised separately by the
+middleware RBAC tests; here we test the route's own logic: config shaping,
+the repo clone/read branch, and clone-failure surfacing.
+"""
+import json
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.routers.submission import review_submission_detail
+
+
+def _fake_submission(github_repo_url=None):
+    return {
+        "server_id": str(uuid.uuid4()),
+        "name": "local-policy-api-readonly",
+        "owner_sub": "alice@corp",
+        "submission_status": "awaiting_review",
+        "injection_mode": "none",
+        "data_categories": ["internal_docs", "public"],
+        "has_write_ops": False,
+        "scan_report": [],
+        "sbom_components": [],
+        "review_notes": None,
+        "github_repo_url": github_repo_url,
+    }
+
+
+def _reviewer_request():
+    """A Request whose state carries an authenticated reviewer (admin role),
+    so the real _require_reviewer passes without needing the middleware."""
+    req = MagicMock()
+    req.state = SimpleNamespace(client_id="reviewer@corp", client_roles=["admin"])
+    return req
+
+
+def _body(resp):
+    return json.loads(bytes(resp.body))
+
+
+class TestReviewEndpoint:
+    @pytest.mark.asyncio
+    async def test_no_repo_url_omits_repo_key(self):
+        sub = _fake_submission(github_repo_url=None)
+        with patch("app.routers.submission._get_submission", new=AsyncMock(return_value=sub)):
+            resp = await review_submission_detail(sub["server_id"], _reviewer_request())
+        assert resp.status_code == 200
+        body = _body(resp)
+        assert body["repo"] is None
+        assert body["config"]["injection_mode"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_repo_url_present_triggers_clone_and_returns_files(self):
+        sub = _fake_submission(github_repo_url="https://github.com/example/repo")
+        fake_tree = ["server.py", "requirements.txt"]
+        fake_files = {"server.py": "print('hi')\n"}
+        with patch("app.routers.submission._get_submission", new=AsyncMock(return_value=sub)), \
+             patch("app.routers.submission._clone_and_read_repo",
+                   new=AsyncMock(return_value=(True, "", fake_tree, fake_files, False))):
+            resp = await review_submission_detail(sub["server_id"], _reviewer_request())
+        assert resp.status_code == 200
+        body = _body(resp)
+        assert body["repo"]["url"] == "https://github.com/example/repo"
+        assert body["repo"]["tree"] == fake_tree
+        assert body["repo"]["files"] == fake_files
+        assert body["repo"]["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_clone_failure_surfaces_error_not_exception(self):
+        sub = _fake_submission(github_repo_url="https://github.com/example/private-repo")
+        with patch("app.routers.submission._get_submission", new=AsyncMock(return_value=sub)), \
+             patch("app.routers.submission._clone_and_read_repo",
+                   new=AsyncMock(return_value=(False, "clone failed: repository not found", [], {}, False))):
+            resp = await review_submission_detail(sub["server_id"], _reviewer_request())
+        assert resp.status_code == 200
+        body = _body(resp)
+        assert body["repo"]["error"] == "clone failed: repository not found"

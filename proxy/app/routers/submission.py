@@ -21,7 +21,10 @@ import asyncio
 import io
 import json
 import logging
+import os
 import re
+import shutil
+import tempfile
 import uuid
 import zipfile
 from typing import Any, Optional
@@ -32,6 +35,7 @@ from pydantic import BaseModel, HttpUrl, field_validator
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
+from app.services import submission_scanner
 from app.services.admin_audit import emit_admin_config_event
 from app.services.scaffold_generator import generate_prompts, generate_scaffold
 from app.services.server_onboarding import InvalidOnboardingConfig, validate_upstream_url_ssrf
@@ -107,6 +111,65 @@ def _require_reviewer(request: Request) -> None:
     roles = list(getattr(request.state, "client_roles", []) or [])
     if not any(r in {"admin", "platform_admin", "security_auditor", "auditor"} for r in roles):
         raise HTTPException(status_code=403, detail="reviewer role required")
+
+
+# Key-file filter for the reviewer source view: skip directories that are
+# never worth showing a human reviewer, and any single file over 100KB
+# (binaries, lockfiles with thousands of pinned versions, etc.).
+_REVIEW_SKIP_DIRS = {".git", "node_modules", ".venv", "__pycache__", "dist", "build"}
+_REVIEW_MAX_FILE_BYTES = 100_000
+_REVIEW_MAX_TOTAL_BYTES = 500_000
+
+
+async def _clone_and_read_repo(
+    github_url: str,
+) -> tuple[bool, str, list[str], dict[str, str], bool]:
+    """
+    Shallow-clone github_url (reusing submission_scanner's clone helper) and
+    return (success, error, file_tree, file_contents, truncated).
+
+    file_contents only includes text files under _REVIEW_MAX_FILE_BYTES,
+    skipping _REVIEW_SKIP_DIRS. Stops adding file contents (but still lists
+    the full tree) once _REVIEW_MAX_TOTAL_BYTES is reached, and reports that
+    via `truncated=True` — the reviewer sees only some contents, not silently
+    all-or-nothing.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="mcp_review_")
+    try:
+        repo_path = os.path.join(tmpdir, "repo")
+        cloned, err = await submission_scanner._clone_repo(github_url, repo_path)
+        if not cloned:
+            return False, err, [], {}, False
+
+        tree: list[str] = []
+        files: dict[str, str] = {}
+        total_bytes = 0
+        truncated = False
+        for root, dirs, filenames in os.walk(repo_path):
+            dirs[:] = [d for d in dirs if d not in _REVIEW_SKIP_DIRS]
+            for fname in filenames:
+                fpath = os.path.join(root, fname)
+                rel = os.path.relpath(fpath, repo_path)
+                tree.append(rel)
+                try:
+                    size = os.path.getsize(fpath)
+                except OSError:
+                    continue
+                if size > _REVIEW_MAX_FILE_BYTES:
+                    continue
+                if total_bytes + size > _REVIEW_MAX_TOTAL_BYTES:
+                    truncated = True
+                    continue
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        content = f.read()
+                except (UnicodeDecodeError, OSError):
+                    continue  # binary or unreadable — listed in tree, no contents
+                files[rel] = content
+                total_bytes += size
+        return True, "", sorted(tree), files, truncated
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 async def _get_submission(server_id: str, owner_sub: str | None = None) -> dict[str, Any]:
@@ -415,6 +478,40 @@ async def list_review_queue(request: Request) -> JSONResponse:
               updated_at DESC
         """))).fetchall()
     return JSONResponse({"submissions": [_json_safe(dict(r._mapping)) for r in rows]})
+
+
+@router.get("/api/v1/admin/submissions/{server_id}/review")
+async def review_submission_detail(server_id: str, request: Request) -> JSONResponse:
+    """Full review detail for one submission: config, scan/SBOM report, and
+    (if a repo was provided) its file tree + key file contents, fetched via
+    a fresh shallow clone — never the DB, and never a stored copy."""
+    _require_reviewer(request)
+    sub = await _get_submission(server_id)
+
+    repo: dict[str, Any] | None = None
+    github_url = sub.get("github_repo_url")
+    if github_url:
+        cloned, err, tree, files, truncated = await _clone_and_read_repo(github_url)
+        if cloned:
+            repo = {"url": github_url, "tree": tree, "files": files, "truncated": truncated}
+        else:
+            repo = {"url": github_url, "error": err}
+
+    return JSONResponse({
+        "server_id": sub["server_id"] if isinstance(sub["server_id"], str) else str(sub["server_id"]),
+        "name": sub["name"],
+        "owner_sub": sub["owner_sub"],
+        "submission_status": sub["submission_status"],
+        "config": {
+            "injection_mode": sub.get("injection_mode"),
+            "data_categories": sub.get("data_categories") or [],
+            "has_write_ops": sub.get("has_write_ops", False),
+        },
+        "scan_report": sub.get("scan_report") or [],
+        "sbom_components": sub.get("sbom_components") or [],
+        "review_notes": sub.get("review_notes"),
+        "repo": repo,
+    })
 
 
 @router.post("/api/v1/admin/submissions/{server_id}/approve")
