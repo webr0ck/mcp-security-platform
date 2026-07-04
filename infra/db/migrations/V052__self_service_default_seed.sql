@@ -129,13 +129,17 @@ ON CONFLICT (name, version) DO UPDATE SET
     metadata       = EXCLUDED.metadata,
     updated_at     = now();
 
--- Link each tool to the self-service server by matching upstream_url (only
--- fills NULLs — same idempotent pattern as lab/seeder/sql/servers.sql).
+-- Link each tool to the self-service server by matching upstream_url. Not
+-- gated on t.server_id IS NULL: the preceding INSERT...ON CONFLICT DO UPDATE
+-- rewrites upstream_url to this exact value for all ten tool_registry rows
+-- this migration owns (the six pre-existing self-service tools included),
+-- so this re-links any row already pointing at a stale server_registry row
+-- (e.g. the legacy lab-only 'lab-self-service' row) as well as brand-new
+-- rows. Safe and idempotent to re-run.
 UPDATE tool_registry t
 SET server_id = s.server_id, updated_at = now()
 FROM server_registry s
-WHERE t.server_id IS NULL
-  AND t.deleted_at IS NULL
+WHERE t.deleted_at IS NULL
   AND t.upstream_url = s.upstream_url
   AND s.name = 'self-service';
 

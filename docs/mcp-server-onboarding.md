@@ -183,30 +183,39 @@ server row plus all ten of its tools — the six existing submitter/design-assis
 tools and four new reviewer tools (§10a below). It ships in every environment
 by default; there is no lab-only gate on it anymore.
 
-**Known gap (found during Task 8 live verification, not yet fixed):** the
-V052 migration's tool→server linking step only back-fills `server_id` where
-it is currently `NULL` (`UPDATE tool_registry ... WHERE t.server_id IS NULL`).
-The six pre-existing tools (`self-service-mcp`, `plan_mcp_server`,
+**Fixed (post-Task-8 follow-up):** the V052 migration's tool→server linking
+step originally only back-filled `server_id` where it was currently `NULL`
+(`UPDATE tool_registry ... WHERE t.server_id IS NULL`). The six
+pre-existing tools (`self-service-mcp`, `plan_mcp_server`,
 `get_auth_mode_recommendation`, `submit_mcp_server`,
 `check_submission_status`, `get_server_scaffold`) were seeded long ago by
-`lab/seeder` against the *old* `lab-self-service` server row and already have
-a non-NULL `server_id` — so they stay linked to `lab-self-service`, while the
-four new reviewer tools (freshly inserted with `server_id IS NULL`) link to
-the *new* `self-service` row. Two `server_registry` rows now share the same
-`upstream_url` (`http://self-service:8000/mcp`) for what is conceptually one
-server. Practical effect: `_ensure_self_service_entitlement()` (§10a) only
-grants access to the new `self-service` server, so a brand-new human
-principal who has never had a legacy `lab-self-service` entitlement can see
-the four reviewer tools (correctly blocked by `required_roles` unless they
-hold a reviewer role) but **not** `submit_mcp_server` /
-`plan_mcp_server` / `check_submission_status` / `get_server_scaffold` — the
-tools onboarding actually depends on. Existing principals (e.g. `alice@corp`,
-entitled to `lab-self-service` since before this plan) are unaffected and see
-everything. Fix needed: either repoint the six legacy tool rows'
-`server_id` to the new `self-service` row (a follow-up migration doing an
-unconditional `UPDATE ... WHERE name IN (...)`, not the NULL-only backfill),
-or retire the `lab-self-service` server row entirely. Until fixed, new
-principals' self-service auto-entitlement is incomplete in practice.
+`lab/seeder` against the *old* `lab-self-service` server row and already had
+a non-NULL `server_id` — so the `IS NULL` guard skipped them, leaving them
+linked to `lab-self-service` while the four new reviewer tools (freshly
+inserted with `server_id IS NULL`) linked to the *new* `self-service` row.
+Two `server_registry` rows shared the same `upstream_url`
+(`http://self-service:8000/mcp`) for what is conceptually one server, and
+`_ensure_self_service_entitlement()` (§10a) only grants access to the new
+`self-service` server — so a brand-new human principal saw the four
+reviewer tools (correctly gated by `required_roles`) but not the six
+onboarding tools.
+
+The fix removes the `t.server_id IS NULL` condition from that `UPDATE`
+entirely: the preceding `INSERT ... ON CONFLICT (name, version) DO UPDATE`
+already rewrites `upstream_url` to the exact same value
+(`http://self-service:8000/mcp`) for all ten rows this migration owns, so
+the linking step now matches — and repoints — any tool_registry row whose
+`upstream_url` equals the new server's `upstream_url`, regardless of its
+current `server_id`. Nothing else in the table coincidentally shares that
+`upstream_url`, so this is safe and idempotent to re-run. After re-applying
+V052, all ten tools (the six submitter/design-assist tools plus the four
+reviewer tools) share the same `server_id`, pointing at the `self-service`
+row — verified live: a fresh human principal now sees all six onboarding
+tools plus (subject to `required_roles`) the four reviewer tools after their
+first `/mcp` request triggers `_ensure_self_service_entitlement()`. The
+`lab-self-service` server row itself is left in place (unused going forward,
+not deleted) — retiring it outright is a separate cleanup, not required for
+correct behavior.
 
 ### 10a. The `required_roles` metadata convention (Part C)
 
@@ -298,19 +307,22 @@ surface) and should be reviewed accordingly, not copy-pasted.
    `lab-mcp-self-service`'s fallback `SELF_SERVICE_API_KEY` was stale/revoked
    in the DB relative to `.env.lab` (seeder rotated it on a later run without
    the container being recreated). → §7, §8.
-9. **Found during Task 8 live verification, not yet fixed** — two gaps
-   surfaced bringing up the promoted `self-service` server end-to-end for the
-   first time: (a) `podman-compose.lab.yml`'s `proxy` service overrides
+9. Two gaps surfaced bringing up the promoted `self-service` server
+   end-to-end for the first time: (a) **Not yet fixed** —
+   `podman-compose.lab.yml`'s `proxy` service overrides
    `PROXY_INGRESS_TRUSTED_HOSTS` to `gateway,lab-mcp-self-service`, which
    entirely replaces (not merges with) `docker-compose.yml`'s
    `gateway,self-service` default — so the new `self-service` container's
    REST callback to the proxy 403s (`INGRESS_DENIED`) in the lab compose
-   profile until `self-service` is added to that overridden list too. (b) The
-   V052 migration's tool-to-server linking only backfills `NULL` `server_id`
-   values, so the six pre-V052 self-service tools stay linked to the old
-   `lab-self-service` server row instead of the new `self-service` row —
-   see §10 for the full explanation and required follow-up. Neither issue
-   blocks the four reviewer tools' own `required_roles` gating (verified
-   working correctly for both a reviewer and non-reviewer principal); both
-   block a *new* principal's auto-entitled access to the pre-existing
-   submitter tools. → §4, §10.
+   profile until `self-service` is added to that overridden list too. (b)
+   **Fixed** — the V052 migration's tool-to-server linking originally only
+   backfilled `NULL` `server_id` values, so the six pre-V052 self-service
+   tools stayed linked to the old `lab-self-service` server row instead of
+   the new `self-service` row; the `IS NULL` guard was removed so the
+   linking step re-links by `upstream_url` match unconditionally — see §10
+   for the full explanation. Neither issue blocks the four reviewer tools'
+   own `required_roles` gating (verified working correctly for both a
+   reviewer and non-reviewer principal); (a) still blocks the new
+   `self-service` container's own outbound REST callback under the lab
+   compose profile specifically — unrelated to (b), which is fully
+   resolved. → §4, §10.
