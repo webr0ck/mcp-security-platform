@@ -146,7 +146,7 @@ client that never sets that header, `inbound_auth` is `None` and **no**
 Authorization header reaches the upstream at all. `lab-mcp-self-service`
 handles this by falling back to its own `SELF_SERVICE_API_KEY` service
 credential when no user token is present (see `_oauth_headers()` in
-`lab/mcp-servers/self-service/server.py`) — if you rely on this fallback,
+`mcp-servers/self-service/server.py`) — if you rely on this fallback,
 make sure the key is actually valid (see the seeder gotcha below).
 
 **Seeder key rotation vs. running containers:** `lab/seeder/seed.py`'s
