@@ -724,6 +724,52 @@ class TestPerToolDispatch:
             _psql("UPDATE tool_registry SET status='active' "
                   "WHERE name='slow_tool' AND metadata->>'kind'='per-tool';")
 
+    def test_release_denied_without_scan_evidence(self, alice_token):
+        """CR-07/CR-18 acceptance test (live gate chain, not mocked): releasing a
+        quarantined tool whose parent server has NOT passed its supply-chain
+        scan must be denied by the admin PATCH endpoint, even for an admin with
+        a valid SBOM on the tool. Builds and tears down its own throwaway
+        server+tool row so it never touches real lab servers."""
+        server_id = _psql(
+            "INSERT INTO server_registry "
+            "(name, upstream_url, status, owner_sub, injection_mode, custody_mode, "
+            " trust_tier, trust_tier_label, scan_status) "
+            "VALUES ('at-cr07-throwaway', 'http://127.0.0.1:1/mcp', 'approved', "
+            " 'alice@corp', 'none', 'session_suk', 2, 'internal', 'blocked') "
+            "RETURNING server_id;"
+        ).strip()
+        if not server_id:
+            pytest.skip("could not create throwaway server row (DB access unavailable)")
+        tool_id = None
+        try:
+            tool_id = _psql(
+                "INSERT INTO tool_registry "
+                "(name, version, description, schema, upstream_url, server_id, "
+                " status, risk_level, risk_score, registered_by) "
+                "VALUES ('at_cr07_throwaway_tool', '1.0.0', 'throwaway', "
+                " '{}', 'http://127.0.0.1:1/mcp', "
+                f" '{server_id}', 'quarantined', 'low', 5, 'lab-seeder') "
+                "RETURNING tool_id;"
+            ).strip()
+            assert tool_id, "could not create throwaway quarantined tool row"
+            _psql(
+                "INSERT INTO sbom_records (tool_id, bom_ref, cyclonedx_json, signature) "
+                f"VALUES ('{tool_id}', 'throwaway', '{{}}', 'throwaway-sig');"
+            )
+            r = httpx.patch(
+                f"{PROXY_URL}/api/v1/tools/{tool_id}",
+                headers=_auth_headers(alice_token),
+                json={"status": "active"},
+                timeout=15,
+            )
+            assert r.status_code == 422, f"expected 422 RELEASE_DENIED, got {r.status_code}: {r.text}"
+            assert r.json().get("detail", {}).get("code") == "RELEASE_DENIED", r.text
+        finally:
+            if tool_id:
+                _psql(f"DELETE FROM sbom_records WHERE tool_id::text = '{tool_id}';")
+            _psql("DELETE FROM tool_registry WHERE name='at_cr07_throwaway_tool';")
+            _psql(f"DELETE FROM server_registry WHERE server_id::text = '{server_id}';")
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Admin per-client rate-limit edit + unblock (Task 7)
