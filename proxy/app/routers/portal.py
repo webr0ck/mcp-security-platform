@@ -487,20 +487,26 @@ _CSS = """
      AEGIS DESIGN SYSTEM — Admin sidebar + User Portal cards
      ================================================================ */
   :root {
-    --adm-bg:      #0c0e12;
-    --adm-sidebar: #08090c;
-    --adm-surface: #13161b;
-    --adm-border:  rgba(255,255,255,0.06);
-    --adm-text:    #e7e9ec;
-    --adm-muted:   #9aa1ab;
-    --adm-dim:     #646b75;
-    --adm-blue:    #3b82f6;
-    --adm-blue2:   #2563eb;
-    --adm-green:   #4ade80;
-    --adm-amber:   #fbbf24;
-    --adm-red:     #f87171;
-    --ff-sans: 'Hanken Grotesk', system-ui, sans-serif;
-    --ff-mono: 'JetBrains Mono', 'Menlo', monospace;
+    /* PRD-0006 R-5: palette aligned to the MCP Console design
+       (docs/design/mcp-console/MCP-Console.html). Surface stack: main bg is the
+       darkest, sidebar sits slightly lighter, cards lighter still, inputs recess. */
+    --adm-bg:      #0a0c11;
+    --adm-sidebar: #0c0f15;
+    --adm-surface: #12161e;   /* card */
+    --adm-input:   #0f131b;   /* recessed inputs / inset sub-cards */
+    --adm-border:  rgba(255,255,255,0.07);
+    --adm-text:    #e7eaf0;
+    --adm-muted:   #8a93a4;
+    --adm-dim:     #5b6474;
+    --adm-blue:    #4f9cf9;   /* primary accent */
+    --adm-blue2:   #7c5cff;   /* violet — logo gradient end */
+    --adm-green:   #35c88a;
+    --adm-amber:   #eab308;
+    --adm-red:     #ef5350;
+    --adm-purple:  #c084fc;
+    --adm-on-accent: #04122b; /* ink on blue buttons */
+    --ff-sans: 'Hanken Grotesk', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --ff-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Menlo', monospace;
   }
 
   /* ---- Admin full-page layout ---- */
@@ -517,9 +523,9 @@ _CSS = """
     display: flex; align-items: center; gap: 10px; padding: 4px 8px 18px;
   }
   .adm-logo-mark {
-    position: relative; width: 24px; height: 24px; border-radius: 7px; flex: none;
-    background: linear-gradient(145deg, #5fa0ff, #2563eb);
-    box-shadow: 0 3px 10px rgba(37,99,235,0.45);
+    position: relative; width: 26px; height: 26px; border-radius: 7px; flex: none;
+    background: linear-gradient(135deg, var(--adm-blue), var(--adm-blue2));
+    box-shadow: 0 3px 12px rgba(124,92,255,0.40);
     display: flex; align-items: center; justify-content: center;
   }
   .adm-logo-mark::before {
@@ -542,16 +548,14 @@ _CSS = """
   }
   .adm-nav-item:hover { color: var(--adm-text); background: rgba(255,255,255,0.04); }
   .adm-nav-item.active {
-    background: rgba(59,130,246,0.13); color: var(--adm-text); font-weight: 600;
-  }
-  .adm-nav-item.active::before {
-    content: ''; position: absolute; left: -14px; top: 7px; bottom: 7px;
-    width: 3px; border-radius: 3px; background: var(--adm-blue);
+    background: rgba(79,156,249,0.12); color: #fff; font-weight: 600;
+    box-shadow: inset 2px 0 0 var(--adm-blue);
   }
   .adm-nav-dot {
-    width: 6px; height: 6px; border-radius: 2px; background: #454c55; flex: none;
+    width: 7px; height: 7px; border-radius: 2px; background: #454c55; flex: none;
+    opacity: 0.55;
   }
-  .adm-nav-dot.active { background: var(--adm-blue); }
+  .adm-nav-dot.active { background: var(--adm-blue); opacity: 1; box-shadow: 0 0 8px rgba(79,156,249,0.7); }
   .adm-user-panel {
     margin-top: auto; display: flex; align-items: center; gap: 10px;
     padding: 10px; border-radius: 10px;
@@ -559,9 +563,9 @@ _CSS = """
   }
   .adm-avatar {
     width: 30px; height: 30px; border-radius: 8px;
-    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    background: #2b3550;
     display: flex; align-items: center; justify-content: center;
-    font-weight: 700; font-size: 12px; color: #fff; flex: none;
+    font-weight: 700; font-size: 13px; color: #cdd6ea; flex: none;
   }
   .adm-user-name { font-size: 12.5px; font-weight: 600; color: var(--adm-text); }
   .adm-user-role { font: 500 10px var(--ff-mono); color: var(--adm-dim); }
