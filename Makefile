@@ -305,23 +305,32 @@ test-oauth:
 	python -m pytest proxy/tests/integration/test_oauth_pkce_flow.py -v --tb=short
 
 # Lab end-to-end functional + invoke-path gate-chain regression.
-# Runs OUTSIDE the proxy container (uses `podman exec` for the network-reachability
-# probe and hits the proxy/Keycloak over published ports). Requires the lab stack
-# up (`make lab-up`). Catches the failure class where a broken invoke path
-# (network split, SSRF DNS-rebind, missing entitlement) still returns HTTP 200 —
+# Runs INSIDE the mcp-proxy container. The SEC-05 ingress guard (middleware/
+# ingress.py, PROXY_INGRESS_ALLOWLIST_ENABLED=true) rejects direct host->:8000
+# access — only the gateway and loopback are trusted peers. And the gateway forces
+# mTLS agent-identity on /api/v1/tools/, so alice's OIDC token can't drive those
+# endpoints through :8443. The only place the harness's OIDC-user + direct-proxy
+# design works is loopback inside the proxy container, so we copy the test in and
+# exec pytest there. KC is reached at its in-network name; tokens issued there
+# carry the same iss the proxy already trusts. The 2 podman-dependent infra probes
+# skip gracefully inside the container (no host CLI). Requires the lab stack up
+# (`make lab-up`). Catches invoke-path breakage that still returns HTTP 200 —
 # see lab/tests/functional_test.py::TestInvokePathGateChain. Run every time.
 test-lab-functional:
 	@. ./.env.lab && \
-	PROXY_URL=http://localhost:8000 \
-	KC_URL=http://localhost:8082 \
-	KC_TEST_CLIENT=lab-test \
-	KC_TEST_SECRET="$${KC_LAB_TEST_SECRET:-lab-test-secret}" \
-	KC_SVC_CLIENT=svc-mcp-agent \
-	KC_SVC_SECRET="$${KC_SVC_MCP_AGENT_SECRET:-svc-mcp-agent-secret}" \
-	ALICE_PASSWORD="$${DEX_ALICE_PASSWORD}" \
-	BOB_PASSWORD="$${DEX_BOB_PASSWORD}" \
-	CAROL_PASSWORD="$${DEX_CAROL_PASSWORD:-labpassword}" \
-	python3 -m pytest lab/tests/functional_test.py -v --tb=short
+	podman cp lab/tests/functional_test.py mcp-proxy:/tmp/functional_test.py && \
+	podman exec \
+	  -e PROXY_URL=http://localhost:8000 \
+	  -e KC_URL=http://lab-keycloak:8080 \
+	  -e KC_REALM=mcp \
+	  -e KC_TEST_CLIENT=lab-test \
+	  -e KC_TEST_SECRET="$${KC_LAB_TEST_SECRET:-lab-test-secret}" \
+	  -e KC_SVC_CLIENT=svc-mcp-agent \
+	  -e KC_SVC_SECRET="$${KC_SVC_MCP_AGENT_SECRET:-svc-mcp-agent-secret}" \
+	  -e ALICE_PASSWORD="$${DEX_ALICE_PASSWORD}" \
+	  -e BOB_PASSWORD="$${DEX_BOB_PASSWORD}" \
+	  -e CAROL_PASSWORD="$${DEX_CAROL_PASSWORD:-labpassword}" \
+	  mcp-proxy python3 -m pytest /tmp/functional_test.py -v --tb=short -p no:cacheprovider
 
 # Run only security tests ([TAMPER] + AI attack surface + sandbox escape)
 test-security:

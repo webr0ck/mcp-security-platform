@@ -33,6 +33,12 @@ KC_TEST_CLIENT = os.environ.get("KC_TEST_CLIENT", "lab-test")
 KC_TEST_SECRET = os.environ.get("KC_TEST_SECRET", "lab-test-secret")
 KC_SVC_CLIENT = os.environ.get("KC_SVC_CLIENT", "svc-mcp-agent")
 KC_SVC_SECRET = os.environ.get("KC_SVC_SECRET", "svc-mcp-agent-secret")
+# Direct-backend probes (no proxy). The suite runs inside the mcp-proxy container
+# (SEC-05 ingress guard blocks host->:8000), so the backends are reached by their
+# in-network names, not the host-published 810x ports. Override via env if needed.
+ECHO_MCP_URL = os.environ.get("ECHO_MCP_URL", "http://lab-mcp-echo:8000/mcp")
+NOTES_MCP_URL = os.environ.get("NOTES_MCP_URL", "http://lab-mcp-notes:8000/mcp")
+SEARCH_MCP_URL = os.environ.get("SEARCH_MCP_URL", "http://lab-mcp-search:8000/mcp")
 ALICE_PASSWORD = os.environ.get("ALICE_PASSWORD", "labpassword")
 BOB_PASSWORD = os.environ.get("BOB_PASSWORD", "labpassword")
 CAROL_PASSWORD = os.environ.get("CAROL_PASSWORD", "labpassword")
@@ -223,7 +229,7 @@ class TestInfrastructure:
     def test_echo_mcp_direct(self):
         """Echo server responds to MCP initialize handshake directly (no proxy)."""
         resp = httpx.post(
-            "http://localhost:8105/mcp",
+            ECHO_MCP_URL,
             json={"jsonrpc": "2.0", "method": "initialize", "id": 1,
                   "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                               "clientInfo": {"name": "test", "version": "1"}}},
@@ -236,7 +242,7 @@ class TestInfrastructure:
 
     def test_notes_mcp_direct(self):
         resp = httpx.post(
-            "http://localhost:8106/mcp",
+            NOTES_MCP_URL,
             json={"jsonrpc": "2.0", "method": "initialize", "id": 1,
                   "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                               "clientInfo": {"name": "test", "version": "1"}}},
@@ -249,7 +255,7 @@ class TestInfrastructure:
 
     def test_search_mcp_direct(self):
         resp = httpx.post(
-            "http://localhost:8107/mcp",
+            SEARCH_MCP_URL,
             json={"jsonrpc": "2.0", "method": "initialize", "id": 1,
                   "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                               "clientInfo": {"name": "test", "version": "1"}}},
@@ -562,11 +568,15 @@ class TestInvokePathGateChain:
             "SELECT DISTINCT upstream_url FROM tool_registry WHERE upstream_url IS NOT NULL "
             "UNION SELECT DISTINCT upstream_url FROM server_registry WHERE upstream_url IS NOT NULL;"
         )
-        q = subprocess.run(
-            ["podman", "exec", "mcp-db", "sh", "-c",
-             f'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c "{sql}"'],
-            capture_output=True, text=True,
-        )
+        try:
+            q = subprocess.run(
+                ["podman", "exec", "mcp-db", "sh", "-c",
+                 f'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c "{sql}"'],
+                capture_output=True, text=True,
+            )
+        except FileNotFoundError:
+            pytest.skip("podman CLI unavailable (running inside container) — this "
+                        "infra probe checks the proxy's network attachment from the host")
         if q.returncode != 0:
             pytest.skip(f"cannot read registry from DB: {q.stderr.strip()}")
         hosts = set()
@@ -643,11 +653,19 @@ def _direct_call(token: str, tool_name: str, arguments: dict, timeout: float = 2
 
 
 def _psql(sql: str) -> str:
-    """Run SQL in the lab DB (used to set up the quarantine-bypass test)."""
-    docker_host = subprocess.run(
-        ["podman", "machine", "inspect", "--format",
-         "unix://{{.ConnectionInfo.PodmanSocket.Path}}"],
-        capture_output=True, text=True).stdout.strip()
+    """Run SQL in the lab DB (used to set up the quarantine-bypass test).
+
+    Uses the host podman/docker CLI. When the suite runs INSIDE the proxy
+    container (make test-lab-functional) those binaries are absent — skip the
+    dependent test rather than erroring with FileNotFoundError."""
+    try:
+        docker_host = subprocess.run(
+            ["podman", "machine", "inspect", "--format",
+             "unix://{{.ConnectionInfo.PodmanSocket.Path}}"],
+            capture_output=True, text=True).stdout.strip()
+    except FileNotFoundError:
+        pytest.skip("podman/docker CLI unavailable (running inside container) — "
+                    "quarantine-bypass DB setup needs host container tooling")
     return subprocess.run(
         # -q suppresses psql's command-status tag (e.g. "UPDATE 1") so a
         # RETURNING query yields only the row value(s).
