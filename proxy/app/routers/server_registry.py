@@ -78,11 +78,22 @@ def _require_platform_admin(request: Request) -> None:
 
 
 def _require_server_owner_or_admin(request: Request) -> None:
-    """Enforce server_owner or platform_admin role."""
+    """Enforce the role required for POST /api/v1/servers direct registration.
+
+    CR-08: this path creates an admin-approvable server_registry row with NO
+    submission-scan/review evidence. Unlike admin roles (inherently trusted),
+    'server_owner' is a role ordinary self-service users can hold, so letting
+    it register directly is a bypass around the scanned submission funnel.
+    Gated behind ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN (default
+    false) — admins can always use this path regardless of the flag.
+    """
+    from app.core.config import get_settings as _get_settings
     roles = getattr(request.state, "client_roles", [])
-    _allowed = {"server_owner", "platform_admin", "admin"}
-    if not any(r in _allowed for r in roles):
-        raise HTTPException(status_code=403, detail="server_owner or platform_admin role required")
+    if any(r in {"platform_admin", "admin"} for r in roles):
+        return
+    if _get_settings().ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN and "server_owner" in roles:
+        return
+    raise HTTPException(status_code=403, detail="server_owner or platform_admin role required")
 
 
 async def _emit_registration_audit(

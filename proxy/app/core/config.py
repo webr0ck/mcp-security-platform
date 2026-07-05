@@ -173,6 +173,14 @@ class Settings(BaseSettings):
     SCAN_FRESHNESS_ENFORCED: bool = False
     RESCAN_INTERVAL_HOURS: int = 24
 
+    # CR-08: POST /api/v1/servers (self-service direct registration) skips the
+    # submission-scan/review funnel entirely — a server_owner-role caller goes
+    # straight to an admin-approvable 'pending' row with no scan evidence.
+    # Default false: direct registration requires platform_admin/admin only.
+    # Flip true only for trusted labs/environments that intentionally rely on
+    # server_owner self-registration without scanning.
+    ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN: bool = False
+
     @property
     def ollama_base_url(self) -> str:
         return f"http://{self.OLLAMA_HOST}:{self.OLLAMA_PORT}"

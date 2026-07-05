@@ -27,13 +27,53 @@ def _make_request(roles=None, client_id="test-owner"):
     return req
 
 
+@pytest.fixture(autouse=True)
+def _restore_direct_registration_flag():
+    """ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN lives on the lru_cache'd
+    Settings singleton — restore it after every test so one test flipping it
+    doesn't leak into the next."""
+    from app.core.config import get_settings
+    settings = get_settings()
+    original = settings.ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN
+    yield
+    settings.ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN = original
+
+
 @pytest.mark.asyncio
-async def test_server_owner_can_register_server():
-    """As server_owner, register server with user mode → 201, status='pending'."""
-    from app.routers.server_registry import router
-    from fastapi.testclient import TestClient
+async def test_server_owner_direct_registration_forbidden_by_default():
+    """CR-08: bare server_owner (no admin role) must NOT reach the unscanned
+    direct-registration path by default — ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN
+    defaults to false, so this is now a 403, not the 201 it used to be."""
     from app.main import app
-    from app.core.database import get_db
+
+    with patch("app.middleware.auth._load_roles", new=AsyncMock(return_value=["server_owner"])):
+        from httpx import ASGITransport, AsyncClient
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver"
+        ) as client:
+            response = await client.post(
+                "/api/v1/servers",
+                json={
+                    "service_name": "new-gitea",
+                    "upstream_url": "https://gitea.internal",
+                    "injection_mode": "user",
+                    "upstream_idp_type": None,
+                    "upstream_idp_config": None,
+                    "adapter_name": None
+                },
+                headers={"X-Client-Cert-CN": "owner-123"}
+            )
+
+        assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_server_owner_can_register_server_when_flag_enabled():
+    """With ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN=true (e.g. a trusted
+    lab), server_owner registration still works: 201, status='pending'."""
+    from app.main import app
+    from app.core.config import get_settings
 
     # Setup request context
     request = _make_request(roles=["server_owner"], client_id="owner-123")
@@ -54,46 +94,52 @@ async def test_server_owner_can_register_server():
     async_session_mock.execute.return_value = insert_result
     async_session_mock.commit = AsyncMock()
 
-    # Patch AsyncSessionLocal and validation functions
-    with patch("app.routers.server_registry.AsyncSessionLocal") as mock_session_local, \
-         patch("app.routers.server_registry.validate_mode_and_idp") as mock_validate_mode, \
-         patch("app.routers.server_registry.validate_upstream_url_ssrf") as mock_validate_url, \
-         patch("app.routers.server_registry.validate_upstream_idp_config") as mock_validate_idp_config, \
-         patch("app.routers.server_registry._emit_registration_audit") as mock_audit, \
-         patch("app.middleware.auth._load_roles", new=AsyncMock(return_value=["server_owner"])):
+    settings = get_settings()
+    original_flag = settings.ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN
+    settings.ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN = True
+    try:
+        # Patch AsyncSessionLocal and validation functions
+        with patch("app.routers.server_registry.AsyncSessionLocal") as mock_session_local, \
+             patch("app.routers.server_registry.validate_mode_and_idp") as mock_validate_mode, \
+             patch("app.routers.server_registry.validate_upstream_url_ssrf") as mock_validate_url, \
+             patch("app.routers.server_registry.validate_upstream_idp_config") as mock_validate_idp_config, \
+             patch("app.routers.server_registry._emit_registration_audit") as mock_audit, \
+             patch("app.middleware.auth._load_roles", new=AsyncMock(return_value=["server_owner"])):
 
-        # Setup mocks
-        mock_session_local.return_value.__aenter__.return_value = async_session_mock
-        mock_session_local.return_value.__aexit__.return_value = None
-        mock_validate_mode.return_value = None
-        mock_validate_url.return_value = None
-        mock_validate_idp_config.return_value = None
-        mock_audit.return_value = None
+            # Setup mocks
+            mock_session_local.return_value.__aenter__.return_value = async_session_mock
+            mock_session_local.return_value.__aexit__.return_value = None
+            mock_validate_mode.return_value = None
+            mock_validate_url.return_value = None
+            mock_validate_idp_config.return_value = None
+            mock_audit.return_value = None
 
-        # Make the request
-        from httpx import ASGITransport, AsyncClient
-        async with AsyncClient(
-            transport=ASGITransport(app=app),
-            base_url="http://testserver"
-        ) as client:
-            response = await client.post(
-                "/api/v1/servers",
-                json={
-                    "service_name": "new-gitea",
-                    "upstream_url": "https://gitea.internal",
-                    "injection_mode": "user",
-                    "upstream_idp_type": None,
-                    "upstream_idp_config": None,
-                    "adapter_name": None
-                },
-                headers={"X-Client-Cert-CN": "owner-123"}
-            )
+            # Make the request
+            from httpx import ASGITransport, AsyncClient
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://testserver"
+            ) as client:
+                response = await client.post(
+                    "/api/v1/servers",
+                    json={
+                        "service_name": "new-gitea",
+                        "upstream_url": "https://gitea.internal",
+                        "injection_mode": "user",
+                        "upstream_idp_type": None,
+                        "upstream_idp_config": None,
+                        "adapter_name": None
+                    },
+                    headers={"X-Client-Cert-CN": "owner-123"}
+                )
 
-        assert response.status_code == 201
-        body = response.json()
-        assert body["server_id"]
-        assert body["service_name"] == "new-gitea"
-        assert body["status"] == "pending"
+            assert response.status_code == 201
+            body = response.json()
+            assert body["server_id"]
+            assert body["service_name"] == "new-gitea"
+            assert body["status"] == "pending"
+    finally:
+        settings.ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN = original_flag
 
 
 @pytest.mark.asyncio
@@ -125,13 +171,17 @@ async def test_register_requires_server_owner_role():
 
 @pytest.mark.asyncio
 async def test_register_validates_mode_idp():
-    """Invalid mode↔IdP combo → 400."""
+    """Invalid mode↔IdP combo → 400. Needs the direct-registration flag on so
+    server_owner reaches this validation instead of the CR-08 403 gate."""
     from app.routers.server_registry import router
     from fastapi.testclient import TestClient
     from app.main import app
+    from app.core.config import get_settings
     from app.services.server_onboarding import InvalidOnboardingConfig
 
     request = _make_request(roles=["server_owner"], client_id="owner-123")
+    settings = get_settings()
+    settings.ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN = True
 
     with patch("app.routers.server_registry.AsyncSessionLocal"), \
          patch("app.routers.server_registry.validate_mode_and_idp") as mock_validate_mode, \
@@ -169,13 +219,16 @@ async def test_register_validates_mode_idp():
 
 @pytest.mark.asyncio
 async def test_register_validates_ssrf():
-    """SSRF URL → 400."""
+    """SSRF URL → 400. Needs the direct-registration flag on so server_owner
+    reaches this validation instead of the CR-08 403 gate."""
     from app.routers.server_registry import router
     from fastapi.testclient import TestClient
     from app.main import app
+    from app.core.config import get_settings
     from app.services.server_onboarding import InvalidOnboardingConfig
 
     request = _make_request(roles=["server_owner"], client_id="owner-123")
+    get_settings().ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN = True
 
     with patch("app.routers.server_registry.AsyncSessionLocal"), \
          patch("app.routers.server_registry.validate_mode_and_idp"), \
@@ -211,11 +264,15 @@ async def test_register_validates_ssrf():
 
 @pytest.mark.asyncio
 async def test_register_audited_before_response():
-    """Audit event exists before 201 returned (INV-001)."""
+    """Audit event exists before 201 returned (INV-001). Needs the
+    direct-registration flag on so server_owner reaches this code path
+    instead of the CR-08 403 gate."""
     from app.routers.server_registry import router
     from app.main import app
+    from app.core.config import get_settings
 
     request = _make_request(roles=["server_owner"], client_id="owner-123")
+    get_settings().ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN = True
 
     # Track call order
     call_order = []
