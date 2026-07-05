@@ -2683,7 +2683,7 @@ async def fragment_admin_identity(request: Request):
               onclick="document.getElementById('oidc-reconfig-note').style.display=document.getElementById('oidc-reconfig-note').style.display==='none'?'block':'none'">Test connection</button>
     </div>
     <div id="oidc-reconfig-note" style="display:none;margin-top:12px;padding:14px 16px;
-         background:#13151a;border:1px solid #2a2d35;border-radius:10px;font-size:12.5px;color:#9aa1ab;line-height:1.6">
+         background:var(--adm-surface);border:1px solid var(--adm-border);border-radius:12px;font-size:12.5px;color:var(--adm-muted);line-height:1.6">
       OIDC reconfiguration is applied via environment variables on the proxy container.<br>
       Restart the proxy after changing these values:
       <ul style="margin:8px 0 0 18px">
@@ -3329,9 +3329,9 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
         <tbody>{"".join(feed_html_rows) if feed_html_rows else '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:1.5rem">No recent detections.</td></tr>'}</tbody>
       </table>
     </div>
-    <div id="det-drawer" style="display:none;margin-bottom:1.25rem;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1rem 1.25rem">
+    <div id="det-drawer" style="display:none;margin-bottom:1.25rem;background:var(--adm-surface);border:1px solid var(--adm-border);border-radius:12px;padding:1rem 1.25rem">
       <div id="det-drawer-body" style="font-size:13px;line-height:1.7"></div>
-      <div id="det-drawer-rule" style="display:none;margin-top:0.75rem;background:#050810;border:1px solid #1e293b;border-radius:6px;padding:0.75rem 1rem">
+      <div id="det-drawer-rule" style="display:none;margin-top:0.75rem;background:var(--adm-input);border:1px solid var(--adm-border);border-radius:8px;padding:0.75rem 1rem">
         <div id="det-drawer-rule-hdr" style="font-size:11px;color:var(--muted);margin-bottom:0.4rem"></div>
         <pre id="det-drawer-rule-src" style="margin:0;font-size:11px;line-height:1.6;color:#93c5fd;overflow-x:auto;white-space:pre"></pre>
       </div>
@@ -3347,7 +3347,7 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
         if (!d) return;
         document.getElementById('det-drawer-rule').style.display = 'none';
         const reasonsHtml = d.reasons.map(r =>
-          '<code style="font-size:11px;background:#1e293b;border-radius:4px;padding:1px 5px;margin-right:4px">' + _escHtml(r) + '</code>' +
+          '<code style="font-size:11px;background:rgba(255,255,255,0.06);border-radius:4px;padding:1px 5px;margin-right:4px">' + _escHtml(r) + '</code>' +
           '<a href="#" style="font-size:11px;color:var(--cyan);margin-right:10px" onclick="viewPolicyRule(' + JSON.stringify(r) + ');return false">view rule</a>'
         ).join(' ');
         const serverHtml = d.server_id
