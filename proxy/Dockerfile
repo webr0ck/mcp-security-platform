@@ -29,7 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/* \
     && curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-       | sh -s -- -b /usr/local/bin v3.82.13
+       | sh -s -- -b /usr/local/bin v3.82.13 \
+    && curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+       | sh -s -- -b /usr/local/bin v1.18.1
 
 # semgrep — SAST engine for the vendored mcp_checker MCP rule pack
 # (proxy/vendor/mcp_checker/policies/semgrep.yml). Without it the SAST check

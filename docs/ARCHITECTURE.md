@@ -224,7 +224,10 @@ review (§6.5 `security_reviewer`, with self-review forbidden) remains the autho
 from repo manifests (`parse_sbom_components`, bounded/soft-fail) into `server_registry.sbom_components`
 and **surfaces them on the submission review card** so the reviewer has a component inventory
 immediately — before the signed per-tool CycloneDX SBOM (INV-006), which is only generated at
-approval time. The declared-dep inventory is display-only context, never a gate.
+approval time. It also generates a full **CycloneDX SBOM via syft** at scan time
+(`generate_cyclonedx_sbom`, `server_registry.sbom_cyclonedx`), downloadable from the review card
+(`GET /api/v1/admin/submissions/{id}/sbom`). Both are **soft-fail** (a syft failure / absent binary
+leaves the declared-dep inventory as the fallback) and display-only — never a gate.
 
 ---
 

@@ -4906,7 +4906,8 @@ async def fragment_admin_submissions(request: Request):
                 SELECT server_id, name, owner_sub, submission_status, scan_status,
                        injection_mode, data_categories, has_write_ops,
                        github_repo_url, scan_report, review_notes, updated_at,
-                       upstream_idp_config, sbom_components
+                       upstream_idp_config, sbom_components,
+                       (sbom_cyclonedx IS NOT NULL) AS has_cyclonedx
                 FROM server_registry
                 WHERE submission_status NOT IN ('draft')
                   AND deleted_at IS NULL
@@ -5118,10 +5119,15 @@ async def fragment_admin_submissions(request: Request):
                     f'<div style="margin-right:1.5rem"><div style="font-size:11px;color:var(--cyan);'
                     f'font-weight:600;margin-bottom:2px">{esc_py(eco)} ({len(comps)})</div>{items}{more}</div>'
                 )
+            cdx_link = (
+                f'<a href="/api/v1/admin/submissions/{esc_py(sid)}/sbom" target="_blank" '
+                f'rel="noopener noreferrer" style="color:var(--cyan);font-size:11px;margin-left:0.5rem">'
+                f'&#x2B07; CycloneDX SBOM</a>' if getattr(r, "has_cyclonedx", False) else ''
+            )
             sbom_components_html = (
                 '<details style="margin-top:0.5rem;background:#0b1220;border-radius:6px;padding:0.4rem 0.6rem">'
                 f'<summary style="cursor:pointer;font-size:12px;color:var(--muted)">&#x1F4E6; '
-                f'Declared dependencies ({len(raw_components)}) — collected at submission</summary>'
+                f'Declared dependencies ({len(raw_components)}) — collected at submission{cdx_link}</summary>'
                 f'<div style="display:flex;flex-wrap:wrap;margin-top:0.4rem">{"".join(eco_blocks)}</div></details>'
             )
 

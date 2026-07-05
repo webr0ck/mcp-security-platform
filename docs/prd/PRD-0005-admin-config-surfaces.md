@@ -159,7 +159,14 @@ scanner path). Non-goal: headless CI (blocked by interactive login) — this is 
 acceptance run under `lab/tests/`.
 - **Exit / Blast radius:** test-only; no production surface.
 
-## R-5 — SBOM collected at submission (for the security analyst)  [added post-critic]
+## R-5 — SBOM collected at submission (for the security analyst)  ✅ DONE  [added post-critic]
+
+**Status:** Both steps implemented + verified. Step 1 (surface declared `sbom_components` on the
+review card) verified earlier. Step 2 (syft CycloneDX at scan time, V056 `sbom_cyclonedx`,
+`generate_cyclonedx_sbom` soft-fail, download endpoint + card link) verified: syft 1.18.1 in-image,
+a real submission produced a valid `CycloneDX` doc, downloadable via
+`GET /api/v1/admin/submissions/{id}/sbom`, card shows the link; soft-fail confirmed (0-component
+repo did not break the scan).
 
 **Problem.** The review card shows "SBOM: not yet provisioned" — the signed per-tool CycloneDX
 SBOM only exists post-approval (INV-006), so the analyst reviewing a **submission** sees no

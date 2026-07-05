@@ -366,6 +366,26 @@ async def get_submission(server_id: str, request: Request) -> JSONResponse:
     })
 
 
+@router.get("/api/v1/admin/submissions/{server_id}/sbom")
+async def download_sbom(server_id: str, request: Request) -> JSONResponse:
+    """R-5: download the CycloneDX SBOM captured at scan time (reviewer/admin)."""
+    _require_submission_reviewer(request)
+    from sqlalchemy import text as _text
+    from app.core.database import AsyncSessionLocal as _S
+    async with _S() as session:
+        row = (await session.execute(_text(
+            "SELECT sbom_cyclonedx FROM server_registry WHERE server_id = :sid AND deleted_at IS NULL"
+        ), {"sid": server_id})).mappings().first()
+    if row is None or row["sbom_cyclonedx"] is None:
+        raise HTTPException(status_code=404, detail="No CycloneDX SBOM for this submission")
+    doc = row["sbom_cyclonedx"]
+    if isinstance(doc, str):
+        doc = json.loads(doc)
+    return JSONResponse(doc, headers={
+        "Content-Disposition": f'attachment; filename="sbom-{server_id}.cdx.json"'
+    })
+
+
 @router.get("/api/v1/submissions/{server_id}/prompts")
 async def get_design_prompts(server_id: str, request: Request) -> JSONResponse:
     """Return design prompts for the no-code path — questions to answer before writing the server."""

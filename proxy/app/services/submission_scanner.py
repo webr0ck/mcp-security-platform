@@ -547,6 +547,39 @@ def _parse_go_mod(text_content: str) -> list[dict]:
     return out
 
 
+async def generate_cyclonedx_sbom(repo_path: str) -> dict | None:
+    """R-5 step 2: generate a CycloneDX SBOM with syft. Soft-fail (returns None).
+
+    Static, offline (`syft dir:` — no install/build, no network). A missing binary
+    or any failure returns None; the caller keeps the declared-dependency inventory
+    (parse_sbom_components) as the always-available fallback. Never a scan gate.
+    """
+    if not shutil.which("syft"):
+        logger.info("syft not present; skipping CycloneDX SBOM (declared-deps inventory still collected)")
+        return None
+    env = os.environ.copy()
+    env.setdefault("SYFT_CHECK_FOR_APP_UPDATE", "false")
+    rc, stdout, stderr = await _run(
+        ["syft", f"dir:{repo_path}", "-o", "cyclonedx-json", "-q"],
+        timeout=180, env=env,
+    )
+    if rc != 0 or not stdout.strip():
+        logger.warning("syft SBOM generation failed (rc=%s): %s", rc, (stderr or "")[-300:])
+        return None
+    try:
+        doc = json.loads(stdout)
+        # Bound the stored size — a pathological repo shouldn't bloat the row.
+        if len(stdout) > 4 * 1024 * 1024:
+            logger.warning("syft SBOM > 4MB; storing components summary only")
+            return {"bomFormat": doc.get("bomFormat"), "specVersion": doc.get("specVersion"),
+                    "components": (doc.get("components") or [])[:_SBOM_MAX_COMPONENTS],
+                    "_truncated": True}
+        return doc
+    except json.JSONDecodeError as exc:
+        logger.warning("syft SBOM output not valid JSON: %s", exc)
+        return None
+
+
 def parse_sbom_components(repo_path: str) -> list[dict]:
     """
     Best-effort, bounded parse of declared (unresolved) dependencies from
@@ -656,13 +689,23 @@ async def scan_submission(server_id: str, github_url: str) -> None:
         except Exception as exc:
             logger.warning("SBOM component parse failed for server_id=%s: %s", server_id, exc)
             sbom_components = []
+        # R-5 step 2: full CycloneDX SBOM via syft (soft-fail — None if syft
+        # absent/fails; the declared-deps inventory above is the fallback).
+        try:
+            sbom_cyclonedx = await generate_cyclonedx_sbom(repo_path)
+        except Exception as exc:
+            logger.warning("CycloneDX SBOM generation failed for server_id=%s: %s", server_id, exc)
+            sbom_cyclonedx = None
         async with AsyncSessionLocal() as session:
             await session.execute(text("""
                 UPDATE server_registry
                 SET sbom_components = CAST(:components AS jsonb),
+                    sbom_cyclonedx = CAST(:cyclonedx AS jsonb),
                     updated_at = now()
                 WHERE server_id = :sid
-            """), {"components": json.dumps(sbom_components), "sid": server_id})
+            """), {"components": json.dumps(sbom_components),
+                   "cyclonedx": json.dumps(sbom_cyclonedx) if sbom_cyclonedx is not None else None,
+                   "sid": server_id})
             await session.commit()
 
         findings: list[dict] = []
