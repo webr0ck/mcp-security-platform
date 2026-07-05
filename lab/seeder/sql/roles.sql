@@ -59,12 +59,25 @@ ON CONFLICT (key_id) DO NOTHING;
 -- there's no longer a matching constraint for ON CONFLICT. Guard with
 -- NOT EXISTS instead: only seed a role if this client has no event row for
 -- it yet at all (first run), never overwrite/duplicate on reseed.
+-- svc-mcp-agent is the shared client_credentials service account used by
+-- functional_test.py's TestScenarioB_SharedServiceAccount. It was never
+-- granted a role here, so RBAC (`policies/rego` requires "agent") denied it
+-- at the /mcp endpoint before OPA or entitlement were even reached.
+--
+-- Its client_id key is the email 'svc-mcp-agent@lab.local', NOT the client
+-- name — verified_oidc_identity() (auth.py) only trusts email as the identity
+-- key when email_verified=true (P1-1 anti-spoof); an unverified/absent email
+-- falls back to the volatile KC `sub` UUID, which would not survive a realm
+-- re-import. realm-mcp.json now predefines the service-account user
+-- (serviceAccountClientId: svc-mcp-agent) with this email pre-verified, so
+-- the key is stable across a from-scratch bootstrap too.
 INSERT INTO role_assignments (client_id, role, granted_by)
 SELECT v.client_id, v.role, 'lab-seeder'
 FROM (VALUES
-    ('alice@corp', 'agent'),
-    ('bob@corp',   'agent'),
-    ('bootstrap',  'admin')
+    ('alice@corp',               'agent'),
+    ('bob@corp',                 'agent'),
+    ('svc-mcp-agent@lab.local',  'agent'),
+    ('bootstrap',                'admin')
 ) AS v(client_id, role)
 WHERE NOT EXISTS (
     SELECT 1 FROM role_assignments r
@@ -72,12 +85,19 @@ WHERE NOT EXISTS (
 );
 
 -- OPA client grants — max_risk_level drives the risk_level_within_threshold gate.
--- alice gets 'critical' so all lab tools are reachable; add per-user rows for
--- tighter lab scenarios.
+-- alice still carries an 'admin' role, which bypasses tool_allowed_for_client
+-- entirely (policies/rego/authz.rego client_has_invoke_permission's admin
+-- rule) — her empty allowed_tools is never actually consulted. bob's admin/
+-- platform_admin/etc grants were later REVOKED in this lab (role_assignments
+-- is append-only; his only active, non-revoked role is 'agent'), and
+-- svc-mcp-agent only ever had 'agent' — both need the tools their tests
+-- invoke listed explicitly, or OPA denies with client_not_authorized_for_tool.
 INSERT INTO client_grants (client_id, max_risk_level, allowed_tools, allowed_tags, granted_by)
 VALUES
-    ('alice@corp', 'critical', '[]'::jsonb, '[]'::jsonb, 'lab-seeder'),
-    ('bob@corp',   'medium',   '[]'::jsonb, '[]'::jsonb, 'lab-seeder')
+    ('alice@corp',              'critical', '[]'::jsonb,                    '[]'::jsonb, 'lab-seeder'),
+    ('bob@corp',                'medium',   '["ping"]'::jsonb,              '[]'::jsonb, 'lab-seeder'),
+    ('svc-mcp-agent@lab.local', 'medium',   '["ping", "search-kb"]'::jsonb, '[]'::jsonb, 'lab-seeder')
 ON CONFLICT (client_id) DO UPDATE
     SET max_risk_level = EXCLUDED.max_risk_level,
+        allowed_tools  = EXCLUDED.allowed_tools,
         updated_at     = now();
