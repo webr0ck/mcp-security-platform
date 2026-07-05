@@ -955,6 +955,7 @@ _TAB_MAP_PY = {
     "sbom":        "SBOM",
     "submissions": "Submissions",
     "prompts":     "Wizard Prompts",
+    "llm":         "LLM Provider",
     "profile":     "Profile",
     "access":      "Access",
 }
@@ -1045,6 +1046,7 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
     {_nav("Access",          "access",      active=initial_tab == "access")}
     {_nav("Submissions",     "submissions", active=initial_tab == "submissions")}
     {_nav("Wizard Prompts",  "prompts",     active=initial_tab == "prompts")}
+    {_nav("LLM Provider",    "llm",         active=initial_tab == "llm")}
     {_nav("Credentials",     "credentials", active=initial_tab == "credentials")}
     {_nav("Request Limits",  "limits",      active=initial_tab == "limits")}
     {_nav("Profile",         "profile",     active=initial_tab == "profile")}
@@ -5274,6 +5276,91 @@ async def fragment_admin_prompts(request: Request):
       const r = await fetch('/api/v1/admin/prompts/' + encodeURIComponent(key), {{method: 'DELETE'}});
       if (r.ok) {{ htmx.ajax('GET', '/portal/fragments/admin/prompts', {{target: '#adm-content', swap: 'innerHTML'}}); }}
       else {{ const e = await r.json().catch(() => ({{}})); alert('Reset failed: ' + (e.detail || r.status)); }}
+    }}
+    </script>
+    """)
+
+
+# ---------------------------------------------------------------------------
+# LLM Provider tab (admin — configure the AI auditor endpoint/model/token)
+# ---------------------------------------------------------------------------
+
+@router.get("/fragments/admin/llm", response_class=HTMLResponse)
+async def fragment_admin_llm(request: Request):
+    """Configure the LLM provider (base_url/model/timeout/token) used by the auditor."""
+    _require_admin(request)
+    from app.services import llm_config as _llm_config
+    from app.services import platform_secrets as _ps
+    try:
+        eff = await _llm_config.effective(force=True)
+        token_set = await _ps.secret_exists("llm-api")
+    except Exception as exc:
+        return HTMLResponse(f'<div class="section-title">LLM Provider</div>'
+                            f'<div style="color:#fca5a5">Could not load LLM config: {esc_py(str(exc))}</div>')
+
+    token_state = ('<span style="color:#4ade80">set</span>' if token_set
+                   else '<span style="color:var(--muted)">not set (local / unauthenticated)</span>')
+    return HTMLResponse(f"""
+    <div class="section-title">&#x1F916; LLM Provider</div>
+    <p style="color:var(--muted);font-size:12px;margin:0.25rem 0 0.75rem">
+      Configures the AI auditor (runs at tool <b>registration</b>, never on invoke).
+      Overrides the env defaults; a token is stored encrypted and only ever sent as a
+      Bearer header. In production, a token-protected endpoint that rejects auth is treated
+      as "LLM unavailable" (fails closed if REQUIRE_LLM_AUDIT is on) — never a silent
+      unauthenticated call.</p>
+    <div style="max-width:560px;display:flex;flex-direction:column;gap:0.6rem;font-size:13px">
+      <label>Base URL<input id="llm-base" value="{esc_py(eff.base_url)}"
+        style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
+      <label>Model<input id="llm-model" value="{esc_py(eff.model)}"
+        style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
+      <label>Timeout (seconds)<input id="llm-timeout" type="number" min="1" max="600" value="{eff.timeout_seconds}"
+        style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
+      <label style="display:flex;align-items:center;gap:0.5rem"><input id="llm-enabled" type="checkbox" {"checked" if eff.enabled else ""}> Enabled</label>
+      <div style="display:flex;gap:0.5rem">
+        <button class="btn-primary" style="font-size:12px;padding:0.35rem 0.9rem" onclick="saveLlm()">Save settings</button>
+        <button class="btn-secondary" style="font-size:12px;padding:0.35rem 0.9rem" onclick="testLlm()">Test connection</button>
+      </div>
+      <hr style="border-color:#1e293b;width:100%">
+      <div>API token: {token_state}</div>
+      <label>Set / replace token (write-only)<input id="llm-token" type="password" placeholder="paste token — leave blank to keep current"
+        style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
+      <div style="display:flex;gap:0.5rem">
+        <button class="btn-primary" style="font-size:12px;padding:0.35rem 0.9rem" onclick="saveLlmToken()">Save token</button>
+        <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:12px;padding:0.35rem 0.9rem" onclick="delLlmToken()">Remove token</button>
+      </div>
+      <div id="llm-test-out" style="font-size:12px;color:var(--muted)"></div>
+    </div>
+    <script>
+    async function saveLlm() {{
+      const body = {{
+        base_url: document.getElementById('llm-base').value || null,
+        model: document.getElementById('llm-model').value || null,
+        timeout_seconds: parseInt(document.getElementById('llm-timeout').value) || null,
+        enabled: document.getElementById('llm-enabled').checked
+      }};
+      const r = await fetch('/api/v1/admin/llm', {{method:'PUT',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+      if (r.ok) {{ htmx.ajax('GET','/portal/fragments/admin/llm',{{target:'#adm-content',swap:'innerHTML'}}); }}
+      else {{ const e=await r.json().catch(()=>({{}})); alert('Save failed: '+(e.detail||r.status)); }}
+    }}
+    async function saveLlmToken() {{
+      const t = document.getElementById('llm-token').value;
+      if (!t) {{ alert('Enter a token first.'); return; }}
+      const r = await fetch('/api/v1/admin/llm/token', {{method:'PUT',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:t}})}});
+      if (r.ok) {{ htmx.ajax('GET','/portal/fragments/admin/llm',{{target:'#adm-content',swap:'innerHTML'}}); }}
+      else {{ const e=await r.json().catch(()=>({{}})); alert('Token save failed: '+(e.detail||r.status)); }}
+    }}
+    async function delLlmToken() {{
+      if (!confirm('Remove the stored LLM token?')) return;
+      const r = await fetch('/api/v1/admin/llm/token', {{method:'DELETE'}});
+      if (r.ok) {{ htmx.ajax('GET','/portal/fragments/admin/llm',{{target:'#adm-content',swap:'innerHTML'}}); }}
+    }}
+    async function testLlm() {{
+      const out = document.getElementById('llm-test-out'); out.textContent = 'Testing…';
+      const r = await fetch('/api/v1/admin/llm/test',{{method:'POST'}});
+      const d = await r.json().catch(()=>({{}}));
+      out.textContent = d.ok ? ('OK (status '+d.status+', token '+(d.token_used?'used':'not used')+')')
+                             : ('Failed: '+(d.error||('status '+d.status)));
+      out.style.color = d.ok ? '#4ade80' : '#fca5a5';
     }}
     </script>
     """)

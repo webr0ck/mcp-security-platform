@@ -51,7 +51,14 @@
 
 ---
 
-## R-1 — LLM configuration admin panel
+## R-1 — LLM configuration admin panel  ✅ DONE
+
+**Status:** Implemented + verified (V054 `platform_secrets` + `llm_config`; `platform_secrets.py`
+reusing only approach_a crypto; `llm_config.py` env+DB overlay; `auditor.py` SI-6 wiring;
+`admin_llm.py` GET/PUT/token/test; portal LLM tab). Verified via live API: config override persists,
+token stored encrypted through the live Vault KEK and never echoed, `/test` probe hits ollama, delete
+reverts. 9 auditor tests pass incl. 3 new SI-6 (token-unobtainable → llm_unavailable with no HTTP
+call; token→Bearer; no-token→no header).
 
 **Problem.** LLM config is env-only (`OLLAMA_*` in `config.py`, consumed in `auditor.py`,
 no auth header). No way to point at a token-protected endpoint without a redeploy.

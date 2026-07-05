@@ -171,31 +171,18 @@ async def run_llm_analysis(
     )
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
 
-    payload = {
-        "model": settings.OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-    }
+    # PRD-0005 R-1: effective LLM config (env overlaid with admin llm_config row)
+    # and an optional API token. SI-6: a configured-but-unobtainable token
+    # (Vault down / decrypt failure) is treated as llm_unavailable — we must NOT
+    # fall through to an unauthenticated request. A 401/403 from a token-protected
+    # endpoint is likewise mapped to unavailable by raise_for_status() below.
+    from app.services import llm_config as _llm_config
 
-    try:
-        async with httpx.AsyncClient(timeout=float(settings.OLLAMA_TIMEOUT_SECONDS)) as client:
-            resp = await client.post(
-                f"{settings.ollama_base_url}/api/generate",
-                json=payload,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            raw_response = body.get("response", "{}")
-            analysis = json.loads(raw_response)
-            analysis["prompt_hash"] = prompt_hash
-            analysis["model"] = settings.OLLAMA_MODEL
-            return analysis
-    except Exception as exc:
+    def _unavailable(reason_exc) -> dict:
         logger.warning(
-            "Ollama LLM analysis failed: %s — will re-weight to 1.0×static score "
-            "(llm_unavailable=True). If REQUIRE_LLM_AUDIT=true, registration will be refused.",
-            exc,
+            "LLM analysis unavailable: %s — re-weight to 1.0×static (llm_unavailable=True). "
+            "If REQUIRE_LLM_AUDIT=true, registration will be refused.",
+            reason_exc,
         )
         return {
             "risk_score": 0,
@@ -207,6 +194,41 @@ async def run_llm_analysis(
             "prompt_hash": prompt_hash,
             "llm_unavailable": True,
         }
+
+    try:
+        llm = await _llm_config.effective()
+        # SI-6: token fetch failure => unavailable, never an unauthenticated send.
+        try:
+            token = await _llm_config.api_token()
+        except Exception as tok_exc:
+            return _unavailable(f"LLM token unobtainable: {tok_exc}")
+    except Exception as cfg_exc:
+        return _unavailable(f"LLM config error: {cfg_exc}")
+
+    payload = {
+        "model": llm.model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+    }
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+
+    try:
+        async with httpx.AsyncClient(timeout=float(llm.timeout_seconds)) as client:
+            resp = await client.post(
+                f"{llm.base_url}/api/generate",
+                json=payload,
+                headers=headers,
+            )
+            resp.raise_for_status()   # 401/403/5xx -> HTTPStatusError -> unavailable
+            body = resp.json()
+            raw_response = body.get("response", "{}")
+            analysis = json.loads(raw_response)
+            analysis["prompt_hash"] = prompt_hash
+            analysis["model"] = llm.model
+            return analysis
+    except Exception as exc:
+        return _unavailable(exc)
 
 
 async def run_audit(

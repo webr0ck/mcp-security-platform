@@ -176,6 +176,17 @@ unreachable the score falls back to **1.0 × static** (no silent downgrade), and
 `REQUIRE_LLM_AUDIT=true` makes registration return 503 rather than run fail-open. **Invocations are
 not affected** — the LLM auditor only runs at registration.
 
+**LLM provider is admin-configurable (PRD-0005 R-1)**: `services/llm_config.py` overlays env
+defaults (`OLLAMA_*`) with the `llm_config` table (base_url/model/timeout/enabled; absent row = env),
+editable via the **LLM Provider** admin tab. An optional API token is stored **encrypted** in
+`platform_secrets` (KEK-wrapped AES-256-GCM via `approach_a` — a distinct non-user key-domain, NOT
+the tool-bound `credential_store` path) and sent only as a `Bearer` header. **SI-6 (no silent
+unauthenticated downgrade)**: a configured-but-unobtainable token (Vault down / decrypt failure) OR a
+`401/403` from the endpoint is treated identically to "LLM unreachable" → `llm_unavailable`, which in
+prod trips the `REQUIRE_LLM_AUDIT` 503. A no-token local ollama is unaffected. *Reference:
+`services/auditor.py::run_llm_analysis`, `routers/admin_llm.py`, `services/platform_secrets.py`,
+migration `V054`.*
+
 ### 5.5 Submission scan pipeline (self-service onboarding)
 
 A self-service submission carrying a GitHub repo URL is statically scanned **before** it enters the

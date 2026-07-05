@@ -22,7 +22,7 @@ from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
 from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
-from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, admin_prompts, portal, server_registry, catalog, lab_links, entitlements, profiles, submission
+from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, admin_prompts, admin_llm, portal, server_registry, catalog, lab_links, entitlements, profiles, submission
 from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.log_filter import RedactingFilter
@@ -298,6 +298,7 @@ app.include_router(server_registry.router)     # Server registry CRUD + approval
 app.include_router(admin_grants.router)        # Client grants CRUD + OPA sync (Task 4.4b)
 app.include_router(admin_limits.router)        # Per-client limits API (Task 5)
 app.include_router(admin_prompts.router)       # Editable self-service wizard prompts
+app.include_router(admin_llm.router)           # LLM provider config (PRD-0005 R-1)
 app.include_router(catalog.router)            # Principal-scoped server catalog (discovery==invoke)
 app.include_router(entitlements.router)       # Entitlement CRUD (Phase 2.2)
 app.include_router(profiles.router)           # Profile CRUD — self-service + admin (Task 4.2)
