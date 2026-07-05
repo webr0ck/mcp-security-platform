@@ -1982,12 +1982,22 @@ async def _run_tool_discovery(
                 llm_analysis = audit_result.llm_analysis or {}
                 auditor_version = getattr(audit_result, "auditor_version", "1.0.0")
             except LLMAuditRequiredError as exc:
+                # CR-09: register_tool() and update_tool() both fail closed (503,
+                # no row inserted) when REQUIRE_LLM_AUDIT=true and the auditor is
+                # unavailable — discovery must not be the one path that fabricates
+                # a synthetic risk score and inserts anyway. Skip this tool with a
+                # visible reason instead; the submitter/reviewer can retry
+                # discovery once the auditor recovers.
                 logger.error(
-                    "discover_tools auditor unavailable for '%s' — registering without an audit record: %s",
+                    "discover_tools auditor unavailable for '%s' — skipping, not "
+                    "registering without a real audit record: %s",
                     tool_name, exc,
                 )
-                risk_score, risk_level = 20, "medium"
-                static_analysis, llm_analysis, auditor_version = {}, {}, "1.0.0"
+                skipped_tools.append({
+                    "name": tool_name,
+                    "reason": "LLM auditor unavailable and REQUIRE_LLM_AUDIT=true — retry discovery once it recovers",
+                })
+                continue
 
             # SAVEPOINT per tool: a failed INSERT (e.g. the global
             # tool_registry_name_version_unique collision when the same
