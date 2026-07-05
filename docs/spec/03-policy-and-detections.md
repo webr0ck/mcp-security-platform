@@ -472,3 +472,37 @@ Recorded per the engineering standard (a claim without backing code is a bug):
    `docs/rfc/RFC-0001*` file exists at HEAD; the citations are code-comment
    anchors only. `transparency_log.py` cites **RFC-0002 §5.4** and is an explicit
    stub (see SPEC-04).
+
+## 12. Configuration & operations (PRD-0006 R-3)
+
+**Policy/detection config is git-managed files, not a UI** (deliberate — an admin
+console tuning surface is out of scope; only the DB-backed knobs below are live-tunable).
+
+| Config file | Governs | How to change it |
+|---|---|---|
+| `policies/rego/authz.rego` | Deny-by-default entitlement + RBAC + meta-tool gate (the invoke chokepoint) | Edit → **`make sign-policy-bundle`** → restart OPA (prod). Dev: OPA `--watch` auto-reloads. |
+| `policies/rego/anomaly.rego`, `tool_risk.rego` | Anomaly + registration risk rego | Same as above. |
+| `policies/semgrep.yml` | SAST gate over lab MCP servers (`make` H3 gate) | Edit YAML; re-run the gate. |
+| `proxy/vendor/mcp_checker/policies/*` | Submission-time MCP SAST (semgrep pack + tool/prompt validators) | Vendored; re-copy from source (see `VENDORED.md`). |
+| `deployments/poc/wazuh/rules/*.xml`, `decoders/*.xml` | SIEM detections over the audit stream (POC) | Edit XML; reload Wazuh. |
+
+**Footgun (call it out):** in production, editing a `.rego` file **without** re-running
+`make sign-policy-bundle` is a **silent no-op** — OPA keeps loading the previously-signed bundle.
+`make up` runs `sign-policy-bundle` as a prerequisite; a manual rego edit does not.
+
+**Read-only introspection:** `routers/policy.py` (`GET /api/v1/policy`) lists loaded OPA rule
+metadata for `admin`/`auditor`. It has **no write endpoint** — policy is changed via git + bundle
+signing only.
+
+**The only live-tunable (DB-backed, not rego) controls:** per-client rate-limit + anomaly
+sensitivity (`admin_limits.py`, `client_limits` V040) and the LLM provider config
+(`admin_llm.py`, PRD-0005 R-1). Everything else is file-edit + bundle-sign.
+
+**Wazuh dependency (clarified):** Wazuh is an **optional detection consumer of the audit stream**,
+**not** a runtime dependency of the proxy/gateway. The proxy emits redacted audit JSON to stdout
+(single point, `mcp-audit-logger`); a **Filebeat** sidecar (POC topology, `compose.poc.yml`) ships
+it to the Wazuh manager where rules 100001–100003 (`mcp-taint-floor.xml`) match on
+`event_type`/`outcome`/`deny_reasons`. The taint-floor detections are themselves **dark unless
+`TAINT_FLOOR_ENABLED`**. Any SIEM that tails the stdout JSON (or a syslog forward of it) works
+equally — see the README "Connecting a SIEM" section; the JSON schema
+(`mcp_audit_logger/schema.py`) is the stable seam.
