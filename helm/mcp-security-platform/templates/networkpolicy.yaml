@@ -43,6 +43,44 @@ spec:
         - port: 8000
           protocol: TCP
 ---
+# CR-16 (Codex review): the proxy pod previously had NO egress NetworkPolicy at
+# all, so it could reach anything reachable from its network — the exact gap
+# the review flags ("NetworkPolicy egress to required services is incomplete").
+# Always allow OPA + DNS; every other destination (DB, Redis, Vault, MinIO,
+# IdP, git providers, upstream MCP servers) must be added via
+# .Values.networkPolicy.proxyEgress in an environment-specific overlay, since
+# this chart cannot know those destinations generically.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcp-security-platform.fullname" . }}-proxy-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mcp-security-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mcp-security-platform.proxySelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "mcp-security-platform.opaSelectorLabels" . | nindent 14 }}
+      ports:
+        - port: 8181
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- range .Values.networkPolicy.proxyEgress }}
+    - {{- toYaml . | nindent 6 }}
+    {{- end }}
+---
 # OPA receives traffic ONLY from the proxy — never from ingress or other pods
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -242,6 +242,22 @@ ingress:
 # ─────────────────────────────────────────────────────────────────────────────
 networkPolicy:
   enabled: true
+  # CR-15/CR-16 (Codex review): the proxy pod previously had NO egress
+  # NetworkPolicy at all — only OPA's egress was restricted. Add entries here
+  # for your DB/Redis/Vault/MinIO/IdP/Git-provider endpoints; each entry is a
+  # standard NetworkPolicy egress rule (to: [...], ports: [...]). Empty by
+  # default, which still restricts proxy egress to OPA + DNS only — you MUST
+  # add entries for every other backing service or the proxy cannot reach them.
+  proxyEgress: []
+  # Example:
+  # proxyEgress:
+  #   - to:
+  #       - namespaceSelector:
+  #           matchLabels:
+  #             kubernetes.io/metadata.name: data
+  #     ports:
+  #       - port: 5432
+  #         protocol: TCP
 
 # ─────────────────────────────────────────────────────────────────────────────
 # External dependencies (point at managed services in production)
