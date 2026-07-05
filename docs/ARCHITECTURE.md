@@ -185,6 +185,13 @@ Triggered by `invoke_tool()` when a tool's `injection_mode != none`. Crypto, per
   (alias `oauth_user_token`, RFC 8693), `entra_client_credentials` active; `passthrough` /
   `entra_user_token` exist in code but aren't settable via the admin API **(roadmap)**. An unknown
   mode **fails closed**.
+  `kc_token_exchange`'s proxy-side audience allowlist (Codex review CR-03, partially fixed) is
+  `KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES` (comma-separated env setting, default `lab-tickets`) —
+  previously a hardcoded Python-literal frozenset, which meant onboarding any new same-IdP
+  audience required a code change and redeploy. Still deliberately config/env-driven, not
+  DB-driven, so a malicious/buggy `server_registry` row cannot widen the mint. **Open**: no
+  per-server `approved_token_audience`/`approved_token_scopes` columns, no requested-vs-approved
+  reviewer UI, no full exchanged-token actor/delegation claim verification.
 - Resolved token is injected as `Authorization: Bearer …` and **never logged** (redacted).
 
 ### 5.4 Tool-manifest audit (registration time only)
