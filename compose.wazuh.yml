@@ -25,12 +25,17 @@
 # Enable only for named demo scenarios; requires 'admin' role at the proxy layer.
 
 # ── MCP server hardening — matches podman-compose.lab.yml anchor ─────────────
-# pids_limit (not deploy.resources.limits.pids) to match podman-compose.lab.yml's
-# x-mcp-hardening exactly — docker-compose (podman-compose now shells out to a
-# real v2 binary as an external provider) merges same-named x-* extension
-# fields across -f files, and having pids set via BOTH mechanisms anywhere in
-# the merged fragment is rejected: "can't set distinct values on 'pids_limit'
-# and 'deploy.resources.limits.pids'".
+# pids via deploy.resources.limits.pids, NOT the top-level `pids_limit`
+# shorthand — matches podman-compose.lab.yml's x-mcp-hardening exactly.
+# `podman compose` (the built-in subcommand — distinct from the standalone
+# podman-compose Python tool) silently duplicates `pids_limit` into an
+# internal deploy.resources.limits.pids representation and hands
+# docker-compose a merged file with BOTH present, which the real v2 binary
+# rejects: "can't set distinct values on 'pids_limit' and
+# 'deploy.resources.limits.pids'". Any per-service override of pids in THIS
+# file (or podman-compose.lab.yml) must repeat the full deploy.resources.limits
+# block, not just override pids_limit as a sibling key — `<<:` merge does not
+# deep-merge a service's own `deploy:` key into the anchor's `deploy:`.
 x-mcp-hardening: &mcp-hardening
   read_only: true
   security_opt:
@@ -38,12 +43,12 @@ x-mcp-hardening: &mcp-hardening
     - seccomp:${PWD}/sandbox/files/seccomp/mcp-sandbox.json
   cap_drop:
     - ALL
-  pids_limit: 64
   deploy:
     resources:
       limits:
         memory: 256m
         cpus: "0.5"
+        pids: 64
   user: "1001:1001"
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m

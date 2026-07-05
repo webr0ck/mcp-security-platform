@@ -33,12 +33,27 @@ x-mcp-hardening: &mcp-hardening
     - seccomp:${PWD}/sandbox/files/seccomp/mcp-sandbox.json
   cap_drop:
     - ALL
-  pids_limit: 64
+  # pids via deploy.resources.limits.pids, NOT the top-level `pids_limit`
+  # shorthand: `podman compose` (the built-in subcommand — distinct from the
+  # standalone podman-compose Python tool) silently duplicates `pids_limit`
+  # into an internal deploy.resources.limits.pids representation and then
+  # hands docker-compose a merged file with BOTH present, which the real v2
+  # binary rejects: "can't set distinct values on 'pids_limit' and
+  # 'deploy.resources.limits.pids'". Confirmed empirically: removing every
+  # `pids_limit` occurrence in this file was the only thing that made
+  # `podman compose ... config` succeed; the standalone `podman-compose` tool
+  # never had this problem either way. Since lab-setup.sh uses `podman
+  # compose` (see LAB_COMPOSE there), this file must avoid pids_limit
+  # entirely — any per-service override must repeat the FULL deploy.resources
+  # block (memory/cpus + pids), not just override pids_limit as a sibling key,
+  # because `<<: *mcp-hardening` merge does not deep-merge a service's own
+  # `deploy:` key into the anchor's `deploy:` — it replaces it.
   deploy:
     resources:
       limits:
         memory: 256m
         cpus: "0.5"
+        pids: 64
   user: "1001:1001"
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m
@@ -268,12 +283,12 @@ services:
     security_opt:
       - no-new-privileges:true
       - seccomp:${PWD}/sandbox/files/seccomp/mcp-sandbox.json
-    pids_limit: 64
     deploy:
       resources:
         limits:
           memory: 256m
           cpus: "0.5"
+          pids: 64
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
     ports:
@@ -397,7 +412,15 @@ services:
     build: ./lab/mcp-servers/gitea
     image: lab-mcp-gitea:lab
     container_name: lab-mcp-gitea
-    pids_limit: 256  # override hardening default (64): FastMCP streamable_http worker threads
+    # override hardening default (64): FastMCP streamable_http worker threads.
+    # `<<:` merge does not deep-merge `deploy:` — repeat memory/cpus so this
+    # override doesn't silently drop them (see x-mcp-hardening's comment).
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+          pids: 256
     ports:
       - "127.0.0.1:8102:8000"
     environment:
@@ -429,7 +452,13 @@ services:
     build: ./lab/mcp-servers/m365
     image: lab-mcp-m365:lab
     container_name: lab-mcp-m365
-    pids_limit: 512  # override hardening default (64): stateless_http uses more worker threads
+    # override hardening default (64): stateless_http uses more worker threads.
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+          pids: 512
     ports:
       - "127.0.0.1:8103:8000"
     environment:
@@ -504,7 +533,13 @@ services:
     build: ./lab/mcp-servers/rag-assistant
     image: lab-rag-assistant:lab
     container_name: lab-rag-assistant
-    pids_limit: 256  # override hardening default (64): FastMCP streamable_http worker threads
+    # override hardening default (64): FastMCP streamable_http worker threads.
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+          pids: 256
     ports:
       - "127.0.0.1:8104:8000"
     environment:
@@ -565,7 +600,13 @@ services:
       context: ./lab/mcp-servers/notes
     image: lab-mcp-notes:lab
     container_name: lab-mcp-notes
-    pids_limit: 256  # override hardening default (64): FastMCP streamable_http worker threads
+    # override hardening default (64): FastMCP streamable_http worker threads.
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+          pids: 256
     ports:
       - "127.0.0.1:8106:8000"
     environment:
@@ -616,7 +657,13 @@ services:
       context: ./lab/mcp-servers/self-service
     image: lab-mcp-self-service:lab
     container_name: lab-mcp-self-service
-    pids_limit: 256  # override hardening default (64): FastMCP streamable_http worker threads
+    # override hardening default (64): FastMCP streamable_http worker threads.
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+          pids: 256
     ports:
       - "127.0.0.1:8108:8000"
     environment:
