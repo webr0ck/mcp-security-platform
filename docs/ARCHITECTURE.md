@@ -192,7 +192,14 @@ Triggered by `invoke_tool()` when a tool's `injection_mode != none`. Crypto, per
 On tool registration the proxy combines a static OPA score with an Ollama LLM score. If Ollama is
 unreachable the score falls back to **1.0 × static** (no silent downgrade), and in production
 `REQUIRE_LLM_AUDIT=true` makes registration return 503 rather than run fail-open. **Invocations are
-not affected** — the LLM auditor only runs at registration.
+not affected** — the LLM auditor only runs at registration. **Discovery uses the same fail-closed
+rule (Codex review CR-09, fixed)**: `_run_tool_discovery` used to catch the auditor-unavailable
+error and insert the tool anyway with a *fabricated* `risk_score=20`/`medium` — a made-up audit
+record for a tool never actually analyzed, even though INV-005 quarantined it either way. It now
+skips the tool (visible in the discovery response's `skipped_tools`) instead of inserting, matching
+`register_tool`/`update_tool`. **Open**: discovery still has no `MAX_DISCOVERED_TOOLS` /
+`MAX_TOOL_SCHEMA_BYTES` limits or a reserved-name denylist on the raw upstream `tools/list` response
+— it is not yet validated with the same strictness as direct registration.
 
 **Code-scan fusion (PRD-0006 R-1)**: the manifest scorer is blind to the *repo code*, so the
 registration audit applies a **structural risk floor** from the tool's server's mcp_checker submission
