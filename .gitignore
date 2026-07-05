@@ -1,5 +1,10 @@
 *.pyc
 __pycache__/
+# Generated per-run acceptance test artifacts (results) and regenerated-fresh-
+# each-run TLS fixtures (certs, keys) — never source, never commit.
+lab/tests/acceptance/results/
+lab/tests/acceptance/fixtures/certs/
+lab/tests/acceptance/fixtures/certs_for_proxy/
 .env
 .env.lab
 *.egg-info/

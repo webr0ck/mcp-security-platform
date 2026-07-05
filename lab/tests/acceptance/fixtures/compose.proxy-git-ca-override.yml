@@ -1,0 +1,23 @@
+# QA acceptance-test fixture override — NOT part of the normal lab stack.
+#
+# The submission scanner's git clone (proxy/app/services/submission_scanner.py
+# _clone_repo) runs `git clone https://...` inside the `proxy` container with no
+# TLS-verification override. AT3 (lab/tests/acceptance/test_at3_onboarding.py)
+# clones fixture repos from a self-signed-TLS Gitea sidecar (lab-gitea-tls,
+# stood up because the submission scanner's own `git_providers` host-matching
+# regex requires a literal "https://<host>/" with no port suffix, i.e. Gitea's
+# real host:port would never match — see fixtures/README.md). Trusting that
+# self-signed cert via GIT_SSL_CAINFO is scoped to this proxy container only
+# and reverted by removing this override + restarting the proxy without it.
+#
+# NOTE: GIT_SSL_CAINFO pins the ENTIRE container's git-over-https trust store
+# to this one CA file, so it would break a clone from a real public host (e.g.
+# github.com) for as long as this override is applied. No test in this suite
+# clones from a real public host — AT3 uses lab-gitea-tls exclusively — so this
+# is safe for the acceptance run, but do not leave it applied outside a run.
+services:
+  proxy:
+    environment:
+      GIT_SSL_CAINFO: /fixtures-certs/lab-gitea-tls-ca.pem
+    volumes:
+      - ./lab/tests/acceptance/fixtures/certs:/fixtures-certs:ro
