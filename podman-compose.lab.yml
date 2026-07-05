@@ -1021,6 +1021,14 @@ volumes:
   lab-keycloak-data:
 
 # ── Networks ─────────────────────────────────────────────────────────────────
+# NOTE ON ALLOWLIST DRIFT: podman assigns these bridge subnets sequentially from
+# its default 10.89.0.0/16 pool. Adding/removing/reordering a network here
+# RENUMBERS the others' subnets on the next `up`. server_registry rows pin an
+# upstream_allowlist_entry CIDR for the invoke-time DNS-rebind check
+# (services/server_onboarding.revalidate_upstream_ip_at_invoke); a row pinned to a
+# narrow /24 will start denying with `upstream_revalidation_failed` after any
+# renumber. Lab convention is therefore /16 for every lab server row so it tolerates
+# renumbering. If you add a network here, keep lab allowlist entries at 10.89.0.0/16.
 networks:
   lab-net:
     driver: bridge
