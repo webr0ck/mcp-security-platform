@@ -145,7 +145,14 @@ was authorized. R-3 must answer that objection, not just narrow blast radius.
   servers an admin flags; today that is 1 server (self-service). A mis-flip cannot expose write
   ops (DB CHECK) or quarantined servers (status gate).
 
-## R-4 — Codex-driven E2E QA harness
+## R-4 — Codex-driven E2E QA harness  ✅ DONE
+
+**Status:** Scriptable lifecycle implemented + passing — `lab/tests/submission_lifecycle_e2e.sh`,
+**12/12 assertions** (submit → scan w/ mcp_checker findings + declared SBOM + CycloneDX → SoD
+self-approve 403 → carol `security_reviewer` approve → `approved_pending_url` → reviewer SBOM
+download). The Codex interactive generation half is documented in `lab/tests/README-r4-codex.md`
+(manual, because `codex mcp login mcp-gateway` is an interactive PKCE browser flow — no headless
+path by design).
 
 **Design.** Codex CLI (session at `~/Code/test-api-server`), auth via `codex mcp login
 mcp-gateway` (interactive browser copy-paste — the one **manual** prerequisite). Flow: read

@@ -220,6 +220,13 @@ that cannot run fails **closed** (`scan_status='error'`, never `passed`). **The 
 only** — a `passed` scan moves the submission to `awaiting_review`; it does not approve it. Human
 review (§6.5 `security_reviewer`, with self-review forbidden) remains the authoritative gate.
 
+**End-to-end acceptance (PRD-0005 R-4)**: `lab/tests/submission_lifecycle_e2e.sh` drives the whole
+lifecycle over the real gateway — submit (alice) → automated scan (mcp_checker findings + both SBOMs)
+→ segregation-of-duties (submitter self-approve → 403) → approve (carol, `security_reviewer`) →
+`approved_pending_url` → reviewer SBOM download (12 assertions, all passing). The Codex-driven
+generation half (author a server from the wizard answers + push) is a documented manual runbook
+(`lab/tests/README-r4-codex.md`) because `codex mcp login mcp-gateway` is an interactive PKCE flow.
+
 **SBOM at submission (analyst context)**: during the scan the platform parses declared dependencies
 from repo manifests (`parse_sbom_components`, bounded/soft-fail) into `server_registry.sbom_components`
 and **surfaces them on the submission review card** so the reviewer has a component inventory
