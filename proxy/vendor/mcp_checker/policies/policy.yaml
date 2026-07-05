@@ -1,0 +1,155 @@
+version: 1
+metadata:
+  name: "baseline-mcp-policy"
+  owner: "SecOps"
+  severity_threshold: "high"
+
+# Signed tool registry with hash pinning
+registry:
+  - name: "file_browser.read"
+    server_id: "spki:ABCD1234EFGH5678IJKL9012MNOP3456"
+    desc_sha256: "3d7f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3"
+    schema_sha256: "f1aa2b3c4d5e6f7890a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3"
+    version: "1.2.3"
+  - name: "file_browser.write"
+    server_id: "spki:ABCD1234EFGH5678IJKL9012MNOP3456"
+    desc_sha256: "9e8c7d6e5f4a3b2c1d0e9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c"
+    schema_sha256: "b44c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c"
+    version: "1.2.3"
+  - name: "jira.create_issue"
+    server_id: "spki:EFGH5678IJKL9012MNOP3456ABCD1234"
+    desc_sha256: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+    schema_sha256: "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3"
+    version: "2.1.0"
+  - name: "jira.search"
+    server_id: "spki:EFGH5678IJKL9012MNOP3456ABCD1234"
+    desc_sha256: "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4"
+    schema_sha256: "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5"
+    version: "2.1.0"
+  - name: "openai.chat_completion"
+    server_id: "spki:IJKL9012MNOP3456ABCD1234EFGH5678"
+    desc_sha256: "f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6"
+    schema_sha256: "a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7"
+    version: "1.0.5"
+
+# Tool-scoped least-privilege policies (deny by default in rego)
+tools:
+  file_browser:
+    read:
+      canonical_name: "file_browser.read"
+      file_roots:
+        - "/srv/mcp_roots/docs"
+        - "/srv/mcp_roots/shared"
+      allowed_ops: ["read", "stat", "list"]
+      deny_globs: ["**/.ssh/**", "**/.aws/**", "**/.*", "**/.git/**", "**/etc/**", "**/proc/**", "**/sys/**"]
+      max_read_bytes: 524288  # 512KB
+      follow_symlinks: false
+      allow_traversal: false
+      rate_limit_per_minute: 60
+    write:
+      canonical_name: "file_browser.write"
+      file_roots:
+        - "/srv/mcp_roots/uploads"
+        - "/srv/mcp_roots/tmp"
+      allowed_ops: ["write", "create"]
+      deny_globs: ["**/.ssh/**", "**/.aws/**", "**/etc/**", "**/bin/**", "**/usr/bin/**"]
+      max_write_bytes: 10485760  # 10MB
+      follow_symlinks: false
+      allow_traversal: false
+      rate_limit_per_minute: 30
+  
+  jira:
+    create_issue:
+      canonical_name: "jira.create_issue"
+      confirm: true
+      network_egress: ["jira.internal.corp:443"]
+      rate_limit_per_minute: 30
+      max_fields: 50
+    search:
+      canonical_name: "jira.search"
+      network_egress: ["jira.internal.corp:443"]
+      rate_limit_per_minute: 60
+      max_results: 100
+  
+  openai:
+    chat_completion:
+      canonical_name: "openai.chat_completion"
+      allow_internet: false
+      max_tokens: 4096
+      allowed_models: ["gpt-4", "gpt-4o", "gpt-3.5-turbo"]
+      rate_limit_per_minute: 120
+
+# Legacy global allow-lists (deprecated - use tool-scoped above)
+allow_lists:
+  file_roots: []  # Empty - use tool-scoped permissions
+  network_egress: []  # Empty - use tool-scoped permissions
+  tools_allowed:
+    - "file_browser.read"
+    - "file_browser.write?requires_confirmation=true"
+    - "jira.create_issue?requires_confirmation=true"
+    - "jira.search"
+    - "openai.chat_completion"
+
+deny_lists:
+  tools:
+    - "exec_shell"
+    - "run_cmd"
+    - "eval_code"
+    - "eval"
+    - "exec"
+    - "system"
+    - "subprocess"
+    - "open"
+    - "file"
+    - "bash"
+    - "sh"
+    - "python_exec"
+    - "node_exec"
+
+requirements:
+  confirmation_for_write: true
+  redact_pii_in_logs: true
+  authn_required: true
+  authz_model: ["scopes", "rbac"]
+  severity_threshold: "high"
+  rate_limits:
+    enabled: true
+    per_minute: 120
+  data_classifications:
+    - "public"
+    - "internal"
+    - "confidential"
+    - "restricted"
+  container:
+    run_as_non_root: true
+    readonly_filesystem: true
+    no_new_privileges: true
+    memory_limit: "512m"
+    cpu_limit: "1"
+  logging:
+    audit_enabled: true
+    security_events: true
+    log_level: "info"
+    token_storage: false  # No token storage
+    token_broker: true    # Use brokered short-lived tokens
+  security:
+    registry_pinning: true
+    hash_validation: true
+    shadowing_detection: true
+    introspection_validation: true
+
+classifications:
+  write:
+    - "file_browser.write"
+    - "jira.create_issue"
+  exec:
+    - "exec"
+    - "run_cmd"
+    - "eval"
+  read:
+    - "file_browser.read"
+    - "jira.search"
+    - "openai.chat_completion"
+  network:
+    - "jira.create_issue"
+    - "jira.search"

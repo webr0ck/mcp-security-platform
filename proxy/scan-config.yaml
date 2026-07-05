@@ -30,6 +30,31 @@ scanners:
     ecosystems:
       - pip
 
+  # MCP-specific static security checks (vendored mcp_checker engine —
+  # see proxy/vendor/mcp_checker/VENDORED.md). Covers malicious code patterns,
+  # tool poisoning, per-OS attack patterns, SSRF/IMDS, crypto stealers,
+  # obfuscation, and MCP-specific semgrep SAST rules.
+  mcp_checker:
+    enabled: true
+    # Offline static checks only (no Docker/Trivy/registry lookups).
+    # The engine always injects its 8 critical checks (malicious_doc_ast,
+    # windows/linux/macos_attack_patterns, network_exposure, ssrf_patterns,
+    # memory_poisoning, crypto_stealer) on top of this list.
+    checks: "code_static,prompt_schema,tool_schema,package_scripts,oauth_abuse,ide_config_scan,obfuscation_scan,transport_config,default_binding_exposure,unauthenticated_control_plane,silent_exfil_pattern,semgrep"
+    # A FAIL in any of these checks BLOCKS the submission (deliberate-malice
+    # signals). Any other check FAILing is recorded as a warning and routed to
+    # human review rather than auto-blocking (avoids false-positive lockouts on
+    # e.g. transport_config/tool_schema, which fire on benign servers too).
+    block_checks:
+      - malicious_doc_ast
+      - windows_attack_patterns
+      - linux_attack_patterns
+      - macos_attack_patterns
+      - memory_poisoning
+      - crypto_stealer
+      - silent_exfil_pattern
+      - obfuscation_scan
+
   custom_rules:
     - id: no_hardcoded_ips
       description: "Hardcoded IP address — use environment variables or service discovery"

@@ -34,6 +34,7 @@ from sqlalchemy import text
 from app.core.database import AsyncSessionLocal
 from app.services.admin_audit import emit_admin_config_event
 from app.services.scaffold_generator import generate_prompts, generate_scaffold
+from app.services import prompt_store
 from app.services.server_onboarding import InvalidOnboardingConfig, validate_upstream_url_ssrf
 from app.services.submission_scanner import GITHUB_CLONE_ACCOUNT, scan_submission
 
@@ -358,7 +359,8 @@ async def get_design_prompts(server_id: str, request: Request) -> JSONResponse:
     owner = _client_id(request)
     sub = await _get_submission(server_id, owner_sub=owner)
     mode = sub.get("injection_mode") or "none"
-    return JSONResponse({"server_id": server_id, "injection_mode": mode, "prompts": generate_prompts(mode)})
+    prompts = await prompt_store.prompts_for_mode(mode)
+    return JSONResponse({"server_id": server_id, "injection_mode": mode, "prompts": prompts})
 
 
 @router.get("/api/v1/submissions/{server_id}/scaffold")
@@ -728,8 +730,8 @@ async def design_assist(request: Request, mode: Optional[str] = None) -> JSONRes
             "all_modes": list(_VALID_MODES),
         })
 
-    # Mode-specific design questions
-    prompts = generate_prompts(mode)
+    # Mode-specific design questions (admin-overridable via prompt_store)
+    prompts = await prompt_store.prompts_for_mode(mode)
     return JSONResponse({
         "stage": "design_questions",
         "injection_mode": mode,

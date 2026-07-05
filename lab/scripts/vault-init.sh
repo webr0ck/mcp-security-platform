@@ -21,30 +21,7 @@ set -euo pipefail
 #   5. Writes lab service config to secret/mcp/lab-config
 # =============================================================================
 
-VAULT_ADDR="${VAULT_ADDR:-http://localhost:8200}"
-VAULT_TOKEN="${VAULT_TOKEN:-lab-root-token}"
-export VAULT_ADDR VAULT_TOKEN
-
-# ---------------------------------------------------------------------------
-# Resolve vault executor — host CLI preferred, podman exec fallback
-# ---------------------------------------------------------------------------
 VAULT_CONTAINER="mcp-vault"
-
-if command -v vault &>/dev/null; then
-    VAULT_EXEC="vault"
-    echo "[vault-init] Using host vault CLI"
-elif podman exec "${VAULT_CONTAINER}" vault version &>/dev/null 2>&1; then
-    # Run vault commands inside the container
-    VAULT_EXEC="podman exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=${VAULT_TOKEN:-lab-root-token} ${VAULT_CONTAINER} vault"
-    # Health check against container-internal address when using exec
-    HEALTH_URL="http://127.0.0.1:8200/v1/sys/health"
-    echo "[vault-init] vault CLI not on host — using 'podman exec ${VAULT_CONTAINER} vault'"
-else
-    echo "[vault-init] ERROR: vault CLI not found on host and container '${VAULT_CONTAINER}' is not running." >&2
-    echo "[vault-init] Install vault CLI:  brew install hashicorp/tap/vault" >&2
-    echo "[vault-init] Or start the stack: make -f Makefile.lab lab-up" >&2
-    exit 1
-fi
 
 # ---------------------------------------------------------------------------
 # Load .env.lab if present (project root or script directory)
@@ -62,20 +39,40 @@ if [[ -f "${PROJECT_ROOT}/.env.lab" ]]; then
     set +a
 fi
 
-# Re-export after potential .env.lab override
+# Resolve after .env.lab so its VAULT_TOKEN/VAULT_ADDR are honoured (the old
+# order baked the pre-.env.lab defaults into the exec command line).
 VAULT_ADDR="${VAULT_ADDR:-http://localhost:8200}"
 VAULT_TOKEN="${VAULT_TOKEN:-lab-root-token}"
 export VAULT_ADDR VAULT_TOKEN
 
 # ---------------------------------------------------------------------------
+# Resolve vault executor — container preferred (its internal address is always
+# http://127.0.0.1:8200 regardless of host port remapping; host VAULT_ADDR
+# often isn't, e.g. vault is published on 8201 here), host CLI fallback.
+# ---------------------------------------------------------------------------
+if podman exec "${VAULT_CONTAINER}" vault version &>/dev/null; then
+    VAULT_EXEC="podman exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=${VAULT_TOKEN} ${VAULT_CONTAINER} vault"
+    HEALTH_CMD=(podman exec "${VAULT_CONTAINER}" wget -q -O /dev/null http://127.0.0.1:8200/v1/sys/health)
+    echo "[vault-init] Using 'podman exec ${VAULT_CONTAINER} vault'"
+elif command -v vault &>/dev/null; then
+    VAULT_EXEC="vault"
+    HEALTH_CMD=(curl -sf "${VAULT_ADDR}/v1/sys/health")
+    echo "[vault-init] Container '${VAULT_CONTAINER}' not running — using host vault CLI at ${VAULT_ADDR}"
+else
+    echo "[vault-init] ERROR: container '${VAULT_CONTAINER}' is not running and vault CLI not found on host." >&2
+    echo "[vault-init] Start the stack: make -f Makefile.lab lab-up" >&2
+    echo "[vault-init] Or install vault CLI:  brew install hashicorp/tap/vault" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Wait for Vault health
 # ---------------------------------------------------------------------------
-HEALTH_URL="${VAULT_ADDR:-http://localhost:8200}/v1/sys/health"
 MAX_WAIT=60
 ELAPSED=0
 
-echo "[vault-init] Waiting for Vault at ${VAULT_ADDR} ..."
-until curl -sf "${HEALTH_URL}" > /dev/null 2>&1; do
+echo "[vault-init] Waiting for Vault ..."
+until "${HEALTH_CMD[@]}" > /dev/null 2>&1; do
     if [[ ${ELAPSED} -ge ${MAX_WAIT} ]]; then
         echo "[vault-init] ERROR: Vault did not become ready within ${MAX_WAIT}s." >&2
         exit 1

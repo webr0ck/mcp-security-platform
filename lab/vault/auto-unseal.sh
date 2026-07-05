@@ -71,6 +71,17 @@ fi
 # 6. Ensure KV v2 is mounted at secret/ (idempotent; the seeder also tolerates this).
 VAULT_TOKEN="$FIXED_TOKEN" vault secrets enable -path=secret kv-v2 >/dev/null 2>&1 || true
 
+# 6.5. Ensure the broker master secret (KEK) exists. Seeding it here — not only in
+# lab/scripts/vault-init.sh — makes a clean start / restart self-healing: the proxy
+# 500s every OIDC callback if this path 404s. NEVER rotate an existing value
+# (would orphan already-encrypted credential_store rows).
+if ! VAULT_TOKEN="$FIXED_TOKEN" vault kv get secret/mcp/broker-master >/dev/null 2>&1; then
+  KEK="$(head -c 32 /dev/urandom | od -An -v -tx1 | tr -d ' \n')"
+  VAULT_TOKEN="$FIXED_TOKEN" vault kv put secret/mcp/broker-master value="$KEK" >/dev/null
+  unset KEK
+  log "broker master secret seeded at secret/mcp/broker-master"
+fi
+
 log "ready — Vault unsealed and bootstrap token active; handing off to server (pid $VPID)"
 # 7. Hand off: become a thin supervisor of the server process.
 wait "$VPID"

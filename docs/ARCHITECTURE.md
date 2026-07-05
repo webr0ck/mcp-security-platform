@@ -37,12 +37,12 @@ Three enforcement layers sit in front of network-isolated backends.
  AI agent / MCP client ──TLS 1.3 (mTLS on /api/v1/tools/*)──┐
                                                             ▼
 ┌──────────────────── LAYER 1 — GATEWAY (Nginx + ModSecurity) ───────────────────┐
-│ TLS 1.3 termination · mTLS client-cert enforcement · OWASP-CRS WAF              │
+│ TLS 1.3 termination · mTLS client-cert enforcement · OWASP-CRS WAF             │
 │ rate limit per client-CN + per source-IP · structured JSON access log          │
-│ X-Client-Cert-CN set for the proxy; blanked outside /api/v1/tools/*             │
+│ X-Client-Cert-CN set for the proxy; blanked outside /api/v1/tools/*            │
 └───────────────────────────────────┬────────────────────────────────────────────┘
                                      ▼  (proxy honours the CN header only from trusted-proxy IPs)
-┌──────────────────── LAYER 2 — SECURITY PROXY (FastAPI / Python 3.12) ───────────┐
+┌──────────────────── LAYER 2 — SECURITY PROXY (FastAPI / Python 3.12) ────────────┐
 │ ① Identity        AuthMiddleware: mTLS CN (post-verify) / OIDC session / API key │
 │ ② RBAC            role check from role_assignments                               │
 │ ③ Quarantine      pre-policy gate (INV-005) on tool quarantine state             │
@@ -50,7 +50,7 @@ Three enforcement layers sit in front of network-isolated backends.
 │ ⑤ Credentials     broker resolves & injects per-identity; client never sees it   │
 │ ⑥ Audit           synchronous SHA-256 event (HMAC-signed in production)          │
 │ Registration-time: CycloneDX SBOM · OPA-static + Ollama LLM manifest audit       │
-└───────────────────────────────────┬────────────────────────────────────────────┘
+└───────────────────────────────────┬──────────────────────────────────────────────┘
         ┌──────────────┬─────────────┼──────────────┬──────────────┐
         ▼              ▼             ▼              ▼              ▼
    OPA sidecar     PostgreSQL 16   Redis 7       Ollama        Vault (KMS)
@@ -59,10 +59,10 @@ Three enforcement layers sit in front of network-isolated backends.
    default         credential_store
                                      │ structured audit events (append-only)
                                      ▼
-┌──────────────────── LAYER 3 — OBSERVABILITY ────────────────────────────────────┐
-│ mcp-audit-logger: SHA-256/event · redaction (tested) → Loki/Promtail · Grafana   │
+┌──────────────────── LAYER 3 — OBSERVABILITY ──────────────────────────────────────┐
+│ mcp-audit-logger: SHA-256/event · redaction (tested) → Loki/Promtail · Grafana    │
 │ Alertmanager · MinIO archival (Object-Lock GOVERNANCE) · daily compliance check   │
-└──────────────────────────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Backend MCP servers are **not** on this diagram's trust plane: they sit behind the proxy with no
@@ -176,6 +176,34 @@ unreachable the score falls back to **1.0 × static** (no silent downgrade), and
 `REQUIRE_LLM_AUDIT=true` makes registration return 503 rather than run fail-open. **Invocations are
 not affected** — the LLM auditor only runs at registration.
 
+### 5.5 Submission scan pipeline (self-service onboarding)
+
+A self-service submission carrying a GitHub repo URL is statically scanned **before** it enters the
+human review queue (`services/submission_scanner.py`, background task). Four scanners run:
+
+- **trufflehog** — verified secrets only (`--only-verified`); a live-confirmed secret blocks.
+- **pip-audit** — Python-dependency CVEs; blocks at `critical`. No-ops on non-pip repos (recorded as
+  an informational note, not a false "ran").
+- **custom regex rules** — `scan-config.yaml` patterns (hardcoded IPs, credential logging, `eval`);
+  advisory by default.
+- **mcp_checker** — the vendored MCP-specific static engine (`proxy/vendor/mcp_checker/`, sourced
+  from the `mcp-security-research` audit engine): malicious-code patterns, tool poisoning, per-OS
+  attack patterns, SSRF/IMDS, crypto stealers, obfuscation, and an MCP-specific **semgrep** SAST
+  rule pack. Runs semgrep in an isolated venv, fully offline.
+
+**Gate semantics**: a FAIL in a `block_checks` check (deliberate-malice signals: `malicious_doc_ast`,
+`*_attack_patterns`, `memory_poisoning`, `crypto_stealer`, `silent_exfil_pattern`, `obfuscation_scan`)
+**blocks** the submission; any other FAIL is a **warning** routed to human review. A scanner binary
+that cannot run fails **closed** (`scan_status='error'`, never `passed`). **The scan is a pre-filter
+only** — a `passed` scan moves the submission to `awaiting_review`; it does not approve it. Human
+review (§6.5 `security_reviewer`, with self-review forbidden) remains the authoritative gate.
+
+**SBOM at submission (analyst context)**: during the scan the platform parses declared dependencies
+from repo manifests (`parse_sbom_components`, bounded/soft-fail) into `server_registry.sbom_components`
+and **surfaces them on the submission review card** so the reviewer has a component inventory
+immediately — before the signed per-tool CycloneDX SBOM (INV-006), which is only generated at
+approval time. The declared-dep inventory is display-only context, never a gate.
+
 ---
 
 ## 6. Policy & authorization (OPA)
@@ -265,6 +293,20 @@ revoked) — a real lockout guard, not just a self-lockout check, verified live 
 **UI**: a new "RBAC role assignments" table + grant form inside the existing Access tab
 (`routers/portal.py::fragment_admin_access`) — no new nav tab, follows the existing
 `fragment_admin_*` HTMX-fragment convention.
+
+### 6.7 Wizard Prompts panel (in-platform, admin-only)
+
+The self-service submission wizard's per-mode design questions ("list every action…", "which
+scopes…") default to code (`services/scaffold_generator.py` `_PROMPTS`/`_SHARED_PROMPTS`) but are
+**admin-overridable at runtime**. `wizard_prompts` (`V052`) stores only overrides — an absent row
+means "use the code default" (same NULL/absent-means-default convention as `client_limits`).
+`services/prompt_store.py` overlays overrides on defaults at a single read choke point,
+`prompts_for_mode()`, which both `GET /api/v1/submissions/{id}/prompts` and `GET /api/v1/design-assist`
+call; a 30s cache bounds the DB read. **Endpoints** (`routers/admin_prompts.py`, gated
+`admin`/`platform_admin`): `GET /api/v1/admin/prompts`, `PUT /api/v1/admin/prompts/{key}`,
+`DELETE /api/v1/admin/prompts/{key}` (reset to default). **UI**: a new "Wizard Prompts" admin nav tab
+(`portal.py::fragment_admin_prompts`), prompts grouped by auth mode with Save / Reset-to-default and
+an "overridden" badge. Mutations flow through the HMAC-signed admin audit chain.
 
 ---
 

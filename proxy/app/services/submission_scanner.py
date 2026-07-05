@@ -73,10 +73,12 @@ def _clone_url_with_auth(github_url: str) -> str:
     return github_url
 
 
-async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[int, str, str]:
+async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120,
+               env: dict | None = None) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=cwd,
+        env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -210,6 +212,135 @@ async def _run_custom_rules(repo_path: str, config: dict) -> list[dict]:
                         })
                         break  # one finding per file per rule is enough
     return findings
+
+
+# Vendored mcp_checker engine (proxy/vendor/mcp_checker). Runs MCP-specific
+# static checks the secret/CVE/regex scanners structurally cannot see:
+# malicious code patterns, tool poisoning, SSRF/IMDS, crypto stealers, and
+# MCP-aware semgrep SAST. See VENDORED.md for provenance.
+_MCP_CHECKER_DIR = Path(__file__).parents[2] / "vendor" / "mcp_checker"
+_MCP_CHECKER_PY = _MCP_CHECKER_DIR / "mcp_checker.py"
+
+
+async def _run_mcp_checker(repo_path: str, config: dict) -> list[dict]:
+    """Run the vendored mcp_checker static pass against an already-cloned repo."""
+    cfg = config.get("scanners", {}).get("mcp_checker", {})
+    if not cfg.get("enabled", True):
+        return []
+    if not _MCP_CHECKER_PY.is_file():
+        logger.error("mcp_checker not vendored at %s; MCP scan did not run", _MCP_CHECKER_PY)
+        return [{
+            "scanner": "mcp_checker", "severity": "critical", "block": False,
+            "missing_tool": True, "file": "", "line": 0,
+            "message": "mcp_checker engine not found in scanner environment; MCP security scan did not run",
+        }]
+
+    checks = cfg.get("checks", "code_static,tool_schema,semgrep")
+    block_checks = set(cfg.get("block_checks", []))
+
+    # mcp_checker writes its report under <projects-dir>/<project>/artifacts/.
+    # Point it at a throwaway dir and scan the local clone (no re-clone).
+    with tempfile.TemporaryDirectory(prefix="mcp_checker_") as proj_dir:
+        # semgrep (spawned by mcp_checker) writes a settings file under $HOME and
+        # phones home for version/metrics by default. The proxy runs as a
+        # read-only-home non-root user, so give it a writable HOME and force it
+        # fully offline — the scanner must not leak submitted-repo metadata.
+        env = os.environ.copy()
+        env["HOME"] = proj_dir
+        env["SEMGREP_SETTINGS_FILE"] = os.path.join(proj_dir, "semgrep_settings.yml")
+        env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
+        env["SEMGREP_SEND_METRICS"] = "off"
+        rc, stdout, stderr = await _run(
+            [
+                "python3", str(_MCP_CHECKER_PY),
+                "-u", repo_path,
+                "--project-name", "submission",
+                "--projects-dir", proj_dir,
+                "--checks", checks,
+            ],
+            cwd=str(_MCP_CHECKER_DIR),
+            timeout=300,
+            env=env,
+        )
+        report_path = Path(proj_dir) / "submission" / "artifacts" / "mcp-checker-report.json"
+        if not report_path.is_file():
+            logger.error("mcp_checker produced no report (rc=%s): %s", rc, (stderr or stdout)[-500:])
+            return [{
+                "scanner": "mcp_checker", "severity": "critical", "block": False,
+                "missing_tool": True, "file": "", "line": 0,
+                "message": f"mcp_checker did not produce a report (exit {rc}); MCP security scan did not complete",
+            }]
+        try:
+            report = json.loads(report_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.error("mcp_checker report unreadable: %s", exc)
+            return [{
+                "scanner": "mcp_checker", "severity": "critical", "block": False,
+                "missing_tool": True, "file": "", "line": 0,
+                "message": "mcp_checker report was unreadable; MCP security scan did not complete",
+            }]
+
+    findings: list[dict] = []
+    # Infra checks that FAIL for reasons unrelated to the repo's security posture.
+    _infra = {"clone", "checkout", "lint", "rego", "trivy"}
+    for res in report.get("results", []):
+        if res.get("status") != "FAIL" or res.get("name") in _infra:
+            continue
+        name = res.get("name", "unknown")
+        hits = _mcp_checker_hits(res.get("details", {}))
+        blocks = name in block_checks
+        for h in hits[:20]:  # cap per-check to keep the report bounded
+            findings.append({
+                "scanner": "mcp_checker",
+                "check": name,
+                "severity": "critical" if blocks else "warning",
+                "block": blocks,
+                "file": _rel_to_repo(h.get("file", ""), repo_path),
+                "line": h.get("line", 0),
+                "message": h.get("message") or f"{name}: {h.get('detail', 'MCP security check failed')}",
+            })
+    return findings
+
+
+def _rel_to_repo(path: str, repo_path: str) -> str:
+    """mcp_checker emits absolute paths inside its own clone dir; relativise."""
+    if not path:
+        return ""
+    try:
+        # mcp_checker clones into <projects-dir>/submission/repo/... — strip to
+        # the basename-ward portion after 'repo/' when present, else basename.
+        p = str(path)
+        if "/repo/" in p:
+            return p.split("/repo/", 1)[1]
+        return os.path.basename(p)
+    except Exception:
+        return path
+
+
+def _mcp_checker_hits(details: dict) -> list[dict]:
+    """Normalise the varied per-check detail shapes into {file,line,detail,message}."""
+    out: list[dict] = []
+    # code_static / semgrep style: findings -> [{file, hits:[{line,sig}]}]
+    for f in details.get("findings", []) or []:
+        file = f.get("file", "")
+        inner = f.get("hits", [])
+        if inner:
+            for h in inner:
+                out.append({"file": file, "line": h.get("line", 0),
+                            "detail": h.get("sig") or h.get("message", ""),
+                            "message": f.get("message") or h.get("message", "")})
+        else:
+            out.append({"file": file, "line": f.get("line", 0),
+                        "detail": f.get("message", ""), "message": f.get("message", "")})
+    # tool_schema style: violations -> [{tool, type, parameter, line, file}]
+    for v in details.get("violations", []) or []:
+        out.append({"file": v.get("file", ""), "line": v.get("line", 0),
+                    "detail": v.get("type", ""),
+                    "message": f"{v.get('type','violation')}: tool {v.get('tool','?')}"
+                               f"{' param ' + v['parameter'] if v.get('parameter') else ''}"})
+    if not out:  # a FAIL with an unrecognised shape still counts — don't drop it
+        out.append({"file": "", "line": 0, "detail": "", "message": ""})
+    return out
 
 
 async def _run_pip_audit(repo_path: str, config: dict) -> list[dict]:
@@ -525,14 +656,16 @@ async def scan_submission(server_id: str, github_url: str) -> None:
             await session.commit()
 
         findings: list[dict] = []
-        th, custom, pip_f = await asyncio.gather(
+        th, custom, pip_f, mcp_f = await asyncio.gather(
             _run_trufflehog(repo_path, config),
             _run_custom_rules(repo_path, config),
             _run_pip_audit(repo_path, config),
+            _run_mcp_checker(repo_path, config),
         )
         findings.extend(th)
         findings.extend(custom)
         findings.extend(pip_f)
+        findings.extend(mcp_f)
 
         blocked = any(f.get("block") for f in findings)
         missing_tool = any(f.get("missing_tool") for f in findings)
@@ -584,12 +717,13 @@ async def scan_repo(github_url: str) -> tuple[list[dict], str]:
                 "message": f"Rescan clone failed: {clone_err}",
             }], "blocked")
 
-        th, custom, pip_f = await asyncio.gather(
+        th, custom, pip_f, mcp_f = await asyncio.gather(
             _run_trufflehog(repo_path, config),
             _run_custom_rules(repo_path, config),
             _run_pip_audit(repo_path, config),
+            _run_mcp_checker(repo_path, config),
         )
-        findings = th + custom + pip_f
+        findings = th + custom + pip_f + mcp_f
         blocked = any(f.get("block") for f in findings)
         missing_tool = any(f.get("missing_tool") for f in findings)
         status = "blocked" if blocked else ("error" if missing_tool else "passed")

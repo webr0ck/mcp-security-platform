@@ -31,6 +31,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
        | sh -s -- -b /usr/local/bin v3.82.13
 
+# semgrep — SAST engine for the vendored mcp_checker MCP rule pack
+# (proxy/vendor/mcp_checker/policies/semgrep.yml). Without it the SAST check
+# SKIPs; the scanner treats a missing engine as "did not run", not a pass.
+#
+# Installed in an ISOLATED venv, not the app env, because:
+#  - semgrep's opentelemetry dep imports pkg_resources, which setuptools 81+
+#    removed and slim Python omits — the venv pins setuptools<81 where nothing
+#    else can upgrade it (the app env resolves setuptools 83).
+#  - it keeps semgrep's heavy transitive deps from colliding with proxy deps.
+# The venv's own python is on the semgrep shebang; only the launcher is exposed.
+RUN python3 -m venv /opt/semgrep-venv \
+    && /opt/semgrep-venv/bin/pip install --no-cache-dir "setuptools<81" semgrep==1.86.0 \
+    && ln -sf /opt/semgrep-venv/bin/semgrep /usr/local/bin/semgrep \
+    && ln -sf /opt/semgrep-venv/bin/pysemgrep /usr/local/bin/pysemgrep
+
 # ─── Builder ──────────────────────────────────────────────────────────────────
 FROM base AS builder
 
@@ -73,6 +88,9 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application source
 COPY --chown=appuser:appgroup proxy/app/ /app/app/
+# Vendored mcp_checker engine — MCP-specific static security scan (see
+# proxy/vendor/mcp_checker/VENDORED.md). Dev target gets this via the bind mount.
+COPY --chown=appuser:appgroup proxy/vendor/ /app/vendor/
 
 USER appuser
 EXPOSE 8000

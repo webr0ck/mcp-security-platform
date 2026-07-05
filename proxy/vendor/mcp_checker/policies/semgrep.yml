@@ -1,0 +1,1364 @@
+# Semgrep multi-language rules for MCP servers (Python, TypeScript/JS, Go)
+# Exclude deps/builds
+# Run: semgrep --config semgrep.yml --exclude node_modules --exclude dist --exclude build --exclude vendor
+
+rules:
+  #######################################################################
+  # -------- PYTHON (kept from your file; trimmed for brevity) -------- #
+  #######################################################################
+  - id: fastmcp-tool-rce
+    message: Dangerous function found inside a FastMCP @mcp.tool() function. Possible RCE risk if $X includes untrusted input.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+            ...
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: exec($X)
+          - pattern: os.system($X)
+          - pattern: subprocess.run($X, ...)
+          - pattern: subprocess.call($X, ...)
+
+  - id: langchain-tool-rce
+    message: Dangerous function found inside a LangChain @tool function. Potential RCE if input is unsanitized.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern: |
+          @tool
+          def $FUNC(...):
+            ...
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: exec($X)
+          - pattern: os.system($X)
+          - pattern: subprocess.run($X, ...)
+          - pattern: subprocess.call($X, ...)
+
+  - id: crewai-task-rce
+    message: Dangerous code execution inside a CrewAI @task function. RCE risk if $X contains unsanitized input.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern: |
+          @task
+          def $FUNC(...):
+            ...
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: exec($X)
+          - pattern: os.system($X)
+          - pattern: subprocess.run($X, ...)
+          - pattern: subprocess.call($X, ...)
+
+  # MCP SPECIFIC VULNERABILITIES
+
+  - id: prompt-injection-system-override
+    message: Prompt injection vulnerability detected. System override patterns can allow attackers to manipulate LLM behavior.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              "SYSTEM OVERRIDE"
+          - pattern: |
+              "Ignore above instructions"
+          - pattern: |
+              "Ignore all previous"
+          - pattern: |
+              "New instructions:"
+          - pattern: |
+              "ACT AS:"
+          - pattern: |
+              "You are now"
+          - pattern: |
+              "Forget everything"
+
+  - id: prompt-injection-user-input-concatenation
+    message: Direct user input concatenation in prompts - high risk of prompt injection attacks.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @mcp.tool()
+              def $FUNC(..., $INPUT: str):
+                ...
+                f"...{$INPUT}..."
+          - pattern: |
+              @mcp.tool()
+              def $FUNC(..., $INPUT: str):
+                ...
+                "... " + $INPUT + " ..."
+          - pattern: |
+              @mcp.tool()
+              def $FUNC(..., $INPUT: str):
+                ...
+                format(..., $INPUT)
+          - pattern: |
+              @mcp.tool()
+              def $FUNC(..., $INPUT: str):
+                ...
+                "...".format($INPUT)
+          - pattern: |
+              async def $FUNC(..., $INPUT: str):
+                ...
+                f"...{$INPUT}..."
+          - pattern: |
+              async def $FUNC(..., arguments: dict):
+                ...
+                $INPUT = arguments.get("...", "")
+                ...
+                f"...{$INPUT}..."
+
+  - id: prompt-injection-resource-exposure
+    message: User-controlled data exposed as resources without sanitization - potential prompt injection vector.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @mcp.resource()
+              def $FUNC(..., $INPUT: str):
+                ...
+                return $INPUT
+          - pattern: |
+              @mcp.resource()
+              def $FUNC(...):
+                ...
+                return user_content
+          - pattern: |
+              @mcp.resource()
+              def $FUNC(...):
+                ...
+                return request_data
+          - pattern: |
+              @mcp.resource() 
+              def $FUNC(...):
+                ...
+                return client_input
+          - pattern: |
+              async def $FUNC(..., uri: str):
+                ...
+                $USER_DATA = uri.replace("...", "")
+                ...
+                return f"...{$USER_DATA}..."
+          - pattern: |
+              async def handle_read_resource(uri: str):
+                ...
+                if uri.startswith("..."):
+                  $CONTENT = uri.replace("...", "")
+                  return f"...{$CONTENT}..."
+
+  - id: prompt-injection-template-vulnerability
+    message: Prompt template includes user-controlled variables without validation - injection risk.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: |
+              def $FUNC(..., $INPUT: str):
+                ...
+                template = "..."
+                return template.format($INPUT)
+          - pattern: |
+              def $FUNC(..., $INPUT: str):
+                ...
+                prompt = f"...{$INPUT}..."
+                return prompt
+          - pattern: |
+              async def $FUNC(..., arguments: dict):
+                ...
+                $CONTENT = arguments.get("...", "")
+                ...
+                return [types.TextContent(type="text", text=f"...{$CONTENT}...")]
+
+  - id: tool-poisoning-description
+    message: Tool poisoning detected. Malicious instructions embedded in tool descriptions can manipulate LLM behavior.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern: |
+          @mcp.tool(..., description="$DESC")
+      - metavariable-regex:
+          metavariable: $DESC
+          regex: (ignore|override|system|admin|bypass|escalate|privilege)
+
+  - id: excessive-permissions-file-access
+    message: Excessive file permissions detected. Tool can access sensitive files or entire filesystem.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @mcp.tool()
+              def $FUNC(...):
+                ...
+                open("/", ...)
+          - pattern: |
+              @mcp.tool()
+              def $FUNC(...):
+                ...
+                open("/etc", ...)
+          - pattern: |
+              @mcp.tool()
+              def $FUNC(...):
+                ...
+                open("/home", ...)
+          - pattern: |
+              @mcp.tool()
+              def $FUNC(...):
+                ...
+                os.walk("/")
+          - pattern: |
+              @mcp.tool()
+              def $FUNC(...):
+                ...
+                glob.glob("/**")
+
+  - id: rug-pull-tool-mutation
+    message: Tool definition mutation detected. Dynamic tool changes can enable rug pull attacks.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              setattr($TOOL, "__name__", $X)
+          - pattern: |
+              $TOOL.__doc__ = $X
+          - pattern: |
+              update_wrapper($TOOL, $X)
+
+  - id: tool-shadowing-override
+    message: Tool shadowing detected. Overriding legitimate tools with malicious implementations.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              def $NAME(...):
+                ...
+              globals()["$NAME"] = $FUNC
+          - pattern: |
+              sys.modules[$MODULE].$NAME = $FUNC
+
+  - id: indirect-prompt-injection-data-source
+    message: Indirect prompt injection risk. External data sources not sanitized before LLM processing.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: |
+              requests.get($URL).text + $PROMPT
+          - pattern: |
+              open($FILE).read() + $PROMPT
+          - pattern: |
+              $EXTERNAL_DATA.format(**$USER_INPUT)
+
+  - id: token-theft-insecure-storage
+    message: Token theft vulnerability detected. Credentials stored insecurely in plaintext files - matches vulnerablemcp patterns.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              os.environ["TOKEN"] = $TOKEN
+          - pattern: |
+              os.environ["API_KEY"] = $TOKEN
+          - pattern: |
+              open("token.txt", "w").write($TOKEN)
+          - pattern: |
+              open("credentials.json", "w").write($TOKEN)
+          - pattern: |
+              json.dump({"token": $TOKEN}, open("...", "w"))
+          - pattern: |
+              json.dump({"api_key": $TOKEN}, open("...", "w"))
+          - pattern: |
+              json.dump({"access_token": $TOKEN}, open("...", "w"))
+          - pattern: |
+              json.dump({"refresh_token": $TOKEN}, open("...", "w"))
+          - pattern: |
+              pickle.dump($TOKEN, open("...", "wb"))
+          - pattern: |
+              yaml.dump({"token": $TOKEN}, open("...", "w"))
+    # Exclude benign patterns that cause false-positives
+    # - UI print statements and user prompts
+    # - Logging messages (not actual token data)
+    # - Setup wizard prompts
+    # - Documentation strings
+    # - Error messages
+    # - Configuration examples
+    # - Template strings without actual tokens
+
+  - id: remote-access-control-shell
+    message: Remote access control vulnerability. Direct shell access or command execution.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              os.system($USER_INPUT)
+          - pattern: |
+              subprocess.run($USER_INPUT, shell=True)
+          - pattern: |
+              subprocess.call($USER_INPUT, shell=True)
+          - pattern: |
+              subprocess.Popen($USER_INPUT, shell=True)
+
+  - id: multi-vector-attack-combination
+    message: Multiple vulnerability patterns detected. Potential for multi-vector attacks.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+            ...
+            os.system($INPUT)
+            ...
+            open($FILE).read()
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+            ...
+            eval($INPUT)
+            ...
+            requests.get($URL)
+
+  # Non-exploitable classic file IO (should never be ERROR)
+  - id: classic-file-io-benign
+    message: Classic file IO pattern; review if combined with dynamic execution (benign by default).
+    languages: [python]
+    severity: INFO
+    patterns:
+      - pattern: open($PATH, ...)
+
+  # Tool function making outbound HTTP to LLMs with raw user input concatenation
+  - id: tool-outbound-llm-risk
+    message: Tool function sends raw user input to external LLM APIs - potential data exfiltration.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+            ...
+            requests.post(..., json={"messages": [{"role": "user", "content": $USER_INPUT}]})
+
+  # Embedding or vector data in logs (potential leakage)
+  - id: embedding-logging-leak
+    message: Raw embedding/vector data found in logs - potential information leakage.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: logging.info($EMBEDDING)
+          - pattern: logging.debug($EMBEDDING)
+          - pattern: print($EMBEDDING)
+      - metavariable-regex:
+          metavariable: $EMBEDDING
+          regex: (embedding|vector|embedding_|\[.*\].*float)
+
+  # Prompt injection markers in strings
+  - id: prompt-injection-markers
+    message: Potential prompt injection patterns detected in string literals.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: |
+              "SYSTEM OVERRIDE"
+          - pattern: |
+              "Ignore above instructions"
+          - pattern: |
+              "Ignore all previous"
+          - pattern: |
+              "New instructions:"
+          - pattern: |
+              "ACT AS:"
+          - pattern: |
+              "You are now"
+          - pattern: |
+              "Forget everything"
+
+  # Additional patterns based on vulnerablemcp repository
+  - id: mcp-tool-poisoning-hidden-instructions
+    message: Tool poisoning detected - hidden instructions in tool descriptions (matches vulnerablemcp patterns).
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @mcp.tool(..., description="$DESC")
+          - pattern: |
+              @tool(..., description="$DESC")
+      - metavariable-regex:
+          metavariable: $DESC
+          regex: (ignore|override|system|admin|bypass|escalate|privilege|download|execute|run|wget|curl|ssh|cat|\.ssh|backdoor|malicious|evil|hack|exploit)
+
+  - id: mcp-ansi-terminal-escape-injection
+    message: ANSI terminal escape codes detected - potential hidden instruction injection (matches vulnerablemcp patterns).
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $ESCAPE = "\x1b[..."
+          - pattern: |
+              $ESCAPE = "\033[..."
+          - pattern: |
+              print(..., "\x1b[...", ...)
+          - pattern: |
+              print(..., "\033[...", ...)
+
+  - id: mcp-session-id-exposure
+    message: Session ID exposed in URL/path - matches vulnerablemcp session hijacking patterns.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: |
+              "/messages/?sessionId="
+          - pattern: |
+              f"/messages/?sessionId={$SESSION}"
+          - pattern: |
+              "/session/{$SESSION}/"
+
+  - id: mcp-parameter-exfiltration
+    message: Tool parameter abuse detected - potential conversation history or system prompt exfiltration (matches vulnerablemcp patterns).
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              def $FUNC($...ARGS, system_prompt: str, $...KWARGS):
+                ...
+          - pattern: |
+              def $FUNC($...ARGS, conversation_history: str, $...KWARGS):
+                ...
+          - pattern: |
+              def $FUNC($...ARGS, previous_calls: str, $...KWARGS):
+                ...
+          - pattern: |
+              def $FUNC($...ARGS, chain_of_thought: str, $...KWARGS):
+                ...
+          - pattern: |
+              def $FUNC($...ARGS, full_prompt: str, $...KWARGS):
+                ...
+
+  - id: mcp-local-code-execution
+    message: Local code execution in MCP server - matches vulnerablemcp stdio transport risks.
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @mcp.tool()
+              def $FUNC($...ARGS):
+                ...
+                exec(...)
+          - pattern: |
+              @mcp.tool()
+              def $FUNC($...ARGS):
+                ...
+                os.system(...)
+          - pattern: |
+              @mcp.tool()
+              def $FUNC($...ARGS):
+                ...
+                eval(...)
+
+  - id: shadowed-tool-descriptions
+    message: Tool description may be shadowed or ambiguous - potential for confusion.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern: |
+          @mcp.tool(description="$DESC")
+          def $FUNC($...ARGS):
+            ...
+      - metavariable-regex:
+          metavariable: $DESC
+          regex: .*(read|write|execute|access).*
+
+  # ===== ADVANCED STATIC CHECKS =====
+
+  - id: python-dynamic-import-sensitive
+    message: Dynamic import of sensitive module detected - potential obfuscation of dangerous functionality
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: __import__($MOD)
+          - pattern: importlib.import_module($MOD)
+          - pattern: importlib.__import__($MOD)
+      - metavariable-regex:
+          metavariable: $MOD
+          regex: .*(os|subprocess|socket|shutil|sys|pty|fcntl|resource|signal|ctypes|multiprocessing|threading|requests|urllib|http|ftplib|telnetlib|paramiko|fabric|ansible).*
+
+  - id: python-obfuscated-eval-exec
+    message: Obfuscated eval/exec via getattr(__builtins__) detected - likely malicious code obfuscation
+    languages: [python]
+    severity: CRITICAL
+    patterns:
+      - pattern-either:
+          - pattern: getattr(__builtins__, $FUNC)
+          - pattern: getattr(builtins, $FUNC)
+          - pattern: __builtins__[$FUNC]
+          - pattern: globals()[$FUNC]
+          - pattern: locals()[$FUNC]
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: .*(eval|exec|compile|__import__|open).*
+
+  - id: python-base64-decode-exec
+    message: Base64 decode followed by exec/eval - common malware obfuscation pattern
+    languages: [python]
+    severity: CRITICAL
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $DECODED = base64.b64decode($DATA)
+              ...
+              exec($DECODED)
+          - pattern: |
+              $DECODED = base64.b64decode($DATA)
+              ...
+              eval($DECODED)
+          - pattern: exec(base64.b64decode($DATA))
+          - pattern: eval(base64.b64decode($DATA))
+
+  - id: python-tainted-command-wrapper
+    message: Custom function wrapping dangerous command execution - potential command injection vector
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern: |
+          def $FUNC($...ARGS):
+            ...
+            $CMD
+      - pattern-either:
+          - pattern: os.system(...)
+          - pattern: os.popen(...)
+          - pattern: subprocess.run(...)
+          - pattern: subprocess.call(...)
+          - pattern: subprocess.Popen(...)
+          - pattern: subprocess.check_output(...)
+          - pattern: os.execv(...)
+          - pattern: os.execvp(...)
+
+  - id: python-shell-true-with-format
+    message: subprocess with shell=True and string formatting - high risk command injection
+    languages: [python]
+    severity: CRITICAL
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$METHOD($CMD, shell=True)
+          - pattern: subprocess.$METHOD($CMD, ..., shell=True, ...)
+      - metavariable-pattern:
+          metavariable: $CMD
+          patterns:
+            - pattern-either:
+                - pattern: 'f"..."'
+                - pattern: '"...".format(...)'
+                - pattern: '"..." % ...'
+                - pattern: '"..." + ...'
+
+  - id: python-network-exfiltration-pattern
+    message: Network call with data from file/env - potential data exfiltration
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $DATA = open($FILE).read()
+              ...
+              requests.$METHOD($URL, ..., data=$DATA, ...)
+          - pattern: |
+              $DATA = os.environ.get($KEY)
+              ...
+              requests.$METHOD($URL, ..., data=$DATA, ...)
+          - pattern: |
+              $DATA = Path($FILE).read_text()
+              ...
+              requests.$METHOD($URL, ..., data=$DATA, ...)
+
+  - id: python-pickle-untrusted
+    message: Pickle load from untrusted source - arbitrary code execution risk
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: pickle.loads($DATA)
+          - pattern: pickle.load($FILE)
+          - pattern: dill.loads($DATA)
+          - pattern: dill.load($FILE)
+      - pattern-not: pickle.loads(TRUSTED_CONSTANT)
+
+  - id: python-yaml-unsafe-load
+    message: yaml.load without SafeLoader - arbitrary code execution risk
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: yaml.load($DATA)
+          - pattern: yaml.load($DATA, Loader=yaml.Loader)
+          - pattern: yaml.load($DATA, Loader=yaml.FullLoader)
+      - pattern-not: yaml.load($DATA, Loader=yaml.SafeLoader)
+
+  #######################################################################
+  # ------------------ TYPESCRIPT / JAVASCRIPT ------------------------ #
+  #######################################################################
+
+  # 1) Tool registration hotspots: registerTool, defineTool, mcp.tool, server.addTool
+  - id: ts-mcp-tool-registration
+    message: MCP tool registration found. Downstream rules check for risky calls inside.
+    languages: [typescript, javascript]
+    severity: INFO
+    patterns:
+      - pattern-either:
+          - pattern: registerTool($OBJ)
+          - pattern: defineTool($OBJ)
+          - pattern: mcp.tool($OBJ)
+          - pattern: server.addTool($OBJ)
+          - pattern: tools.register($OBJ)
+
+  # 2) Dangerous execution in/around tool handlers
+  - id: ts-tool-rce-child-process
+    message: child_process execution with user-influenced input (RCE risk).
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              import child_process from "child_process";
+              ...
+              child_process.exec($CMD, ...)
+          - pattern: |
+              const cp = require("child_process");
+              ...
+              cp.exec($CMD, ...)
+          - pattern: |
+              import { exec, execSync, spawn, spawnSync } from "child_process";
+              ...
+              exec($CMD, ...)
+          - pattern: |
+              execSync($CMD, ...)
+          - pattern: |
+              spawn($BIN, $ARGS, { shell: true, ... })
+          - pattern: |
+              spawnSync($BIN, $ARGS, { shell: true, ... })
+
+  - id: ts-tool-rce-eval
+    message: eval/new Function/vm.* used (code injection risk).
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: new Function($X, ...)
+          - pattern: |
+              import vm from "vm";
+              ...
+              vm.runInNewContext($X, ...)
+          - pattern: |
+              const vm = require("vm");
+              ...
+              vm.runInNewContext($X, ...)
+
+  # 3) Prompt injection risks: concatenating user input into LLM calls
+  - id: ts-llm-prompt-injection
+    message: Raw user input concatenated into LLM messages (prompt injection risk).
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          # OpenAI (>=v4)
+          - pattern: |
+              openai.chat.completions.create({
+                ...,
+                messages: [
+                  ...,
+                  { role: "user", content: $USER_INPUT }
+                ]
+              })
+          # OpenAI beta responses
+          - pattern: |
+              client.responses.create({
+                ...,
+                input: $USER_INPUT
+              })
+          # Anthropic
+          - pattern: |
+              anthropic.messages.create({
+                ...,
+                messages: [
+                  ...,
+                  { role: "user", content: $USER_INPUT }
+                ]
+              })
+          # Generic fetch/axios to LLM-ish endpoints with raw input
+          - pattern: |
+              fetch($URL, { method: "POST", body: $USER_INPUT, ... })
+          - pattern: |
+              axios.post($URL, $USER_INPUT, ...)
+
+  # 4) Excessive permissions: filesystem root/sensitive paths
+  - id: ts-excessive-fs-perms
+    message: Unscoped filesystem access (/, /etc, home) inside tool or handler.
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: fs.readFileSync("/", ...)
+          - pattern: fs.readFileSync("/etc", ...)
+          - pattern: fs.readFileSync("/home", ...)
+          - pattern: fs.promises.readFile("/", ...)
+          - pattern: fs.promises.readFile("/etc", ...)
+          - pattern: fs.promises.readFile("/home", ...)
+          - pattern: fs.readdirSync("/", ...)
+          - pattern: fs.promises.opendir("/", ...)
+          - pattern: require("fs").readFileSync("/", ...)
+
+  # 5) Path traversal: use of ../ or unvalidated joins
+  - id: ts-path-traversal
+    message: Possible path traversal (joins or string ops allow '../').
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: path.join($BASE, $P)
+          - pattern: path.resolve($BASE, $P)
+          - pattern: $BASE + "/" + $P
+      - metavariable-regex:
+          metavariable: $P
+          regex: (\.\./|\.\.\\)
+
+  # 6) Token leakage and insecure storage
+  - id: ts-token-leakage
+    message: Token/API key written to logs or files.
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: console.log($SECRET)
+          - pattern: fs.writeFileSync("token.txt", $SECRET, ...)
+          - pattern: fs.writeFileSync("credentials.json", $SECRET, ...)
+          - pattern: fs.writeFile("token.txt", $SECRET, ...)
+          - pattern: localStorage.setItem("token", $SECRET)
+          - pattern: process.env["API_KEY"] = $SECRET
+          - pattern: process.env.API_KEY = $SECRET
+
+  # 7) Tool mutation / shadowing in Node
+  - id: ts-tool-shadowing
+    message: Tool shadowing/mutation detected (export or global reassignment).
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: exports[$NAME] = $FUNC
+          - pattern: module.exports[$NAME] = $FUNC
+          - pattern: (global as any)[$NAME] = $FUNC
+          - pattern: global[$NAME] = $FUNC
+
+  #######################################################################
+  # --------------------------- GO ----------------------------------- #
+  #######################################################################
+
+  # 1) Dangerous execution
+  - id: go-rce-exec
+    message: os/exec.Command with user-controlled input (RCE risk).
+    languages: [go]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              import "os/exec"
+              ...
+              exec.Command($BIN, $ARG, ...)
+          - pattern: |
+              import "os/exec"
+              ...
+              exec.CommandContext($CTX, $BIN, $ARG, ...)
+    
+  # 2) Prompt injection to LLM clients or generic HTTP
+  - id: go-llm-prompt-injection
+    message: User input directly injected into LLM request.
+    languages: [go]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              http.Post($URL, "application/json", bytes.NewBuffer([]byte($USER)))
+          - pattern: |
+              req, _ := http.NewRequest("POST", $URL, strings.NewReader($USER))
+              http.DefaultClient.Do(req)
+
+  # 3) Excessive FS permissions
+  - id: go-excessive-fs-perms
+    message: Unscoped filesystem access (/, /etc, $HOME) inside tool or handler.
+    languages: [go]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: os.ReadFile("/")
+          - pattern: os.ReadFile("/etc")
+          - pattern: os.ReadFile("/home")
+          - pattern: filepath.Walk("/", ...)
+          - pattern: os.Open("/")
+
+  # 4) Token leakage
+  - id: go-token-leakage
+    message: Token/API key printed or written to file.
+    languages: [go]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: fmt.Printf("%s", $TOKEN)
+          - pattern: log.Printf("%s", $TOKEN)
+          - pattern: os.WriteFile("token.txt", []byte($TOKEN), ...)
+          - pattern: os.Setenv("API_KEY", $TOKEN)
+
+  #######################################################################
+  # ---------------------- LANGUAGE-AGNOSTIC ------------------------- #
+  #######################################################################
+
+  # Indirect prompt injection: fetching HTML/MD and concatenating to prompt
+  - id: generic-indirect-prompt-injection
+    message: External HTML/Markdown fetched and used as prompt content without sanitization.
+    languages: [python, typescript, javascript, go]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: fetch($URL, ...); ... + $HTML
+          - pattern: axios.get($URL, ...); ... + $HTML
+          - pattern: requests.get($URL).text + $HTML
+          - pattern: http.Get($URL); ... + $HTML
+      - metavariable-regex:
+          metavariable: $URL
+          regex: (?i)https?://
+      - metavariable-regex:
+          metavariable: $HTML
+          regex: (</?(script|img|iframe|a|style)\\b)
+
+  # ANSI escape in descriptions/logs (hidden directives)
+  
+  - id: ts-path-normalize-traversal
+    message: path.normalize may allow '../' if not validated
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern: |
+          const p = path.normalize($X)
+      - metavariable-regex:
+          metavariable: $X
+          regex: (\.\./|\.\.\\)
+
+  - id: ts-dotenv-in-repo
+    message: dotenv file loaded from repo path (secrets risk)
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: "require('dotenv').config({ path: $P })"
+          - pattern: import 'dotenv/config'
+
+  - id: go-rce-sh-c
+    message: exec.Command("sh","-c", <user>) RCE pattern
+    languages: [go]
+    severity: ERROR
+    patterns:
+      - pattern: |
+          exec.Command("sh", "-c", $ARG)
+
+  - id: ts-path-traversal-resolve
+    message: path.resolve with user input may allow traversal
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: path.resolve($BASE, $USER_INPUT)
+          - pattern: path.join($BASE, $USER_INPUT)
+      - metavariable-regex:
+          metavariable: $USER_INPUT
+          regex: (input|req|params|query|args)
+
+  - id: ts-fs-write-dangerous-paths
+    message: fs.write to dangerous paths (system/config)
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: fs.writeFileSync("/etc/...", ...)
+          - pattern: fs.writeFileSync("/usr/bin/...", ...)
+          - pattern: fs.writeFileSync("/bin/...", ...)
+          - pattern: fs.writeFileSync("/boot/...", ...)
+          - pattern: fs.promises.writeFile("/etc/...", ...)
+          - pattern: fs.promises.writeFile("/usr/bin/...", ...)
+
+  - id: go-os-exec-user-input
+    message: os/exec with user input (RCE risk)
+    languages: [go]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: exec.Command($USER_INPUT, ...)
+          - pattern: exec.CommandContext($CTX, $USER_INPUT, ...)
+      - metavariable-regex:
+          metavariable: $USER_INPUT
+          regex: (input|req|params|query|args|user)
+
+  - id: ts-child-process-exec
+    message: child_process.exec with shell injection risk
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: exec($USER_CMD, ...)
+          - pattern: execSync($USER_CMD, ...)
+          - pattern: spawn($SHELL, $USER_CMD, ...)
+      - metavariable-regex:
+          metavariable: $USER_CMD
+          regex: (input|req|params|query|args|user)
+
+  - id: go-filepath-traversal
+    message: filepath.Join with user input may allow traversal
+    languages: [go]
+    severity: WARNING
+    patterns:
+      - pattern: filepath.Join($BASE, $USER_INPUT)
+      - metavariable-regex:
+          metavariable: $USER_INPUT
+          regex: (input|req|params|query|args|user)
+
+  - id: ts-eval-user-input
+    message: eval() with user input (code injection)
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern: eval($USER_INPUT)
+      - metavariable-regex:
+          metavariable: $USER_INPUT
+          regex: (input|req|params|query|args|user)
+
+  - id: go-http-user-url
+    message: HTTP request to user-controlled URL (SSRF risk)
+    languages: [go]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: http.Get($USER_URL)
+          - pattern: http.Post($USER_URL, ...)
+          - pattern: (&http.Client{}).Get($USER_URL)
+      - metavariable-regex:
+          metavariable: $USER_URL
+          regex: (input|req|params|query|args|user)
+
+  - id: ts-fetch-user-url
+    message: fetch() to user-controlled URL (SSRF risk)
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern: fetch($USER_URL, ...)
+      - metavariable-regex:
+          metavariable: $USER_URL
+          regex: (input|req|params|query|args|user)
+
+  - id: go-env-hardcoded-secrets
+    message: Hardcoded secrets in environment variables
+    languages: [go]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: os.Setenv("API_KEY", "...")
+          - pattern: os.Setenv("SECRET", "...")
+          - pattern: os.Setenv("TOKEN", "...")
+          - pattern: os.Setenv("PASSWORD", "...")
+
+  - id: ts-process-env-secrets
+    message: Hardcoded secrets in process.env
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: process.env.API_KEY = "..."
+          - pattern: process.env.SECRET = "..."
+          - pattern: process.env.TOKEN = "..."
+          - pattern: process.env.PASSWORD = "..."
+# --- MCP exfil & shadowing: sensitive paths, env harvest, covert params ---
+  - id: mcp-sensitive-paths-in-tool
+    message: Sensitive path referenced inside tool (exfil indicator)
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: '@mcp.tool(...)\n def $F(...):\n  ...'
+          - pattern: '@tool\n def $F(...):\n  ...'
+      - pattern-either:
+          - pattern: '"~/.ssh/id_rsa"'
+          - pattern: '".cursor/mcp.json"'
+          - pattern: '".config/"'
+          - pattern: '"/etc/passwd"'
+          - pattern: 'os.path.expanduser("~/.ssh")'
+
+  - id: mcp-env-enumeration
+    message: Environment enumeration inside tool (token/API harvest indicator)
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern: |
+          @mcp.tool(...)
+          def $F(...):
+            ...
+            for $k, $v in os.environ.items():
+              ...
+      - pattern-either:
+          - pattern: 'os.environ.get($X)'
+          - pattern: 'os.getenv($X)'
+
+  - id: mcp-hidden-exfil-params
+    message: Suspicious exfil parameter in tool signature (context leak)
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern: |
+          @mcp.tool(...)
+          def $F(..., context_info: str = "", ...):
+            ...
+      - pattern: |
+          @mcp.tool(...)
+          def $F(..., full_prompt: str = "", ...):
+            ...
+
+  - id: mcp-recipient-hijack
+    message: Potential recipient override (tool shadowing / email redirection)
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern: |
+          @mcp.tool(...)
+          def $F(..., recipient: str, ...):
+            ...
+            $RCPT = "@" + ...
+            ...
+      - pattern-either:
+          - pattern: 'recipient = $X; $X = ".*@.*"'
+          - pattern: 'return {"sent_to": ".*@.*"}'
+
+  #######################################################################
+  # -------- AUTH ABSENCE: MCP HTTP/SSE TRANSPORT -------------------- #
+  #######################################################################
+
+  # TypeScript/JS: SSEServerTransport created — flag for auth review
+  - id: mcp-sse-transport-no-auth
+    message: >
+      MCP SSEServerTransport instantiated. HTTP-exposed MCP servers must validate
+      authentication on every request before calling transport.handleRequest().
+      Check that an auth middleware runs before this transport is reached.
+    languages: [typescript, javascript]
+    severity: WARNING
+    pattern: new SSEServerTransport($PATH, $RES)
+
+  # TypeScript/JS: StreamableHTTPServerTransport created — flag for auth review
+  - id: mcp-streamable-http-no-auth
+    message: >
+      MCP StreamableHTTPServerTransport instantiated. Verify that all incoming
+      requests are authenticated before being forwarded to this transport.
+    languages: [typescript, javascript]
+    severity: WARNING
+    pattern: new StreamableHTTPServerTransport(...)
+
+  # TypeScript/JS: Explicit auth disabled on MCP-related express route
+  - id: mcp-express-auth-disabled
+    message: Authentication explicitly disabled on an Express route that handles MCP traffic.
+    languages: [typescript, javascript]
+    severity: ERROR
+    pattern-either:
+      - pattern: |
+          $APP.$METHOD($PATH, { auth: false }, ...)
+      - pattern: |
+          $APP.$METHOD($PATH, { authenticate: false }, ...)
+      - pattern: |
+          $ROUTER.$METHOD($PATH, { auth: false }, ...)
+
+  # Python: FastMCP running SSE transport — flag for auth review
+  - id: fastmcp-sse-no-auth
+    message: >
+      FastMCP server started with SSE transport. Verify that an authentication
+      dependency (e.g. Depends(verify_token)) is applied to the mounted routes.
+    languages: [python]
+    severity: WARNING
+    pattern: mcp.run(transport="sse", ...)
+
+  # Python: FastMCP running streamable-http transport — flag for auth review
+  - id: fastmcp-streamable-http-no-auth
+    message: >
+      FastMCP server started with streamable-http transport. Verify authentication
+      middleware is applied to all MCP endpoints.
+    languages: [python]
+    severity: WARNING
+    pattern: mcp.run(transport="streamable-http", ...)
+
+  # Python: uvicorn.run without any auth — common pattern for unauthenticated FastMCP
+  - id: fastmcp-uvicorn-no-auth
+    message: >
+      MCP app served via uvicorn without explicit authentication. If this is
+      network-accessible, ensure auth middleware is applied.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern: uvicorn.run($APP, ...)
+      - pattern-not: uvicorn.run($APP, ..., ssl_keyfile=..., ...)
+
+  # Python: FastAPI app mounting MCP without Depends auth
+  - id: fastapi-mcp-mount-no-auth
+    message: >
+      FastAPI app mounts an MCP server without an explicit auth dependency.
+      Add Depends(verify_token) or HTTPBearer to the router.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern: $APP.mount($PATH, $MCP_APP)
+
+  #######################################################################
+  # -------- SSRF, PATH TRAVERSAL, TOKEN EXPOSURE, SQL INJECTION ------ #
+  #######################################################################
+
+  # SSRF: tool accepts URL param and passes directly to HTTP client
+  - id: mcp-ssrf-unvalidated-url
+    message: >
+      MCP tool accepts a URL parameter and passes it directly to an HTTP client
+      without allowlist validation — Server-Side Request Forgery (SSRF) risk.
+      An attacker can use this to reach internal services or cloud metadata endpoints.
+    languages: [python]
+    severity: ERROR
+    pattern-either:
+      - pattern: |
+          def $FUNC(..., $URL: str, ...):
+              ...
+              requests.get($URL, ...)
+      - pattern: |
+          def $FUNC(..., $URL: str, ...):
+              ...
+              requests.post($URL, ...)
+      - pattern: |
+          def $FUNC(..., $URL: str, ...):
+              ...
+              httpx.get($URL, ...)
+      - pattern: |
+          def $FUNC(..., $URL: str, ...):
+              ...
+              urllib.request.urlopen($URL)
+      - pattern: |
+          def $FUNC(..., $URL: str, ...):
+              ...
+              urllib.request.urlopen($URL, ...)
+
+  # Path traversal: os.path.join or pathlib / with user input, no realpath check
+  - id: mcp-path-traversal-join
+    message: >
+      Path constructed with user-supplied input via os.path.join or pathlib /
+      operator without os.path.realpath() or Path.resolve() normalization —
+      path traversal vulnerability (e.g. ../../../../etc/passwd).
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: os.path.join($BASE, $INPUT)
+          - pattern: Path($BASE) / $INPUT
+      - pattern-not-inside: |
+          $SAFE = os.path.realpath(...)
+          ...
+      - pattern-not-inside: |
+          $SAFE = os.path.abspath(...)
+          ...
+      - pattern-not-inside: |
+          $SAFE = Path(...).resolve()
+          ...
+
+  # Token / API key embedded in URL query string
+  - id: mcp-token-in-query-string
+    message: >
+      API token or secret passed as a URL query parameter — exposed in server logs,
+      browser history, proxy logs, and HTTP Referer headers. Use Authorization
+      header instead.
+    languages: [python, javascript, typescript]
+    severity: WARNING
+    pattern-either:
+      - pattern: f"$URL?token=$VAL"
+      - pattern: f"$URL?api_key=$VAL"
+      - pattern: f"$URL?secret=$VAL"
+      - pattern: f"$URL?access_token=$VAL"
+      - pattern: f"$URL?apikey=$VAL"
+      - pattern: $X + "?token=" + $Y
+      - pattern: $X + "?api_key=" + $Y
+      - pattern: $X + "?access_token=" + $Y
+
+  # SQL injection via string concatenation in MCP tool handlers
+  - id: mcp-sql-injection-tool
+    message: >
+      SQL query constructed by string concatenation or f-string interpolation inside
+      an MCP tool function — SQL injection risk if any variable derives from tool
+      input. Use parameterized queries (cursor.execute(sql, params)) instead.
+    languages: [python]
+    severity: ERROR
+    pattern-either:
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+              ...
+              $Q = "SELECT" + $X
+              ...
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+              ...
+              $Q = f"SELECT ... {$VAR} ..."
+              ...
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+              ...
+              $Q = "INSERT INTO" + $X
+              ...
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+              ...
+              $Q = f"INSERT INTO ... {$VAR} ..."
+              ...
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+              ...
+              $Q = "DELETE FROM" + $X
+              ...
+      - pattern: |
+          @mcp.tool()
+          def $FUNC(...):
+              ...
+              $Q = "UPDATE " + $X
+              ...
+      - pattern-not: $APP.mount($PATH, $MCP_APP, dependencies=[...])
+
+  #######################################################################
+  # -------- MCP RESOURCE SSRF (resources/read attack surface) -------- #
+  # BlueRock Security found 36.7% of MCP servers vulnerable via         #
+  # resources/read — generic mcp-ssrf-unvalidated-url misses this path. #
+  #######################################################################
+
+  # Rule 1 — resource handler passes URI directly to HTTP client (Python)
+  - id: mcp-resource-uri-ssrf-python
+    patterns:
+      - pattern: |
+          async def $HANDLER($..., uri: str, $...):
+              ...
+              $CLIENT.$METHOD(uri, ...)
+      - pattern-not: |
+          async def $HANDLER($..., uri: str, $...):
+              ...
+              if uri.startswith(...):
+                  ...
+              $CLIENT.$METHOD(uri, ...)
+      - pattern-not: |
+          async def $HANDLER($..., uri: str, $...):
+              ...
+              assert ...
+              $CLIENT.$METHOD(uri, ...)
+    message: "MCP resource handler passes URI directly to HTTP client without scheme validation — SSRF risk (BlueRock: 36.7% of MCP servers vulnerable)"
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: security
+      cwe: CWE-918
+      confidence: HIGH
+      mcp_specific: true
+
+  # Rule 2 — scheme allowlist check that allows fallthrough (Python)
+  - id: mcp-resource-uri-partial-validation-python
+    patterns:
+      - pattern: |
+          if $URI.startsWith("https://"):
+              ...
+      - pattern-not: |
+          if $URI.startsWith("https://"):
+              ...
+          else:
+              raise ...
+      - pattern-not: |
+          if $URI.startsWith("https://"):
+              ...
+          else:
+              return ...
+    message: "URI scheme check allows fallthrough — non-HTTPS schemes (file://, http://, internal://) still reachable"
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: security
+      cwe: CWE-918
+      confidence: MEDIUM
+      mcp_specific: true
+
+  # Rule 3 — resource handler with no URI validation (Python)
+  - id: mcp-resource-uri-no-validation-python
+    patterns:
+      - pattern: |
+          @$SERVER.read_resource()
+          async def $HANDLER($URI):
+              ...
+              $CLIENT.$METHOD($URI, ...)
+      - pattern-not-inside: |
+          @$SERVER.read_resource()
+          async def $HANDLER($URI):
+              if ...:
+                  ...
+    message: "MCP read_resource handler makes HTTP request with no URI validation"
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: security
+      cwe: CWE-918
+      confidence: HIGH
+      mcp_specific: true
+
+  # Rule 4 — TypeScript/JavaScript resource handler passing URI to fetch/axios
+  - id: mcp-resource-uri-ssrf-typescript
+    patterns:
+      - pattern: |
+          async function $HANDLER($...) {
+            ...
+            $CLIENT($URI, ...)
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $CLIENT
+          regex: '(fetch|axios\.get|axios\.request|got|request|http\.get|https\.get)'
+      - pattern-not: |
+          async function $HANDLER($...) {
+            ...
+            if (!$URI.startsWith("https://")) { ... }
+            ...
+          }
+    message: "Resource handler passes URI to HTTP client without scheme validation — SSRF risk"
+    severity: ERROR
+    languages: [typescript, javascript]
+    metadata:
+      category: security
+      cwe: CWE-918
+      confidence: MEDIUM
+      mcp_specific: true
+
+  # Rule 5 — file:// or internal URI scheme not blocked
+  - id: mcp-resource-allows-file-scheme
+    pattern: $URI.startsWith("file://")
+    message: "Code explicitly handles file:// URI scheme — verify this cannot be triggered by MCP resource requests from untrusted clients"
+    severity: WARNING
+    languages: [python, typescript, javascript]
+    metadata:
+      category: security
+      cwe: CWE-918
+      confidence: LOW
+      mcp_specific: true

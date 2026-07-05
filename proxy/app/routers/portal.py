@@ -954,6 +954,7 @@ _TAB_MAP_PY = {
     "detections":  "Detections",
     "sbom":        "SBOM",
     "submissions": "Submissions",
+    "prompts":     "Wizard Prompts",
     "profile":     "Profile",
     "access":      "Access",
 }
@@ -1043,6 +1044,7 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
     {_nav("MCP Servers",     "servers",     active=initial_tab == "servers")}
     {_nav("Access",          "access",      active=initial_tab == "access")}
     {_nav("Submissions",     "submissions", active=initial_tab == "submissions")}
+    {_nav("Wizard Prompts",  "prompts",     active=initial_tab == "prompts")}
     {_nav("Credentials",     "credentials", active=initial_tab == "credentials")}
     {_nav("Request Limits",  "limits",      active=initial_tab == "limits")}
     {_nav("Profile",         "profile",     active=initial_tab == "profile")}
@@ -4876,7 +4878,7 @@ async def fragment_admin_submissions(request: Request):
                 SELECT server_id, name, owner_sub, submission_status, scan_status,
                        injection_mode, data_categories, has_write_ops,
                        github_repo_url, scan_report, review_notes, updated_at,
-                       upstream_idp_config
+                       upstream_idp_config, sbom_components
                 FROM server_registry
                 WHERE submission_status NOT IN ('draft')
                   AND deleted_at IS NULL
@@ -4968,7 +4970,7 @@ async def fragment_admin_submissions(request: Request):
         )
         scan_findings = [f for f in raw_report if not (f.get("scanner") == "pip-audit" and f.get("skipped"))]
         blocked_count = sum(1 for f in scan_findings if f.get("block"))
-        scanners_ran = ["trufflehog", "custom rules"] + (["pip-audit"] if pip_skip_note is None else [])
+        scanners_ran = ["trufflehog", "custom rules", "mcp_checker"] + (["pip-audit"] if pip_skip_note is None else [])
         # R-12: render the scan report for any terminal scan status, not just
         # 'scan_blocked' — a passed scan with zero findings is a fact worth
         # showing a reviewer, not silence.
@@ -4991,8 +4993,9 @@ async def fragment_admin_submissions(request: Request):
                     'padding:0.5rem 0.75rem;font-size:11px;color:#4ade80">'
                     f'&#x2713; 0 findings — {len(scanners_ran)} scanners ran ({", ".join(scanners_ran)})'
                     f'{skip_line}'
-                    '<div style="color:#86efac;margin-top:2px">Secret + known-CVE-dependency + basic pattern '
-                    'checks only — not a full code security audit.</div></div>'
+                    '<div style="color:#86efac;margin-top:2px">Secrets, known-CVE dependencies, basic patterns, '
+                    'and MCP-specific static checks (malicious code, tool poisoning, SSRF, crypto stealers, '
+                    'SAST). Static analysis only — human review still required.</div></div>'
                 )
 
         # R-12/F-14: show exactly what will be wired at approval time.
@@ -5059,7 +5062,40 @@ async def fragment_admin_submissions(request: Request):
                 '<span style="font-size:12px;color:var(--muted)">&#x1F4E6; SBOM pending (tool(s) provisioned, not yet generated)</span>'
             )
         else:
-            sbom_link = '<span style="font-size:12px;color:var(--muted)">&#x1F4E6; SBOM: not yet provisioned</span>'
+            sbom_link = '<span style="font-size:12px;color:var(--muted)">&#x1F4E6; Signed SBOM: not yet provisioned (generated at approval)</span>'
+
+        # R-5: declared-dependency inventory collected at submission time
+        # (server_registry.sbom_components, parsed by the scanner). Gives the
+        # reviewer a component list immediately, before the signed per-tool SBOM
+        # exists. Read-only display; never a gate.
+        sbom_components_html = ""
+        raw_components = r.sbom_components if isinstance(r.sbom_components, list) else []
+        if raw_components:
+            by_eco: dict[str, list] = defaultdict(list)
+            for c in raw_components:
+                purl = str(c.get("purl", ""))
+                eco = purl.split(":", 2)[1].split("/", 1)[0] if purl.startswith("pkg:") else "other"
+                by_eco[eco].append(c)
+            eco_blocks = []
+            for eco in sorted(by_eco):
+                comps = by_eco[eco]
+                items = "".join(
+                    f'<div style="font-size:11px;color:var(--text);padding:1px 0">'
+                    f'{esc_py(str(c.get("name","")))} '
+                    f'<span style="color:var(--muted)">{esc_py(str(c.get("version","*")))}</span></div>'
+                    for c in comps[:40]
+                )
+                more = f'<div style="font-size:11px;color:var(--muted)">+{len(comps)-40} more</div>' if len(comps) > 40 else ""
+                eco_blocks.append(
+                    f'<div style="margin-right:1.5rem"><div style="font-size:11px;color:var(--cyan);'
+                    f'font-weight:600;margin-bottom:2px">{esc_py(eco)} ({len(comps)})</div>{items}{more}</div>'
+                )
+            sbom_components_html = (
+                '<details style="margin-top:0.5rem;background:#0b1220;border-radius:6px;padding:0.4rem 0.6rem">'
+                f'<summary style="cursor:pointer;font-size:12px;color:var(--muted)">&#x1F4E6; '
+                f'Declared dependencies ({len(raw_components)}) — collected at submission</summary>'
+                f'<div style="display:flex;flex-wrap:wrap;margin-top:0.4rem">{"".join(eco_blocks)}</div></details>'
+            )
 
         scaffold_link = ""
         if st == "scaffold_ready":
@@ -5090,6 +5126,7 @@ async def fragment_admin_submissions(request: Request):
             {github_link}
             {sbom_link}
           </div>
+          {sbom_components_html}
           {scaffold_link}
           {scan_html}
           {f'<div style="margin-top:0.4rem;font-size:12px;color:#d97706">Reviewer notes: {esc_py(r.review_notes)}</div>' if r.review_notes else ''}
@@ -5122,6 +5159,97 @@ async def fragment_admin_submissions(request: Request):
         const err = await r.json().catch(() => ({{}}));
         alert('Action failed: ' + (err.detail || r.status));
       }}
+    }}
+    </script>
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Wizard Prompts tab (admin — edit self-service design questions)
+# ---------------------------------------------------------------------------
+
+_PROMPT_MODE_LABELS = {
+    "kc_token_exchange": "Keycloak token exchange",
+    "entra_client_credentials": "Entra app identity",
+    "entra_user_token": "Entra delegated (per-user)",
+    "service": "Shared service account",
+    "user": "Per-user stored token",
+    "oauth_user_token": "External OAuth (per-user)",
+    "none": "No credential injection",
+    "shared": "Shared (all modes)",
+}
+
+
+@router.get("/fragments/admin/prompts", response_class=HTMLResponse)
+async def fragment_admin_prompts(request: Request):
+    """Edit the self-service wizard's design prompts (what it asks submitters)."""
+    _require_admin(request)
+    from app.services import prompt_store
+    try:
+        prompts = await prompt_store.list_prompts()
+    except Exception as exc:
+        return HTMLResponse(f'<div class="section-title">Wizard Prompts</div>'
+                            f'<div style="color:#fca5a5">Could not load prompts: {esc_py(str(exc))}</div>')
+
+    # Group by mode, in a stable, human order.
+    order = list(_PROMPT_MODE_LABELS.keys())
+    by_mode: dict[str, list] = {}
+    for p in prompts:
+        by_mode.setdefault(p["mode"], []).append(p)
+
+    groups_html = []
+    for mode in sorted(by_mode, key=lambda m: order.index(m) if m in order else 99):
+        rows = []
+        for p in by_mode[mode]:
+            badge = ('<span style="background:#3b2f0b;color:#fbbf24;border-radius:4px;'
+                     'padding:1px 6px;font-size:10px;margin-left:6px">overridden</span>'
+                     if p["is_override"] else "")
+            rows.append(f"""
+            <div style="margin:0.6rem 0;padding:0.6rem 0.75rem;background:#0f172a;border-radius:6px">
+              <div style="font-size:12px;color:var(--muted);margin-bottom:4px">
+                <code style="color:var(--cyan)">{esc_py(p["id"])}</code>{badge}
+              </div>
+              <textarea id="pt-{esc_py(p["key"])}"
+                        style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;
+                               color:var(--text);padding:0.5rem;font-size:12px;resize:vertical;min-height:64px"
+                        >{esc_py(p["text"])}</textarea>
+              <div style="display:flex;gap:0.5rem;margin-top:0.4rem">
+                <button class="btn-primary" style="font-size:11px;padding:0.25rem 0.7rem"
+                        onclick="savePrompt('{esc_py(p["key"])}')">Save</button>
+                <button class="btn-secondary" style="font-size:11px;padding:0.25rem 0.7rem"
+                        onclick="resetPrompt('{esc_py(p["key"])}')">Reset to default</button>
+              </div>
+            </div>""")
+        label = _PROMPT_MODE_LABELS.get(mode, mode)
+        groups_html.append(f"""
+        <details {"open" if mode == "shared" else ""} style="margin:0.75rem 0;border:1px solid #1e293b;border-radius:8px;padding:0.5rem 0.75rem">
+          <summary style="cursor:pointer;font-weight:600;font-size:13px">{esc_py(label)}
+            <span style="color:var(--muted);font-weight:400">· {len(by_mode[mode])} prompts</span></summary>
+          {"".join(rows)}
+        </details>""")
+
+    return HTMLResponse(f"""
+    <div class="section-title">&#x1F4DD; Wizard Prompts</div>
+    <p style="color:var(--muted);font-size:12px;margin:0.25rem 0 0.75rem">
+      These are the design questions the self-service submission wizard asks submitters,
+      grouped by auth mode. Edits take effect immediately (no redeploy). "Reset" removes the
+      override and restores the built-in default.</p>
+    {"".join(groups_html)}
+    <script>
+    async function savePrompt(key) {{
+      const el = document.getElementById('pt-' + key);
+      const r = await fetch('/api/v1/admin/prompts/' + encodeURIComponent(key), {{
+        method: 'PUT', headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{text: el.value}})
+      }});
+      if (r.ok) {{ htmx.ajax('GET', '/portal/fragments/admin/prompts', {{target: '#adm-content', swap: 'innerHTML'}}); }}
+      else {{ const e = await r.json().catch(() => ({{}})); alert('Save failed: ' + (e.detail || r.status)); }}
+    }}
+    async function resetPrompt(key) {{
+      if (!confirm('Reset this prompt to its built-in default?')) return;
+      const r = await fetch('/api/v1/admin/prompts/' + encodeURIComponent(key), {{method: 'DELETE'}});
+      if (r.ok) {{ htmx.ajax('GET', '/portal/fragments/admin/prompts', {{target: '#adm-content', swap: 'innerHTML'}}); }}
+      else {{ const e = await r.json().catch(() => ({{}})); alert('Reset failed: ' + (e.detail || r.status)); }}
     }}
     </script>
     """)
