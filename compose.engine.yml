@@ -187,7 +187,11 @@ services:
       - --verification-key=${POLICY_SIGNING_KEY}
       - --verification-key-id=mcp-policy-signing-key-v1
       - --signing-alg=HS256
-      - --scope=write
+      # CR-15 / NOTE: --scope=write removed — see docker-compose.yml's identical
+      # comment. `opa build` (the repo's only signing tool) cannot embed a `scope`
+      # claim into the bundle signature, so every freshly signed bundle has
+      # scope=None and OPA rejected it with "scope mismatch" -> crashloop. This
+      # tier had drifted from the base compose's already-applied fix.
       - --bundle
       - /policies/bundle.tar.gz
     volumes:
