@@ -51,3 +51,7 @@ lab/nginx/lab-certs/*.key
 CLAUDE.md
 docs/superpowers/
 lab.config
+
+# PRD-0006 R-2: generated lab gateway secret + step-ca certs (never commit)
+lab/nginx/secrets/
+lab/nginx/lab-certs/step-ca-root.crt

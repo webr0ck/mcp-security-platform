@@ -70,7 +70,16 @@ reads it (`auditor.py` has zero `scan_report` references today).
   block-tier scan over-flags a since-fixed tool; the `scanned_at`/`commit_sha` on the audit surfaces
   it and a rescan clears it. Never lowers a score.
 
-## R-2 — step-ca in the lab + mTLS agent-identity test
+## R-2 — step-ca in the lab + mTLS agent-identity test  ✅ DONE
+
+**Status:** Implemented + verified (8/8 smoke). The lab nginx now verifies step-ca client certs on
+`/api/v1/tools/`: `mcp-proxy-lab.conf` gains `ssl_client_certificate` + `ssl_verify_client optional`,
+a CN-extraction + path-scope map (`00-mtls-map.conf` — the CRS nginx 1.30.1 lacks `$ssl_client_s_dn_cn`
+so it regexes CN from `$ssl_client_s_dn`), the real `X-Gateway-Secret` via a gitignored include, and
+the 401-on-`!SUCCESS` gate. `lab/tests/mtls_agent_identity.sh` sets up (CA extract + secret gen + mint
+agent cert, all gitignored) and asserts: OIDC unbroken (307), no-cert `/api/v1/tools/` → 401,
+agent-cert → 403 with the proxy resolving `agent:{ca}:agent-lab-01` (audited, fail-closed). E2E
+lifecycle re-verified (12/12) — the gateway change didn't break the submission flow.
 
 ### Problem (CORRECTED by 3-critic — v1 premise was verified-false)
 step-ca **already runs in the lab** (`mcp-step-ca` container up now; `Makefile.lab` `LAB_COMPOSE`

@@ -703,6 +703,9 @@ services:
       - ./lab/nginx/nginx.conf:/etc/nginx/nginx.conf
       - ./lab/nginx/conf.d:/etc/nginx/conf.d
       - ./lab/nginx/lab-certs:/etc/nginx/lab-certs:ro
+      # PRD-0006 R-2: step-ca CA is in lab-certs above; the generated X-Gateway-Secret
+      # include (gitignored) enables the proxy to trust the mTLS CN.
+      - ./lab/nginx/secrets:/etc/nginx/secrets:ro
       # bind-mount all three modsecurity.d config files — the container rootfs is read_only:true
       # so 90-copy-modsecurity-config.sh cannot create new files there at runtime.
       - ./lab/modsecurity-crs/modsecurity.conf:/etc/modsecurity.d/modsecurity.conf
