@@ -1123,14 +1123,17 @@ networks:
     internal: false   # this net has internet access via lab-egress-proxy NAT
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
-# podman-compose does not support the Docker Compose v2 'environment:' secret
-# source. The base docker-compose.yml defines step_ca_password with
-# environment: STEP_CA_PROVISIONER_PASSWORD.  When the two files are merged,
-# podman-compose 1.6+ performs a deep merge that keeps both keys.  Setting
-# environment: ~ (null) here causes the deep-merged value to be null (falsy),
-# which suppresses the podman-compose validator's "environment not supported"
-# error, while file: provides the actual secret content from disk.
+# Override the base docker-compose.yml's step_ca_password secret to point at
+# the lab-specific password file. The base secret defines ONLY `file:` (no
+# `environment:` key) — a stale comment here previously claimed the base used
+# `environment:` and added a matching `environment: ""` override to "null it
+# out" during the deep merge. That's wrong on current docker-compose.yml, and
+# the empty string still counts as "environment is set" to a Compose Spec v2
+# validator, so the merged secret ends up with BOTH `file:` and `environment:`
+# — which docker-compose (real v2 binary; podman-compose now shells out to it
+# as an external provider) rejects outright: "file|environment attributes are
+# mutually exclusive". Just override `file:`; there is no `environment:` key
+# in the base to suppress.
 secrets:
   step_ca_password:
-    environment: ""
     file: ./lab/step-ca-password
