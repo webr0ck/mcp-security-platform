@@ -82,6 +82,15 @@ For `kc_token_exchange`, before injecting the exchanged token the broker MUST ve
 2. **Passthrough, same trust domain** (`passthrough`, roadmap-gated at the admin API): the client presents its own upstream token in `X-Downstream-Authorization`; the proxy forwards it. This is *not* "forward the caller's gateway token" — a normal client that never sets that header gets **no** Authorization forwarded.
 3. **Static injection** (`service`, `user`, `service_account`): a stored secret/token (or a KC service-account token) is decrypted/minted and injected. `service`/`user` inject the decrypted `credential_store` blob directly.
 
+### 2.6 ms365-class servers (device-code / self-managed token cache) — architectural gap (validation HIGH-1)
+
+The broker's model is **stateless per-call injection**: it resolves one credential and injects it into one upstream request. A real-world server like [`softeria/ms-365-mcp-server`](https://github.com/softeria/ms-365-mcp-server) is a **different shape** — it runs an OAuth **device-code** flow and **owns and refreshes its own MSAL token cache across its process lifetime**. The broker has no concept of a long-lived, server-managed token store, and every scaffold template + the SDK context assume the stateless-per-call shape.
+
+- **"Dozens of tools" is NOT the blocker** — Pattern B (`mcp-server-onboarding.md`) already proxies `tools/list` for an arbitrarily large upstream.
+- The needed delegated mode `entra_user_token` is **(roadmap)** (see the table above); `entra_client_credentials` is single-tenant (no multi-tenant Azure AD).
+- **Current supported path:** run such a server with `injection_mode=none` and let the server **self-manage its OAuth** (device-code + its own token cache) *outside* the broker. This is the pattern to use today; the broker simply injects nothing and the server authenticates upstream itself.
+- **Roadmap:** a broker-native device-code / persistent-token-store flow so the platform can own the MSAL cache and keep per-user attribution. Until then, `injection_mode=none` self-managed is the documented, supported answer for ms365-class servers — with the trade-off that the broker gives no per-call credential isolation for that server (the server holds its own tokens).
+
 ---
 
 ## 4. Enrollment flow (zero raw credentials to the client)

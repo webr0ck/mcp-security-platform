@@ -248,6 +248,18 @@ that cannot run fails **closed** (`scan_status='error'`, never `passed`). **The 
 only** — a `passed` scan moves the submission to `awaiting_review`; it does not approve it. Human
 review (§6.5 `security_reviewer`, with self-review forbidden) remains the authoritative gate.
 
+**Post-approval state machine + deploy model (be honest — validation CRITICAL-2).** Approval does
+**NOT** build or launch a container. The platform automates *intake → scan → human review*; it does
+**not** automate "running isolated container behind the gateway." The submitter **self-hosts** the
+server on their own infrastructure and hands the URL back. The state machine:
+`awaiting_review` → **approve** (`submission.py::approve_submission`) → `approved_pending_url`
+(repo-backed) or `scaffold_ready` (no-code) — *DB fields only, nothing is deployed* → submitter runs
+the server, then `POST /api/v1/submissions/{id}/provide-url` (SSRF-validated) → discovery runs
+**synchronously** (`await _run_tool_discovery`, tools registered **quarantined**, INV-005) → `active`.
+No podman/docker/systemd/ansible/compose call exists in the approval path. **Auto-deploy into a
+per-server isolated network with the gateway as sole ingress is (roadmap)** — do not describe the
+current flow as "submit git URL → running isolated container, zero manual steps."
+
 **End-to-end acceptance (PRD-0005 R-4)**: `lab/tests/submission_lifecycle_e2e.sh` drives the whole
 lifecycle over the real gateway — submit (alice) → automated scan (mcp_checker findings + both SBOMs)
 → segregation-of-duties (submitter self-approve → 403) → approve (carol, `security_reviewer`) →

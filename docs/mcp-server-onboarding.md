@@ -17,6 +17,15 @@ debugging why it's half-visible.
    `proxy/app/services/server_onboarding.py`, driven from the admin portal).
    Same end state, skips the submission/scan workflow.
 
+> **The self-service submission state machine (and the deploy reality).** Approval does **not**
+> deploy anything — the **submitter self-hosts** the server. Flow:
+> `draft` → `scan_pending`/`scan_running` → `awaiting_review` → **reviewer approves** →
+> `approved_pending_url` (repo-backed) or `scaffold_ready` (no-code) — *DB status only, nothing runs* →
+> submitter starts the server on their own infra, then `POST /api/v1/submissions/{id}/provide-url`
+> (SSRF-checked) → tools are **discovered synchronously and quarantined** (INV-005) → `active`. There is
+> **no** container build/launch in the platform (podman/docker/systemd/ansible are absent from the
+> approval path). Auto-deploy into a per-server isolated network is **(roadmap)** — see ARCHITECTURE §5.5.
+
 Both converge on the same three tables — get these right and discovery,
 entitlement, and invocation all just work:
 
