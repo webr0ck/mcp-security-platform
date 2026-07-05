@@ -166,6 +166,7 @@ services:
     networks:
       - lab-net
       - observability-net
+      - mcp-grafana-backend-net   # HIGH-2: reachable by lab-mcp-grafana only
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
       interval: 10s
@@ -234,6 +235,7 @@ services:
       SKIP_SUPERUSER: "false"
     networks:
       - lab-net
+      - mcp-netbox-backend-net   # HIGH-2: reachable by mcp-netbox only
     healthcheck:
       # 403 = auth required = NetBox is up; curl -f fails on >=400 so use -s + grep
       test: ["CMD-SHELL", "curl -s http://localhost:8080/api/ | grep -q 'detail\\|Authentication' && exit 0 || exit 1"]
@@ -283,7 +285,7 @@ services:
       lab-grafana:
         condition: service_healthy
     networks:
-      - lab-net
+      - mcp-grafana-backend-net   # HIGH-2: dedicated MCP<->backend net (replaces shared lab-net)
       - mcp-grafana-net   # pairwise net with proxy only
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8000/mcp > /dev/null 2>&1 || exit 1"]
@@ -314,7 +316,7 @@ services:
       lab-netbox:
         condition: service_healthy
     networks:
-      - lab-net
+      - mcp-netbox-backend-net   # HIGH-2: dedicated MCP<->backend net (replaces shared lab-net)
       - mcp-netbox-net   # pairwise net with proxy only; replaces internal-net
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
@@ -343,7 +345,7 @@ services:
       lab-keycloak:
         condition: service_healthy
     networks:
-      - lab-net
+      # HIGH-2: dropped shared lab-net (no backend) — no MCP-to-MCP path
       - mcp-lab-tickets-net   # pairwise net with proxy only
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
@@ -378,6 +380,7 @@ services:
       - lab-gitea-data:/data
     networks:
       - lab-net
+      - mcp-gitea-backend-net   # HIGH-2: reachable by lab-mcp-gitea only
     healthcheck:
       test: ["CMD-SHELL", "wget -T 30 -qO- http://localhost:3000/api/healthz 2>/dev/null | grep -q 'pass' && exit 0 || exit 1"]
       interval: 15s
@@ -406,7 +409,7 @@ services:
       lab-gitea:
         condition: service_healthy
     networks:
-      - lab-net
+      - mcp-gitea-backend-net   # HIGH-2: dedicated MCP<->backend net (replaces shared lab-net)
       - mcp-gitea-net   # pairwise net with proxy only; replaces internal-net
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
@@ -539,7 +542,7 @@ services:
       SERVER_NAME: "echo-mcp"
       FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
     networks:
-      - lab-net
+      # HIGH-2: dropped shared lab-net (echo has no backend) — no MCP-to-MCP path
       - mcp-echo-net   # pairwise net with proxy only; replaces internal-net
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
@@ -650,7 +653,7 @@ services:
       PORT: "8000"
       FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
     networks:
-      - lab-net
+      # HIGH-2: dropped shared lab-net (no backend) — no MCP-to-MCP path
       - mcp-search-net   # pairwise net with proxy only; replaces internal-net
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
@@ -1068,6 +1071,17 @@ networks:
     driver: bridge
     internal: true
   mcp-gitea-net:
+    driver: bridge
+    internal: true
+  # ── HIGH-2: dedicated MCP<->backend nets (each MCP server + ONLY its backend),
+  # replacing the shared lab-net path that let MCP servers reach each other. ──
+  mcp-gitea-backend-net:
+    driver: bridge
+    internal: true
+  mcp-netbox-backend-net:
+    driver: bridge
+    internal: true
+  mcp-grafana-backend-net:
     driver: bridge
     internal: true
   mcp-m365-net:
