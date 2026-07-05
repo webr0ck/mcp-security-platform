@@ -2715,20 +2715,20 @@ async def fragment_admin_limits(request: Request):
   </div>
 
   <!-- Edit drawer -->
-  <div id="limits-drawer" style="display:none;margin-top:20px;background:#13151a;border:1px solid #2a2d35;border-radius:10px;padding:18px">
-    <div style="font-size:13px;font-weight:600;color:#e7e9ec;margin-bottom:12px">
-      Edit limits for <code id="limits-edit-cid" style="color:var(--cyan)"></code>
+  <div id="limits-drawer" style="display:none;margin-top:20px;background:var(--adm-surface);border:1px solid var(--adm-border);border-radius:14px;padding:20px">
+    <div style="font-size:14px;font-weight:700;color:var(--adm-text);margin-bottom:14px">
+      Edit limits for <code id="limits-edit-cid" style="color:var(--adm-blue);font-family:var(--ff-mono)"></code>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
       <div>
-        <label style="font-size:12px;color:#9aa1ab;display:block;margin-bottom:4px">Rate limit (req/window)</label>
+        <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--adm-dim);display:block;margin-bottom:5px">Rate limit (req/window)</label>
         <input id="limits-edit-rl" type="number" min="1" max="100000"
-               style="width:100%;background:#0d0f14;border:1px solid #2a2d35;border-radius:6px;color:#e7e9ec;padding:6px 10px;font-size:13px">
+               style="width:100%;background:var(--adm-input);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--adm-text);padding:9px 12px;font-size:13px">
       </div>
       <div>
-        <label style="font-size:12px;color:#9aa1ab;display:block;margin-bottom:4px">Anomaly sensitivity</label>
+        <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--adm-dim);display:block;margin-bottom:5px">Anomaly sensitivity</label>
         <select id="limits-edit-sens"
-                style="width:100%;background:#0d0f14;border:1px solid #2a2d35;border-radius:6px;color:#e7e9ec;padding:6px 10px;font-size:13px">
+                style="width:100%;background:var(--adm-input);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--adm-text);padding:9px 12px;font-size:13px">
           <option value="normal">normal</option>
           <option value="lenient">lenient</option>
           <option value="off">off</option>
@@ -2738,11 +2738,11 @@ async def fragment_admin_limits(request: Request):
     <div style="display:flex;gap:8px">
       <button class="btn-primary btn-sm" onclick="limitsSave()">Save</button>
       <button class="btn-sm" onclick="limitsReset('both')"
-              style="background:#2a2d35;border:none;color:#e7e9ec;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px">
+              style="background:var(--adm-btn-secondary);border:1px solid rgba(255,255,255,0.12);color:#cdd6ea;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:12px">
         Reset counters
       </button>
       <button class="btn-sm" onclick="limitsCloseDrawer()"
-              style="background:transparent;border:1px solid #2a2d35;color:#9aa1ab;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px">
+              style="background:transparent;border:1px solid rgba(255,255,255,0.14);color:var(--adm-muted);padding:8px 14px;border-radius:8px;cursor:pointer;font-size:12px">
         Cancel
       </button>
     </div>
@@ -2751,15 +2751,15 @@ async def fragment_admin_limits(request: Request):
 </div>
 
 <style>
-.limits-table { width:100%; border-collapse:collapse; font-size:13px; }
-.limits-table th { text-align:left; color:#9aa1ab; font-weight:500; padding:6px 10px; border-bottom:1px solid #2a2d35; }
-.limits-table td { padding:8px 10px; border-bottom:1px solid #1a1d24; color:#e7e9ec; vertical-align:middle; }
-.limits-table tr:hover td { background:#13151a; }
-.lbadge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; }
-.lbadge-ok   { background:#16231a; color:#4ade80; }
-.lbadge-warn { background:#251f10; color:#fbbf24; }
-.lbadge-block{ background:#2a1010; color:#f87171; }
-.lbadge-mode { background:#1a1d24; color:#9aa1ab; }
+.limits-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+.limits-table th { text-align:left; color:var(--adm-dim); font:700 10.5px var(--ff-sans); text-transform:uppercase; letter-spacing:.06em; padding:12px 12px; border-bottom:1px solid rgba(255,255,255,0.08); }
+.limits-table td { padding:13px 12px; border-bottom:1px solid rgba(255,255,255,0.04); color:var(--adm-text); vertical-align:middle; }
+.limits-table tr:hover td { background:rgba(255,255,255,0.02); }
+.lbadge { display:inline-block; padding:2px 8px; border-radius:5px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+.lbadge-ok   { background:rgba(53,200,138,0.14); color:var(--adm-green); }
+.lbadge-warn { background:rgba(234,179,8,0.14); color:var(--adm-amber); }
+.lbadge-block{ background:rgba(239,83,80,0.14); color:var(--adm-red); }
+.lbadge-mode { background:rgba(79,156,249,0.13); color:var(--adm-blue); font-family:var(--ff-mono); }
 </style>
 
 <script>
