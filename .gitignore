@@ -55,3 +55,7 @@ lab.config
 # PRD-0006 R-2: generated lab gateway secret + step-ca certs (never commit)
 lab/nginx/secrets/
 lab/nginx/lab-certs/step-ca-root.crt
+
+# playwright session screenshots (keep only the 2 originally tracked)
+.playwright-mcp/page-*
+.playwright-mcp/console-2026-07-05*
