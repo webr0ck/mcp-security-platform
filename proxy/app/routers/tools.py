@@ -726,6 +726,27 @@ async def update_tool(
                 status_code=422,
                 detail={"code": "SCHEMA_INVALID", "message": "Cannot activate: tool has no signed SBOM (INV-006)."},
             )
+        # CR-07: releasing a quarantined tool (quarantined -> active) through this
+        # generic PATCH must carry the same evidence a dedicated release workflow
+        # would require — parent server approved, and its supply-chain scan
+        # passed — not just an admin role + SBOM. Otherwise a bare admin can
+        # release a tool whose server scan failed/blocked or was never approved.
+        if effective_status == "active" and row.status == "quarantined":
+            _srv = await db.execute(
+                text("SELECT status, scan_status FROM server_registry WHERE server_id = :sid"),
+                {"sid": row.server_id},
+            )
+            _srv_row = _srv.fetchone()
+            if row.server_id and (_srv_row is None or _srv_row.status != "approved"):
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "RELEASE_DENIED", "message": "Cannot release: parent server is not approved."},
+                )
+            if row.server_id and _srv_row.scan_status not in ("passed", "not_applicable"):
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "RELEASE_DENIED", "message": f"Cannot release: parent server scan_status={_srv_row.scan_status!r}, not passed."},
+                )
         updates.append("status = :new_status")
         update_params["new_status"] = effective_status
 

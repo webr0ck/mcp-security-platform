@@ -721,3 +721,80 @@ async def test_patch_db_failure_rolls_back():
     db.rollback.assert_awaited_once()
     # Commit must NOT have been called
     db.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Test 9/10: CR-07 — releasing quarantined -> active requires parent server
+# approved + scan passed, not just admin role + SBOM.
+# ---------------------------------------------------------------------------
+
+def _quarantined_tool_row(server_id: str = "srv-001") -> MagicMock:
+    row = MagicMock()
+    row.name = "quarantined_tool"
+    row.description = "Awaiting release."
+    row.schema = {"type": "object", "properties": {}}
+    row.upstream_url = "https://upstream.example.com/quarantined"
+    row.source_repo = "https://github.com/example/quarantined"
+    row.tags = []
+    row.status = "quarantined"
+    row.server_id = server_id
+    row.sbom_id = "sbom-release"
+    return row
+
+
+def _make_release_db(tool_row: MagicMock, server_row: MagicMock | None) -> AsyncMock:
+    """Status-only PATCH (no content change -> no re-audit/collision call), so
+    call #2 is the CR-07 server_registry lookup, not the MCP-005 collision check."""
+    return _make_db(tool_row=tool_row, collision_row=server_row)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_release_denied_when_parent_server_not_approved():
+    from fastapi import HTTPException
+
+    body = {"status": "active"}
+    request = _make_request(body)
+    tool_row = _quarantined_tool_row()
+    server_row = MagicMock(status="pending", scan_status="passed")
+    db = _make_release_db(tool_row, server_row)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_patch(request, db)
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "RELEASE_DENIED"
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_release_denied_when_scan_not_passed():
+    from fastapi import HTTPException
+
+    body = {"status": "active"}
+    request = _make_request(body)
+    tool_row = _quarantined_tool_row()
+    server_row = MagicMock(status="approved", scan_status="blocked")
+    db = _make_release_db(tool_row, server_row)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_patch(request, db)
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "RELEASE_DENIED"
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_release_succeeds_when_server_approved_and_scan_passed():
+    body = {"status": "active"}
+    request = _make_request(body)
+    tool_row = _quarantined_tool_row()
+    server_row = MagicMock(status="approved", scan_status="passed")
+    db = _make_release_db(tool_row, server_row)
+
+    await _call_patch(request, db)
+
+    db.commit.assert_awaited_once()
