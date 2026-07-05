@@ -1019,9 +1019,9 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 text("SELECT status FROM tool_registry WHERE name = :name AND deleted_at IS NULL LIMIT 1"),
                 {"name": lookup_name},
             )
-            any_status_row = any_status_result.fetchone()
-            if any_status_row is not None and any_status_row[0] in ("quarantined", "deprecated", "disabled"):
-                return {"type": "text", "text": f"Tool '{lookup_name}' is {any_status_row[0]} and cannot be invoked"}
+            any_status_row = any_status_result.mappings().fetchone()
+            if any_status_row is not None and any_status_row["status"] in ("quarantined", "deprecated", "disabled"):
+                return {"type": "text", "text": f"Tool '{lookup_name}' is {any_status_row['status']} and cannot be invoked"}
 
             result = await session.execute(
                 text("SELECT * FROM tool_registry WHERE name = :name AND status NOT IN ('deprecated', 'quarantined', 'disabled') AND deleted_at IS NULL LIMIT 1"),
