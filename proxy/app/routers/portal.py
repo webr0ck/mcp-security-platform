@@ -956,6 +956,7 @@ _TAB_MAP_PY = {
     "submissions": "Submissions",
     "prompts":     "Wizard Prompts",
     "llm":         "LLM Provider",
+    "git":         "Git Providers",
     "profile":     "Profile",
     "access":      "Access",
 }
@@ -1047,6 +1048,7 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
     {_nav("Submissions",     "submissions", active=initial_tab == "submissions")}
     {_nav("Wizard Prompts",  "prompts",     active=initial_tab == "prompts")}
     {_nav("LLM Provider",    "llm",         active=initial_tab == "llm")}
+    {_nav("Git Providers",   "git",         active=initial_tab == "git")}
     {_nav("Credentials",     "credentials", active=initial_tab == "credentials")}
     {_nav("Request Limits",  "limits",      active=initial_tab == "limits")}
     {_nav("Profile",         "profile",     active=initial_tab == "profile")}
@@ -5361,6 +5363,96 @@ async def fragment_admin_llm(request: Request):
       out.textContent = d.ok ? ('OK (status '+d.status+', token '+(d.token_used?'used':'not used')+')')
                              : ('Failed: '+(d.error||('status '+d.status)));
       out.style.color = d.ok ? '#4ade80' : '#fca5a5';
+    }}
+    </script>
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Git Providers tab (admin — configure github/bitbucket clone sources)
+# ---------------------------------------------------------------------------
+
+@router.get("/fragments/admin/git", response_class=HTMLResponse)
+async def fragment_admin_git(request: Request):
+    """Configure git providers (host/account/token/allow_private) for repo cloning."""
+    _require_admin(request)
+    from app.services import platform_secrets as _ps
+    from app.core.asyncpg_pool import asyncpg_pool
+    pool = asyncpg_pool.get()
+    if pool is None:
+        return HTMLResponse('<div class="section-title">Git Providers</div>'
+                            '<div style="color:#fca5a5">Database unavailable.</div>')
+    rows = await pool.fetch(
+        "SELECT provider, enabled, host, clone_account, allow_private FROM git_providers ORDER BY provider"
+    )
+    existing = {r["provider"]: r for r in rows}
+
+    cards = []
+    for prov in ("github", "bitbucket"):
+        r = existing.get(prov)
+        host = esc_py(r["host"] if r else ("github.com" if prov == "github" else ""))
+        acct = esc_py((r["clone_account"] if r else "") or "")
+        enabled = bool(r["enabled"]) if r else False
+        allow_priv = bool(r["allow_private"]) if r else False
+        token_set = await _ps.secret_exists(f"git-{prov}")
+        token_state = ('<span style="color:#4ade80">set</span>' if token_set
+                       else '<span style="color:var(--muted)">not set</span>')
+        cards.append(f"""
+        <details {"open" if enabled or prov=="bitbucket" else ""} style="margin:0.75rem 0;border:1px solid #1e293b;border-radius:8px;padding:0.6rem 0.85rem">
+          <summary style="cursor:pointer;font-weight:600;font-size:13px">{esc_py(prov)}
+            <span style="color:var(--muted);font-weight:400">· {"enabled" if enabled else "disabled"}</span></summary>
+          <div style="display:flex;flex-direction:column;gap:0.5rem;margin-top:0.6rem;font-size:13px;max-width:560px">
+            <label>Host (exact)<input id="git-host-{prov}" value="{host}" placeholder="bitbucket.corp.example"
+              style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
+            <label>Clone account<input id="git-acct-{prov}" value="{acct}" placeholder="mcp-platform-bot"
+              style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
+            <label style="display:flex;align-items:center;gap:0.5rem"><input id="git-enabled-{prov}" type="checkbox" {"checked" if enabled else ""}> Enabled</label>
+            <label style="display:flex;align-items:center;gap:0.5rem"><input id="git-priv-{prov}" type="checkbox" {"checked" if allow_priv else ""}>
+              Allow private/internal host (RFC1918) — <span style="color:#d97706">widens SSRF surface; audited</span></label>
+            <div style="display:flex;gap:0.5rem">
+              <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.8rem" onclick="saveGit('{prov}')">Save</button>
+            </div>
+            <div>Token: {token_state}</div>
+            <label>Set token (write-only)<input id="git-token-{prov}" type="password" placeholder="paste clone token"
+              style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
+            <div style="display:flex;gap:0.5rem">
+              <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.8rem" onclick="saveGitToken('{prov}')">Save token</button>
+              <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:12px;padding:0.3rem 0.8rem" onclick="delGitToken('{prov}')">Remove token</button>
+            </div>
+          </div>
+        </details>""")
+
+    return HTMLResponse(f"""
+    <div class="section-title">&#x1F517; Git Providers</div>
+    <p style="color:var(--muted);font-size:12px;margin:0.25rem 0 0.75rem">
+      Repository hosts the submission scanner may clone from. Provider is inferred from a submission's
+      URL host; only an <b>enabled</b>, exact-match host is accepted. Loopback/link-local/cloud-metadata
+      hosts are always refused; an internal (RFC1918) corporate host requires the explicit
+      "Allow private" acknowledgement. Tokens are stored encrypted and only used as clone credentials.</p>
+    {"".join(cards)}
+    <script>
+    async function saveGit(prov) {{
+      const body = {{
+        host: document.getElementById('git-host-'+prov).value,
+        clone_account: document.getElementById('git-acct-'+prov).value || null,
+        enabled: document.getElementById('git-enabled-'+prov).checked,
+        allow_private: document.getElementById('git-priv-'+prov).checked
+      }};
+      const r = await fetch('/api/v1/admin/git-providers/'+prov, {{method:'PUT',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+      if (r.ok) {{ htmx.ajax('GET','/portal/fragments/admin/git',{{target:'#adm-content',swap:'innerHTML'}}); }}
+      else {{ const e=await r.json().catch(()=>({{}})); alert('Save failed: '+(e.detail||r.status)); }}
+    }}
+    async function saveGitToken(prov) {{
+      const t = document.getElementById('git-token-'+prov).value;
+      if (!t) {{ alert('Enter a token first.'); return; }}
+      const r = await fetch('/api/v1/admin/git-providers/'+prov+'/token', {{method:'PUT',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:t}})}});
+      if (r.ok) {{ htmx.ajax('GET','/portal/fragments/admin/git',{{target:'#adm-content',swap:'innerHTML'}}); }}
+      else {{ const e=await r.json().catch(()=>({{}})); alert('Token save failed: '+(e.detail||r.status)); }}
+    }}
+    async function delGitToken(prov) {{
+      if (!confirm('Remove the stored token for '+prov+'?')) return;
+      const r = await fetch('/api/v1/admin/git-providers/'+prov+'/token', {{method:'DELETE'}});
+      if (r.ok) {{ htmx.ajax('GET','/portal/fragments/admin/git',{{target:'#adm-content',swap:'innerHTML'}}); }}
     }}
     </script>
     """)

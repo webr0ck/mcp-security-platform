@@ -38,9 +38,13 @@ from app.services import prompt_store
 from app.services.server_onboarding import InvalidOnboardingConfig, validate_upstream_url_ssrf
 from app.services.submission_scanner import GITHUB_CLONE_ACCOUNT, scan_submission
 
-# Same regex as submission_scanner — enforced at API boundary before any storage
-_GITHUB_URL_RE = re.compile(
-    r'^https://github\.com/[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*(\.git)?/?$'
+# R-2: cheap structural guard at submit time — well-formed https URL, no
+# embedded credentials, no whitespace/control chars. The authoritative
+# per-provider host allowlist + SSRF validation runs in the async scanner
+# (git_providers). Host is NOT pinned to github here so Bitbucket URLs pass the
+# API boundary and are gated by the provider config at scan time.
+_SAFE_REPO_URL_RE = re.compile(
+    r'^https://[A-Za-z0-9.-]+(:\d+)?/[A-Za-z0-9][A-Za-z0-9_./~-]*(\.git)?/?$'
 )
 
 logger = logging.getLogger(__name__)
@@ -126,10 +130,19 @@ async def _get_submission(server_id: str, owner_sub: str | None = None) -> dict[
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 def _validate_github_url(v: Optional[str]) -> Optional[str]:
+    """Cheap structural guard at submit time (R-2): require a well-formed https
+    URL with a bare host path and no embedded credentials. The authoritative
+    provider-host allowlist + SSRF check runs asynchronously in the submission
+    scanner (git_providers.match_provider / validate_host), which is where an
+    unknown/disabled host or a private-IP target is actually rejected. This
+    validator only rejects obviously-malformed input (non-https, credentials,
+    whitespace, control chars) without hardcoding a single provider host."""
     if v is None or v == "":
         return None
-    if not _GITHUB_URL_RE.match(v):
-        raise ValueError("github_repo_url must be https://github.com/<owner>/<repo>")
+    if not _SAFE_REPO_URL_RE.match(v):
+        raise ValueError(
+            "repository URL must be https://<host>/<path> with no embedded credentials"
+        )
     return v
 
 

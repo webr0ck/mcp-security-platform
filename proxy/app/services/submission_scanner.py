@@ -34,18 +34,14 @@ import yaml
 from app.core.database import AsyncSessionLocal
 from sqlalchemy import text
 
-# Strict allowlist: only https://github.com/<owner>/<repo> (optionally .git)
-# Owner/repo chars: alphanumeric, hyphens, underscores, dots.
-# Rejects anything starting with '-', protocol smuggling, file://, etc.
-_GITHUB_URL_RE = re.compile(
-    r'^https://github\.com/[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*(\.git)?/?$'
-)
-
 logger = logging.getLogger(__name__)
 
 _SCAN_CONFIG_PATH = Path(__file__).parents[2] / "scan-config.yaml"
 
 # GitHub account used to clone repositories (shown to submitters in the wizard).
+# R-2: the authoritative per-provider allowlist + clone now lives in
+# app/services/git_providers.py; these env vars remain the github fallback
+# (account display + token via git_providers.provider_token) for back-compat.
 GITHUB_CLONE_ACCOUNT = os.environ.get("GITHUB_CLONE_ACCOUNT", "mcp-platform-bot")
 GITHUB_CLONE_TOKEN = os.environ.get("GITHUB_CLONE_TOKEN", "")
 
@@ -60,17 +56,6 @@ def _load_scan_config() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Failed to load scan-config.yaml: %s", exc)
         return {}
-
-
-def _clone_url_with_auth(github_url: str) -> str:
-    """Inject token into GitHub HTTPS clone URL."""
-    if not GITHUB_CLONE_TOKEN:
-        return github_url
-    url = github_url.rstrip("/")
-    if url.startswith("https://github.com/"):
-        path = url[len("https://github.com/"):]
-        return f"https://{GITHUB_CLONE_ACCOUNT}:{GITHUB_CLONE_TOKEN}@github.com/{path}"
-    return github_url
 
 
 async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120,
@@ -91,13 +76,36 @@ async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120,
     return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
-async def _clone_repo(github_url: str, dest: str) -> tuple[bool, str]:
-    """Clone the repo. Returns (success, error_message)."""
-    if not _GITHUB_URL_RE.match(github_url):
-        return False, "Repository URL must be https://github.com/<owner>/<repo>"
+async def _clone_repo(repo_url: str, dest: str) -> tuple[bool, str]:
+    """Clone the repo from a configured git provider. Returns (success, error).
+
+    R-2: the provider (github/bitbucket/…) is inferred from the URL host and must
+    match an enabled git_providers row. The host is SSRF-validated (loopback/
+    link-local/metadata always rejected; RFC1918 only with allow_private) right
+    before the clone. Transport hardening (https-only, option-injection guard,
+    shallow, sandbox cwd) is unchanged.
+    """
+    from app.services import git_providers
+
+    provider = await git_providers.match_provider(repo_url)
+    if provider is None:
+        return False, ("Repository URL does not match any enabled git provider. "
+                       "Allowed: an enabled host in Admin → Git Providers.")
     if not shutil.which("git"):
         return False, "git not available in the scanner environment"
-    clone_url = _clone_url_with_auth(github_url)
+
+    # SSRF: resolve + validate the host immediately before cloning.
+    try:
+        git_providers.validate_host(provider.host, provider.allow_private)
+    except git_providers.GitHostError as exc:
+        return False, f"clone blocked: {exc}"
+
+    try:
+        token = await git_providers.provider_token(provider.provider)
+    except git_providers.GitHostError as exc:
+        return False, str(exc)
+
+    clone_url = git_providers.build_clone_url(repo_url, provider.clone_account, token)
     rc, _, stderr = await _run(
         [
             "git",
@@ -113,8 +121,7 @@ async def _clone_repo(github_url: str, dest: str) -> tuple[bool, str]:
         timeout=120,
     )
     if rc != 0:
-        # Sanitise: remove token from error message before storing
-        safe_err = stderr.replace(GITHUB_CLONE_TOKEN, "***") if GITHUB_CLONE_TOKEN else stderr
+        safe_err = stderr.replace(token, "***") if token else stderr
         return False, safe_err.strip() or "clone failed"
     return True, ""
 
@@ -609,14 +616,17 @@ async def scan_submission(server_id: str, github_url: str) -> None:
 
     # H1 fix: URL check is here (after _set_status is defined) so an invalid URL
     # produces a proper DB update rather than a NameError.
-    if not _GITHUB_URL_RE.match(github_url):
+    # R-2: accept any URL matching an enabled git provider (github/bitbucket/…).
+    from app.services import git_providers
+    if await git_providers.match_provider(github_url) is None:
         await _set_status("blocked", [{
             "scanner": "url_validation",
             "severity": "critical",
             "block": True,
             "file": "",
             "line": 0,
-            "message": "Repository URL rejected: must be https://github.com/<owner>/<repo>",
+            "message": "Repository URL rejected: host must match an enabled git provider "
+                       "(Admin → Git Providers).",
         }])
         return
 
@@ -698,11 +708,12 @@ async def scan_repo(github_url: str) -> tuple[list[dict], str]:
     Does NOT write to the DB — callers handle persistence.
     Used by the periodic rescan scheduler.
     """
-    if not _GITHUB_URL_RE.match(github_url):
+    from app.services import git_providers
+    if await git_providers.match_provider(github_url) is None:
         return ([{
             "scanner": "url_validation", "severity": "critical", "block": True,
             "file": "", "line": 0,
-            "message": "Repository URL rejected by rescan: must be https://github.com/<owner>/<repo>",
+            "message": "Repository URL rejected by rescan: host must match an enabled git provider.",
         }], "blocked")
 
     config = _load_scan_config()

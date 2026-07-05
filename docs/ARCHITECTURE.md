@@ -192,6 +192,17 @@ migration `V054`.*
 A self-service submission carrying a GitHub repo URL is statically scanned **before** it enters the
 human review queue (`services/submission_scanner.py`, background task). Four scanners run:
 
+The repo is cloned from a configured **git provider** (PRD-0005 R-2). GitHub and corporate
+**Bitbucket** (Data Center `/scm/<proj>/<repo>.git` + `/<proj>/repos/<repo>`, and Cloud
+`/<workspace>/<repo>`) are both supported — the provider is inferred from the URL host and must
+match an **enabled, exact-host** row in `git_providers`. The service-account token lives encrypted
+in `platform_secrets` (`git-<provider>`). **SSRF (the clone path does NOT traverse the egress proxy,
+whose allowlist is M365/Graph only)**: the host is resolved and validated at write time and again
+immediately before the clone — loopback/link-local/`169.254` cloud-metadata are **always** refused;
+RFC1918/private ranges require an explicit `allow_private` admin acknowledgement (audited). Transport
+hardening (https-only, option-injection `--` guard, shallow, tmpfs, read-only token) is unchanged.
+*Reference: `services/git_providers.py`, `routers/admin_git.py`, migration `V055`.*
+
 - **trufflehog** — verified secrets only (`--only-verified`); a live-confirmed secret blocks.
 - **pip-audit** — Python-dependency CVEs; blocks at `critical`. No-ops on non-pip repos (recorded as
   an informational note, not a false "ran").

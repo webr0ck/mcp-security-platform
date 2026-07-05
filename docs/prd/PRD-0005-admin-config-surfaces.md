@@ -77,7 +77,14 @@ no auth header). No way to point at a token-protected endpoint without a redeplo
 - **Blast radius:** one platform LLM identity; a leaked token affects only the configured
   endpoint. Auditor runs at **registration only**, never on invoke — no data-plane exposure.
 
-## R-2 — Corporate Bitbucket service account (alongside GitHub)
+## R-2 — Corporate Bitbucket service account (alongside GitHub)  ✅ DONE
+
+**Status:** Implemented + verified (V055 `git_providers`; `git_providers.py` provider match +
+SSRF host validation; scanner refactored provider-aware; `admin_git.py`; portal Git Providers tab;
+submit-time validator relaxed to structural https). Verified via API: internal host rejected without
+`allow_private` (400), metadata host rejected even with it (400), internal host allowed with the ack,
+token encrypt round-trip, and a full GitHub submission still clones+scans (3 findings, 2 SBOM
+components → awaiting_review). 8 unit tests (URL shapes + IP classification + fail-closed DNS).
 
 **Problem.** `submission_scanner.py` is GitHub-hardcoded; clone path is unproxied (egress
 squid allowlist covers only M365/Graph — verified), so a new configurable host is a potential
