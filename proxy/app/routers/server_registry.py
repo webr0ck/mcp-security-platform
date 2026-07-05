@@ -562,6 +562,59 @@ async def release_server(server_id: str, request: Request):
         await db.commit()
 
 
+class PublicToggle(BaseModel):
+    enabled: bool
+
+
+@router.post("/api/v1/admin/servers/{server_id}/public")
+async def set_server_public(server_id: str, body: PublicToggle, request: Request):
+    """PRD-0005 R-3: toggle public_to_authenticated on a server.
+
+    Any authenticated principal may invoke a server flagged public — but ONLY a
+    read-only server (has_write_ops=false). Enabling on a write-op server is
+    rejected by the DB CHECK (ck_public_not_write_ops); we surface that as 409
+    rather than a 500. Audited via the HMAC-signed admin chain.
+    """
+    _require_platform_admin(request)
+    actor = getattr(request.state, "client_id", "unknown-admin")
+    try:
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                text(
+                    "UPDATE server_registry SET public_to_authenticated = :en "
+                    "WHERE server_id = :id AND deleted_at IS NULL "
+                    "RETURNING name, has_write_ops"
+                ),
+                {"en": body.enabled, "id": server_id},
+            )
+            row = res.mappings().first()
+            if row is None:
+                await db.rollback()
+                raise HTTPException(status_code=404, detail="server not found")
+            await db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # ck_public_not_write_ops violation (enabling public on a write-op server).
+        msg = str(exc).lower()
+        if "ck_public_not_write_ops" in msg or "check constraint" in msg:
+            raise HTTPException(
+                status_code=409,
+                detail="A write-capable server (has_write_ops=true) cannot be made public.",
+            )
+        logger.warning("set_server_public failed for %s: %s", server_id, exc)
+        raise HTTPException(status_code=500, detail="failed to update public flag")
+
+    try:
+        from app.services.admin_audit import emit_admin_config_event
+        await emit_admin_config_event(
+            actor, "set_server_public", server_id, {"enabled": body.enabled, "name": row["name"]},
+        )
+    except Exception:
+        pass  # audit failure must not fail the committed operation
+    return {"ok": True, "server_id": server_id, "public_to_authenticated": body.enabled}
+
+
 @router.post("/api/v1/servers/{server_id}/consent", status_code=201)
 async def mint_consent_token(server_id: str, body: ConsentRequest, request: Request):
     """

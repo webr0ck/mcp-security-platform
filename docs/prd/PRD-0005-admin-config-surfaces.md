@@ -96,7 +96,14 @@ SSRF/confused-deputy primitive.
   account's read token; contained by (a) metadata-range block, (b) DNS-pin, (c) read-only token,
   (d) the clone running in a tmpfs sandbox with no inbound path to the proxy.
 
-## R-3 — Self-service reachable by all authenticated users (scoped, write-safe)
+## R-3 — Self-service reachable by all authenticated users (scoped, write-safe)  ✅ DONE
+
+**Status:** Implemented + verified (V053, `entitlement.py` resolver gate + discovery parity,
+`server_registry.py` toggle endpoint, portal toggle UI, 3 unit tests). Verified: ungranted
+principal granted `public_server`; quarantine denies; write-op blocked by DB CHECK + 409; discovery
+parity. Also fixed a **pre-existing latent bug** — `list_entitled_servers` selected a non-existent
+`entitlement.role` column, so the catalog listing (`GET /api/v1/servers`) and detail endpoint
+returned empty/404 for everyone; now uses the `'user'` literal (matches `check_entitlement`).
 
 **Problem.** Entitlement is per-principal fail-closed (verified: `entitlement.py` has no
 "everyone" path and no admin bypass). Only alice + lab apikey are granted self-service. A prior

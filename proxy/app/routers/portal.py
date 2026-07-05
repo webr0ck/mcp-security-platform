@@ -2334,7 +2334,8 @@ async def fragment_admin_servers(request: Request):
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
                 SELECT server_id, name, upstream_url, status, owner_sub,
-                       injection_mode, updated_at, maintainers, debug_mode
+                       injection_mode, updated_at, maintainers, debug_mode,
+                       public_to_authenticated, has_write_ops
                 FROM server_registry
                 ORDER BY name
             """))
@@ -2412,6 +2413,10 @@ async def fragment_admin_servers(request: Request):
             ' <span class="pill pill-quarantined" title="Only the owner and maintainers can invoke this server right now">'
             '&#x1F527; maintenance</span>' if s.debug_mode else ''
         )
+        public_badge = (
+            ' <span class="pill pill-approved" title="Any authenticated user can invoke this read-only server (PRD-0005 R-3)">'
+            '&#x1F310; public</span>' if getattr(s, "public_to_authenticated", False) else ''
+        )
         if st == "pending":
             action_html = (
                 f'<div style="display:flex;gap:6px;justify-content:flex-end">'
@@ -2442,7 +2447,14 @@ async def fragment_admin_servers(request: Request):
                 f'<button onclick="adminSetMaintainers(\'{sid}\',{maint_json})">Maintainers…</button>'
                 f'<button onclick="adminToggleDebug(\'{sid}\',{"false" if debug_on else "true"})">'
                 f'{"Disable" if debug_on else "Enable"} debug mode</button>'
-                f'<button onclick="adminQuarantineSrv(\'{sid}\')">Quarantine</button>'
+                + (
+                    f'<button onclick="adminSetPublic(\'{sid}\',{"false" if s.public_to_authenticated else "true"})">'
+                    f'{"Make private" if s.public_to_authenticated else "Make public (all users)"}</button>'
+                    if not s.has_write_ops else
+                    '<button disabled title="Write-capable servers cannot be public" '
+                    'style="opacity:0.5;cursor:not-allowed">Make public (write-op — blocked)</button>'
+                )
+                + f'<button onclick="adminQuarantineSrv(\'{sid}\')">Quarantine</button>'
                 f'<button class="danger" onclick="adminDeleteSrv(\'{sid}\')">Delete</button>'
                 f'</div></div>'
             )
@@ -2454,7 +2466,7 @@ async def fragment_admin_servers(request: Request):
             <div class="srv-cell-alias">{esc_py(s.name or "")}</div>
           </div>
           <div class="srv-cell-url">{esc_py(s.upstream_url or "—")}</div>
-          <div><span class="pill {pill_cls}"><span class="pill-dot"></span>{pill_label}</span>{maint_badge}</div>
+          <div><span class="pill {pill_cls}"><span class="pill-dot"></span>{pill_label}</span>{maint_badge}{public_badge}</div>
           <div class="srv-cell-owner">{esc_py(s.owner_sub or "—")}</div>
           <div><span class="mode-chip">{esc_py(mode_label)}</span></div>
           <div class="srv-cell-updated">{esc_py(_fmt_time(s.updated_at))}</div>
@@ -2520,6 +2532,18 @@ async def fragment_admin_servers(request: Request):
       if (!confirm('Release this server from quarantine?')) return;
       fetch('/api/v1/admin/servers/' + id + '/release', {{method:'POST'}})
         .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.detail?.message || 'Error')))
+        .catch(e => alert('Network error: ' + e));
+    }}
+    function adminSetPublic(id, enable) {{
+      document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
+      if (!confirm(enable
+          ? 'Make this server reachable by ALL authenticated users? (Read-only servers only.)'
+          : 'Make this server private again (explicit grants only)?')) return;
+      fetch('/api/v1/admin/servers/' + id + '/public', {{
+        method:'POST', headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{enabled: enable}})
+      }})
+        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.detail || 'Error')))
         .catch(e => alert('Network error: ' + e));
     }}
     function adminQuarantineSrv(id) {{

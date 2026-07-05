@@ -217,6 +217,18 @@ approval time. The declared-dep inventory is display-only context, never a gate.
   table consumed by middleware, not pushed to OPA.
 - **Discovery == invoke**: server-linked tools are entitlement-checked on invoke
   (`enforce_tool_entitlement`), with no admin exception.
+- **Public-to-authenticated servers (PRD-0005 R-3)**: a per-server opt-in flag
+  `server_registry.public_to_authenticated` lets **any authenticated principal** invoke a server
+  without an explicit grant — but **only** a read-only one. This is not a wildcard entitlement and
+  not a role bypass: the `check_entitlement` resolver grants `role='user'`, `reason='public_server'`
+  **iff** the caller is authenticated AND the server is `status='approved'` (quarantine/suspended
+  are denied first) AND `public_to_authenticated=true` AND `has_write_ops=false`. Write-op safety is
+  double-enforced — a DB `CHECK (NOT (public_to_authenticated AND has_write_ops))` (`V053`) makes the
+  unsafe state unrepresentable, and the resolver re-checks. Discovery keeps parity
+  (`list_entitled_servers` includes public read-only servers). Only `lab-self-service` is seeded
+  public. Admin toggle: `POST /api/v1/admin/servers/{id}/public` (409 on a write-op server), audited.
+  *Follow-on: thread `reason='public_server'` into the invoke audit event (today it is on the
+  discovery/catalog response + an INFO log).*
 
 ### 6.5 RBAC roles
 

@@ -36,7 +36,7 @@ class EntitlementResult:
     entitled: bool
     role: str | None          # highest role granted, or None
     server_id: str | None
-    reason: str               # 'entitlement_table' | 'role_grant' | 'not_found' | 'server_not_approved'
+    reason: str               # 'entitlement_table' | 'role_grant' | 'public_server' | 'not_found' | 'server_not_approved'
 
 
 class NotEntitledError(Exception):
@@ -108,10 +108,12 @@ async def check_entitlement(
     """
     try:
         async with AsyncSessionLocal() as db:
-            # Step 1: Verify server exists and is approved.
+            # Step 1: Verify server exists and is approved. Also pull the
+            # public/write-op flags for the R-3 public-server branch (Step 4).
             row = await db.execute(
                 text(
-                    "SELECT server_id, status FROM server_registry "
+                    "SELECT server_id, status, public_to_authenticated, has_write_ops "
+                    "FROM server_registry "
                     "WHERE server_id = :server_id AND deleted_at IS NULL"
                 ),
                 {"server_id": server_id},
@@ -119,6 +121,8 @@ async def check_entitlement(
             server_row = row.mappings().first()
 
             if server_row is None or server_row["status"] != "approved":
+                # Quarantined / suspended / pending / rejected all land here and
+                # are denied BEFORE the public-server branch — quarantine wins.
                 return EntitlementResult(
                     entitled=False,
                     role=None,
@@ -172,6 +176,29 @@ async def check_entitlement(
                     role=srg["role"],
                     server_id=server_id,
                     reason="role_grant",
+                )
+
+            # Step 4 (R-3): public-to-authenticated fallback. Reaching here means
+            # the caller has a resolved principal (callers pass a real principal_id;
+            # enforce_tool_entitlement fails closed on an unresolved one) but no
+            # explicit grant. A server the admin flagged public AND that is
+            # read-only (has_write_ops=false) grants 'user' access to any
+            # authenticated principal. Write-op servers are excluded here AND by a
+            # DB CHECK (V053); quarantined/unapproved are already denied at Step 1.
+            if server_row["public_to_authenticated"] and server_row["has_write_ops"] is False:
+                # Greppable ALLOW-path signal so public access is distinguishable
+                # from an explicit grant in logs. (Full threading of this reason
+                # into the invoke audit_event is a documented follow-on — the
+                # catalog/discovery path already surfaces result.reason.)
+                logger.info(
+                    "entitlement granted via public_server: principal=%s server=%s",
+                    principal_id, server_id,
+                )
+                return EntitlementResult(
+                    entitled=True,
+                    role="user",
+                    server_id=server_id,
+                    reason="public_server",
                 )
 
             return EntitlementResult(
@@ -283,8 +310,13 @@ async def list_entitled_servers(
                         combined.role       AS role
                     FROM server_registry sr
                     JOIN (
-                        -- Explicit per-principal grants (not revoked)
-                        SELECT server_id, role
+                        -- Explicit per-principal grants (not revoked).
+                        -- entitlement has NO role column (grants USE == 'user');
+                        -- a literal keeps this valid — the prior `SELECT role`
+                        -- threw UndefinedColumn, was swallowed, and silently made
+                        -- this whole query return [] (discovery via this path was
+                        -- dead). Matches check_entitlement Step 2.
+                        SELECT server_id, 'user' AS role
                         FROM entitlement
                         WHERE principal_type = :pt
                           AND principal_id   = :pid
@@ -297,6 +329,19 @@ async def list_entitled_servers(
                         FROM server_role_grant
                         WHERE principal_type = :pt
                           AND principal_id   = :pid
+
+                        UNION ALL
+
+                        -- R-3: public-to-authenticated servers (read-only only).
+                        -- Discovery==invoke parity with check_entitlement Step 4:
+                        -- any authenticated principal discovers a public read-only
+                        -- approved server. Grants 'user' role.
+                        SELECT server_id, 'user' AS role
+                        FROM server_registry
+                        WHERE public_to_authenticated = true
+                          AND has_write_ops = false
+                          AND status = 'approved'
+                          AND deleted_at IS NULL
                     ) AS combined ON sr.server_id = combined.server_id
                     WHERE sr.status = 'approved'
                       AND sr.deleted_at IS NULL

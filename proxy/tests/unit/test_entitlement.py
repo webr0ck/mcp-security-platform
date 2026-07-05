@@ -144,6 +144,78 @@ async def test_check_entitlement_via_role_grant_fallback():
     assert result.reason == "role_grant"
 
 
+# ---------------------------------------------------------------------------
+# R-3: public_to_authenticated (PRD-0005) — write-op-gated public servers
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_check_entitlement_public_server_grants_ungranted_principal():
+    """Approved + public + read-only, no explicit grant → entitled via public_server."""
+    from app.services.entitlement import check_entitlement
+
+    sid = "00000000-0000-0000-0000-0000000000aa"
+    r_registry = _mock_result({"server_id": sid, "status": "approved",
+                               "public_to_authenticated": True, "has_write_ops": False})
+    r_entitlement = _mock_result(None)   # no explicit grant
+    r_role_grant = _mock_result(None)    # no role grant
+
+    factory = _make_session(r_registry, r_entitlement, r_role_grant)
+    with patch("app.services.entitlement.AsyncSessionLocal", factory):
+        result = await check_entitlement(
+            principal_type="human",
+            principal_id="human:keycloak:nobody@corp",
+            server_id=sid,
+        )
+    assert result.entitled is True
+    assert result.role == "user"
+    assert result.reason == "public_server"
+
+
+@pytest.mark.asyncio
+async def test_check_entitlement_public_flag_ignored_for_write_op_server():
+    """A write-op server must NOT be granted via the public branch (defense in
+    depth beside the DB CHECK) → falls through to not_found."""
+    from app.services.entitlement import check_entitlement
+
+    sid = "00000000-0000-0000-0000-0000000000bb"
+    r_registry = _mock_result({"server_id": sid, "status": "approved",
+                               "public_to_authenticated": True, "has_write_ops": True})
+    r_entitlement = _mock_result(None)
+    r_role_grant = _mock_result(None)
+
+    factory = _make_session(r_registry, r_entitlement, r_role_grant)
+    with patch("app.services.entitlement.AsyncSessionLocal", factory):
+        result = await check_entitlement(
+            principal_type="human",
+            principal_id="human:keycloak:nobody@corp",
+            server_id=sid,
+        )
+    assert result.entitled is False
+    assert result.reason == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_check_entitlement_non_public_server_still_denies_ungranted():
+    """Approved, not public, no grants → not_found (public flag off changes nothing)."""
+    from app.services.entitlement import check_entitlement
+
+    sid = "00000000-0000-0000-0000-0000000000cc"
+    r_registry = _mock_result({"server_id": sid, "status": "approved",
+                               "public_to_authenticated": False, "has_write_ops": False})
+    r_entitlement = _mock_result(None)
+    r_role_grant = _mock_result(None)
+
+    factory = _make_session(r_registry, r_entitlement, r_role_grant)
+    with patch("app.services.entitlement.AsyncSessionLocal", factory):
+        result = await check_entitlement(
+            principal_type="human",
+            principal_id="human:keycloak:nobody@corp",
+            server_id=sid,
+        )
+    assert result.entitled is False
+    assert result.reason == "not_found"
+
+
 @pytest.mark.asyncio
 async def test_list_entitled_servers_filters_by_principal():
     """list_entitled_servers returns only servers the principal is granted."""
