@@ -278,8 +278,8 @@ _CSS = """
     font-weight: 500;
     transition: background 0.15s;
   }
-  .btn-primary { background: #0ea5e9; color: #fff; }
-  .btn-primary:hover { background: var(--primary-dark); }
+  .btn-primary { background: var(--adm-blue); color: var(--adm-on-accent); font-weight: 700; }
+  .btn-primary:hover { filter: brightness(1.08); }
   .btn-danger  { background: #dc2626; color: #fff; }
   .btn-danger:hover { background: #b91c1c; }
   .btn-secondary { background: #334155; color: var(--text); }
@@ -505,6 +505,7 @@ _CSS = """
     --adm-red:     #ef5350;
     --adm-purple:  #c084fc;
     --adm-on-accent: #04122b; /* ink on blue buttons */
+    --adm-btn-secondary: #1a2233; /* neutral/secondary button + toast bg */
     --ff-sans: 'Hanken Grotesk', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     --ff-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Menlo', monospace;
   }
@@ -689,41 +690,53 @@ _CSS = """
   .srv-cell-url    { font: 400 12px var(--ff-mono); color: var(--adm-muted); }
   .srv-cell-owner  { font: 400 12px var(--ff-mono); color: var(--adm-muted); }
   .srv-cell-updated { font: 400 11px var(--ff-mono); color: var(--adm-dim); }
+  /* Console KPI tile (design §4): card + colored top accent bar */
+  .kpi {
+    position: relative; overflow: hidden; background: var(--adm-surface);
+    border: 1px solid var(--adm-border); border-radius: 12px; padding: 16px 18px;
+  }
+  .kpi::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--kpi, var(--adm-blue)); }
+  .kpi-label { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: var(--adm-muted); }
+  .kpi-num   { font-size: 27px; font-weight: 800; letter-spacing: -0.02em; color: var(--kpi, var(--adm-text)); margin-top: 6px; line-height: 1; }
+  .kpi-sub   { font-size: 11px; color: var(--adm-dim); margin-top: 5px; }
+  .kpi-grid  { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+
+  /* Console mode pill: blue-tinted mono, square-ish (design §4) */
   .mode-chip {
-    font: 500 11px var(--ff-mono); color: var(--adm-muted);
-    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
-    padding: 3px 8px; border-radius: 6px;
+    font: 600 10px var(--ff-mono); letter-spacing: 0.03em; color: var(--adm-blue);
+    background: rgba(79,156,249,0.13); border: 1px solid rgba(79,156,249,0.3);
+    padding: 2px 7px; border-radius: 5px;
   }
 
-  /* ---- Status pills (server registry) ---- */
+  /* ---- Status pills (console recipe §4) ---- */
   .pill {
-    display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px;
-    border-radius: 999px; font: 600 11px var(--ff-mono); letter-spacing: 0.02em;
+    display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px;
+    border-radius: 999px; font: 600 10px var(--ff-sans); letter-spacing: 0.05em;
     text-transform: uppercase; white-space: nowrap;
   }
   .pill-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
-  .pill-approved   { background: rgba(74,222,128,0.12);  color: #4ade80; }
-  .pill-approved   .pill-dot { background: #4ade80; }
-  .pill-pending    { background: rgba(251,191,36,0.13);  color: #fbbf24; }
-  .pill-pending    .pill-dot { background: #fbbf24; }
-  .pill-quarantined { background: rgba(248,113,113,0.14); color: #f87171; }
-  .pill-quarantined .pill-dot { background: #f87171; }
+  .pill-approved   { background: rgba(53,200,138,0.14); color: var(--adm-green); border: 1px solid rgba(53,200,138,0.3); }
+  .pill-approved   .pill-dot { background: var(--adm-green); }
+  .pill-pending    { background: rgba(234,179,8,0.14);  color: var(--adm-amber); border: 1px solid rgba(234,179,8,0.3); }
+  .pill-pending    .pill-dot { background: var(--adm-amber); }
+  .pill-quarantined { background: rgba(239,83,80,0.14); color: var(--adm-red); border: 1px solid rgba(239,83,80,0.3); }
+  .pill-quarantined .pill-dot { background: var(--adm-red); }
 
-  /* ---- Table action buttons ---- */
+  /* ---- Table action buttons (console recipe §4) ---- */
   .btn-approve {
-    background: var(--adm-blue); color: #fff; font-size: 11.5px; font-weight: 600;
-    padding: 6px 11px; border-radius: 7px; border: none; cursor: pointer;
+    background: var(--adm-blue); color: var(--adm-on-accent); font-size: 12px; font-weight: 700;
+    padding: 7px 13px; border-radius: 8px; border: none; cursor: pointer;
     font-family: var(--ff-sans);
   }
   .btn-release {
-    border: 1px solid rgba(255,255,255,0.16); color: #cbd0d7; font-size: 11.5px;
-    font-weight: 600; padding: 5px 10px; border-radius: 7px; background: transparent;
+    border: 1px solid rgba(255,255,255,0.12); color: #cdd6ea; font-size: 12px;
+    font-weight: 600; padding: 6px 12px; border-radius: 8px; background: var(--adm-btn-secondary, #1a2233);
     cursor: pointer; font-family: var(--ff-sans);
   }
   .btn-reject {
-    background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35);
-    color: #f87171; font-size: 11.5px; font-weight: 600;
-    padding: 5px 10px; border-radius: 7px; cursor: pointer; font-family: var(--ff-sans);
+    background: rgba(239,83,80,0.13); border: 1px solid rgba(239,83,80,0.28);
+    color: #ef8b88; font-size: 12px; font-weight: 600;
+    padding: 6px 11px; border-radius: 8px; cursor: pointer; font-family: var(--ff-sans);
   }
   .btn-menu {
     color: var(--adm-dim); font-size: 18px; letter-spacing: 1px;
@@ -2873,10 +2886,91 @@ async def fragment_admin_limits(request: Request):
 
 @router.get("/fragments/admin/dashboard", response_class=HTMLResponse)
 async def fragment_admin_dashboard(request: Request):
+    """PRD-0006 R-5: console posture dashboard — 6 KPI tiles + recent detections."""
     _require_admin(request)
-    return HTMLResponse("""
-    <div style="font-size:14px;font-weight:700;color:#e7e9ec">Security Dashboard</div>
-    <div style="font-size:13px;color:#9aa1ab;margin-top:4px">Coming soon.</div>
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+
+    async def _scalar(session, sql, **p):
+        try:
+            return int((await session.execute(text(sql), p)).scalar() or 0)
+        except Exception:
+            return 0
+
+    kpis = []
+    recent = []
+    try:
+        async with AsyncSessionLocal() as s:
+            total_tools = await _scalar(s, "SELECT count(*) FROM tool_registry WHERE deleted_at IS NULL")
+            sbom_cov = await _scalar(s,
+                "SELECT count(DISTINCT sr.tool_id) FROM sbom_records sr "
+                "JOIN tool_registry t ON t.tool_id = sr.tool_id WHERE t.deleted_at IS NULL")
+            awaiting = await _scalar(s,
+                "SELECT count(*) FROM server_registry WHERE submission_status='awaiting_review' AND deleted_at IS NULL")
+            approved_srv = await _scalar(s,
+                "SELECT count(*) FROM server_registry WHERE status='approved' AND deleted_at IS NULL")
+            detections_24h = await _scalar(s,
+                "SELECT count(*) FROM audit_events WHERE outcome='deny' AND timestamp > now() - interval '24 hours'")
+            # recent detections (reason-classified)
+            try:
+                rows = (await s.execute(text(
+                    "SELECT client_id, deny_reasons, timestamp FROM audit_events "
+                    "WHERE outcome='deny' ORDER BY timestamp DESC LIMIT 6"))).mappings().all()
+                for r in rows:
+                    reasons = r["deny_reasons"] or []
+                    if isinstance(reasons, str):
+                        try:
+                            reasons = json.loads(reasons)
+                        except Exception:
+                            reasons = [reasons]
+                    code = (reasons[0] if reasons else "unknown")
+                    name, sev = _classify(str(code).split(":")[0] if ":" not in str(code) else str(code))
+                    recent.append({"who": r["client_id"] or "—", "name": name, "sev": sev})
+            except Exception:
+                pass
+    except Exception as exc:
+        return HTMLResponse(f'<div class="section-title">Security</div>'
+                            f'<div style="color:#fca5a5">Dashboard unavailable: {esc_py(str(exc))}</div>')
+
+    sbom_ok = total_tools > 0 and sbom_cov >= total_tools
+    kpis = [
+        ("Registered tools", str(total_tools), "server-linked, active", "var(--adm-blue)"),
+        ("SBOM coverage", f"{sbom_cov}/{total_tools}", "tools with a signed SBOM",
+         "var(--adm-green)" if sbom_ok else "var(--adm-amber)"),
+        ("Awaiting review", str(awaiting), "submissions in the queue",
+         "var(--adm-amber)" if awaiting else "var(--adm-green)"),
+        ("Advisory detections (24h)", str(detections_24h), "deny-path signals",
+         "var(--adm-red)" if detections_24h else "var(--adm-green)"),
+        ("Approved servers", str(approved_srv), "network-isolated backends", "var(--adm-blue)"),
+        ("Policy engine", "deny-by-default", "OPA fail-closed · signed bundle", "var(--adm-purple)"),
+    ]
+    tiles = "".join(
+        f'<div class="kpi fu" style="--kpi:{color}">'
+        f'<div class="kpi-label">{esc_py(label)}</div>'
+        f'<div class="kpi-num">{esc_py(num)}</div>'
+        f'<div class="kpi-sub">{esc_py(sub)}</div></div>'
+        for label, num, sub, color in kpis
+    )
+    _sevcol = {"high": "var(--adm-red)", "medium": "var(--adm-amber)", "low": "var(--adm-dim)"}
+    if recent:
+        det_items = "".join(
+            f'<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;'
+            f'border-bottom:1px solid rgba(255,255,255,0.04)">'
+            f'<span style="width:8px;height:8px;border-radius:50%;background:{_sevcol.get(d["sev"],"var(--adm-dim)")};'
+            f'box-shadow:0 0 8px {_sevcol.get(d["sev"],"var(--adm-dim)")};flex:none"></span>'
+            f'<span style="font-size:12.5px;color:var(--adm-text);flex:1">{esc_py(d["name"])}</span>'
+            f'<span style="font-size:11.5px;color:var(--adm-dim);font-family:var(--ff-mono)">{esc_py(d["who"])}</span>'
+            f'</div>' for d in recent)
+    else:
+        det_items = ('<div style="padding:16px;font-size:12.5px;color:var(--adm-dim)">'
+                     'No recent deny-path detections.</div>')
+
+    return HTMLResponse(f"""
+    <div class="kpi-grid" style="margin-bottom:18px">{tiles}</div>
+    <div class="fu" style="background:var(--adm-surface);border:1px solid var(--adm-border);border-radius:14px;overflow:hidden">
+      <div style="padding:13px 16px;border-bottom:1px solid rgba(255,255,255,0.06);font-size:14px;font-weight:700;color:var(--adm-text)">Recent detections</div>
+      {det_items}
+    </div>
     """)
 
 
