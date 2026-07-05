@@ -7,7 +7,7 @@ Covers 3 auth scenarios:
   Scenario C — Per-user JWT injection (each of alice/bob/carol with own token)
 
 MCP servers under test:
-  echo-mcp   — echo-ping tool (no credential injection; liveness + auth-verification)
+  echo-mcp   — ping tool (no credential injection; liveness + auth-verification)
   notes-mcp  — notes-store tool (approach A: per-user X-User-Sub injection)
   search-mcp — search-kb tool (approach B: shared SA Bearer injection)
   gitea-mcp  — gitea-repos tool (approach B: existing shared service token)
@@ -39,6 +39,7 @@ KC_SVC_SECRET = os.environ.get("KC_SVC_SECRET", "svc-mcp-agent-secret")
 ECHO_MCP_URL = os.environ.get("ECHO_MCP_URL", "http://lab-mcp-echo:8000/mcp")
 NOTES_MCP_URL = os.environ.get("NOTES_MCP_URL", "http://lab-mcp-notes:8000/mcp")
 SEARCH_MCP_URL = os.environ.get("SEARCH_MCP_URL", "http://lab-mcp-search:8000/mcp")
+OPA_URL = os.environ.get("OPA_URL", "http://mcp-opa:8181")
 ALICE_PASSWORD = os.environ.get("ALICE_PASSWORD", "labpassword")
 BOB_PASSWORD = os.environ.get("BOB_PASSWORD", "labpassword")
 CAROL_PASSWORD = os.environ.get("CAROL_PASSWORD", "labpassword")
@@ -149,6 +150,7 @@ _INVOKE_FAILURE_SENTINELS = (
     "Access denied",                   # entitlement / OPA deny
     "internal error",                  # swallowed exception in invoke_tool
     "Unknown tool",                    # platform tool-name ↔ upstream tool-name mismatch
+    "not found in registry",           # invoke_tool given a name with no tool_registry row
 )
 
 
@@ -294,19 +296,17 @@ class TestScenarioA_FullOAuth:
     def test_alice_can_list_tools(self, alice_token):
         tools = _list_tools(alice_token)
         names = [t["name"] for t in tools]
-        assert "echo-ping" in names, f"echo-ping not in {names}"
+        assert "ping" in names, f"ping not in {names}"
         assert "search-kb" in names
         assert "notes-store" in names
 
     def test_alice_invoke_echo_ping(self, alice_token):
-        result = _invoke_tool(alice_token, "echo-ping",
-                              {"message": "hello from alice", "count": 3, "tag": "test"})
-        assert result["status_code"] == 200, f"Expected 200 got {result}"
+        result = _invoke_tool(alice_token, "ping", {})
+        _assert_invoke_ok(result, "ping")
 
     def test_bob_invoke_echo_ping(self, bob_token):
-        result = _invoke_tool(bob_token, "echo-ping",
-                              {"message": "hello from bob", "count": 1})
-        assert result["status_code"] == 200
+        result = _invoke_tool(bob_token, "ping", {})
+        _assert_invoke_ok(result, "ping")
 
     def test_unauthenticated_request_rejected(self):
         resp = httpx.get(f"{PROXY_URL}/api/v1/tools", timeout=10)
@@ -372,9 +372,8 @@ class TestScenarioB_SharedServiceAccount:
         assert result["status_code"] == 200
 
     def test_service_account_invoke_echo(self, service_token):
-        result = _invoke_tool(service_token, "echo-ping",
-                              {"message": "service-account-test"})
-        assert result["status_code"] == 200
+        result = _invoke_tool(service_token, "ping", {})
+        _assert_invoke_ok(result, "ping")
 
     def test_service_token_not_issued_for_wrong_audience(self, service_token):
         """Service token audience must be 'mcp-proxy' — proxy should accept it."""
@@ -476,8 +475,8 @@ class TestSecurityBoundaries:
         """Tools with status='internal' must be blocked from invocation."""
         # We cannot easily create an internal-status tool here without admin creds
         # so we verify the basic invocation path works for active tools
-        result = _invoke_tool(alice_token, "echo-ping", {"message": "security-check"})
-        assert result["status_code"] == 200
+        result = _invoke_tool(alice_token, "ping", {})
+        _assert_invoke_ok(result, "ping")
 
     def test_audit_endpoint_accessible(self, alice_token):
         resp = httpx.get(f"{PROXY_URL}/api/v1/audit",
@@ -491,18 +490,18 @@ class TestSecurityBoundaries:
 
     def test_batch_size_cap(self, alice_token):
         """Sending >20 messages in a batch should be rejected (HTTP 400)."""
-        tool_id = _find_tool_id(alice_token, "echo-ping")
+        tool_id = _find_tool_id(alice_token, "ping")
         if not tool_id:
-            pytest.skip("echo-ping tool_id not found")
+            pytest.skip("ping tool_id not found")
         # Invoke endpoint is single-tool — batch cap applies to MCP session batches
         # Just verify single invocation succeeds
-        result = _invoke_tool(alice_token, "echo-ping", {"message": "batch-cap-test"})
-        assert result["status_code"] == 200
+        result = _invoke_tool(alice_token, "ping", {})
+        _assert_invoke_ok(result, "ping")
 
     def test_opa_policy_blocks_quarantined_tool(self):
         """If a quarantined tool exists in DB, invocation should be denied by OPA."""
         # Read the OPA policy to confirm quarantine rule exists
-        resp = httpx.get("http://127.0.0.1:8181/v1/policies", timeout=5)
+        resp = httpx.get(f"{OPA_URL}/v1/policies", timeout=5)
         if resp.status_code != 200:
             pytest.skip("OPA not directly accessible")
         policy_text = str(resp.json())
@@ -518,18 +517,18 @@ class TestToolRegistry:
         tools = _list_tools(alice_token)
         names = {t["name"] for t in tools}
         # 3 new servers + existing gitea/grafana (rag-assistant optional — only added by seeder if lab-rag-assistant is running)
-        expected = {"echo-ping", "notes-store", "search-kb", "gitea-repos", "grafana-query"}
+        expected = {"ping", "notes-store", "search-kb", "gitea-repos", "grafana-query"}
         missing = expected - names
         assert not missing, f"Missing tools in registry: {missing}. Available: {names}"
 
     def test_tool_detail_endpoint(self, alice_token):
-        tool_id = _find_tool_id(alice_token, "echo-ping")
-        assert tool_id, "echo-ping must be findable"
+        tool_id = _find_tool_id(alice_token, "ping")
+        assert tool_id, "ping must be findable"
         resp = httpx.get(f"{PROXY_URL}/api/v1/tools/{tool_id}",
                          headers=_auth_headers(alice_token), timeout=10)
         assert resp.status_code == 200
         t = resp.json()
-        assert t.get("name") == "echo-ping"
+        assert t.get("name") == "ping"
         assert t.get("status") == "active"
 
 
@@ -617,8 +616,8 @@ class TestInvokePathGateChain:
 
     def test_alice_invoke_echo_ping_succeeds_end_to_end(self, alice_token):
         """Strict success: HTTP 200 AND no JSON-RPC / gate-chain error in body."""
-        result = _invoke_tool(alice_token, "echo-ping", {"message": "qa-regression"})
-        _assert_invoke_ok(result, "echo-ping")
+        result = _invoke_tool(alice_token, "ping", {})
+        _assert_invoke_ok(result, "ping")
 
     def test_alice_invoke_search_kb_succeeds_end_to_end(self, alice_token):
         result = _invoke_tool(alice_token, "search-kb", {"query": "mcp", "limit": 3})
@@ -684,26 +683,28 @@ class TestPerToolDispatch:
         assert "unknown tool" not in blob and "not found in registry" not in blob, blob[:300]
 
     def test_mcp_tools_list_hides_aliases_shows_real_tools(self, alice_token):
+        """Post per-tool-registry-migration there are no more hidden legacy
+        server-alias rows to hide — every tool is its own active, discoverable
+        row. This just confirms the per-tool names surface directly."""
         names = {t["name"] for t in _mcp_tools_list(alice_token)}
-        assert "ping" in names and "search" in names
-        assert "echo-ping" not in names and "search-kb" not in names
+        assert "ping" in names and "search-kb" in names
 
     def test_invoke_tool_by_alias_tools_list_still_works(self, alice_token):
-        r = _invoke_tool(alice_token, "echo-ping", {})  # no method -> tools/list
+        r = _invoke_tool(alice_token, "ping", {})  # no method -> tools/list
         assert r["status_code"] == 200, r
         blob = json.dumps(r.get("body", {})).lower()
         assert "not found in registry" not in blob, blob[:300]
         # must actually route to the upstream and return that server's tool list
-        # (echo exposes ping/echo_args/whoami/slow_tool/bulk_compute)
+        # (echo-mcp exposes ping/echo_args/whoami/slow_tool/bulk_compute)
         assert "ping" in blob or "echo_args" in blob or "whoami" in blob, (
-            f"alias invoke_tool did not return upstream tools/list content: {blob[:300]}")
+            f"invoke_tool did not return upstream tools/list content: {blob[:300]}")
 
     def test_invoke_tool_cannot_bypass_quarantine(self, alice_token):
         """A quarantined per-tool row must NOT be invokable via invoke_tool tools/call
-        through its (still-callable) alias. Requires the slow_tool per-tool row to exist
-        (post-migration). Calls the invoke_tool platform tool DIRECTLY so method/tool_name/
-        arguments are siblings - the shape _handle_invoke_tool_real actually parses (the
-        _invoke_tool helper would nest them one level too deep)."""
+        through another active tool's routing. Requires the slow_tool per-tool row to
+        exist (post-migration). Calls the invoke_tool platform tool DIRECTLY so
+        method/tool_name/arguments are siblings - the shape _handle_invoke_tool_real
+        actually parses (the _invoke_tool helper would nest them one level too deep)."""
         changed = _psql("UPDATE tool_registry SET status='quarantined' "
                         "WHERE name='slow_tool' AND metadata->>'kind'='per-tool' "
                         "RETURNING name;")
@@ -712,7 +713,7 @@ class TestPerToolDispatch:
             "run the migration (Task 7) before this test")
         try:
             r = _direct_call(alice_token, "invoke_tool", {
-                "tool_name": "echo-ping",          # the still-callable (hidden) alias
+                "tool_name": "ping",               # any active tool routes to the same upstream
                 "method": "tools/call",
                 "arguments": {"name": "slow_tool", "arguments": {"delay_ms": 1}},
             })
@@ -759,19 +760,16 @@ class TestAdminLimits:
         httpx.put(f"{PROXY_URL}/api/v1/admin/limits/{cid}", headers=h, timeout=15,
                   json={"rate_limit": None, "anomaly_sensitivity": "normal"})
 
-    def test_non_admin_forbidden(self):
-        """carol has no admin role in the lab — admin endpoints must return 403.
+    def test_non_admin_forbidden(self, service_token):
+        """A caller with only the 'agent' role (no admin/platform_admin) must get
+        403 from admin endpoints.
 
-        Obtains carol's token directly (not via the session fixture) so a
-        missing/unseeded carol KC password skips this assertion rather than
-        erroring the whole class; the admin-edit happy path above is the
-        load-bearing deliverable."""
-        try:
-            tok = _get_user_token("carol", CAROL_PASSWORD)
-        except AssertionError:
-            pytest.skip("carol KC credentials not provisioned in this lab")
+        Uses the shared svc-mcp-agent service token rather than a human lab user:
+        every human lab account (alice/bob/carol) has accreted admin or
+        platform_admin grants over the life of this lab from prior ad hoc
+        testing, so none of them still exercises the non-admin path."""
         r = httpx.get(f"{PROXY_URL}/api/v1/admin/limits",
-                      headers=_auth_headers(tok), timeout=15)
+                      headers=_auth_headers(service_token), timeout=15)
         assert r.status_code == 403, f"expected 403 for non-admin, got {r.status_code}: {r.text}"
 
 
