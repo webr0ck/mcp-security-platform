@@ -25,6 +25,12 @@
 # Enable only for named demo scenarios; requires 'admin' role at the proxy layer.
 
 # ── MCP server hardening — matches podman-compose.lab.yml anchor ─────────────
+# pids_limit (not deploy.resources.limits.pids) to match podman-compose.lab.yml's
+# x-mcp-hardening exactly — docker-compose (podman-compose now shells out to a
+# real v2 binary as an external provider) merges same-named x-* extension
+# fields across -f files, and having pids set via BOTH mechanisms anywhere in
+# the merged fragment is rejected: "can't set distinct values on 'pids_limit'
+# and 'deploy.resources.limits.pids'".
 x-mcp-hardening: &mcp-hardening
   read_only: true
   security_opt:
@@ -32,12 +38,12 @@ x-mcp-hardening: &mcp-hardening
     - seccomp:${PWD}/sandbox/files/seccomp/mcp-sandbox.json
   cap_drop:
     - ALL
+  pids_limit: 64
   deploy:
     resources:
       limits:
         memory: 256m
         cpus: "0.5"
-        pids: 64
   user: "1001:1001"
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=32m
