@@ -106,7 +106,9 @@ flowchart TB
     L2 -. caches .-> redis
     auth -. verifies .-> idp
     cred --> audit
-    backends -- response --> client
+    backends -- "response" --> cred
+    cred -- "audit · injection-screen · ES256 envelope" --> gw
+    gw -- "response" --> client
 
     classDef gateway fill:#0c1a2e,stroke:#00d4ff,stroke-width:2px,color:#c4d8e8;
     classDef proxy fill:#091422,stroke:#00d4ff,color:#c4d8e8;

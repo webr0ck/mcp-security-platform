@@ -27,6 +27,24 @@ proxy or other backends over the network, and can't act without an audit record.
 
 It is a **reference implementation**, not a hardened product.
 
+### 1.1 Security-critical design — read this first ⚠️
+
+If you re-implement only a few things correctly, make it these. Each is a place where a subtle
+mistake silently removes a security guarantee (the hard-won failure modes are in §6 of the spec set,
+[`06-implementation-lessons.md`](spec/06-implementation-lessons.md)).
+
+| # | Load-bearing invariant | Why it's dangerous to get wrong | Where |
+|---|---|---|---|
+| 🔑 **KEK never on disk** | Broker master secret lives only inside Vault's encrypted barrier; per-identity KEK is derived (HKDF) + zeroed after use, blob AAD-bound to `(user_sub, service, tool_id, owner_type)`. | A KEK on disk + a DB dump = **offline** decryption of every stored credential. The two-factor KMS boundary collapses to one. | §5.3, [`02-credential-broker.md`](spec/02-credential-broker.md) |
+| 🚦 **Deny-by-default, fail-closed everywhere** | OPA `default allow = false`; OPA-unreachable ⇒ deny; unresolved principal ⇒ deny; missing session JTI ⇒ treated revoked; a credential mode with no handler ⇒ raise, never pass through. | Any fail-*open* path is a full auth bypass under the exact conditions an attacker induces (DoS the policy engine, strip a header). | §6, `invocation.py`, `dispatcher.py` |
+| 🪪 **Trusted-proxy header gate** | `X-Client-Cert-CN` / `X-User-Sub` are honoured **only** when the caller proves the gateway shared secret (`hmac.compare_digest`); prod refuses to boot without it. | Without the gate, any client that can reach the proxy directly spoofs identity by setting a header. | §5.1, `middleware/auth.py`, `config.py` |
+| 🔁 **Discovery == invoke** | The *same* entitlement resolver gates catalog visibility and invocation; there is **no** admin/role exception. | If discovery and invoke drift, a principal can invoke what they can't see (or an admin bypasses per-server entitlement). | §6, `services/entitlement.py` |
+| 🧾 **Audit-before-response (synchronous)** | The audit event is emitted and durable **before** the tool result returns (emit-or-500). Responses re-enter the proxy for injection screening + ES256 trust-envelope signing — they are **not** a passthrough. | An async/after audit loses the record on crash; a passthrough response is an unscreened injection / unattributable action. | §5.1/§7, `invocation.py` |
+| 🧬 **Network isolation** | Each backend shares exactly one pairwise net with the proxy and has **no inbound route** to `proxy:8000`; enforced by a CI runtime assertion, not just compose topology. | A backend that can call the proxy REST API is a confused-deputy / SSRF pivot into the control plane. | §4, `scripts/check_network_isolation.py` |
+| ✍️ **Signed policy bundles** | OPA loads a signed bundle by default (HMAC/HS256 today); `make sign-policy-bundle` after any `.rego` edit — editing rego without re-signing is a silent no-op in prod. | An unsigned/were-not-resigned bundle means policy changes don't take effect, or a tampered bundle loads. | §6, `docker-compose.yml`, `scripts/sign_policy_bundle.sh` |
+
+Everything below elaborates these. When a section describes one, it is marked with the same icon.
+
 ---
 
 ## 2. Layered architecture
