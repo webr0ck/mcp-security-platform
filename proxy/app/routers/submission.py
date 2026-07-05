@@ -262,9 +262,13 @@ async def update_draft(server_id: str, body: DraftUpdate, request: Request) -> J
         fields.append("data_categories = :cats")
         updates["cats"] = body.data_categories
 
-    if body.description is not None:
-        fields.append("service_name = :svc_name")
-        updates["svc_name"] = body.description
+    # CRITICAL-1 fix: the submitter must NOT control service_name — it is the
+    # credential lookup key, and letting a self-service submitter set it (here it
+    # even wrongly stored body.description into it) enabled the cross-user token
+    # bleed. Description is not a credential key; drop this mapping entirely.
+    # service_name is set only via the admin/approval path (server_registry PATCH,
+    # constrained to the registered-adapter allowlist).
+    # (body.description is intentionally not persisted to service_name.)
 
     if not fields:
         return JSONResponse({"server_id": server_id, "updated": False})

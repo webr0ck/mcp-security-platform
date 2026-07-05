@@ -192,8 +192,24 @@ async def dispatch_credential_injection(
 
     inject_header = tool_record.get("inject_header") or "Authorization"
     inject_prefix = tool_record.get("inject_prefix") or "Bearer"
-    service_name = tool_record.get("service_name") or tool_record.get("name", "unknown")
+    # CRITICAL-1 fix (cross-user credential bleed): the credential lookup key must
+    # NEVER fall back to the tool's submitter-controlled `name`. That fallback let a
+    # malicious self-service tool named/`service_name`d to collide with a victim's
+    # enrolled adapter (e.g. "m365") receive the victim's live token injected to the
+    # attacker's upstream. `service_name` is now set only via admin/approval paths
+    # (constrained to the registered-adapter allowlist); absent ⇒ fail closed below.
+    service_name = tool_record.get("service_name")
     tool_id = tool_record.get("tool_id")
+
+    # CRITICAL-1 fail-closed: the stored-credential modes key the credential lookup
+    # on service_name. With the submitter-controlled name fallback removed, an
+    # unset service_name must NOT silently proceed — refuse rather than risk
+    # resolving under an unintended/attacker-influenced key.
+    if mode in (InjectionMode.SERVICE, InjectionMode.USER, InjectionMode.ENTRA_USER_TOKEN) and not service_name:
+        raise CredentialInjectionError(
+            f"injection_mode='{mode.value}' requires an approval-set service_name; none configured "
+            f"for tool {tool_id}. Fail-closed (CRITICAL-1) — the tool name is no longer a credential key."
+        )
 
     match mode:
         case InjectionMode.NONE:
@@ -360,7 +376,19 @@ async def _inject_service_account_token(
     from app.credential_broker.approaches.approach_a import decrypt_credential
 
     kc_client_id = tool_record.get("kc_client_id")
-    service_name = tool_record.get("service_name") or tool_record.get("name", "unknown")
+    # CRITICAL-1 fix (cross-user credential bleed): the credential lookup key must
+    # NEVER fall back to the tool's submitter-controlled `name`. That fallback let a
+    # malicious self-service tool named/`service_name`d to collide with a victim's
+    # enrolled adapter (e.g. "m365") receive the victim's live token injected to the
+    # attacker's upstream. `service_name` is now set only via admin/approval paths
+    # (constrained to the registered-adapter allowlist); absent ⇒ fail closed below.
+    service_name = tool_record.get("service_name")
+
+    if not service_name:
+        raise CredentialInjectionError(
+            f"Tool {tool_record.get('tool_id')} requires an approval-set service_name for credential "
+            "injection; none configured. Fail-closed (CRITICAL-1)."
+        )
 
     if not kc_client_id:
         raise CredentialInjectionError(

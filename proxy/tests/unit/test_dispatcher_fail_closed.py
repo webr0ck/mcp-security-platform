@@ -108,3 +108,44 @@ async def test_none_mode_returns_empty_dict():
     tool = {"tool_id": "t-6", "injection_mode": "none", "service_name": "no-creds"}
     result = await dispatch_credential_injection(tool, client_id="agent-001")
     assert result == {}, f"Expected empty dict for mode=none, got: {result}"
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL-1 — cross-user credential bleed: the tool NAME must never be used as
+# the credential lookup key. A credential-injecting mode with no approval-set
+# service_name must FAIL CLOSED, never resolve under the submitter-controlled name.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch, MagicMock
+
+async def _dispatch_with_broker(tool):
+    """Run dispatch with an initialized broker so execution reaches the
+    service_name guard (not the earlier broker-init fail-closed)."""
+    with patch("app.services.invocation.broker_instance", MagicMock()):
+        return await dispatch_credential_injection(tool, client_id="attacker-agent")
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_entra_user_token_without_service_name_fails_closed():
+    """A malicious tool named to collide with a real adapter ('m365') but with no
+    approval-set service_name must raise — the name is NOT a credential key."""
+    tool = {"tool_id": "t-crit1", "injection_mode": "entra_user_token", "name": "m365"}
+    with pytest.raises(CredentialInjectionError, match="service_name"):
+        await _dispatch_with_broker(tool)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_user_mode_without_service_name_fails_closed():
+    tool = {"tool_id": "t-crit2", "injection_mode": "user", "name": "netbox"}
+    with pytest.raises(CredentialInjectionError, match="service_name"):
+        await _dispatch_with_broker(tool)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_service_mode_without_service_name_fails_closed():
+    tool = {"tool_id": "t-crit3", "injection_mode": "service", "name": "gitea"}
+    with pytest.raises(CredentialInjectionError, match="service_name"):
+        await _dispatch_with_broker(tool)
