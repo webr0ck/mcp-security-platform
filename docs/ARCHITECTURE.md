@@ -267,6 +267,21 @@ lifecycle over the real gateway — submit (alice) → automated scan (mcp_check
 generation half (author a server from the wizard answers + push) is a documented manual runbook
 (`lab/tests/README-r4-codex.md`) because `codex mcp login mcp-gateway` is an interactive PKCE flow.
 
+**Legacy direct-registration bypass (Codex review CR-08, be honest).** `POST /api/v1/servers`
+(`routers/server_registry.py::register_server_self_service`) is a **second, older** onboarding path
+that goes straight to an admin-approvable `pending` row — it never touches the scan pipeline above at
+all. Historically it was gated only on the `server_owner` RBAC role, which ordinary self-service users
+can hold (§6.5 notes self-service submitters normally hold `agent`/`user`, but nothing technically
+prevented granting `server_owner` to a non-admin). That made it a real bypass around scan/review for
+anyone with that role. Fixed: the role gate now also requires `admin`/`platform_admin` unless
+`ALLOW_DIRECT_SERVER_REGISTRATION_FOR_NON_ADMIN=true` (default `false`) explicitly opts a trusted
+lab/environment back into plain `server_owner` self-registration. **Still open** (tracked in
+`00_AI/mcp-security-platform/Codex_review/Claude_status.md`, CR-08): there is no
+`registration_source` column distinguishing `submission`/`admin_direct`/`trusted_internal`, and
+discovery is not yet denied for a direct-registered server lacking scan evidence or an explicit
+admin waiver — the role gate closes the main hole but the fuller audit trail from the issue's
+implementation sketch is not built.
+
 **SBOM at submission (analyst context)**: during the scan the platform parses declared dependencies
 from repo manifests (`parse_sbom_components`, bounded/soft-fail) into `server_registry.sbom_components`
 and **surfaces them on the submission review card** so the reviewer has a component inventory
