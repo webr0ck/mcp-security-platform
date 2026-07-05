@@ -241,6 +241,18 @@ class Settings(BaseSettings):
     KC_TOKEN_EXCHANGE_ENABLED: bool = False
     KC_TOKEN_EXCHANGE_AUDIENCE: str = ""        # default audience for KC token exchange
 
+    # CR-03: proxy-side allowlist of audiences the realm may mint a kc_token_exchange
+    # token for (credential_broker/dispatcher.py). Deliberately env/config-driven,
+    # NOT DB-driven — a malicious/buggy server_registry row must not be able to
+    # widen what audiences can be minted. Comma-separated; defaults to the one lab
+    # audience that previously lived hardcoded in dispatcher.py, so unset behavior
+    # is unchanged.
+    KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES: str = "lab-tickets"
+
+    @property
+    def kc_token_exchange_allowed_audiences_parsed(self) -> frozenset[str]:
+        return frozenset(a.strip() for a in self.KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES.split(",") if a.strip())
+
     # =========================================================================
     # MinIO / S3
     # =========================================================================

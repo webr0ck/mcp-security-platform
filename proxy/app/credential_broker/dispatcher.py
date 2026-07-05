@@ -55,9 +55,12 @@ import jwt as _jwt
 from app.credential_broker.token_assert import assert_exchanged_token, ExchangedTokenError
 from app.credential_broker.keycloak_client import get_public_key_for_token
 
-# S-6(b): proxy-side allowlist of audiences the KC realm may mint tokens for
-# via token exchange. Hardcoded so a malicious/buggy DB row cannot widen the mint.
-_ALLOWED_EXCHANGE_AUDIENCES = frozenset({"lab-tickets"})
+# S-6(b) / CR-03: proxy-side allowlist of audiences the KC realm may mint tokens
+# for via token exchange. Config-driven (KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES,
+# comma-separated) rather than DB-driven, so a malicious/buggy server_registry
+# row still cannot widen the mint — only a redeploy/config change can. This
+# replaces a Python-literal hardcoded frozenset that required a code change to
+# onboard any new same-IdP audience.
 
 logger = logging.getLogger(__name__)
 
@@ -467,11 +470,14 @@ async def _inject_kc_token_exchange(
             f"{tool_record.get('tool_id')}; refusing to forward unauthenticated request"
         )
 
-    # S-6(b): proxy-side audience allowlist (see module-level _ALLOWED_EXCHANGE_AUDIENCES).
-    if audience not in _ALLOWED_EXCHANGE_AUDIENCES:
+    # S-6(b) / CR-03: proxy-side audience allowlist, config-driven — see the
+    # module-level comment above _inject_kc_token_exchange's imports.
+    from app.core.config import get_settings as _get_kc_settings
+    _allowed_audiences = _get_kc_settings().kc_token_exchange_allowed_audiences_parsed
+    if audience not in _allowed_audiences:
         raise CredentialInjectionError(
             f"kc_token_exchange mode: audience {audience!r} not in allowlist "
-            f"{sorted(_ALLOWED_EXCHANGE_AUDIENCES)}"
+            f"{sorted(_allowed_audiences)}"
         )
 
     exchanged = await exchange_token(
