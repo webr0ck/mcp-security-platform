@@ -5,7 +5,7 @@
 > Every [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) tool call passes through identity, policy, credential brokering, and audit — with backend MCP servers network-isolated by default.
 
 [![CI](https://github.com/webr0ck/mcp-security-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/webr0ck/mcp-security-platform/actions/workflows/ci.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-00d4ff.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-00d4ff.svg)](LICENSE)
 [![Status: reference implementation](https://img.shields.io/badge/status-reference%20implementation-ff8c42.svg)](#enforced-today-vs-roadmap)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776ab.svg)](https://www.python.org/)
 [![Policy: OPA / Rego](https://img.shields.io/badge/policy-OPA%2FRego-7d4698.svg)](https://www.openpolicyagent.org/)
@@ -304,7 +304,7 @@ In `~/.claude/settings.json` (or `~/.claude.json`) on the machine running Claude
 
 ## License
 
-[Apache-2.0](LICENSE) © 2026 Alexander Romanov
+[MIT](LICENSE) © 2026 Alexander Romanov
 
 ---
 

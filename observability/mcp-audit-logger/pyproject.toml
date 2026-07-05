@@ -7,7 +7,7 @@ name = "mcp-audit-logger"
 version = "1.0.0"
 description = "MCP Security Platform — Audit Logger Library"
 requires-python = ">=3.12"
-license = { text = "Apache-2.0" }
+license = { text = "MIT" }
 
 dependencies = [
     "structlog>=24.0.0",
