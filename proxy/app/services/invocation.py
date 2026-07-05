@@ -362,7 +362,29 @@ async def invoke_tool(
         except ScanFreshnessError:
             raise
         except Exception as _sf_exc:
-            logger.warning("Scan freshness check failed for %s, skipping: %s", tool_server_id, _sf_exc)
+            # CR-11: a lookup failure must not silently skip the gate — fail closed
+            # to match "Fail closed on scan lookup errors" when enforcement is on.
+            # Warn-only mode (default) still just logs, since nothing is enforced.
+            logger.warning("Scan freshness check failed for %s: %s", tool_server_id, _sf_exc)
+            if _scan_settings.SCAN_FRESHNESS_ENFORCED:
+                await _emit_audit_event(
+                    tool_id=str(tool_id) if tool_id is not None else None,
+                    tool_name=tool_name,
+                    tool_version=tool_record.get("version"),
+                    client_id=client_id,
+                    outcome="deny",
+                    deny_reasons=["scan_freshness_lookup_failed"],
+                    request_id=request_id,
+                    latency_ms=0,
+                    anomaly_score=0.0,
+                    opa_decision_id="",
+                    is_testing=is_testing,
+                    source_ip=source_ip,
+                    principal_type=principal_type,
+                    roles=client_roles,
+                    session_jti=session_jti,
+                )
+                raise ScanFreshnessError(tool_id, tool_name, None) from _sf_exc
 
     # -------------------------------------------------------------------------
     # Step 1.5: 6.2 — discovery==invoke. If the tool is linked to a server,
