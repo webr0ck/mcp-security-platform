@@ -65,4 +65,31 @@ FROM server_registry s
 WHERE s.upstream_allowlist_entry = '10.89.0.0/16'
 ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING;
 
+-- Grant the shared svc-mcp-agent service account (client_credentials Bearer —
+-- no mTLS cert on this path, so it's a "human:" principal, not "agent:") an
+-- entitlement on lab-echo and lab-search, the two servers
+-- TestScenarioB_SharedServiceAccount invokes. Scope is intentionally narrow
+-- (not every server, like alice) since this is a shared robot credential.
+--
+-- principal_id is keyed on svc-mcp-agent's pre-verified email
+-- (svc-mcp-agent@lab.local), not the client name or its volatile KC sub —
+-- see the matching comment in roles.sql for why.
+INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by, entitlement_version)
+SELECT s.server_id, 'human:keycloak:svc-mcp-agent@lab.local', 'human', 'lab-seeder', 1
+FROM server_registry s
+WHERE s.name IN ('lab-echo', 'lab-search')
+ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING;
+
+-- Grant bob@corp an entitlement on lab-echo (TestScenarioA_FullOAuth's
+-- test_bob_invoke_echo_ping needs it — the per-tool registry migration split
+-- what used to be one "echo-mcp" server into one server_registry row per tool
+-- (ping / echo_args / bulk_compute+whoami+slow_tool each got their own
+-- server_id), so bob's older ad hoc entitlement on the echo_args server
+-- doesn't cover ping's server).
+INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by, entitlement_version)
+SELECT s.server_id, 'human:keycloak:bob@corp', 'human', 'lab-seeder', 1
+FROM server_registry s
+WHERE s.name = 'lab-echo'
+ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING;
+
 COMMIT;
