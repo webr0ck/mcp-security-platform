@@ -194,6 +194,16 @@ unreachable the score falls back to **1.0 × static** (no silent downgrade), and
 `REQUIRE_LLM_AUDIT=true` makes registration return 503 rather than run fail-open. **Invocations are
 not affected** — the LLM auditor only runs at registration.
 
+**Code-scan fusion (PRD-0006 R-1)**: the manifest scorer is blind to the *repo code*, so the
+registration audit applies a **structural risk floor** from the tool's server's mcp_checker submission
+scan: `combined_score = max(combined_score, floor)` (same monotonic shape as the injection escalation,
+`auditor.py::_scan_risk_floor`). The floor fires only when the server-linked tool's `scan_status`
+is `blocked` or its `scan_report` carries a block-tier finding — a benign-looking manifest can't mask
+a repo the code scanner flagged malicious. A tool registered directly (`POST /tools`, no `server_id`)
+has no scan → manifest-only, unchanged (fail-safe); lookup errors fail safe to no-floor. The floor is
+one-directional (never lowers a score) and records the scan's `scanned_at`/`scan_commit` so a reviewer
+can spot a stale flooring scan. *Reference: `auditor.py`, migration `V057`.*
+
 **LLM provider is admin-configurable (PRD-0005 R-1)**: `services/llm_config.py` overlays env
 defaults (`OLLAMA_*`) with the `llm_config` table (base_url/model/timeout/enabled; absent row = env),
 editable via the **LLM Provider** admin tab. An optional API token is stored **encrypted** in

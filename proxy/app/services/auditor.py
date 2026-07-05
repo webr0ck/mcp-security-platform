@@ -231,6 +231,47 @@ async def run_llm_analysis(
         return _unavailable(exc)
 
 
+async def _scan_risk_floor(tool_id: str) -> dict[str, Any]:
+    """PRD-0006 R-1: derive a structural risk floor from the tool's server's
+    mcp_checker code scan. Returns {floor, scanned_at, scan_commit, reason}.
+
+    floor > 0 only when the tool is linked to a server (server_id) whose scan
+    blocked OR whose scan_report carries a block-tier finding. Fail-safe: any
+    error, or no server link, returns floor=0 (manifest-only, unchanged).
+    """
+    from sqlalchemy import text as _text
+    from app.core.database import AsyncSessionLocal as _S
+    from app.core.config import get_settings as _gs
+    zero = {"floor": 0, "scanned_at": None, "scan_commit": None, "reason": None}
+    try:
+        async with _S() as db:
+            row = (await db.execute(_text("""
+                SELECT sr.scan_status, sr.scan_report, sr.scanned_at, sr.scan_commit
+                FROM tool_registry tr
+                JOIN server_registry sr ON sr.server_id = tr.server_id
+                WHERE tr.tool_id = :tid AND sr.deleted_at IS NULL
+            """), {"tid": tool_id})).mappings().first()
+        if row is None:
+            return zero  # direct registration (no server) — manifest-only
+        report = row["scan_report"]
+        if isinstance(report, str):
+            import json as _json
+            report = _json.loads(report or "[]")
+        block_tier = bool(report) and any(f.get("block") for f in report)
+        if row["scan_status"] == "blocked" or block_tier:
+            floor = int(_gs().OLLAMA_CRITICAL_RISK_THRESHOLD)
+            return {
+                "floor": floor,
+                "scanned_at": row["scanned_at"].isoformat() if row["scanned_at"] else None,
+                "scan_commit": row["scan_commit"],
+                "reason": "scan_status=blocked" if row["scan_status"] == "blocked" else "block_tier_finding",
+            }
+        return zero
+    except Exception as exc:
+        logger.warning("scan risk floor lookup failed for tool %s: %s", tool_id, exc)
+        return zero
+
+
 async def run_audit(
     tool_id: str,
     tool_name: str,
@@ -326,6 +367,22 @@ async def run_audit(
     if llm_result.get("prompt_injection_detected"):
         combined_score = max(combined_score, settings.OLLAMA_CRITICAL_RISK_THRESHOLD)
 
+    # PRD-0006 R-1: fuse the mcp_checker code scan into the manifest score as a
+    # STRUCTURAL floor (monotonic — max() only, never lowers; same shape as the
+    # injection boost above). The manifest scorer is blind to the actual repo
+    # code; a benign-looking manifest must not mask a repo the code scanner
+    # flagged as malicious. Keyed off scan_status/block-tier findings via the
+    # tool's server_id (direct POST /tools registrations have no server → no
+    # floor → manifest-only, unchanged).
+    scan_floor = await _scan_risk_floor(tool_id)
+    if scan_floor["floor"] > 0:
+        combined_score = max(combined_score, scan_floor["floor"])
+        logger.info(
+            "code-scan risk floor applied for tool %s: floor=%d reason=%s scanned_at=%s commit=%s",
+            tool_id, scan_floor["floor"], scan_floor["reason"],
+            scan_floor["scanned_at"], scan_floor["scan_commit"],
+        )
+
     risk_level = _score_to_risk_level(combined_score)
 
     # Step 4: Build findings from risk flags
@@ -404,6 +461,9 @@ async def run_audit(
                 f for f in static_result.get("risk_flags", [])
                 if "credential" in f or "shell" in f
             ],
+            # PRD-0006 R-1: record the code-scan floor (if any) + the scan's
+            # commit/time so a reviewer can spot a stale flooring scan.
+            "code_scan_floor": scan_floor if scan_floor["floor"] > 0 else None,
         },
         llm_model=llm_result.get("model", settings.OLLAMA_MODEL),
         llm_prompt_hash=llm_result.get("prompt_hash", ""),

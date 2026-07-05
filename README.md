@@ -157,6 +157,23 @@ sequenceDiagram
 - **Layer 2 — FastAPI security proxy:** identity resolution, OPA/Rego policy evaluation, LLM-assisted tool-manifest auditing (Ollama, advisory), CycloneDX SBOM per tool, sliding-window anomaly heuristics, fail-closed credential injection, synchronous audit emission.
 - **Layer 3 — Observability:** audit logger (SHA-256, redaction), Loki + Grafana, Alertmanager, MinIO archival, daily compliance checks.
 
+### Connecting a SIEM
+
+Every audit event is emitted as **one redacted JSON line to the proxy's stdout** from a single point
+(`observability/mcp-audit-logger`, schema in `mcp_audit_logger/schema.py`; raw tool args are never
+included — hashes only). That stdout stream is the **stable integration seam** — point any collector
+at it:
+
+- **Loki** (bundled lab): Promtail scrapes container stdout → Loki → Grafana.
+- **Wazuh** (optional POC detection consumer, `compose.poc.yml`): a Filebeat sidecar ships the same
+  JSON to the Wazuh manager, where rules (e.g. taint-floor `deployments/poc/wazuh/rules/*.xml`)
+  match on `event_type` / `outcome` / `deny_reasons`. Wazuh is **not** a runtime dependency — it only
+  reads the audit stream.
+- **Any other SIEM** (Splunk, Elastic, Sentinel, …): run a collector (Fluent Bit / Vector / rsyslog)
+  that tails the proxy stdout JSON or forwards it as **syslog**. No proxy code change is required; the
+  JSON schema is the contract. *(A first-class in-proxy syslog/CEF sink configurable from the admin
+  console is roadmap — the stdout-JSON contract is the seam to build on.)*
+
 ---
 
 ## Enforced today vs Roadmap

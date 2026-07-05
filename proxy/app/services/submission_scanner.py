@@ -682,6 +682,16 @@ async def scan_submission(server_id: str, github_url: str) -> None:
             await _set_status("blocked", report)
             return
 
+        # PRD-0006 R-1: record the scanned commit so a later re-audit can detect
+        # a stale code-scan floor. Best-effort (shallow clone still has HEAD).
+        scan_commit = ""
+        try:
+            rc_c, out_c, _ = await _run(["git", "-C", repo_path, "rev-parse", "HEAD"], timeout=15)
+            if rc_c == 0:
+                scan_commit = out_c.strip()[:64]
+        except Exception:
+            scan_commit = ""
+
         # R-9: best-effort manifest parse, independent of scan pass/fail —
         # inventory metadata, not a security gate (FM: never blocks approval).
         try:
@@ -701,10 +711,13 @@ async def scan_submission(server_id: str, github_url: str) -> None:
                 UPDATE server_registry
                 SET sbom_components = CAST(:components AS jsonb),
                     sbom_cyclonedx = CAST(:cyclonedx AS jsonb),
+                    scanned_at = now(),
+                    scan_commit = :commit,
                     updated_at = now()
                 WHERE server_id = :sid
             """), {"components": json.dumps(sbom_components),
                    "cyclonedx": json.dumps(sbom_cyclonedx) if sbom_cyclonedx is not None else None,
+                   "commit": scan_commit or None,
                    "sid": server_id})
             await session.commit()
 
