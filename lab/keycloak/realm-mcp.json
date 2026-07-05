@@ -368,6 +368,16 @@
         "grafana-viewer"
       ],
       "emailVerified": true
+    },
+    {
+      "username": "service-account-svc-mcp-agent",
+      "email": "svc-mcp-agent@lab.local",
+      "emailVerified": true,
+      "enabled": true,
+      "serviceAccountClientId": "svc-mcp-agent",
+      "realmRoles": [
+        "agent"
+      ]
     }
   ],
   "identityProviders": [],
