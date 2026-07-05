@@ -1004,6 +1004,25 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
     # in params (already set below) unchanged.
     try:
         async with AsyncSessionLocal() as session:
+            # CR-18/quarantine-bypass fix: check for ANY row (including
+            # quarantined/deprecated/disabled) first. The old query filtered
+            # status in the same SELECT used to decide "does lookup_name have
+            # its own row" — so a quarantined sub-tool's row looked identical
+            # to "no row exists" and silently fell back to the outer tool_name
+            # row instead (e.g. invoke_tool called with tool_name='ping',
+            # method='tools/call', arguments={name:'slow_tool'} — slow_tool
+            # quarantined — resolved to *ping's* active/entitled tool_record,
+            # authorized against ping, then dispatched slow_tool to the
+            # upstream anyway). A quarantined lookup_name row must deny
+            # immediately, never fall through to a different tool's identity.
+            any_status_result = await session.execute(
+                text("SELECT status FROM tool_registry WHERE name = :name AND deleted_at IS NULL LIMIT 1"),
+                {"name": lookup_name},
+            )
+            any_status_row = any_status_result.fetchone()
+            if any_status_row is not None and any_status_row[0] in ("quarantined", "deprecated", "disabled"):
+                return {"type": "text", "text": f"Tool '{lookup_name}' is {any_status_row[0]} and cannot be invoked"}
+
             result = await session.execute(
                 text("SELECT * FROM tool_registry WHERE name = :name AND status NOT IN ('deprecated', 'quarantined', 'disabled') AND deleted_at IS NULL LIMIT 1"),
                 {"name": lookup_name},

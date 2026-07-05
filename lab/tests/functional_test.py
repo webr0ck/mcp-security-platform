@@ -652,19 +652,61 @@ def _direct_call(token: str, tool_name: str, arguments: dict, timeout: float = 2
 
 
 def _psql(sql: str) -> str:
-    """Run SQL in the lab DB (used to set up the quarantine-bypass test).
+    """Run SQL in the lab DB (used to set up the quarantine-bypass /
+    release-evidence tests).
 
-    Uses the host podman/docker CLI. When the suite runs INSIDE the proxy
-    container (make test-lab-functional) those binaries are absent — skip the
-    dependent test rather than erroring with FileNotFoundError."""
+    CR-18: previously host-only (shelled out to `docker exec mcp-db psql` via
+    the podman/docker CLI) — which meant it could NEVER actually run: inside
+    the proxy container (make test-lab-functional) those binaries are absent,
+    and running from the host instead hits the SEC-05 ingress guard on any
+    real HTTP call these tests also make (INGRESS_DENIED — direct host->:8000
+    access is refused). No environment was both a trusted ingress peer AND
+    had docker-socket access.
+
+    Fixed: when running inside the proxy container, `app.core.database` is
+    importable and already holds the exact DB credentials the app itself
+    uses — use that directly (asyncpg via SQLAlchemy), no subprocess/CLI
+    needed at all. Falls back to the old podman/docker CLI path for anyone
+    running this file from the host with docker available.
+    """
+    try:
+        import asyncio
+        import asyncpg
+        from app.core.config import get_settings
+
+        async def _run() -> str:
+            # A fresh, standalone connection created and closed within this
+            # asyncio.run() call — NOT the app's shared AsyncSessionLocal pool,
+            # whose asyncpg connections are bound to whatever event loop was
+            # running when the pool was first created. Reusing that pool across
+            # repeated asyncio.run() calls (a fresh loop each time) raises
+            # "attached to a different loop".
+            settings = get_settings()
+            conn = await asyncpg.connect(
+                host=settings.DB_HOST, port=settings.DB_PORT,
+                user=settings.DB_USER, password=settings.DB_PASSWORD,
+                database=settings.DB_NAME,
+            )
+            try:
+                rows = await conn.fetch(sql)
+            finally:
+                await conn.close()
+            return "\n".join(
+                "|".join("" if v is None else str(v) for v in row) for row in rows
+            )
+
+        return asyncio.run(_run())
+    except ImportError:
+        pass  # not running inside the proxy container — fall through to CLI
+
     try:
         docker_host = subprocess.run(
             ["podman", "machine", "inspect", "--format",
              "unix://{{.ConnectionInfo.PodmanSocket.Path}}"],
             capture_output=True, text=True).stdout.strip()
     except FileNotFoundError:
-        pytest.skip("podman/docker CLI unavailable (running inside container) — "
-                    "quarantine-bypass DB setup needs host container tooling")
+        pytest.skip("neither app.core.database (in-container) nor podman/docker "
+                    "CLI (host) is available for DB setup")
     return subprocess.run(
         # -q suppresses psql's command-status tag (e.g. "UPDATE 1") so a
         # RETURNING query yields only the row value(s).
@@ -701,16 +743,23 @@ class TestPerToolDispatch:
 
     def test_invoke_tool_cannot_bypass_quarantine(self, alice_token):
         """A quarantined per-tool row must NOT be invokable via invoke_tool tools/call
-        through another active tool's routing. Requires the slow_tool per-tool row to
-        exist (post-migration). Calls the invoke_tool platform tool DIRECTLY so
-        method/tool_name/arguments are siblings - the shape _handle_invoke_tool_real
-        actually parses (the _invoke_tool helper would nest them one level too deep)."""
+        through another active tool's routing. Calls the invoke_tool platform tool
+        DIRECTLY so method/tool_name/arguments are siblings - the shape
+        _handle_invoke_tool_real actually parses (the _invoke_tool helper would nest
+        them one level too deep).
+
+        CR-18: this test could never actually run before — it always hit _psql's old
+        host-only-CLI skip (make test-lab-functional runs in-container). Now that
+        _psql works in-container too, this precondition was the next thing exposed:
+        none of the lab-echo per-tool rows (ping/echo_args/whoami/bulk_compute/
+        slow_tool) actually carry metadata.kind='per-tool' — that tag was never
+        applied to this lab's seed data. Matching on name alone instead; 'per-tool'
+        is not a meaningful filter in this lab (nothing has it)."""
         changed = _psql("UPDATE tool_registry SET status='quarantined' "
-                        "WHERE name='slow_tool' AND metadata->>'kind'='per-tool' "
+                        "WHERE name='slow_tool' AND deleted_at IS NULL "
                         "RETURNING name;")
         assert changed.strip() == "slow_tool", (
-            "precondition failed: no active per-tool 'slow_tool' row to quarantine - "
-            "run the migration (Task 7) before this test")
+            "precondition failed: no 'slow_tool' row to quarantine")
         try:
             r = _direct_call(alice_token, "invoke_tool", {
                 "tool_name": "ping",               # any active tool routes to the same upstream
@@ -721,8 +770,7 @@ class TestPerToolDispatch:
             assert ("quarantin" in blob or "not found in registry" in blob
                     or "not callable" in blob), f"bypass not blocked: {blob[:300]}"
         finally:
-            _psql("UPDATE tool_registry SET status='active' "
-                  "WHERE name='slow_tool' AND metadata->>'kind'='per-tool';")
+            _psql("UPDATE tool_registry SET status='active' WHERE name='slow_tool';")
 
     def test_release_denied_without_scan_evidence(self, alice_token):
         """CR-07/CR-18 acceptance test (live gate chain, not mocked): releasing a
@@ -753,8 +801,9 @@ class TestPerToolDispatch:
             ).strip()
             assert tool_id, "could not create throwaway quarantined tool row"
             _psql(
-                "INSERT INTO sbom_records (tool_id, bom_ref, cyclonedx_json, signature) "
-                f"VALUES ('{tool_id}', 'throwaway', '{{}}', 'throwaway-sig');"
+                "INSERT INTO sbom_records (tool_id, cyclonedx_json, schema_hash, signature, auditor_version) "
+                f"VALUES ('{tool_id}', '{{}}', "
+                f"'{'0' * 64}', 'throwaway-sig', '1.0.0');"
             )
             r = httpx.patch(
                 f"{PROXY_URL}/api/v1/tools/{tool_id}",
