@@ -392,6 +392,19 @@ def _check_mcp_isolation(c: dict, compose_file: str, fails: list[str]) -> None:
                 not extra,
             )
 
+    # (v) ISO-F1.4 — NO TWO MCP servers may share ANY network (validation HIGH-2).
+    # A shared bridge (e.g. lab-net) between two MCP servers is a bidirectional
+    # lateral-movement path: a compromised MCP server can reach another MCP
+    # server's port directly, bypassing the proxy/OPA/auth/credential-injection.
+    # The pre-existing checks only asked "is an MCP server on a *platform* net";
+    # they never asked "do two MCP servers co-occupy any net at all."
+    for net, occupants in sorted(net2svc.items()):
+        mcp_occupants = sorted(o for o in occupants if _is_mcp_service(o))
+        chk(
+            f"network {net}: at most one MCP server (got {mcp_occupants})",
+            len(mcp_occupants) <= 1,
+        )
+
 
 def _check_egress_proxy(c: dict, compose_file: str, fails: list[str]) -> None:
     """

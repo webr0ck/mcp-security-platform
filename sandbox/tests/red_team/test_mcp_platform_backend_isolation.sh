@@ -37,9 +37,21 @@ _probe() {
     local host="$1"
     local port="$2"
     local label="$3"
-    # nc -z = scan only (no data); -w 3 = 3s timeout; exit 0 if connected, 1 if not
-    if podman exec "${MCP_ECHO_CONTAINER}" sh -c "nc -z -w3 ${host} ${port} 2>/dev/null"; then
-        fail "${label}: TCP connect to ${host}:${port} SUCCEEDED — platform backend reachable from MCP server (ISOLATION BROKEN)"
+    # RELIABILITY FIX (validation HIGH-2): the old probe used `nc -z`, but nc is
+    # NOT installed in these MCP containers, so it exited non-zero (command not
+    # found) and the test reported "blocked" — a FALSE PASS that hid real
+    # reachability (MCP-to-MCP lateral movement went undetected). Use a Python
+    # socket connect, which is reliably present and actually establishes the TCP
+    # connection. rc 0 = reachable (ISOLATION BROKEN), rc != 0 = blocked.
+    if podman exec "${MCP_ECHO_CONTAINER}" python3 -c "
+import socket,sys
+s=socket.socket(); s.settimeout(3)
+try:
+    s.connect(('${host}', ${port})); s.close(); sys.exit(0)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+        fail "${label}: TCP connect to ${host}:${port} SUCCEEDED — reachable from MCP server (ISOLATION BROKEN)"
         OVERALL=1
     else
         pass "${label}: TCP connect to ${host}:${port} blocked — ${host} not reachable from MCP container"
@@ -58,7 +70,16 @@ _probe "mcp-opa" "8181" "RT-MCP-001c (opa:8181)"
 # RT-MCP-001d: Vault not reachable from echo MCP
 _probe "mcp-vault" "8200" "RT-MCP-001d (vault:8200)"
 
-echo "[INFO] $(ts) Platform backend isolation probes complete."
+# RT-MCP-002: MCP-to-MCP lateral movement (validation HIGH-2). A compromised MCP
+# server must NOT be able to reach ANOTHER MCP server's port directly — that
+# bypasses the proxy/OPA/auth/credential-injection. Probes from lab-mcp-echo to
+# peer MCP servers; each must be blocked (no shared network).
+_probe "mcp-netbox"          "8000" "RT-MCP-002a (peer MCP mcp-netbox:8000)"
+_probe "lab-mcp-gitea"       "8000" "RT-MCP-002b (peer MCP lab-mcp-gitea:8000)"
+_probe "lab-mcp-grafana"     "8000" "RT-MCP-002c (peer MCP lab-mcp-grafana:8000)"
+_probe "lab-mcp-lab-tickets" "8000" "RT-MCP-002d (peer MCP lab-mcp-lab-tickets:8000)"
+
+echo "[INFO] $(ts) Platform backend + MCP-to-MCP isolation probes complete."
 
 if [[ ${OVERALL} -ne 0 ]]; then
     echo "[FAIL] $(ts) RT-MCP-001: One or more platform backends are reachable from lab-mcp-echo — ISOLATION BROKEN"
