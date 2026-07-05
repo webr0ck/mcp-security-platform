@@ -152,14 +152,34 @@ There is **no generic export/webhook**.
 - **Roadmap note:** a first-class in-proxy syslog/HTTP-CEF sink (configurable in the Console) is
   deferred; the stdout-JSON contract is the stable integration seam.
 
-## R-5 — MCP Console (admin UI) — BLOCKED on `/design-login`
+## R-5 — MCP Console (admin UI) — DESIGN IMPORTED, ready to build
 
-Import `MCP Console.dc.html` from the Claude Design project via DesignSync, then implement the
-console. The current live admin UI is the server-rendered HTMX portal (`portal.py`); the Console
-design will either reskin/replace it or become the new React `ui/` surface — **to be determined from
-the imported design**. Deferred to a follow-on once the design is accessible; this PRD reserves the
-scope and the tab inventory (Dashboard, Servers, Submissions, Wizard Prompts, LLM, Git, Access,
-Credentials, Limits, SBOM, Detections, Audit) that the console must cover.
+**Design imported** (`/design-login` granted): `docs/design/mcp-console/MCP-Console.html` (84 KB,
+dark-themed SPA mockup). It covers the same functional domains as the live portal: Dashboard
+(recent detections, registered tools, SBOM stats), Servers & Tools, SBOM (signed/missing/components,
+View JSON), Submissions (Approve / Request changes / Reject, server details, operational contract),
+Access & Limits (rate, anomaly sensitivity, manage access, client-id/allowed-tools/tags/max-risk,
+roles, revoke), Credentials (OAuth authorization, enrollment), Catalog / Submit-a-server, plus
+"View as" role-switching, a Keycloak-connection panel (reconfigure / test / save), and principal/
+session/sign-out. It is a **reskin of the existing admin surface**, not new capability.
+
+### The architectural fork (must decide before building)
+The repo ships **two UIs**: the **live server-rendered HTMX portal** (`proxy/app/routers/portal.py`,
+what users actually use + what the acceptance tests target) and a **prebuilt React `ui/`** (bundles
+only). The console can be built as either:
+- **(A) Reskin the live portal** — restyle `portal.py`'s fragments to the console design, wiring the
+  same JSON APIs (all already exist: `/api/v1/admin/*`, `/api/v1/submissions`, `/api/v1/tools`, …).
+  Lowest risk, immediately live, no new build pipeline, keeps acceptance tests working.
+- **(B) Build the React `ui/`** into a real console app against the same APIs. Cleaner long-term
+  frontend, but a larger lift and a second surface to keep in sync.
+
+### Build plan (after the fork is chosen)
+Dispatch a **team of agents** per domain (dashboard, servers/tools, submissions, access/limits,
+credentials, SBOM, catalog/submit), 3-critic the wiring decisions (auth, RBAC-gated nav, the
+"view as" role switch must NOT bypass server-side RBAC), implement, then a **red-team pass** (can a
+non-admin reach admin fragments? does "view as" grant real access or only change the view? are the
+Keycloak-reconfigure and OAuth panels write-gated?). This is a multi-phase UI build tracked as its
+own effort.
 
 ---
 
