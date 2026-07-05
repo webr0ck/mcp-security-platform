@@ -194,7 +194,14 @@ invocation time:
   `BackgroundTasks` only for `scan_submission` (`:297`), never for discovery. The
   `"next": "Tool discovery will run shortly."` message returned by `provide_running_url`
   (`submission.py:527`) is aspirational — no scheduler, webhook, or code path fulfills
-  it. An admin must manually run discover-tools *and* separately either audit-approve
+  it.
+  > **CORRECTION (2026-07-05, validation follow-up):** this is now **stale** — discovery
+  > runs **synchronously** at `provide-running-url` time: `submission.py` calls
+  > `await _run_tool_discovery(...)` and registers the tools **quarantined** (INV-005)
+  > in the same request. The "will run shortly" message is fulfilled; an admin still
+  > un-quarantines separately (that release step remains a manual action).
+
+  An admin must manually run discover-tools *and* separately either audit-approve
   the resulting quarantined tool or use the disconnected "Register Tool" form, which
   re-collects name/version/upstream_url/injection_mode from scratch with no link back
   to the submission it came from.

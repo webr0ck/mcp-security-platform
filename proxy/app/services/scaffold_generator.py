@@ -333,6 +333,12 @@ def generate_scaffold(server_name: str, injection_mode: str) -> dict[str, str]:
     Returns {filename: content} for the scaffold zip.
     Falls back to 'none' template if mode is unknown.
     """
+    # validation LOW: an unrecognised injection_mode was silently downgraded to
+    # 'none' (no credential injection) — a dev could ship a scaffold with no auth
+    # unknowingly. Detect the downgrade and SURFACE it prominently rather than
+    # hide it. (An explicit "none"/empty request is not a downgrade.)
+    requested = (injection_mode or "none")
+    downgraded = requested not in _SERVER_TEMPLATES and requested != "none"
     mode = injection_mode if injection_mode in _SERVER_TEMPLATES else "none"
     server_code = _SERVER_TEMPLATES[mode].format(name=server_name)
     readme = _README_TEMPLATE.format(
@@ -340,9 +346,22 @@ def generate_scaffold(server_name: str, injection_mode: str) -> dict[str, str]:
         mode=mode,
         mode_notes=_MODE_NOTES.get(mode, ""),
     )
-    return {
+    if downgraded:
+        warning = (
+            f"# ⚠️  WARNING: requested injection_mode '{requested}' is NOT a recognised mode.\n"
+            f"# This scaffold was generated with injection_mode='none' — it performs NO\n"
+            f"# credential injection. If you intended an authenticated upstream, pick a valid\n"
+            f"# mode (kc_token_exchange / service / user / entra_* / oauth_user_token) and\n"
+            f"# regenerate. Do not ship this as-is expecting credentials to be injected.\n\n"
+        )
+        server_code = warning + server_code
+        readme = (f"> ⚠️ **Requested mode `{requested}` was not recognised — scaffolded as `none` "
+                  f"(no credential injection).** Regenerate with a valid mode if that's not intended.\n\n"
+                  + readme)
+    files = {
         "server.py": server_code,
         "requirements.txt": _REQUIREMENTS,
         "Dockerfile": _DOCKERFILE,
         "README.md": readme,
     }
+    return files
