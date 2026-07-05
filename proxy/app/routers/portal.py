@@ -3820,16 +3820,18 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
         </tr>""")
 
     _card = (
-        'background:var(--panel,#11161f);border:1px solid var(--border,#222b3a);'
-        'border-radius:9px;padding:0.85rem 1rem;flex:1;min-width:120px'
+        'background:var(--adm-surface);border:1px solid var(--adm-border);'
+        'border-radius:12px;padding:15px 18px;flex:1;min-width:150px'
     )
-    _num = "font-size:1.5rem;font-weight:700;line-height:1.1"
-    _lbl = "color:var(--muted);font-size:0.72rem;text-transform:uppercase;letter-spacing:.04em;margin-top:.2rem"
+    _num = "font-size:25px;font-weight:800;line-height:1;letter-spacing:-.02em"
+    _lbl = "color:var(--adm-muted);font-size:11.5px;margin-top:5px"
+    _ok = "color:var(--adm-green)"
+    _bad = "color:var(--adm-red)"
     summary = f"""
-    <div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-bottom:1rem">
+    <div class="fu" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:18px">
       <div style="{_card}"><div style="{_num}">{total}</div><div style="{_lbl}">Registered tools</div></div>
-      <div style="{_card}"><div style="{_num}">{with_sbom}</div><div style="{_lbl}">With SBOM</div></div>
-      <div style="{_card}"><div style="{_num};{'color:#fca5a5' if missing else ''}">{missing}</div><div style="{_lbl}">Missing SBOM</div></div>
+      <div style="{_card}"><div style="{_num};{_ok if with_sbom and not missing else ''}">{with_sbom}</div><div style="{_lbl}">With signed SBOM</div></div>
+      <div style="{_card}"><div style="{_num};{_bad if missing else _ok}">{missing}</div><div style="{_lbl}">Missing SBOM</div></div>
       <div style="{_card}"><div style="{_num}">{total_components}</div><div style="{_lbl}">Total components</div></div>
     </div>"""
 
@@ -5268,6 +5270,18 @@ async def fragment_admin_submissions(request: Request):
     awaiting = sum(1 for r in rows if r.submission_status == "awaiting_review")
     count_badge = f'{len(rows)} total' + (f' · {awaiting} awaiting review' if awaiting else '')
 
+    # Console funnel: Submit → Scan → Review → Approve (design §4)
+    def _fpill(label, color):
+        return (f'<span style="padding:6px 13px;border-radius:8px;font:600 12px var(--ff-sans);'
+                f'color:{color};background:{color}1f;border:1px solid {color}47">{label}</span>')
+    _arrow = '<span style="color:#3a4150">&#8594;</span>'
+    funnel = (
+        '<div class="fu" style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'
+        + _fpill("Submit", "var(--adm-blue)") + _arrow
+        + _fpill("Scan", "var(--adm-amber)") + _arrow
+        + _fpill("Review", "var(--adm-purple)") + _arrow
+        + _fpill("Approve", "var(--adm-green)") + '</div>'
+    )
     return HTMLResponse(f"""
     <div class="section-title">&#x1F4E5; Submissions <span class="count">{count_badge}</span>
       <button class="btn-secondary" style="margin-left:auto;font-size:12px"
@@ -5275,6 +5289,7 @@ async def fragment_admin_submissions(request: Request):
         &#x21BB; Refresh
       </button>
     </div>
+    {funnel}
     <div id="submissions-list">{"".join(cards_html)}</div>
     <script>
     async function reviewAction(sid, action) {{
