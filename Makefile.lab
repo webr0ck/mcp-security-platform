@@ -10,7 +10,7 @@ LAB_COMPOSE = podman-compose --env-file .env.lab \
 
 .PHONY: lab-setup lab-up lab-down lab-reset lab-rebuild lab-init lab-test lab-smoke \
         lab-logs lab-dex-logs lab-ps lab-entra-check lab-vault-init \
-        lab-proxy-shell lab-netbox-shell smoke-four wazuh-up wazuh-dashboard-up incidents help
+        lab-proxy-shell lab-netbox-shell smoke-four lab-acceptance wazuh-up wazuh-dashboard-up incidents help
 
 ## lab-setup       Zero-to-usable: start stack, migrate DB, provision tokens, seed, smoke test
 lab-setup:
@@ -73,6 +73,10 @@ lab-smoke:
 ## smoke-four       PRD-0002 P0 acceptance test — verify 3/4 auth cases registered
 smoke-four:
 	bash lab/scripts/smoke_four_cases.sh
+
+## lab-acceptance   Full AT0-AT3 acceptance run against the live lab (brings lab up if needed)
+lab-acceptance:
+	bash lab/scripts/run_full_acceptance.sh
 
 ## wazuh-up           Start full lab stack + Wazuh SIEM + Wazuh MCP server (no dashboard)
 wazuh-up:

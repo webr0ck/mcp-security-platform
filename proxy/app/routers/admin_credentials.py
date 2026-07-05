@@ -293,7 +293,14 @@ async def update_injection_mode(
     """Update the injection_mode and Keycloak/Entra metadata for a tool."""
     _require_admin(request)
 
-    valid_modes = ("none", "service", "user", "service_account", "oauth_user_token")
+    # Acceptance-suite F-1: this list omitted entra_client_credentials and
+    # kc_token_exchange even though the dispatcher fully supports both — a
+    # tool could never have its injection_mode set to either through the only
+    # admin write path. Sourced from the canonical AuthMode status matrix
+    # (services/auth_modes.py, Codex review CR-02) instead of a separate
+    # ad hoc tuple, so this list can't drift behind what's actually supported.
+    from app.services.auth_modes import AuthMode, is_self_service_selectable
+    valid_modes = tuple(m.value for m in AuthMode if is_self_service_selectable(m)) + ("oauth_user_token",)
     if mode not in valid_modes:
         raise HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": f"injection_mode must be one of: {valid_modes}"})
 
