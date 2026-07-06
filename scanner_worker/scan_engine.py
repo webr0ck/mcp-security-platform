@@ -29,7 +29,7 @@ from typing import Any
 
 import yaml
 
-from . import git_clone
+from . import dependency_scanners, git_clone
 
 logger = logging.getLogger(__name__)
 
@@ -305,23 +305,35 @@ async def _run_pip_audit(repo_path: str, config: dict) -> list[dict]:
             "message": "pip-audit binary not found in scanner-worker environment; dependency scan did not run",
         }]
 
-    block_on = dep_cfg.get("block_on", "critical")
-    severity_order = ["low", "medium", "high", "critical"]
-    block_threshold = severity_order.index(block_on) if block_on in severity_order else 3
-
     rc, stdout, stderr = await _run(["pip-audit", "--format=json", "-r", str(req_files[0])], timeout=120)
     findings = []
     try:
         result = json.loads(stdout) if stdout else []
         for dep in result:
             for vuln in dep.get("vulns", []):
-                sev = vuln.get("fix_versions", [""])[0] and "high" or "medium"
-                sev_idx = severity_order.index(sev) if sev in severity_order else 1
+                # pip-audit's own JSON output carries NO severity/CVSS field
+                # at all — only an advisory id. CR-12 hardening: never infer
+                # severity from fix-version presence (that was this
+                # function's pre-WP-B2 behavior and is exactly the heuristic
+                # the issue file calls out to remove). Severity is always
+                # "unknown" here; the evaluator (dependency_policy.py)
+                # recovers the real severity by alias-collapsing this
+                # finding's vuln_id/aliases against OSV-Scanner's finding for
+                # the same CVE, which does carry CVSS/severity. If no other
+                # layer covers this package, "unknown" forces
+                # review-required rather than a silent pass. `block` is
+                # always False from this worker — see dependency_scanners.py
+                # module docstring for the full policy split rationale.
                 findings.append({
-                    "scanner": "pip-audit", "severity": sev, "block": sev_idx >= block_threshold,
+                    "scanner": "pip-audit", "ecosystem": "PyPI", "severity": "unknown",
+                    "cvss_score": None, "block": False, "waiver_id": None,
                     "package": dep.get("name", ""), "version": dep.get("version", ""),
                     "vuln_id": vuln.get("id", ""),
+                    "aliases": vuln.get("aliases", []) or [],
+                    "fix_versions": vuln.get("fix_versions", []) or [],
+                    "reachable": None, "direct_dependency": None,
                     "file": str(req_files[0].relative_to(repo_path)), "line": 0,
+                    "source": str(req_files[0].relative_to(repo_path)),
                     "message": f"{dep.get('name')}=={dep.get('version')}: {vuln.get('id', '')}",
                 })
     except (json.JSONDecodeError, Exception) as exc:
@@ -534,13 +546,16 @@ async def run_scan(pool, github_url: str) -> dict[str, Any]:
             logger.warning("CycloneDX SBOM generation failed for %s: %s", github_url, exc)
             sbom_cyclonedx = None
 
-        th, custom, pip_f, mcp_f = await asyncio.gather(
+        th, custom, pip_f, mcp_f, osv_f, npm_f, go_f = await asyncio.gather(
             _run_trufflehog(repo_path, config),
             _run_custom_rules(repo_path, config),
             _run_pip_audit(repo_path, config),
             _run_mcp_checker(repo_path, config),
+            dependency_scanners.run_osv_scanner(_run, repo_path, config),
+            dependency_scanners.run_npm_audit(_run, repo_path, config),
+            dependency_scanners.run_govulncheck(_run, repo_path, config),
         )
-        findings = th + custom + pip_f + mcp_f
+        findings = th + custom + pip_f + mcp_f + osv_f + npm_f + go_f
         return {
             "raw_findings": findings,
             "scan_commit": scan_commit or None,

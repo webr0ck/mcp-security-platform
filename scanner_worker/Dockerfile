@@ -18,15 +18,34 @@ WORKDIR /app
 # git            - repo clone (untrusted content; this IS the isolated place for it)
 # trufflehog     - secret scanning
 # syft           - CycloneDX SBOM generation
+# nodejs/npm     - CR-12 (WP-B2): npm audit (Node dependency CVE gate)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     git \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/* \
     && curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
        | sh -s -- -b /usr/local/bin v3.82.13 \
     && curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
        | sh -s -- -b /usr/local/bin v1.18.1
+
+# CR-12 (WP-B2): OSV-Scanner (broad multi-ecosystem CVE coverage) and Go
+# toolchain + govulncheck (Go reachability-aware CVE gate). Go is needed only
+# to build/install govulncheck and to let it load a submitted repo's go.mod —
+# it never builds/executes the submitted repo's own binary, only analyzes it
+# (see scanner_worker/dependency_scanners.py::run_govulncheck).
+ARG GO_VERSION=1.23.4
+RUN curl -sSfL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
+       -o /tmp/go.tar.gz \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz
+ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
+RUN go install github.com/google/osv-scanner/cmd/osv-scanner@v1.9.2 \
+    && go install golang.org/x/vuln/cmd/govulncheck@v1.1.3 \
+    && cp /root/go/bin/osv-scanner /root/go/bin/govulncheck /usr/local/bin/ \
+    && chmod +x /usr/local/bin/osv-scanner /usr/local/bin/govulncheck
 
 # semgrep — SAST engine for the vendored mcp_checker MCP rule pack. Isolated
 # venv for the same reasons documented in the (now-trimmed) proxy/Dockerfile.

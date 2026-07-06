@@ -39,10 +39,30 @@ A corrupted/compromised worker can therefore at worst produce a parse
 error or a crashed job, which the evaluator maps to `scan_status='error'`
 (fail closed) — it can never forge a `PASS`.
 
+## Multi-ecosystem dependency CVE gate (CR-12 / WP-B2)
+
+Three more scanner layers run here alongside pip-audit:
+`dependency_scanners.py::run_osv_scanner` (broad Go/npm/PyPI/etc. via
+OSV-Scanner), `run_npm_audit` (Node, requires a lockfile — deliberately uses
+`--package-lock-only`, NEVER `npm install`, which would execute the
+submitted package's own install scripts here), and `run_govulncheck` (Go
+reachability analysis; a module load/build failure is a forced
+`review_required` signal, never a silent pass — see the module's docstring
+for why this is the package's core security property). All four dependency
+scanners emit `block: false` unconditionally — policy (severity threshold,
+alias-collapse across scanners, waivers) is decided entirely by
+`proxy/app/services/dependency_policy.py` on the evaluator side, because no
+single scanner layer has the full picture (pip-audit's own output carries no
+severity at all). See `docs/spec/05-integrations.md` §4 step 1b for the full
+design and `infra/db/migrations/V066__scan_waivers.sql` for the waiver
+table's DB-role grants (same execution/adjudication split as the rest of
+this document: `scanner_worker_app` has zero grant on `scan_waivers`).
+
 ## What this container has (and does not have)
 
 Has:
 - `git`, `trufflehog`, `pip-audit`, `semgrep`, `syft`, vendored `mcp_checker`.
+- `osv-scanner`, `npm`/`node`, `go` + `govulncheck` (CR-12 / WP-B2).
 - Its own narrow DB role (`scanner_worker_app` via `SCANNER_WORKER_DATABASE_URL`).
 - Its own, separately-scoped git clone token(s), e.g. `GIT_CLONE_TOKEN_GITHUB`
   — a read-only, provider-scoped credential. This is NOT the same secret
