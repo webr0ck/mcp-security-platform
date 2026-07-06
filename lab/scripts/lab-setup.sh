@@ -164,7 +164,7 @@ wait_for_health "Grafana" "http://localhost:3001/api/health" 120 "200"
 # NetBox returns 403 on unauthenticated /api/ — that means it's up
 log "  Waiting for NetBox..."
 NB_ELAPSED=0
-until curl -sf "http://localhost:8080/api/" 2>&1 | grep -qiE "Authentication|netbox|detail"; do
+until curl -s "http://localhost:8080/api/" 2>&1 | grep -qiE "Authentication|netbox|detail"; do
     [[ ${NB_ELAPSED} -ge 180 ]] && die "NetBox did not start within 180s"
     sleep 10; NB_ELAPSED=$((NB_ELAPSED + 10))
 done
