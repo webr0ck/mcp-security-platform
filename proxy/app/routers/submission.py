@@ -616,7 +616,10 @@ async def approve_submission(server_id: str, body: ReviewAction, request: Reques
         raise HTTPException(status_code=409, detail="submission is not awaiting review")
     # A-06 fix: scan must have completed (or been genuinely not-applicable — no
     # repo to scan) before human approval. Blocks 'blocked', 'pending', 'scan_running'.
-    if sub.get("scan_status") not in ("passed", "not_applicable"):
+    # 'review_required' (CR-12/WP-B2: unknown-severity CVE, no npm lockfile, or a
+    # govulncheck module-load failure) is reviewable — a human may approve past it
+    # (optionally after adding a waiver) but it is never auto-approved like 'passed'.
+    if sub.get("scan_status") not in ("passed", "not_applicable", "review_required"):
         raise HTTPException(status_code=409, detail="cannot approve a scan-blocked submission")
 
     # R-10/F-15: no-code submissions (no repo) can never reach provide_running_url —
