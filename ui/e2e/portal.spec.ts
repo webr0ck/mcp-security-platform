@@ -125,8 +125,10 @@ async function setupMocks(page: Page, role: 'viewer' | 'editor' | 'analyst' | 'a
 async function navigateToPortal(page: Page, role: 'viewer' | 'editor' | 'analyst' | 'admin') {
   if (MOCK) {
     await page.goto('/')
-    // The app starts on the dashboard view — click Portal nav button to switch
-    await page.getByRole('button', { name: /portal/i }).click()
+    // The app starts on the Overview view — click the Catalog nav button to
+    // switch (nav was reorganized into Overview/Servers/Access/Settings/Catalog;
+    // "Catalog" is where the tool-catalog UserPortal now lives).
+    await page.getByRole('button', { name: /catalog/i }).click()
     // Wait for portal to mount and load
     await page.waitForSelector('[data-testid="portal-title"]', { timeout: 8000 })
   } else {
@@ -282,8 +284,8 @@ test.describe('UserPortal — MCP management', () => {
     )
 
     // Navigate away and back to the portal to trigger a fresh load with the error route active
-    await page.getByRole('button', { name: /security/i }).click()
-    await page.getByRole('button', { name: /portal/i }).click()
+    await page.getByRole('button', { name: /overview/i }).click()
+    await page.getByRole('button', { name: /catalog/i }).click()
 
     // Issue #11: use data-testid for reliable error-state selection
     await expect(page.locator('[data-testid="portal-error"]')).toBeVisible({ timeout: 5000 })

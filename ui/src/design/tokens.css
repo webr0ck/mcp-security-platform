@@ -5,49 +5,56 @@
 
 :root {
   /* ── Backgrounds ──────────────────────────────────────────────────────── */
-  --bg-void:     #08080e;  /* page backdrop */
-  --bg-base:     #0e0e18;  /* main surface */
-  --bg-surface:  #14141f;  /* cards, panels */
-  --bg-elevated: #1c1c2a;  /* dropdowns, tooltips */
+  /* Palette matches the "MCP Security Platform simplification" Claude Design
+     mockup (claude.ai/design/p/5b5ec562-ad4e-4000-9a5e-d199f8045f2e) exactly —
+     variable NAMES are unchanged so every existing component keeps working. */
+  --bg-void:     #0a0c11;  /* page backdrop */
+  --bg-base:     #0c0f15;  /* sidebar / main surface */
+  --bg-surface:  #12161e;  /* cards, panels */
+  --bg-elevated: #0f131b;  /* inputs, nested tiles, dropdowns */
   --bg-hover:    #22223200; /* hover state overlay — transparent by default */
 
   /* ── Borders ──────────────────────────────────────────────────────────── */
-  --border-dim:    rgba(255,255,255,0.05);
-  --border-base:   rgba(255,255,255,0.08);
+  --border-dim:    rgba(255,255,255,0.04);
+  --border-base:   rgba(255,255,255,0.07);
   --border-bright: rgba(255,255,255,0.14);
 
   /* ── Text ─────────────────────────────────────────────────────────────── */
-  --text-primary:   #f4f4f6;
-  --text-secondary: #9898a8;
-  --text-muted:     #52525e;
-  --text-disabled:  #33333f;
+  --text-primary:   #e7eaf0;
+  --text-secondary: #8a93a4;
+  --text-muted:     #5b6474;
+  --text-disabled:  #3a4150;
 
-  /* ── Brand accent — burnt amber ───────────────────────────────────────── */
-  --accent:        #f97316;
-  --accent-dim:    rgba(249,115,22,0.12);
-  --accent-bright: #fb923c;
+  /* ── Brand accent — blue ──────────────────────────────────────────────── */
+  --accent:        #4f9cf9;
+  --accent-dim:    rgba(79,156,249,0.14);
+  --accent-bright: #7bb4f7;
 
   /* ── Semantic colours ─────────────────────────────────────────────────── */
-  --success:      #4ade80;
-  --success-dim:  rgba(74,222,128,0.10);
-  --warning:      #fbbf24;
-  --warning-dim:  rgba(251,191,36,0.10);
-  --danger:       #f87171;
-  --danger-dim:   rgba(248,113,113,0.10);
-  --info:         #22d3ee;
-  --info-dim:     rgba(34,211,238,0.10);
+  --success:      #35c88a;
+  --success-dim:  rgba(53,200,138,0.10);
+  --warning:      #eab308;
+  --warning-dim:  rgba(234,179,8,0.10);
+  --danger:       #ef5350;
+  --danger-dim:   rgba(239,83,80,0.10);
+  --info:         #4f9cf9;
+  --info-dim:     rgba(79,156,249,0.10);
 
-  /* ── Severity badges ──────────────────────────────────────────────────── */
-  --sev-critical: #ff4d6d;
-  --sev-high:     #f97316;
-  --sev-medium:   #fbbf24;
-  --sev-low:      #94a3b8;
-  --sev-info:     #22d3ee;
+  /* ── Severity / risk badges ───────────────────────────────────────────── */
+  --sev-critical: #ef5350;
+  --sev-high:     #ef5350;
+  --sev-medium:   #eab308;
+  --sev-low:      #35c88a;
+  --sev-info:     #4f9cf9;
+
+  /* extra accents used for section/nav color-coding (purple/pink groups) */
+  --accent-purple: #c084fc;
+  --accent-pink:   #f472b6;
 
   /* ── Typography ───────────────────────────────────────────────────────── */
-  --font-display: 'Fraunces', Georgia, serif;
-  --font-ui:      'Plus Jakarta Sans', system-ui, sans-serif;
-  --font-mono:    'Fira Code', 'Cascadia Code', monospace;
+  --font-display: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-ui:      system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono:    ui-monospace, 'SF Mono', Menlo, monospace;
 
   /* ── Spacing scale ────────────────────────────────────────────────────── */
   --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
@@ -55,18 +62,18 @@
   --sp-12: 48px; --sp-16: 64px;
 
   /* ── Border radii ─────────────────────────────────────────────────────── */
-  --r-sm: 4px; --r-md: 8px; --r-lg: 12px; --r-xl: 16px; --r-pill: 999px;
+  --r-sm: 6px; --r-md: 9px; --r-lg: 14px; --r-xl: 16px; --r-pill: 999px;
 
   /* ── Shadows ──────────────────────────────────────────────────────────── */
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
   --shadow-md: 0 4px 16px rgba(0,0,0,0.5);
   --shadow-lg: 0 12px 40px rgba(0,0,0,0.6);
-  --glow-accent: 0 0 20px rgba(249,115,22,0.2);
+  --glow-accent: 0 0 20px rgba(79,156,249,0.25);
 
   /* ── Transitions ──────────────────────────────────────────────────────── */
   --ease: cubic-bezier(0.16,1,0.3,1);
   --t-fast: 120ms; --t-base: 200ms; --t-slow: 360ms;
 
   /* ── Sidebar width ────────────────────────────────────────────────────── */
-  --sidebar-w: 220px;
+  --sidebar-w: 236px;
 }

@@ -3,15 +3,57 @@
   height: 100vh;
   width: 100%;
   overflow: hidden;
+  background: var(--bg-void);
 }
+
+.app-shell__col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-shell__topbar {
+  height: 56px;
+  flex: none;
+  border-bottom: 1px solid var(--border-dim);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--sp-6);
+  gap: var(--sp-4);
+}
+
+.app-shell__breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.app-shell__breadcrumb-sep { color: var(--text-disabled); }
+.app-shell__breadcrumb-current { color: var(--text-primary); font-weight: 600; }
+
+.app-shell__quick-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent);
+  color: #04122b;
+  font-weight: 700;
+  font-size: 12.5px;
+  border: none;
+  padding: 8px 14px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  transition: filter var(--t-fast);
+}
+.app-shell__quick-action:hover { filter: brightness(1.08); }
 
 .app-shell__main {
   flex: 1;
   overflow-y: auto;
-  background: var(--bg-base);
-  /* Subtle grid texture */
-  background-image:
-    linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
-  background-size: 40px 40px;
+  background: var(--bg-void);
 }

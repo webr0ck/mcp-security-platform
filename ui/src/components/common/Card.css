@@ -5,7 +5,7 @@
   overflow: hidden;
 }
 .card--padded { padding: var(--sp-6); }
-.card--glow { box-shadow: 0 0 30px rgba(249,115,22,0.06); border-color: rgba(249,115,22,0.2); }
+.card--glow { box-shadow: 0 0 30px rgba(79,156,249,0.08); border-color: rgba(79,156,249,0.25); }
 
 /* Stat card */
 .stat-card {
@@ -19,7 +19,7 @@
   transition: border-color var(--t-fast);
 }
 .stat-card:hover { border-color: var(--border-bright); }
-.stat-card--accent { border-color: rgba(249,115,22,0.3); background: linear-gradient(135deg, var(--bg-surface), rgba(249,115,22,0.04)); }
+.stat-card--accent { border-color: rgba(79,156,249,0.3); background: linear-gradient(135deg, var(--bg-surface), rgba(79,156,249,0.05)); }
 
 .stat-card__label {
   font-size: 11px;

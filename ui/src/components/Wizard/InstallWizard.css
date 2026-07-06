@@ -85,7 +85,7 @@
   transition: border-color var(--t-fast), transform var(--t-fast);
 }
 .tier-card:hover { border-color: var(--border-bright); transform: translateY(-2px); }
-.tier-card--selected { border-color: var(--accent); background: linear-gradient(135deg, var(--bg-surface), rgba(249,115,22,0.04)); }
+.tier-card--selected { border-color: var(--accent); background: linear-gradient(135deg, var(--bg-surface), rgba(79,156,249,0.05)); }
 
 .tier-card__header { display: flex; align-items: center; justify-content: space-between; }
 .tier-card__name { font-size: 16px; font-weight: 600; color: var(--text-primary); font-family: var(--font-display); }
@@ -203,7 +203,7 @@
   padding: var(--sp-8) 0;
   text-align: center;
 }
-.deploy-step__icon { font-size: 40px; color: var(--accent); filter: drop-shadow(0 0 16px rgba(249,115,22,0.4)); }
+.deploy-step__icon { font-size: 40px; color: var(--accent); filter: drop-shadow(0 0 16px rgba(79,156,249,0.4)); }
 .deploy-step__actions { display: flex; gap: var(--sp-3); }
 
 .deploy-done { display: flex; flex-direction: column; align-items: center; gap: var(--sp-4); }

@@ -23,7 +23,8 @@
 /* Variants */
 .btn--primary {
   background: var(--accent);
-  color: #fff;
+  color: #04122b;
+  font-weight: 700;
 }
 .btn--primary:hover:not(:disabled) {
   background: var(--accent-bright);
@@ -49,9 +50,9 @@
 .btn--danger {
   background: var(--danger-dim);
   color: var(--danger);
-  border: 1px solid rgba(248,113,113,0.2);
+  border: 1px solid rgba(239,83,80,0.28);
 }
-.btn--danger:hover:not(:disabled) { background: rgba(248,113,113,0.2); }
+.btn--danger:hover:not(:disabled) { background: rgba(239,83,80,0.2); }
 
 /* Loading spinner */
 .btn--loading { pointer-events: none; }

@@ -1,44 +1,49 @@
-import type { View } from './AppShell'
+import type { CSSProperties } from 'react'
+import type { MainView } from './AppShell'
 import './Sidebar.css'
 
-const NAV_ITEMS: { id: View; label: string; icon: string; badge?: string }[] = [
-  { id: 'dashboard', label: 'Security', icon: '⬡' },
-  { id: 'portal',    label: 'Portal',   icon: '⊞' },
-  { id: 'submit',    label: 'Request',  icon: '＋' },
-  { id: 'review',    label: 'Review',   icon: '◉' },
-  { id: 'admin',     label: 'Admin',    icon: '⚙' },
-  { id: 'wizard',    label: 'Setup',    icon: '◈' },
+interface NavItem {
+  id: MainView
+  label: string
+  color: string
+}
+
+const NAV_ITEMS: NavItem[] = [
+  { id: 'overview', label: 'Overview', color: 'var(--accent)' },
+  { id: 'servers',  label: 'Servers',  color: 'var(--success)' },
+  { id: 'access',   label: 'Access',   color: 'var(--accent-purple)' },
+  { id: 'settings', label: 'Settings', color: 'var(--warning)' },
+  { id: 'catalog',  label: 'Catalog',  color: 'var(--accent-pink)' },
 ]
 
 interface Props {
-  active: View
-  onNav: (v: View) => void
+  active: MainView
+  onNav: (v: MainView) => void
 }
 
 export function Sidebar({ active, onNav }: Props) {
   return (
     <aside className="sidebar">
       <div className="sidebar__logo">
-        <span className="sidebar__logo-mark">⬡</span>
+        <span className="sidebar__logo-mark">M</span>
         <div>
-          <p className="sidebar__logo-name">MCP Guard</p>
-          <p className="sidebar__logo-version">v0.1.0</p>
+          <p className="sidebar__logo-name">MCP Security</p>
+          <p className="sidebar__logo-version">Console</p>
         </div>
       </div>
 
+      <p className="sidebar__section-label">NAVIGATION</p>
       <nav className="sidebar__nav" aria-label="Main navigation">
         {NAV_ITEMS.map(item => (
           <button
             key={item.id}
             className={`sidebar__item ${active === item.id ? 'sidebar__item--active' : ''}`}
+            style={{ '--item-color': item.color } as CSSProperties}
             onClick={() => onNav(item.id)}
             aria-current={active === item.id ? 'page' : undefined}
           >
-            <span className="sidebar__item-icon" aria-hidden>{item.icon}</span>
+            <span className="sidebar__item-dot" aria-hidden />
             <span className="sidebar__item-label">{item.label}</span>
-            {item.badge && (
-              <span className="sidebar__item-badge">{item.badge}</span>
-            )}
           </button>
         ))}
       </nav>
