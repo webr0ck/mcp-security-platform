@@ -1416,7 +1416,7 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
         # it by bypassing _roles.  Uses the module-level _PLATFORM_NAMES frozenset
         # (computed at import time) rather than rebuilding per request.
         if name in _PLATFORM_NAMES and not _can_call(name, roles):
-            return _err(req_id, -32003, "Authorization denied", http_status=403)
+            return _err(req_id, -32003, "Authorization denied")
 
         # Registry tool — route directly through the security pipeline
         if not _can_call(name, roles):

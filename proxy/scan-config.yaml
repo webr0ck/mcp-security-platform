@@ -73,3 +73,9 @@ scanners:
       pattern: '\beval\s*\('
       files: ["*.py", "*.js", "*.ts"]
       block: false
+
+    - id: acceptance_test_planted_marker
+      description: "AT3 acceptance-test fixture marker — deterministically blocks lab/tests/acceptance/fixtures/malicious-mcp"
+      pattern: 'MCP_ACCEPTANCE_TEST_MALICIOUS_MARKER_7f3a9c2e'
+      files: ["*.py"]
+      block: true
