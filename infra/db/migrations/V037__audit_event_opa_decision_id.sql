@@ -53,7 +53,7 @@ GRANT INSERT, SELECT ON audit_events TO proxy_app;
 
 -- compliance_checker_app: SELECT only (read audit events for verification runs).
 -- The compliance checker does not query opa_decision_id today but may in future.
-GRANT SELECT ON audit_events TO compliance_checker;
+GRANT SELECT ON audit_events TO compliance_checker_app;
 
 -- Revoke UPDATE/DELETE as an idempotent append-only invariant guard.
 REVOKE UPDATE, DELETE ON audit_events FROM proxy_app;

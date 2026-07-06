@@ -57,4 +57,3 @@ ALTER TYPE injection_mode_enum ADD VALUE IF NOT EXISTS 'entra_client_credentials
 
 -- INV-011: explicit grants for new columns
 GRANT SELECT, INSERT, UPDATE ON server_registry TO proxy_app;
-GRANT UPDATE ON server_registry TO proxy_migrations;

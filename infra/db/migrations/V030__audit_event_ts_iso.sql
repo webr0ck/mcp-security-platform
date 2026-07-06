@@ -48,7 +48,7 @@ GRANT INSERT, SELECT ON audit_events TO proxy_app;
 REVOKE UPDATE, DELETE ON audit_events FROM proxy_app;
 
 -- compliance_checker: SELECT only (read audit events for verification runs).
-GRANT SELECT ON audit_events TO compliance_checker;
+GRANT SELECT ON audit_events TO compliance_checker_app;
 
 -- audit_reader: SELECT only (conditional — role may not exist in all deployments).
 DO $$

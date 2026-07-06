@@ -79,8 +79,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_events_legacy
 -- SELECT granted so the proxy can read back events for the compliance API.
 GRANT INSERT, SELECT ON audit_events TO proxy_app;
 
--- compliance_checker: SELECT only (read audit events for verification runs).
-GRANT SELECT ON audit_events TO compliance_checker;
+-- compliance_checker_app: SELECT only (read audit events for verification runs).
+GRANT SELECT ON audit_events TO compliance_checker_app;
 
 -- audit_reader: SELECT only (for the GET /audit/events API).
 -- This role may not exist in all deployments; wrapped in DO block to avoid

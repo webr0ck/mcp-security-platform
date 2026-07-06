@@ -19,7 +19,7 @@
 --   created_at       — immutable creation timestamp
 --   updated_at       — last modification timestamp (for reconcile change detection)
 --
--- INV-011: explicit GRANT/REVOKE for mcp_proxy role.
+-- INV-011: explicit GRANT/REVOKE for proxy_app role.
 -- The proxy reads grants (SELECT) and the admin endpoints insert/delete them.
 -- No UPDATE — mutations create a new row after deleting the old one (UNIQUE enforces).
 -- =============================================================================
@@ -65,12 +65,12 @@ BEGIN
 END;
 $$;
 
--- INV-011: explicit GRANT/REVOKE for mcp_proxy role
+-- INV-011: explicit GRANT/REVOKE for proxy_app role
 -- SELECT: proxy reads grants at startup and in reconcile loop
 -- INSERT, UPDATE, DELETE: admin endpoints (grant, update, revoke)
-GRANT SELECT, INSERT, UPDATE, DELETE ON client_grants TO mcp_proxy;
-REVOKE TRUNCATE ON client_grants FROM mcp_proxy;
-GRANT USAGE, SELECT ON SEQUENCE client_grants_id_seq TO mcp_proxy;
+GRANT SELECT, INSERT, UPDATE, DELETE ON client_grants TO proxy_app;
+REVOKE TRUNCATE ON client_grants FROM proxy_app;
+GRANT USAGE, SELECT ON SEQUENCE client_grants_id_seq TO proxy_app;
 
 -- Seed from data.json grants so startup behaves identically to pre-migration.
 -- These are the static dev/lab clients. Production grants are managed via the

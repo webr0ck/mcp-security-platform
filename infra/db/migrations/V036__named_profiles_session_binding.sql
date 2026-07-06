@@ -98,10 +98,10 @@ GRANT USAGE, SELECT ON SEQUENCE profile_mcp_bindings_id_seq TO proxy_app;
 -- oidc_sessions already has GRANT in V012; ALTER TABLE ADD COLUMN inherits it.
 -- mcp_profiles already has GRANT in V020; ALTER TABLE ADD COLUMN inherits it.
 
--- Also grant to mcp_proxy role (used by V034 client_grants path)
-GRANT SELECT, INSERT, UPDATE ON profiles TO mcp_proxy;
-GRANT SELECT, INSERT, UPDATE, DELETE ON profile_mcp_bindings TO mcp_proxy;
-GRANT USAGE, SELECT ON SEQUENCE profile_mcp_bindings_id_seq TO mcp_proxy;
+-- Also grant to proxy_app role (used by V034 client_grants path)
+GRANT SELECT, INSERT, UPDATE ON profiles TO proxy_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON profile_mcp_bindings TO proxy_app;
+GRANT USAGE, SELECT ON SEQUENCE profile_mcp_bindings_id_seq TO proxy_app;
 
 COMMENT ON TABLE profiles IS
     'Named profile definitions. Each profile is a named set of MCP entitlements. '
