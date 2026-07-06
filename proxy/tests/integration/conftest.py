@@ -118,10 +118,16 @@ async def _run_seed(dsn: str, insert: bool) -> None:
     try:
         for client_id, role in _TEST_ROLE_SEEDS:
             if insert:
+                # role_assignments is append-only (V050) — no unique constraint
+                # on (client_id, role) to ON CONFLICT against.
                 await conn.execute(
                     "INSERT INTO role_assignments (client_id, role, granted_by) "
-                    "VALUES ($1, $2, 'integration-test-seed') "
-                    "ON CONFLICT (client_id, role) DO NOTHING",
+                    "SELECT $1, $2, 'integration-test-seed' "
+                    "WHERE NOT EXISTS ("
+                    "  SELECT 1 FROM (SELECT DISTINCT ON (role) role, revoked FROM role_assignments "
+                    "                 WHERE client_id = $1 ORDER BY role, created_at DESC) latest "
+                    "  WHERE latest.role = $2 AND latest.revoked = false"
+                    ")",
                     client_id, role,
                 )
             else:

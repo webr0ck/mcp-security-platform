@@ -114,7 +114,7 @@ KC_EXPECTED_USERS = {"alice", "bob", "carol"}
 KC_USER_PASSWORDS: dict[str, str] = {
     "alice": os.environ.get("DEX_ALICE_PASSWORD", "labpassword"),
     "bob": os.environ.get("DEX_BOB_PASSWORD", "labpassword"),
-    "carol": os.environ.get("DEX_ALICE_PASSWORD", "labpassword"),
+    "carol": os.environ.get("DEX_CAROL_PASSWORD", "labpassword"),
 }
 
 SQL_DIR = Path(__file__).parent / "sql"
@@ -839,11 +839,23 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
         # profiles router needs a role grant — scoped narrowly to avoid blanket
         # admin. See proxy/app/routers/profiles.py:_PROFILE_SERVICE_ROLES).
         for role in ("agent", "profile_service"):
+            # role_assignments is append-only (V050): no unique constraint on
+            # (client_id, role) to ON CONFLICT against — the latest event row
+            # per key determines current state. Only insert a fresh grant if
+            # there isn't already an active (non-revoked) one.
             await conn.execute(
                 """
                 INSERT INTO role_assignments (client_id, role, granted_by)
-                VALUES ('lab-self-service', $1, 'seeder')
-                ON CONFLICT (client_id, role) DO NOTHING
+                SELECT 'lab-self-service', $1, 'seeder'
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM (
+                        SELECT DISTINCT ON (role) role, revoked
+                        FROM role_assignments
+                        WHERE client_id = 'lab-self-service'
+                        ORDER BY role, created_at DESC
+                    ) latest
+                    WHERE latest.role = $1 AND latest.revoked = false
+                )
                 """,
                 role,
             )

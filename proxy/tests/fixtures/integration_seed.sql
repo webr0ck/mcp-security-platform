@@ -33,9 +33,22 @@ ON CONFLICT (name, version) DO UPDATE
         deleted_at = NULL;
 
 -- Role assignments (mTLS CN == client_id for these test clients) --------------
-INSERT INTO role_assignments (client_id, role, granted_by) VALUES
+-- role_assignments is append-only (V050) — no unique constraint on
+-- (client_id, role) to ON CONFLICT against; skip rows that already have an
+-- active (non-revoked) grant.
+INSERT INTO role_assignments (client_id, role, granted_by)
+SELECT v.client_id, v.role, v.granted_by
+FROM (VALUES
     ('test-agent-client',   'agent',   'integration-seed'),
     ('test-agent-no-grant', 'agent',   'integration-seed'),
     ('test-admin-client',   'admin',   'integration-seed'),
     ('test-auditor-client', 'auditor', 'integration-seed')
-ON CONFLICT (client_id, role) DO NOTHING;
+) AS v(client_id, role, granted_by)
+WHERE NOT EXISTS (
+    SELECT 1 FROM (
+        SELECT DISTINCT ON (client_id, role) client_id, role, revoked
+        FROM role_assignments
+        ORDER BY client_id, role, created_at DESC
+    ) latest
+    WHERE latest.client_id = v.client_id AND latest.role = v.role AND latest.revoked = false
+);

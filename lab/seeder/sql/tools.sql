@@ -117,6 +117,25 @@ ON CONFLICT (name, version) DO UPDATE SET
     injection_mode = EXCLUDED.injection_mode,
     updated_at     = NOW();
 
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode, inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'slow_tool', '1.0.0',
+    'Sleeps for a configurable duration — tests proxy timeout handling.',
+    '{"type":"object","properties":{"delay_ms":{"type":"integer"}},"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-echo:8000/mcp',
+    'active', 'low', 5, '[]'::jsonb,
+    'lab-seeder', null, null, 'none', null, null
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url   = EXCLUDED.upstream_url,
+    injection_mode = EXCLUDED.injection_mode,
+    updated_at     = NOW();
+
 -- ── Notes MCP — per-user isolation via X-User-Sub header (injected by proxy) ──
 -- injection_mode='none': X-User-Sub comes from forward_base_headers, not broker.
 INSERT INTO tool_registry (
