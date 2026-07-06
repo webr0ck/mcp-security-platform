@@ -1084,38 +1084,24 @@ networks:
     # Services that need internet egress (lab-mcp-m365) must use mcp-egress-net
     # via the allowlisting squid proxy (lab-egress-proxy).
     internal: true
-  # Attach to networks created by the base compose so lab-seeder can reach
-  # mcp-db and mcp-vault.  The project-name prefix matches the compose project
-  # name derived from the directory: mcp-security-platform_.
-  internal-net:
-    external: true
-    name: mcp-security-platform_internal-net
-  vault-net:
-    external: true
-    name: mcp-security-platform_vault-net
-  # lab-grafana joins this to reach mcp-loki:3100 for Loki datasource
-  observability-net:
-    external: true
-    name: mcp-security-platform_observability-net
-  # Proxy service networks — shared with the base compose stack
-  gateway-net:
-    external: true
-    name: mcp-security-platform_gateway-net
-  step-ca-net:
-    external: true
-    name: mcp-security-platform_step-ca-net
-  proxy-opa-net:
-    external: true
-    name: mcp-security-platform_proxy-opa-net
-  proxy-ollama-net:
-    external: true
-    name: mcp-security-platform_proxy-ollama-net
-  proxy-redis-net:
-    external: true
-    name: mcp-security-platform_proxy-redis-net
-  proxy-db-net:
-    external: true
-    name: mcp-security-platform_proxy-db-net
+  # lab-seeder (and lab-grafana, for observability-net) needs to reach
+  # networks the BASE docker-compose.yml already defines (mcp-db, mcp-vault,
+  # Loki, etc.).
+  #
+  # These 9 networks used to be redeclared here as `external: true` with an
+  # explicit `name:` matching the base file's auto-generated name
+  # (`<project>_<key>`, e.g. mcp-security-platform_vault-net), on the theory
+  # that this just "points at" the network the base file creates. It doesn't:
+  # `external: true` tells compose the network must ALREADY exist, and
+  # compose refuses to create it. Since the base file's definition has no
+  # custom name either, both forms resolve to the identical final network
+  # name — the override achieved nothing except making a genuinely-from-
+  # scratch `up` fail outright with "network ... declared as external, but
+  # could not be found" (confirmed empirically: wiped the lab, booted clean,
+  # hit this immediately — this exact 3-file combination had apparently
+  # never been exercised from truly nothing before). Removed entirely; the
+  # base file's plain (non-external) definitions are what these lab services
+  # actually attach to.
   # ── Per-MCP pairwise networks (Task 2.2a+2.2b) ───────────────────────────
   # Each is internal: true — no routing to/from the host or other containers
   # except the proxy. MCP servers cannot reach each other or platform backends.
