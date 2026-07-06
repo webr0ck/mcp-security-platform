@@ -99,6 +99,8 @@ class CreateProfileRequest(BaseModel):
     provider_type: str
     issuer_or_metadata_url: str | None = None  # if set, discovery runs before insert
     default_scopes: list[str] = Field(default_factory=list)
+    allowed_scopes: list[str] = Field(default_factory=list)
+    blocked_scopes: list[str] = Field(default_factory=list)
     token_audience_or_resource: str | None = None
     service_adapter: str | None = None
     supports_client_credentials: bool = False
@@ -137,6 +139,8 @@ async def create_profile(body: CreateProfileRequest, request: Request) -> dict:
                 created_by=_actor(request),
                 metadata=metadata,
                 default_scopes=body.default_scopes,
+                allowed_scopes=body.allowed_scopes,
+                blocked_scopes=body.blocked_scopes,
                 token_audience_or_resource=body.token_audience_or_resource,
                 service_adapter=body.service_adapter,
                 supports_client_credentials=body.supports_client_credentials,
@@ -199,6 +203,8 @@ def _serialize(p: profile_svc.ProfileRow) -> dict:
         "jwks_uri": p.jwks_uri,
         "metadata_url": p.metadata_url,
         "default_scopes": p.default_scopes,
+        "allowed_scopes": p.allowed_scopes,
+        "blocked_scopes": p.blocked_scopes,
         "token_audience_or_resource": p.token_audience_or_resource,
         "supports_pkce": p.supports_pkce,
         "supports_refresh_token": p.supports_refresh_token,

@@ -101,7 +101,11 @@ async def test_discover_metadata_primary_rfc8414_path():
         "token_endpoint_auth_methods_supported": ["client_secret_basic"],
     }
     fake_client = _FakeAsyncClient({primary_url: _json_response(primary_url, payload)})
-    with patch("httpx.AsyncClient", return_value=fake_client):
+    # validate_server_url does a real DNS lookup; mocked here the same way
+    # app.routers.tools's own SSRF-guarded tests mock it, so this test
+    # exercises the discovery/httpx logic in isolation from DNS availability.
+    with patch("app.services.oauth_provider_profile.validate_server_url"), \
+         patch("httpx.AsyncClient", return_value=fake_client):
         result = await svc.discover_metadata(base)
     assert result is not None
     assert result.token_endpoint == f"{base}/token"
@@ -119,7 +123,8 @@ async def test_discover_metadata_falls_back_to_openid_configuration():
         primary_url: httpx.Response(404, request=httpx.Request("GET", primary_url)),
         fallback_url: _json_response(fallback_url, payload),
     })
-    with patch("httpx.AsyncClient", return_value=fake_client):
+    with patch("app.services.oauth_provider_profile.validate_server_url"), \
+         patch("httpx.AsyncClient", return_value=fake_client):
         result = await svc.discover_metadata(base)
     assert result is not None
     assert result.metadata_url == fallback_url
@@ -131,9 +136,46 @@ async def test_discover_metadata_fails_soft_to_none_when_unreachable():
     so the caller falls back to manual entry (Finding 1)."""
     base = "https://no-metadata.example.com"
     fake_client = _FakeAsyncClient({})  # every .get() raises ConnectError
-    with patch("httpx.AsyncClient", return_value=fake_client):
+    with patch("app.services.oauth_provider_profile.validate_server_url"), \
+         patch("httpx.AsyncClient", return_value=fake_client):
         result = await svc.discover_metadata(base)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_discover_metadata_refuses_ssrf_unsafe_host_without_any_request():
+    """Security regression: an admin/submitter-supplied issuer pointed at an
+    internal/private-range host (metadata service, loopback admin panel,
+    RFC1918 range) MUST be refused before any network call is made — never
+    silently retried across the RFC 8414 / OIDC candidate paths for the same
+    unsafe host. Fails soft to None (same as any other discovery miss, so
+    the caller falls back to manual entry) but the SSRF check itself is
+    fail-closed: httpx.AsyncClient.get must never be invoked."""
+    from app.services.ssrf import SSRFError
+
+    fake_client = _FakeAsyncClient({})
+    with patch(
+        "app.services.oauth_provider_profile.validate_server_url",
+        side_effect=SSRFError("Host resolves to a blocked private/reserved IP range"),
+    ), patch("httpx.AsyncClient", return_value=fake_client) as mock_client_ctor:
+        result = await svc.discover_metadata("http://169.254.169.254/latest/meta-data")
+    assert result is None
+    mock_client_ctor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_discover_metadata_disables_redirect_following():
+    """A malicious metadata endpoint could 3xx-redirect to an internal host
+    after the initial hostname passed SSRF validation (redirect-based SSRF
+    bypass) — httpx must be constructed with follow_redirects=False so a
+    redirect response is treated as a miss, never transparently followed."""
+    base = "https://idp3.example.com"
+    with patch("app.services.oauth_provider_profile.validate_server_url"), \
+         patch("httpx.AsyncClient") as mock_client_ctor:
+        mock_client_ctor.return_value = _FakeAsyncClient({})
+        await svc.discover_metadata(base)
+    _, kwargs = mock_client_ctor.call_args
+    assert kwargs.get("follow_redirects") is False
 
 
 @pytest.mark.asyncio
@@ -204,6 +246,8 @@ class _FakeProfileSession:
             row["metadata_url"] = params.get("metadata_url")
             import json as _json
             row["default_scopes"] = _json.loads(params["default_scopes"])
+            row["allowed_scopes"] = _json.loads(params["allowed_scopes"])
+            row["blocked_scopes"] = _json.loads(params["blocked_scopes"])
             row["token_audience_or_resource"] = params.get("audience")
             row["service_adapter"] = params.get("service_adapter")
             row["supports_client_credentials"] = params.get("supports_cc", False)
@@ -305,3 +349,56 @@ async def test_get_profile_not_found_raises():
     session = _FakeProfileSession()
     with pytest.raises(svc.ProfileNotFoundError):
         await svc.get_profile(session, str(uuid.uuid4()))
+
+
+# ---------------------------------------------------------------------------
+# allowed_scopes/blocked_scopes wiring (follow-up to the WP-A6 handoff gap)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_draft_profile_persists_allowed_and_blocked_scopes():
+    session = _FakeProfileSession()
+    profile = await svc.create_draft_profile(
+        session, slug="acme-scoped", display_name="Acme Scoped", provider_type="generic_oauth2",
+        created_by="alice@corp",
+        default_scopes=["openid"], allowed_scopes=["openid", "profile", "email"],
+        blocked_scopes=["admin"],
+    )
+    assert profile.allowed_scopes == ["openid", "profile", "email"]
+    assert profile.blocked_scopes == ["admin"]
+
+
+@pytest.mark.asyncio
+async def test_create_draft_profile_rejects_scope_in_both_allowed_and_blocked():
+    """A scope cannot be simultaneously allowed/default and blocked — that is
+    an inconsistent profile, rejected at creation rather than deferred to
+    approval time."""
+    session = _FakeProfileSession()
+    with pytest.raises(ValueError, match="Mail.Read"):
+        await svc.create_draft_profile(
+            session, slug="acme-conflict", display_name="Acme Conflict", provider_type="generic_oauth2",
+            created_by="alice@corp",
+            allowed_scopes=["openid", "Mail.Read"], blocked_scopes=["Mail.Read"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_approve_profile_requires_high_risk_ack_for_allowed_scopes_too():
+    """CORE ACCEPTANCE TEST: a high-risk scope present only in allowed_scopes
+    (not default_scopes) must still require explicit reviewer ack — settable
+    allowed_scopes must not create a silent bypass of the high-risk gate."""
+    session = _FakeProfileSession()
+    profile = await svc.create_draft_profile(
+        session, slug="acme-allowed-write", display_name="Acme (allowed write)",
+        provider_type="generic_oauth2", created_by="alice@corp",
+        default_scopes=["openid"], allowed_scopes=["openid", "write"],
+    )
+    with pytest.raises(svc.HighRiskScopeAckRequiredError) as exc_info:
+        await svc.approve_profile(session, profile.id, reviewer="admin@corp")
+    assert "write" in exc_info.value.high_risk_scopes
+
+    approved = await svc.approve_profile(
+        session, profile.id, reviewer="admin@corp", high_risk_scopes_approved=True
+    )
+    assert approved.status == "approved"

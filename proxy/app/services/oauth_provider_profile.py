@@ -38,6 +38,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.oauth_policy import HIGH_RISK_SCOPES
+from app.services.ssrf import SSRFError, validate_server_url
 
 logger = logging.getLogger(__name__)
 
@@ -112,12 +113,29 @@ async def discover_metadata(issuer_or_metadata_url: str) -> DiscoveredMetadata |
     (contrast with oauth_policy.py's fail-closed enforcement checks).
     """
     base = issuer_or_metadata_url.rstrip("/")
+
+    # SSRF guard: discovery fetches a submitter/admin-supplied URL — an admin
+    # session (or a request crafted to look like one) pointing this at an
+    # internal metadata service, loopback admin panel, or private-range host
+    # would make the platform issue the request from its own network
+    # position. Validated ONCE up front (all candidate paths share the same
+    # host) so a blocked host never reaches httpx at all — this check is
+    # fail-closed even though the surrounding discovery flow is fail-soft:
+    # an unsafe host returns None (falls back to manual entry) exactly like
+    # any other discovery miss, it just never makes the network call.
+    from app.core.config import settings as _settings
+    try:
+        validate_server_url(base, allow_http_localhost=(_settings.ENVIRONMENT == "development"))
+    except SSRFError as exc:
+        logger.warning("oauth_provider_profile discovery refused unsafe host for %r: %s", base, exc)
+        return None
+
     if base.endswith((".well-known/oauth-authorization-server", ".well-known/openid-configuration")):
         candidates = (base,)
     else:
         candidates = tuple(f"{base}{path}" for path in _METADATA_PATHS)
 
-    async with httpx.AsyncClient(timeout=_DISCOVERY_TIMEOUT_SECONDS) as client:
+    async with httpx.AsyncClient(timeout=_DISCOVERY_TIMEOUT_SECONDS, follow_redirects=False) as client:
         for url in candidates:
             try:
                 resp = await client.get(url)
@@ -312,14 +330,35 @@ async def create_draft_profile(
     created_by: str,
     metadata: DiscoveredMetadata | None = None,
     default_scopes: list[str] | None = None,
+    allowed_scopes: list[str] | None = None,
+    blocked_scopes: list[str] | None = None,
     token_audience_or_resource: str | None = None,
     service_adapter: str | None = None,
     supports_client_credentials: bool = False,
 ) -> ProfileRow:
     """Create a draft oauth_provider_profile row (status='draft'). Not usable
-    by any submission until approve_profile() promotes it to 'approved'."""
+    by any submission until approve_profile() promotes it to 'approved'.
+
+    allowed_scopes/blocked_scopes were previously accepted only implicitly
+    (the columns default to '[]' and were never settable here) — a profile
+    created with e.g. default_scopes=["Mail.Read"] had no way to also record
+    that "Mail.ReadWrite"/"admin" are explicitly blocked, or that the
+    allowed set is wider than the default. Any scope present in BOTH
+    allowed_scopes/default_scopes and blocked_scopes is rejected up front
+    (ValueError) — an inconsistent profile, not something to silently accept
+    and sort out later at approval time.
+    """
     if provider_type not in PROVIDER_TYPES:
         raise ValueError(f"unknown provider_type: {provider_type!r}")
+
+    default_scopes = default_scopes or []
+    allowed_scopes = allowed_scopes or []
+    blocked_scopes = blocked_scopes or []
+    conflicting = sorted((set(default_scopes) | set(allowed_scopes)) & set(blocked_scopes))
+    if conflicting:
+        raise ValueError(
+            f"scope(s) {conflicting} appear in both allowed/default_scopes and blocked_scopes"
+        )
 
     import json as _json
 
@@ -330,12 +369,15 @@ async def create_draft_profile(
                 INSERT INTO oauth_provider_profile (
                     slug, display_name, provider_type, issuer,
                     authorization_endpoint, token_endpoint, jwks_uri, metadata_url,
-                    default_scopes, token_audience_or_resource, service_adapter,
+                    default_scopes, allowed_scopes, blocked_scopes,
+                    token_audience_or_resource, service_adapter,
                     supports_client_credentials, created_by, status
                 ) VALUES (
                     :slug, :display_name, :provider_type, :issuer,
                     :authz_ep, :token_ep, :jwks_uri, :metadata_url,
-                    CAST(:default_scopes AS jsonb), :audience, :service_adapter,
+                    CAST(:default_scopes AS jsonb), CAST(:allowed_scopes AS jsonb),
+                    CAST(:blocked_scopes AS jsonb),
+                    :audience, :service_adapter,
                     :supports_cc, :created_by, 'draft'
                 )
                 RETURNING {_SELECT_COLUMNS}
@@ -350,7 +392,9 @@ async def create_draft_profile(
                 "token_ep": metadata.token_endpoint if metadata else None,
                 "jwks_uri": metadata.jwks_uri if metadata else None,
                 "metadata_url": metadata.metadata_url if metadata else None,
-                "default_scopes": _json.dumps(default_scopes or []),
+                "default_scopes": _json.dumps(default_scopes),
+                "allowed_scopes": _json.dumps(allowed_scopes),
+                "blocked_scopes": _json.dumps(blocked_scopes),
                 "audience": token_audience_or_resource,
                 "service_adapter": service_adapter,
                 "supports_cc": supports_client_credentials,
@@ -400,15 +444,18 @@ async def approve_profile(
     Reviewer-approval gate (Finding 1, "Require an admin/reviewer to approve
     the provider profile before use"). Fail-closed:
       - only 'draft' or 'pending_review' -> 'approved' is a valid transition.
-      - if default_scopes intersects HIGH_RISK_SCOPES and the reviewer has not
-        set high_risk_scopes_approved=true, raise rather than silently pass —
-        mirrors oauth_policy.py's HighRiskScopeApprovalRequiredError posture.
+      - if default_scopes OR allowed_scopes intersects HIGH_RISK_SCOPES and the
+        reviewer has not set high_risk_scopes_approved=true, raise rather than
+        silently pass — mirrors oauth_policy.py's HighRiskScopeApprovalRequiredError
+        posture. allowed_scopes is included (not just default_scopes) because a
+        profile now settable with a broad allowed_scopes set could otherwise
+        approve a high-risk scope invisibly, just by it not being the default.
     """
     profile = await get_profile(session, profile_id)
     if profile.status not in ("draft", "pending_review"):
         raise InvalidProfileStateTransitionError(profile.status, "approved")
 
-    high_risk = sorted(set(profile.default_scopes) & HIGH_RISK_SCOPES)
+    high_risk = sorted((set(profile.default_scopes) | set(profile.allowed_scopes)) & HIGH_RISK_SCOPES)
     if high_risk and not high_risk_scopes_approved:
         raise HighRiskScopeAckRequiredError(high_risk)
 
