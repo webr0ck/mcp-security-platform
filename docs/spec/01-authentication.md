@@ -420,6 +420,70 @@ scopes/redirect_uri/client_auth_method, all present in `external_oauth`'s config
   Atlassian API call required before any real Jira REST call) is left to the downstream Jira MCP
   tool, not the platform. This is a documented limitation, not a silent gap.
 
+### 4.7 Generic OAuth 2.0 substrate productization — provider profiles + service adapters (WP-A6)
+
+User-approved extension of §4.6 (`docs/spec/08-finalization-findings-generic-oauth.md`, Findings
+1–3; explicit scoping decision: **generic OIDC, not Jira-focused** — Jira `cloudId` resolution
+(Finding 4) and the apply/deploy/verify pipeline (Finding 5, being built separately as WP-B3) are
+both out of scope for this package).
+
+- **`oauth_provider_profile` catalog (V070, Finding 1).** Sits ABOVE `oauth_provider_policy`
+  (§4.5) — an admin-curated, reviewer-approved catalog a non-expert submitter picks from
+  ("Same platform IdP" / "Generic OAuth 2.0" / "Microsoft Entra" / "Custom OIDC"; `jira_cloud` is
+  a reserved `provider_type` value, not implemented). It does **not** replace `oauth_provider_policy`
+  — a profile's issuer still validates against a matching policy row (via
+  `oauth_policy.get_policy_for_issuer`, the same `UnknownIssuerError` class, not a parallel
+  mechanism) at profile-approval time in `services/oauth_provider_profile.py::approve_profile`,
+  and again independently at server-submission-approval time via the existing
+  `_validate_oauth_policy_at_approval` gate — unchanged. Profile approval is fail-closed the same
+  way §4.5 is: unknown issuer, un-acknowledged high-risk scope (`oauth_policy.HIGH_RISK_SCOPES`),
+  or an invalid state transition (`draft`/`pending_review` → `approved` only) all reject rather
+  than silently pass. `server_registry.oauth_provider_profile_id` records which profile (if any) a
+  server's submission was built from.
+- **RFC 8414 / OIDC discovery (Finding 1).** `oauth_provider_profile.discover_metadata` fetches
+  `.well-known/oauth-authorization-server` first, falling back to
+  `.well-known/openid-configuration` — a plain HTTPS GET + JSON parse, no new dependency. This is
+  a UX convenience, not a trust boundary: **any** failure (network error, 404, malformed/partial
+  document, a 200 response with no `token_endpoint`) returns `None` rather than raising, and the
+  caller (profile creation / onboarding wizard) falls back to manual endpoint entry. Discovered
+  `token_endpoint_auth_methods_supported`/`scopes_supported` only pre-fill the draft profile —
+  they are never themselves enforced (that stays `oauth_provider_policy`'s job).
+- **"Same platform IdP" non-expert path (Finding 2).** `oauth_provider_profile.recommend_provider_type`
+  is a pure wizard-answer → `(provider_type, injection_mode)` mapping; when the answer is
+  "same IdP as this platform", the recommendation's `provider_type` is `same_platform_idp` and its
+  `display_label` is the literal string **"Same platform IdP"** — the `kc_token_exchange`
+  implementation name is asserted (by unit test) to never appear in submitter-facing text. Under
+  the hood this still produces an ordinary `kc_token_exchange` submission (§4.2/§4.5) — no new
+  persistence or dispatch path, everything downstream of submission is unchanged.
+- **Same-IdP deploy verification probe (Finding 2).** `services/same_idp_verify.run_same_idp_verify_probe`
+  is a standalone, independently-testable check: given a running MCP server URL and its approved
+  audience, it sends three requests directly to that server (bypassing the proxy, so it measures
+  the *upstream's own* validation) — no `Authorization` header, a signed-but-wrong-audience token,
+  and a signed-but-expired token — and asserts all three are rejected (non-2xx, or an MCP
+  JSON-RPC `error` body). **WP-B3's verify pipeline does not exist yet** as of this writing; this
+  module is deliberately not wired into any verify endpoint. Whoever finishes WP-B3 should call
+  `run_same_idp_verify_probe()` from the verify-phase worker for the `kc_token_exchange` /
+  "same platform IdP" auth-mode branch and persist its result into whatever verification-report
+  structure that phase produces (see §4.6-adjacent `server_registry.verification_report`, V068).
+- **`ServiceAdapter` contract (Finding 3).** `credential_broker/adapters/service_adapter.py`
+  defines what OAuth alone cannot know about a specific upstream service — resource API base URL,
+  tenant/site/workspace id, post-enrollment discovery, a safe read-only probe endpoint, and the
+  non-secret runtime context handed to the deployed MCP server. A `ServiceAdapter` **never**
+  stores or returns a refresh token or client secret — those remain exclusively in
+  `credential_store`, managed by the broker; the adapter only ever receives a short-lived
+  `access_token` for the duration of one discovery/verify call. `server_registry.service_context`
+  (JSONB, V070) persists the non-secret result of `build_runtime_context()` — e.g.
+  `{"adapter": "generic", "api_base_url": "..."}` — explicitly separate from `credential_store`.
+  `GenericServiceAdapter` (`adapters/generic_service_adapter.py`) is the reference "no extra
+  discovery needed" implementation: most external OAuth services need nothing beyond a fixed
+  `api_base_url`, proving the contract holds for the common case before any service-specific
+  adapter (e.g. a future Jira Cloud `cloudId`-resolving one, Finding 4 — **not built by WP-A6**)
+  is layered on top.
+- **Router.** `routers/oauth_provider_profiles.py` exposes the catalog CRUD + approval endpoints
+  (`/api/v1/admin/oauth-provider-profiles*`, admin/platform_admin role required) plus the
+  self-service wizard mapping (`POST /api/v1/wizard/recommend-provider-type`, no admin role
+  required — pure recommendation, no state change, no secrets).
+
 ---
 
 ## 5. Browser OIDC session flow

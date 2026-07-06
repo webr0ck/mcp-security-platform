@@ -22,7 +22,7 @@ from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
 from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
-from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, admin_prompts, admin_llm, admin_git, portal, server_registry, catalog, lab_links, entitlements, profiles, submission
+from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, admin_prompts, admin_llm, admin_git, portal, server_registry, catalog, lab_links, entitlements, profiles, submission, oauth_provider_profiles
 from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.log_filter import RedactingFilter
@@ -317,6 +317,7 @@ app.include_router(catalog.router)            # Principal-scoped server catalog 
 app.include_router(entitlements.router)       # Entitlement CRUD (Phase 2.2)
 app.include_router(profiles.router)           # Profile CRUD — self-service + admin (Task 4.2)
 app.include_router(submission.router)         # Self-service MCP server submission + review queue
+app.include_router(oauth_provider_profiles.router)  # OAuth provider profile catalog (WP-A6, Finding 1)
 app.include_router(lab_links.router)          # Lab convenience: / → portal, /netbox /grafana /keycloak
 
 # Static assets — served at /static/* (no auth required; public JS/CSS only)

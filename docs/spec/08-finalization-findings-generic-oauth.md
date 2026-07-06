@@ -2,6 +2,52 @@
 
 **Status:** proposed finalization backlog, 2026-07-06.
 
+**WP-A6 update (2026-07-07):** the user explicitly scoped a follow-up package to **Findings 1–3
+only** ("main thing what should be done - generic oidc, not jira focused"). Findings 4 and 5 are
+deliberately deferred and NOT built by WP-A6 — see the per-finding notes below.
+
+- **Finding 1 (generic OAuth substrate as a product primitive): implemented, first pass.**
+  `oauth_provider_profile` table (V070) + `services/oauth_provider_profile.py` +
+  `routers/oauth_provider_profiles.py`. RFC 8414 discovery with OIDC-discovery fallback and a
+  fail-soft-to-manual posture (`discover_metadata`, never raises). Reviewer-approval gate reuses
+  WP-A2's `oauth_policy.get_policy_for_issuer` / `UnknownIssuerError` and its
+  `HIGH_RISK_SCOPES` high-risk-scope-acknowledgement pattern rather than inventing a parallel
+  mechanism. **Honest gap:** no admin UI (API only); a profile's `allowed_scopes` /
+  `blocked_scopes` / `allowed_redirect_patterns` / `allowed_client_auth_methods` columns exist in
+  the schema but `create_draft_profile` does not yet accept them as constructor args (only
+  `default_scopes` is wired end-to-end) — extending that is a small, low-risk follow-up.
+- **Finding 2 (same-IdP non-expert path): implemented, first pass.**
+  `oauth_provider_profile.recommend_provider_type` maps the wizard's plain-language questions to
+  `provider_type`/`injection_mode`, asserting (via unit test) that "kc_token_exchange" never
+  appears in the submitter-facing `display_label` — the only user-visible string is
+  "Same platform IdP". `services/same_idp_verify.run_same_idp_verify_probe` is the standalone
+  missing/wrong-audience/expired-token rejection probe, with its own unit test suite (mocked
+  httpx transport) — **not wired into any verify endpoint**, since WP-B3's verify pipeline is
+  being built concurrently and did not exist yet when this was written. See the wiring note in
+  `same_idp_verify.py`'s module docstring and in `docs/spec/01-authentication.md` §4.7. **Honest
+  gap:** no scaffold-template generation for a same-IdP backend server's JWT-validation
+  middleware (the finding doc's "Add scaffold templates..." backlog item) — not built.
+- **Finding 3 (generic ServiceAdapter contract): implemented, first pass.**
+  `credential_broker/adapters/service_adapter.py` (a `runtime_checkable` `Protocol`, not an ABC —
+  a deliberate choice so `GenericServiceAdapter` needs no explicit inheritance to satisfy the
+  contract) + `credential_broker/adapters/generic_service_adapter.py` (the reference "no extra
+  discovery needed" adapter) + `server_registry.service_context` JSONB column (V070). Full unit
+  test coverage including a structural `isinstance(adapter, ServiceAdapter)` conformance check.
+  **Honest gap:** nothing yet calls `GenericServiceAdapter` from the actual onboarding/dispatch
+  code path — it exists and is tested as a standalone contract + reference implementation, but is
+  not yet invoked from `routers/submission.py` or `credential_broker/dispatcher.py`. Wiring it in
+  is the natural next step once a submission flow needs to persist `service_context`.
+- **Finding 4 (Jira Cloud `cloudId` resolution): explicitly deferred, out of scope for WP-A6.**
+  Jira-specific; the existing `credential_broker/adapters/jira.py` (WP-A3/D2) is unchanged and
+  remains the documented fast-follow it already was. `oauth_provider_profile.provider_type`
+  reserves the `jira_cloud` value for a future adapter, but no `cloudId` discovery logic exists.
+- **Finding 5 (apply/deploy/verify pipeline): out of scope for WP-A6, built separately as WP-B3.**
+  A different work package is building this concurrently
+  (`Codex_review/Claude_status.md`'s WP-B3 entry, `server_registry.verification_report` / V068).
+  WP-A6 deliberately does not build a competing `/apply` endpoint, build worker, or deploy
+  pipeline — see the Finding-2 same-IdP verify probe note above for how the two packages are
+  meant to connect once WP-B3 lands its verify phase.
+
 **Scope:** what remains to make self-service onboarding usable by a non-expert for MCP servers that call authenticated upstream services, especially services using the same OAuth/IdP as the MCP Security Platform, arbitrary external OAuth 2.0 services, and Jira Cloud.
 
 **Primary references:**
