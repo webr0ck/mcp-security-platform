@@ -126,6 +126,64 @@ Reference implementation: `auth.py::_build_principal_id` (~L124). The `client_id
 key) and the typed `principal_id` are both attached to request state and both flow to the invocation
 pipeline (the entitlement/discovery gate keys on the typed principal).
 
+`_build_principal_id` also derives `principal_issuer` (the issuer/CA component — the OIDC issuer id,
+the mTLS CA id, or the literal `"apikey"`) and `principal_display_sub` (the bare `client_id`, kept
+purely for display/compat purposes). All four values are attached to `request.state`.
+
+### 2.1 Downstream propagation (CR-10)
+
+The invocation pipeline (`services/invocation.py::invoke_tool`, `forward_base_headers`) forwards
+four headers to every upstream MCP server, on top of the pre-existing `X-User-Sub`/`X-User-Role`:
+
+| Header | Value | Notes |
+|---|---|---|
+| `X-Principal-Id` | the typed `principal_id` | collision-proof — the only safe key for per-caller state |
+| `X-Principal-Type` | `human` \| `agent` | |
+| `X-Principal-Issuer` | issuer/CA id, or `"apikey"` | |
+| `X-Principal-Display-Sub` | the bare `client_id` | display-only, **never** an authorization key |
+| `X-User-Sub` | the bare `client_id` | **kept as a compatibility/display alias — MUST NOT be removed** |
+
+The typed headers are omitted (not sent as empty strings) when `principal_id`/`principal_type` are
+unset — e.g. for pre-CR-10 code paths that don't populate request.state. An upstream MCP server built
+against `mcphub_sdk` reads all of this via `identity()` (`sdk/mcphub-sdk/mcphub_sdk/context.py`),
+which exposes `principal_id`/`principal_type`/`principal_issuer` alongside the legacy `sub`/`role` —
+all `None` when the request predates CR-10 or bypassed the proxy. `identity()` requires
+`stateless_http=True` on the server's `FastMCP` instance (already the SDK default) so per-request
+ContextVars actually reach tool code — see
+[06-implementation-lessons.md](06-implementation-lessons.md) for the underlying gotcha.
+
+**Non-negotiable invariant:** a server-side integration that keys per-caller state (credentials,
+notes, rate limits, ...) off `X-User-Sub`/`sub` alone remains exposed to the exact collision this
+section exists to prevent — an OIDC human, an API-key caller, and an mTLS agent can share a bare
+subject string. New integrations **MUST** key off `X-Principal-Id`/`principal_id` instead.
+
+### 2.2 Typed-principal credential dual-read (CR-10)
+
+`credential_store` (per-user OAuth/API-key rows — `V006`/`V011`) is keyed by its `user_sub` column.
+Pre-CR-10, every row was written under the bare subject. Migrating every existing row to the typed
+form in one shot ("big-bang rewrite") was explicitly rejected — it risks breaking live enrollments
+mid-migration. Instead (`app/credential_broker/principal_resolution.py::resolve_credential_owner`,
+`V062`):
+
+1. **Typed lookup** (`user_sub == principal_id`) is tried first. This is the **only** key new
+   enrollments ever write under — see `routers/oauth.py::callback`.
+2. **Bare-sub fallback** (`user_sub == client_id`) is tried only on a typed miss, and only succeeds
+   if the row's `principal_type` column matches the caller's own `principal_type`. A row with
+   `principal_type IS NULL` (every pre-`V062` row) is treated as **inferred-legacy `human`** — safe,
+   since `credential_store` was, before CR-10, only ever populated by OIDC/session human enrollment
+   flows.
+3. A **mismatch is never a match.** It raises `CrossTypePrincipalMismatch`
+   (`app/credential_broker/dispatcher.py::CrossTypePrincipalFallbackDenied`, a
+   `CredentialInjectionError`), which `services/invocation.py`'s credential-dispatch exception
+   handler turns into an audited deny (`deny_reasons=["cross_type_principal_fallback_denied", ...]`)
+   — never a silent cross-type credential match.
+
+This dual-read is wired into the `user`, `basic_auth` (per-user leg), and `entra_user_token`
+injection modes (`credential_broker/dispatcher.py`, `credential_broker/broker.py::_resolve_a`).
+Backfilling every legacy row's `principal_type`, or renaming legacy `user_sub` values to the typed
+form, is an explicit **out-of-scope follow-up** (a later, separate re-enrollment/cleanup step), not
+part of this migration.
+
 ---
 
 ## 3. Zero-credential client connection flow
