@@ -375,6 +375,51 @@ grandfathered — their `approved_upstream_idp_config`/`approved_token_audience`
 migration time (V065), since they already passed human review under the pre-existing model.
 Only approvals from V065 onward go through `oauth_provider_policy` validation.
 
+### 4.6 External IdP adapters — generic + Jira (CR-04 remainder, WP-A3)
+
+`kc_token_exchange` (same Keycloak realm) and `entra_*` (Microsoft-specific) do not cover a
+third case: a self-service-onboarded server whose upstream IdP is neither. Two injection modes
+close this gap, added to `InjectionMode`/`AuthMode`: `external_oauth_user_token` (per-user
+delegated OAuth 2.0, approach A) and `external_oauth_client_credentials` (app-only, approach B
+shape). Both are governed by §4.5's `oauth_provider_policy` at approval time exactly like
+`entra_*` — no special-casing needed, since the policy engine only looks at issuer/tenant/
+scopes/redirect_uri/client_auth_method, all present in `external_oauth`'s config shape.
+
+- **Static vs dynamic adapters.** `m365`/`dex`/`bitbucket`/`jira` (all in
+  `credential_broker/adapters/`) are statically registered from env vars — one platform-wide
+  instance per module, right for integrations the platform itself owns an app registration
+  for. A self-service-onboarded external OAuth server needs the OPPOSITE: one adapter instance
+  PER SERVER, parameterized from that server's own approved config. `GenericOAuthAdapter`
+  (`adapters/generic_oauth.py`) is that parameterized adapter (same
+  build_auth_url/exchange_code/refresh interface as every static one);
+  `adapters/dynamic_external_oauth.py::resolve_external_oauth_adapter` builds it per call from
+  `server_registry.approved_upstream_idp_config` (issuer, client_id, authorization_endpoint,
+  token_endpoint, scopes, redirect_uri, client_auth_method) — **never** the submitter-requested
+  `upstream_idp_config`, same non-negotiable as §4.5. The client_secret is a service-owned
+  `credential_store` row, resolved via `tool_registry.credential_id` the same way
+  `entra_client_credentials` resolves its own (no new admin write path needed).
+- **Resolution order.** `routers/oauth.py::_get_adapter` and `broker.py::_resolve_a` both try
+  the static registry first (backward compatible with existing m365/dex/bitbucket/jira
+  enrollments), then fall back to the dynamic per-server resolver. Any DB/Vault error during
+  dynamic resolution **MUST** be caught and treated as "no adapter" (→ 404 / "not enrolled")
+  — never a raw exception surfaced to the enrollment page or credential broker.
+- **`client_auth_method`.** Some external IdPs (Atlassian, some SaaS OAuth providers) require
+  `client_secret_basic` (HTTP Basic auth header) instead of the more common
+  `client_secret_post` (form body). `GenericOAuthAdapter` and
+  `_inject_external_oauth_client_credentials` both branch on
+  `approved_upstream_idp_config.client_auth_method` — validated at onboarding time
+  (`services/server_onboarding.py::validate_upstream_idp_config`) to be one of these two values.
+- **Enrollment status.** `GET /auth/status/{service}` reports `{"enrolled": bool,
+  "enrollment_url"}` for the AUTHENTICATED caller via the same typed-principal dual-read the
+  broker uses at resolve time (§2.2) — an existence-only check, never decrypts the credential.
+  Applies to every approach-A adapter (m365, dex, bitbucket, jira, entra_user_token,
+  external_oauth_user_token), not just the new mode.
+- **Jira (D2 fast-follow, droppable).** `credential_broker/adapters/jira.py` is a real, working
+  Atlassian Jira Cloud OAuth 2.0 3LO adapter, statically registered like m365/dex/bitbucket. It
+  handles the OAuth token lifecycle only — resolving a Jira Cloud site's `cloudId` (a separate
+  Atlassian API call required before any real Jira REST call) is left to the downstream Jira MCP
+  tool, not the platform. This is a documented limitation, not a silent gap.
+
 ---
 
 ## 5. Browser OIDC session flow

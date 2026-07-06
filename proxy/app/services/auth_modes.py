@@ -109,13 +109,13 @@ AUTH_MODES: dict[AuthMode, AuthModeInfo] = {
     AuthMode.EXTERNAL_OAUTH_CLIENT_CREDENTIALS: AuthModeInfo(
         "External OAuth, app-only",
         "Generic external OAuth 2.0 client_credentials grant for a non-Keycloak, non-Entra IdP.",
-        "roadmap",  # CR-04: no adapter registry / dispatcher branch exists yet
+        "supported",  # WP-A3: credential_broker/dispatcher.py::_inject_external_oauth_client_credentials
     ),
     AuthMode.EXTERNAL_OAUTH_USER_TOKEN: AuthModeInfo(
         "External OAuth, per-user",
         "Generic external OAuth 2.0 per-user delegated/refresh flow for a non-Keycloak, non-Entra IdP "
         "(e.g. Atlassian Jira Cloud OAuth 2.0 3LO).",
-        "roadmap",  # CR-04
+        "supported",  # WP-A3: adapters/generic_oauth.py + dynamic_external_oauth.py
     ),
     AuthMode.PASSTHROUGH: AuthModeInfo(
         "Passthrough (admin-only)",

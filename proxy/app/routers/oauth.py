@@ -11,7 +11,7 @@ from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 
 from app.core.config import get_settings
@@ -33,22 +33,105 @@ _CONSENT_PREFIX = "enroll_consent:"
 _CONSENT_TTL_SECONDS = 300  # independent of PKCE TTL — consent precedes PKCE (D2)
 
 
-def _get_adapter(service: str):
-    """Resolve an Approach-A OAuth adapter by service name via the plugin registry.
+async def _get_adapter(service: str):
+    """Resolve an Approach-A OAuth adapter by service name.
 
-    Unified with the credential broker's discovery layer (adapters/registry.py):
-    enrollment no longer hardcodes the m365/bitbucket/dex list. Any Approach-A
-    adapter that self-registers is resolvable here with no edit to this file.
-    Instances are cached per service for the process lifetime.
+    Two sources, tried in order:
+      1. The static plugin registry (adapters/registry.py) — a platform-wide
+         integration self-registered from env vars (m365, dex, bitbucket, ...).
+         Cached per service for the process lifetime, as before.
+      2. WP-A3 (CR-04): a self-service-onboarded external OAuth server with
+         injection_mode='external_oauth_user_token'. Built dynamically, per
+         call, from that server's reviewer-APPROVED config
+         (server_registry.approved_upstream_idp_config) — never cached, since
+         approval can change and the config is cheap to re-read. See
+         adapters/dynamic_external_oauth.py.
     """
     if service not in _OAUTH_ADAPTERS:
         from app.credential_broker.adapters.registry import get_spec
 
         spec = get_spec(service)
-        if spec is None or spec.approach != "A":
-            return None
-        _OAUTH_ADAPTERS[service] = spec.build(get_settings())
-    return _OAUTH_ADAPTERS.get(service)
+        if spec is not None and spec.approach == "A":
+            _OAUTH_ADAPTERS[service] = spec.build(get_settings())
+    static_adapter = _OAUTH_ADAPTERS.get(service)
+    if static_adapter is not None:
+        return static_adapter
+
+    from app.credential_broker.adapters.dynamic_external_oauth import resolve_external_oauth_adapter
+    from app.services.invocation import broker_instance
+
+    if broker_instance is None:
+        return None
+    return await resolve_external_oauth_adapter(
+        service, db_factory=broker_instance.db_pool, vault_client=broker_instance.vault_client
+    )
+
+
+@router.get("/status/{service}")
+async def enrollment_status(service: str, request: Request) -> JSONResponse:
+    """
+    WP-A3 (CR-04): enrollment-status endpoint for per-user OAuth services.
+    Generalizes to every approach-A adapter (m365, dex, bitbucket, entra_user_token,
+    external_oauth_user_token), not just the new external_oauth mode — this was a
+    gap for ALL of them (no way to check "am I enrolled?" without attempting an
+    invoke and getting a CredentialEnrollmentRequiredError).
+
+    Returns {"service", "enrolled": bool, "enrollment_url"} for the AUTHENTICATED
+    caller. Never returns the credential itself, never decrypts it — existence-only
+    check via the same typed-principal dual-read the broker uses at resolve time,
+    so the answer matches what an actual invoke would see.
+    """
+    client_id = _authenticated_client_id(request)
+    principal_id = getattr(request.state, "principal_id", None)
+    principal_type = getattr(request.state, "principal_type", None)
+
+    enrolled = False
+    try:
+        from app.core.database import AsyncSessionLocal
+        from app.credential_broker.principal_resolution import (
+            resolve_credential_owner,
+            CrossTypePrincipalMismatch,
+        )
+
+        async with AsyncSessionLocal() as session:
+            try:
+                resolved = await resolve_credential_owner(
+                    session,
+                    principal_id=principal_id,
+                    principal_type=principal_type,
+                    bare_sub=client_id,
+                    service=service,
+                )
+            except CrossTypePrincipalMismatch:
+                # A cross-type bare-sub collision is NOT an enrollment for this
+                # caller — same fail-closed semantics as the broker/dispatcher.
+                resolved = None
+            if resolved is not None:
+                row = (
+                    await session.execute(
+                        text(
+                            "SELECT 1 FROM credential_store WHERE user_sub = :sub "
+                            "AND service = :svc LIMIT 1"
+                        ),
+                        {"sub": resolved.owner_key, "svc": service},
+                    )
+                ).fetchone()
+                enrolled = row is not None
+    except Exception as exc:
+        logger.warning(
+            "enrollment_status_lookup_failed",
+            extra={"service": service, "error": str(exc)},
+        )
+        # Fail closed on "enrolled" (never claim enrolled when the check itself
+        # errored) but still return 200 — this is a status read, not a gate.
+        enrolled = False
+
+    base = get_settings().PROXY_BASE_URL.rstrip("/")
+    return JSONResponse({
+        "service": service,
+        "enrolled": enrolled,
+        "enrollment_url": f"{base}/auth/enroll/{service}",
+    })
 
 
 def _pkce_pair() -> tuple[str, str]:
@@ -282,7 +365,7 @@ async def enroll(service: str, request: Request) -> HTMLResponse:
 
     if not registry_config:
         # Fallback to hardcoded adapters for backward compatibility
-        adapter = _get_adapter(service)
+        adapter = await _get_adapter(service)
         if adapter is None:
             raise HTTPException(status_code=404, detail=f"Service '{service}' not found or not OAuth")
 
@@ -463,7 +546,7 @@ async def enroll_consent(
             detail="Consent record service mismatch.",
         )
 
-    adapter = _get_adapter(service)
+    adapter = await _get_adapter(service)
     if adapter is None:
         await _emit_consent_denied_audit(
             request=request,
@@ -534,7 +617,7 @@ async def enroll_consent(
 
 @router.get("/callback/{service}")
 async def callback(service: str, code: str, state: str, request: Request) -> HTMLResponse:
-    adapter = _get_adapter(service)
+    adapter = await _get_adapter(service)
     if adapter is None:
         raise HTTPException(status_code=404, detail=f"Service '{service}' not found")
 

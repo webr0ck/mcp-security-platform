@@ -54,6 +54,7 @@ from enum import Enum
 from typing import Any
 
 import jwt as _jwt
+from sqlalchemy import text
 from app.credential_broker.token_assert import assert_exchanged_token, ExchangedTokenError
 from app.credential_broker.keycloak_client import get_public_key_for_token
 
@@ -87,6 +88,13 @@ class InjectionMode(str, Enum):
     PASSTHROUGH = "passthrough"
     ENTRA_CLIENT_CREDENTIALS = "entra_client_credentials"
     ENTRA_USER_TOKEN = "entra_user_token"
+    # WP-A3 (CR-04 remainder): generic, non-KC/non-Entra external OAuth 2.0.
+    # Cleanly separated from KC_TOKEN_EXCHANGE (same-realm RFC 8693) and
+    # ENTRA_* (Microsoft-specific) — the concrete IdP is resolved dynamically
+    # per-server from server_registry.approved_upstream_idp_config, governed
+    # by WP-A2's oauth_provider_policy (see services/oauth_policy.py).
+    EXTERNAL_OAUTH_CLIENT_CREDENTIALS = "external_oauth_client_credentials"
+    EXTERNAL_OAUTH_USER_TOKEN = "external_oauth_user_token"
 
 
 class CredentialInjectionError(RuntimeError):
@@ -248,6 +256,7 @@ async def dispatch_credential_injection(
         InjectionMode.USER,
         InjectionMode.BASIC_AUTH,
         InjectionMode.ENTRA_USER_TOKEN,
+        InjectionMode.EXTERNAL_OAUTH_USER_TOKEN,
     ) and not service_name:
         raise CredentialInjectionError(
             f"injection_mode='{mode.value}' requires an approval-set service_name; none configured "
@@ -342,6 +351,30 @@ async def dispatch_credential_injection(
                     f"{tool_record.get('tool_id')}; refusing to forward (S-1 fail-closed)"
                 )
             return await _inject_entra_user_token(
+                user_sub=client_id,
+                service_name=service_name,
+                inject_header=inject_header,
+                inject_prefix=inject_prefix,
+                principal_id=principal_id,
+                principal_type=principal_type,
+            )
+
+        case InjectionMode.EXTERNAL_OAUTH_CLIENT_CREDENTIALS:
+            return await _inject_external_oauth_client_credentials(
+                tool_record=tool_record,
+                inject_header=inject_header,
+                inject_prefix=inject_prefix,
+            )
+
+        case InjectionMode.EXTERNAL_OAUTH_USER_TOKEN:
+            # Same S-1 fail-closed rule as entra_user_token: a delegated tool
+            # MUST have a user identity, never fall back to app-only.
+            if not client_id:
+                raise CredentialInjectionError(
+                    f"external_oauth_user_token mode: no authenticated user sub for tool "
+                    f"{tool_record.get('tool_id')}; refusing to forward (S-1 fail-closed)"
+                )
+            return await _inject_external_oauth_user_token(
                 user_sub=client_id,
                 service_name=service_name,
                 inject_header=inject_header,
@@ -1008,3 +1041,210 @@ async def _inject_entra_user_token(
         )
 
     return {inject_header: f"{inject_prefix} {result.token}".strip()}
+
+
+async def _inject_external_oauth_user_token(
+    user_sub: str,
+    service_name: str,
+    inject_header: str,
+    inject_prefix: str,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
+) -> dict[str, str]:
+    """
+    WP-A3 (CR-04 remainder): per-user delegated OAuth 2.0 token for a generic,
+    non-KC/non-Entra external IdP (e.g. a self-service-onboarded Atlassian
+    Jira Cloud OAuth app).
+
+    Identical broker.resolve(approach='A') path as _inject_entra_user_token —
+    the concrete adapter is resolved dynamically inside the broker
+    (adapters/dynamic_external_oauth.py, from server_registry.approved_upstream_idp_config)
+    rather than assumed to be Entra. Kept as its own function (not just an
+    alias) so error messages/log lines name the correct mode and this mode's
+    dispatcher case can evolve independently of entra_user_token's.
+
+    Fail-closed: identical semantics to _inject_entra_user_token — never
+    silently downgrade to app-only, never fall back to a different service's
+    adapter.
+    """
+    from app.services.invocation import broker_instance
+    from app.credential_broker.broker import CredentialNotEnrolledError
+    from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
+
+    if broker_instance is None:
+        raise CredentialInjectionError(
+            f"external_oauth_user_token: credential broker not initialized; cannot resolve "
+            f"delegated token for sub={user_sub} service={service_name}"
+        )
+
+    try:
+        result = await broker_instance.resolve(
+            user_sub=user_sub,
+            service=service_name,
+            session_id=user_sub,
+            approach="A",
+            principal_id=principal_id,
+            principal_type=principal_type,
+        )
+    except CrossTypePrincipalMismatch as _xtype_exc:
+        raise CrossTypePrincipalFallbackDenied(
+            service=service_name,
+            caller_type=_xtype_exc.caller_type,
+            row_type=_xtype_exc.row_type,
+        ) from _xtype_exc
+    except CredentialNotEnrolledError as exc:
+        from app.core.config import get_settings
+        base = get_settings().PROXY_BASE_URL.rstrip("/")
+        enrollment_url = f"{base}/auth/enroll/{service_name}"
+        raise CredentialEnrollmentRequiredError(
+            service=service_name,
+            enrollment_url=enrollment_url,
+        ) from exc
+    except Exception as exc:
+        raise CredentialInjectionError(
+            f"external_oauth_user_token resolve failed for sub={user_sub} service={service_name}: {exc}"
+        ) from exc
+
+    if not result or not result.token:
+        raise CredentialInjectionError(
+            f"external_oauth_user_token: broker returned no delegated token for sub={user_sub} "
+            f"service={service_name}; refusing to forward unauthenticated request"
+        )
+
+    return {inject_header: f"{inject_prefix} {result.token}".strip()}
+
+
+async def _inject_external_oauth_client_credentials(
+    tool_record: dict[str, Any],
+    inject_header: str,
+    inject_prefix: str,
+) -> dict[str, str]:
+    """
+    WP-A3 (CR-04 remainder): app-only OAuth 2.0 client_credentials grant
+    against a generic (non-Entra) token_endpoint, read from this server's
+    reviewer-APPROVED config (server_registry.approved_upstream_idp_config —
+    never the submitter-requested upstream_idp_config). Mirrors
+    _inject_entra_client_credentials's credential_store lookup shape, but
+    the token endpoint/scopes/client-auth-method are read from the server's
+    approved config rather than hardcoded to Microsoft's endpoints.
+
+    Fail-closed: missing credential_id, missing approved config, missing
+    required config fields, or a token-endpoint error all raise
+    CredentialInjectionError — never forward unauthenticated.
+    """
+    import httpx
+    from app.services.credential_storage import retrieve_credential
+    from app.services.invocation import broker_instance
+
+    tool_id = tool_record.get("tool_id")
+    server_id = tool_record.get("server_id")
+    credential_id = tool_record.get("credential_id")
+    if not credential_id:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: tool {tool_id} has no credential_id; "
+            "refusing to forward unauthenticated request"
+        )
+    if broker_instance is None:
+        raise CredentialInjectionError(
+            "external_oauth_client_credentials: credential broker not initialized; "
+            "cannot retrieve credential from vault-backed credential_store"
+        )
+
+    vault_client = broker_instance.vault_client
+    db_pool = broker_instance.db_pool
+    if not vault_client or not db_pool:
+        raise CredentialInjectionError(
+            "external_oauth_client_credentials: broker has no vault_client or db_pool; "
+            "cannot retrieve credential from credential_store"
+        )
+
+    cred_service = tool_record.get("service_name") or tool_record.get("name") or ""
+    try:
+        credential_dict = await retrieve_credential(
+            credential_id=credential_id,
+            user_sub="__service__",
+            service=cred_service,
+            tool_id=tool_id,
+            owner_type="service",
+            vault_client=vault_client,
+            db_pool=db_pool,
+        )
+    except KeyError:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: credential_id {credential_id} not found "
+            "in credential_store; refusing to forward unauthenticated request"
+        ) from None
+    except Exception as exc:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: credential_store retrieval failed for "
+            f"{credential_id}: {exc}"
+        ) from exc
+
+    client_id = credential_dict.get("client_id")
+    client_secret = credential_dict.get("client_secret")
+    if not client_id or not client_secret:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: credential {credential_id} missing "
+            "required fields (client_id, client_secret); refusing to forward "
+            "unauthenticated request"
+        )
+
+    # Approved config (issuer/tenant/scopes/token_endpoint) is server-level,
+    # not tool-level — one DB round trip per call, matching the pattern
+    # dispatcher.py already uses for upstream_allowlist_entry when it isn't
+    # pre-fetched onto tool_record.
+    if not server_id:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: tool {tool_id} has no server_id; "
+            "cannot resolve approved token_endpoint"
+        )
+    from app.core.database import AsyncSessionLocal as _ExtOAuthSessionLocal
+
+    async with _ExtOAuthSessionLocal() as _session:
+        _row = (
+            await _session.execute(
+                text(
+                    "SELECT approved_upstream_idp_config, approved_oauth_scopes "
+                    "FROM server_registry WHERE server_id = :sid AND deleted_at IS NULL"
+                ),
+                {"sid": server_id},
+            )
+        ).fetchone()
+    approved_config = (_row.approved_upstream_idp_config if _row else None) or {}
+    token_endpoint = approved_config.get("token_endpoint")
+    if not token_endpoint:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: no approved token_endpoint for server "
+            f"{server_id}; reviewer must approve OAuth/IdP config before this mode can be used"
+        )
+    scopes = list((_row.approved_oauth_scopes if _row else None) or approved_config.get("scopes") or [])
+    client_auth_method = approved_config.get("client_auth_method") or "client_secret_post"
+
+    payload: dict[str, str] = {"grant_type": "client_credentials"}
+    if scopes:
+        payload["scope"] = " ".join(scopes)
+    request_kwargs: dict[str, Any] = {}
+    if client_auth_method == "client_secret_basic":
+        request_kwargs["auth"] = (client_id, client_secret)
+    else:
+        payload["client_id"] = client_id
+        payload["client_secret"] = client_secret
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            resp = await http_client.post(token_endpoint, data=payload, **request_kwargs)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials token fetch failed: {exc}"
+        ) from exc
+
+    access_token = data.get("access_token")
+    if not access_token:
+        raise CredentialInjectionError(
+            "external_oauth_client_credentials: no access_token in token endpoint "
+            "response; refusing to forward unauthenticated request"
+        )
+
+    return {inject_header: f"{inject_prefix} {access_token}".strip()}

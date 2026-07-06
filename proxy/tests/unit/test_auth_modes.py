@@ -34,11 +34,13 @@ def test_is_self_service_selectable_matches_supported_status():
         assert is_self_service_selectable(mode) == expected
 
 
-# basic_auth left this list with CR-05: it now has a dispatcher branch
-# (_inject_basic_auth) and is status="supported"/selectable.
-@pytest.mark.parametrize("mode", ["passthrough",
-                                   "external_oauth_client_credentials",
-                                   "external_oauth_user_token"])
+# basic_auth left this list with CR-05 (dispatcher branch _inject_basic_auth,
+# status="supported"/selectable). external_oauth_client_credentials/
+# external_oauth_user_token left with WP-A3/CR-04 (dispatcher branches
+# _inject_external_oauth_client_credentials/_inject_external_oauth_user_token,
+# generic adapter registry adapters/generic_oauth.py +
+# adapters/dynamic_external_oauth.py) — see test_dispatcher_external_oauth.py.
+@pytest.mark.parametrize("mode", ["passthrough"])
 def test_non_self_service_modes_are_not_selectable(mode):
     from app.services.auth_modes import AuthMode, is_self_service_selectable
 

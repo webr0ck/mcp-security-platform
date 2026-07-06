@@ -56,6 +56,8 @@ router = APIRouter(tags=["Submissions"])
 _VALID_MODES = {
     "none", "service", "user", "service_account", "oauth_user_token",
     "entra_client_credentials", "entra_user_token", "kc_token_exchange", "passthrough",
+    # WP-A3 (CR-04 remainder)
+    "external_oauth_client_credentials", "external_oauth_user_token",
 }
 _VALID_CATEGORIES = {
     "pii", "financial", "health", "internal_docs", "source_code",
@@ -487,7 +489,15 @@ async def list_review_queue(request: Request) -> JSONResponse:
 
 
 _OAUTH_EXCHANGE_MODES = ("kc_token_exchange", "oauth_user_token")
-_OAUTH_ISSUER_MODES = ("entra_client_credentials", "entra_user_token")
+# WP-A3 (CR-04 remainder): external_oauth_* joins the same scope-set policy
+# gate as entra_* — issuer/tenant → allowed_scopes, same oauth_provider_policy
+# table, same high-risk-scope reviewer-ack requirement. No special-casing
+# needed here; validate_requested_config only looks at issuer/tenant/scopes/
+# redirect_uri/client_auth_method, all present in external_oauth's config shape.
+_OAUTH_ISSUER_MODES = (
+    "entra_client_credentials", "entra_user_token",
+    "external_oauth_client_credentials", "external_oauth_user_token",
+)
 
 
 def _parse_idp_config(raw: Any) -> dict | None:
@@ -641,7 +651,7 @@ async def approve_submission(server_id: str, body: ReviewAction, request: Reques
                 approved_oauth_scopes = :approved_oauth_scopes,
                 oauth_policy_id = CAST(:oauth_policy_id AS uuid),
                 high_risk_scopes_approved_by = :high_risk_by,
-                high_risk_scopes_approved_at = CASE WHEN :high_risk_by IS NOT NULL THEN now() ELSE high_risk_scopes_approved_at END
+                high_risk_scopes_approved_at = CASE WHEN CAST(:high_risk_by AS TEXT) IS NOT NULL THEN now() ELSE high_risk_scopes_approved_at END
             WHERE server_id = :sid
         """), {
             "notes": body.notes, "reviewer": reviewer, "sid": server_id, "new_status": new_status,

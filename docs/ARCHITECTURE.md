@@ -182,9 +182,10 @@ Triggered by `invoke_tool()` when a tool's `injection_mode != none`. Crypto, per
 - **AES-256-GCM** decryption with **AAD row-binding** `(user_sub, service, tool_id, owner_type)` —
   prevents credential-swap attacks; KEK bytearray is zeroed after use.
 - **Injection modes** (`dispatcher.py`): `service`, `user`, `service_account`, `kc_token_exchange`
-  (alias `oauth_user_token`, RFC 8693), `entra_client_credentials` active; `passthrough` /
-  `entra_user_token` exist in code but aren't settable via the admin API **(roadmap)**. An unknown
-  mode **fails closed**.
+  (alias `oauth_user_token`, RFC 8693), `entra_client_credentials`, `entra_user_token`,
+  `external_oauth_client_credentials`, `external_oauth_user_token` active; `passthrough`
+  exists in code but isn't settable via the admin API **(roadmap)**. An unknown mode **fails
+  closed**.
   `kc_token_exchange`'s proxy-side audience allowlist (Codex review CR-03) is now two-layered
   (WP-A2, `services/oauth_policy.py`): the **enforced per-server value** is
   `server_registry.approved_token_audience`, set only by the admin `/approve` endpoint (never by
@@ -210,6 +211,27 @@ Triggered by `invoke_tool()` when a tool's `injection_mode != none`. Crypto, per
   deliberately not the `kc_token_exchange` audience allowlist above; an earlier attempt to
   reuse one mechanism for both was tried and rejected because it broke every existing
   service_account tool (lab-gitea, lab-grafana-mcp, lab-wazuh) on their default `openid` scope.
+- **External IdP adapters, generic + Jira (Codex review CR-04 remainder, WP-A3)**:
+  `credential_broker/adapters/generic_oauth.py::GenericOAuthAdapter` is a parameterized (not
+  statically env-configured) approach-A adapter — onboarding a new external OAuth server (any
+  IdP that isn't Keycloak or Entra) needs zero new Python module or env var, just a submission +
+  reviewer approval. `adapters/dynamic_external_oauth.py::resolve_external_oauth_adapter` builds
+  one per server at enrollment/refresh time from that server's `approved_upstream_idp_config`
+  (never the requested `upstream_idp_config`) plus an admin-provisioned client_secret
+  (`credential_store`, resolved the same way `entra_client_credentials` resolves its own —
+  `tool_registry.credential_id`, no new admin endpoint). `routers/oauth.py::_get_adapter` and
+  `broker.py::_resolve_a` both try the static registry first (m365/dex/bitbucket/jira, unchanged),
+  then fall back to this dynamic resolver — fail-closed to `None`/"not enrolled" on any DB/Vault
+  error, never a raw exception. New dispatcher branches
+  `_inject_external_oauth_user_token`/`_inject_external_oauth_client_credentials` mirror the
+  Entra ones exactly in shape, cleanly separated from `kc_token_exchange`. `GET
+  /auth/status/{service}` is a new enrollment-status endpoint (existence-only check via the
+  typed-principal dual-read, never decrypts) — applies to every approach-A adapter, not just the
+  new mode. `credential_broker/adapters/jira.py` is the named D2 fast-follow: Atlassian Jira Cloud
+  OAuth 2.0 3LO, statically registered like m365/dex/bitbucket (env vars
+  `JIRA_OAUTH_CLIENT_ID`/`_SECRET`/`_REDIRECT_URI`/`_SCOPES`); a real Jira API call additionally
+  needs a `cloudId` resolved via a separate Atlassian endpoint, which this adapter does NOT do —
+  documented limitation, not silently dropped (see the adapter's module docstring).
 - Resolved token is injected as `Authorization: Bearer …` and **never logged** (redacted).
 
 ### 5.4 Tool-manifest audit (registration time only)

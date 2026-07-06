@@ -186,7 +186,22 @@ class CredentialBroker:
                 tool_id=None,
                 owner_type="user",
             )
-            adapter = self._approach_a_adapters[service]
+            adapter = self._approach_a_adapters.get(service)
+            if adapter is None:
+                # WP-A3 (CR-04): not a statically-registered platform integration
+                # (m365/dex/bitbucket) — try a self-service-onboarded external
+                # OAuth server instead, built dynamically from that server's
+                # reviewer-approved config. Never cached here (approval state
+                # can change; this call is already the low-volume per-user
+                # refresh path, so re-resolving is cheap relative to correctness).
+                from app.credential_broker.adapters.dynamic_external_oauth import (
+                    resolve_external_oauth_adapter,
+                )
+                adapter = await resolve_external_oauth_adapter(
+                    service, db_factory=self._db_factory, vault_client=self._kms
+                )
+            if adapter is None:
+                raise CredentialNotEnrolledError(user_sub=user_sub, service=service)
             access_token, new_refresh, expires_in = await adapter.refresh(refresh_token)
 
             new_encrypted = encrypt(

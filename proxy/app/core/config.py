@@ -419,6 +419,24 @@ class Settings(BaseSettings):
         return self.BITBUCKET_SCOPES.split()
 
     # =========================================================================
+    # Credential Broker — Jira (WP-A3 / CR-04 fast-follow, D2 droppable)
+    #
+    # Distinct from JIRA_API_TOKEN et al. above — those are for the platform's
+    # OWN outbound Jira notifications (filing security tickets from CR-13's
+    # oauth_policy findings etc., basic-auth API-token style). These are for
+    # the per-user OAuth 2.0 3LO adapter (credential_broker/adapters/jira.py)
+    # that lets an onboarded Jira MCP tool act AS the signed-in user.
+    # =========================================================================
+    JIRA_OAUTH_CLIENT_ID: str = ""
+    JIRA_OAUTH_CLIENT_SECRET: str = ""
+    JIRA_OAUTH_REDIRECT_URI: str = "https://localhost/auth/callback/jira"
+    JIRA_OAUTH_SCOPES: str = "read:jira-work write:jira-work offline_access"
+
+    @property
+    def jira_oauth_scopes_list(self) -> list[str]:
+        return self.JIRA_OAUTH_SCOPES.split()
+
+    # =========================================================================
     # Credential Broker — Grafana
     # =========================================================================
     GRAFANA_BASE_URL: str = "http://grafana:3000"
