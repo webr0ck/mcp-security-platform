@@ -121,20 +121,41 @@ def _is_public(path: str) -> bool:
     return path in PUBLIC_PATHS or path.startswith(_PUBLIC_PATH_PREFIXES)
 
 
-def _build_principal_id(auth_method: str, client_id: str) -> tuple[str, str]:
+def _build_principal_id(auth_method: str, client_id: str) -> tuple[str, str, str, str]:
     """
-    Return (principal_id, principal_type) in the v3 typed namespace.
+    Return (principal_id, principal_type, principal_issuer, principal_display_sub)
+    in the v3 typed namespace (CR-10 / WP-A1).
 
-    human OIDC/session: ("human:{issuer_id}:{sub}", "human")
-    agent mTLS cert:    ("agent:{ca_id}:{cn}", "agent")
-    API key:            ("human:apikey:{client_id}", "human")
+    human OIDC/session: ("human:{issuer_id}:{sub}", "human", issuer_id, sub)
+    agent mTLS cert:    ("agent:{ca_id}:{cn}", "agent", ca_id, cn)
+    API key:            ("human:apikey:{client_id}", "human", "apikey", client_id)
+
+    principal_id is the collision-proof key forwarded downstream (X-Principal-Id)
+    and used as the credential_store owner key for new enrollments — this is the
+    whole point of CR-10: an OIDC user, an API-key caller, and an mTLS agent that
+    happen to share the same bare `client_id` (principal_display_sub) must never
+    collide onto the same credential/audit identity.
+
+    principal_display_sub is the bare, human-readable subject (== client_id) —
+    forwarded as X-Principal-Display-Sub / X-User-Sub for upstreams that only
+    understand a plain subject. It is NEVER an authorization key on its own.
     """
     if auth_method == "mtls":
-        return f"agent:{settings.MTLS_CA_ID}:{client_id}", "agent"
+        return (
+            f"agent:{settings.MTLS_CA_ID}:{client_id}",
+            "agent",
+            settings.MTLS_CA_ID,
+            client_id,
+        )
     if auth_method == "api_key":
-        return f"human:apikey:{client_id}", "human"
+        return f"human:apikey:{client_id}", "human", "apikey", client_id
     # oidc_session, oidc, or any other human auth method
-    return f"human:{settings.OIDC_ISSUER_ID}:{client_id}", "human"
+    return (
+        f"human:{settings.OIDC_ISSUER_ID}:{client_id}",
+        "human",
+        settings.OIDC_ISSUER_ID,
+        client_id,
+    )
 
 
 # Redis key TTL for role cache (60s — matches v3 spec ≤60s revocation SLA)
@@ -162,6 +183,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.client_roles = []
             request.state.principal_id = None
             request.state.principal_type = None
+            request.state.principal_issuer = None
+            request.state.principal_display_sub = None
             request.state.profile_uuid = None
             request.state.is_service_account = False
             return await call_next(request)  # type: ignore[misc]
@@ -315,9 +338,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 6.3: default — only the direct-OIDC path (3b) sets a real KC subject token.
         if not hasattr(request.state, "user_kc_token"):
             request.state.user_kc_token = None
-        principal_id, principal_type = _build_principal_id(auth_method, client_id)
+        principal_id, principal_type, principal_issuer, principal_display_sub = (
+            _build_principal_id(auth_method, client_id)
+        )
         request.state.principal_id = principal_id
         request.state.principal_type = principal_type
+        # CR-10 (WP-A1): typed principal issuer + display subject, forwarded
+        # downstream as X-Principal-Issuer / X-Principal-Display-Sub.
+        request.state.principal_issuer = principal_issuer
+        request.state.principal_display_sub = principal_display_sub
         # Task 4.3: named profile UUID from session JWT claim (cookie path 2 or Bearer 3a).
         # None when no profile was bound at login (backward compatible: legacy mcp_profiles path).
         # mTLS and API-key callers never have a profile_uuid.

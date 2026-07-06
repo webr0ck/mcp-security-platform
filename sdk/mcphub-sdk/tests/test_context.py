@@ -44,7 +44,14 @@ def _make_app(*, require_proxy: bool = True, credential_env: str | None = None):
     async def identity_route(request: Request):
         who = identity()
         cred = credential(env_var=credential_env)
-        return JSONResponse({"sub": who.sub, "role": who.role, "credential": cred})
+        return JSONResponse({
+            "sub": who.sub,
+            "role": who.role,
+            "credential": cred,
+            "principal_id": who.principal_id,
+            "principal_type": who.principal_type,
+            "principal_issuer": who.principal_issuer,
+        })
 
     async def health_route(request: Request):
         return JSONResponse({"status": "ok"})
@@ -76,6 +83,78 @@ def test_identity_resolves_from_headers():
     data = resp.json()
     assert data["sub"] == "alice@corp", f"Expected alice@corp, got: {data['sub']}"
     assert data["role"] == "admin"
+
+
+# ---------------------------------------------------------------------------
+# CR-10 (WP-A1): typed principal headers reach identity()
+# ---------------------------------------------------------------------------
+
+
+def test_identity_exposes_typed_principal_fields():
+    """X-Principal-Id/-Type/-Issuer reach identity() alongside legacy X-User-Sub."""
+    app = _make_app()
+    client = TestClient(app, raise_server_exceptions=True)
+    resp = client.get(
+        "/identity",
+        headers={
+            "X-User-Sub": "alice@corp",
+            "X-User-Role": "admin",
+            "X-Principal-Id": "human:kc-realm:alice@corp",
+            "X-Principal-Type": "human",
+            "X-Principal-Issuer": "kc-realm",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["principal_id"] == "human:kc-realm:alice@corp"
+    assert data["principal_type"] == "human"
+    assert data["principal_issuer"] == "kc-realm"
+
+
+def test_identity_typed_principal_fields_none_when_absent():
+    """A pre-CR-10 proxy (or a direct/un-proxied call) leaves typed fields None
+    rather than fabricating them from the legacy X-User-Sub header."""
+    app = _make_app(require_proxy=False)
+    client = TestClient(app, raise_server_exceptions=True)
+    resp = client.get("/identity")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["principal_id"] is None
+    assert data["principal_type"] is None
+    assert data["principal_issuer"] is None
+
+
+def test_identity_collision_three_principal_types_same_display_sub():
+    """
+    CR-10 core acceptance test at the SDK boundary: three requests carrying
+    the SAME X-User-Sub (the bare, non-authoritative display subject) but
+    three different X-Principal-Id/-Type values must be distinguishable by
+    any tool that reads identity() — the collision this package exists to
+    kill must not reappear inside the tool process either.
+    """
+    app = _make_app()
+    client = TestClient(app, raise_server_exceptions=True)
+    bare_sub = "shared-subject-123"
+
+    oidc = client.get("/identity", headers={
+        "X-User-Sub": bare_sub,
+        "X-Principal-Id": f"human:kc-realm:{bare_sub}",
+        "X-Principal-Type": "human",
+    }).json()
+    apikey = client.get("/identity", headers={
+        "X-User-Sub": bare_sub,
+        "X-Principal-Id": f"human:apikey:{bare_sub}",
+        "X-Principal-Type": "human",
+    }).json()
+    mtls = client.get("/identity", headers={
+        "X-User-Sub": bare_sub,
+        "X-Principal-Id": f"agent:lab-ca:{bare_sub}",
+        "X-Principal-Type": "agent",
+    }).json()
+
+    assert oidc["sub"] == apikey["sub"] == mtls["sub"] == bare_sub
+    ids = {oidc["principal_id"], apikey["principal_id"], mtls["principal_id"]}
+    assert len(ids) == 3, f"typed principal ids collided: {ids}"
 
 
 def test_identity_defaults_when_require_proxy_false():

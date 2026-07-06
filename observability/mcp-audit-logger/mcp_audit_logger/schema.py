@@ -118,6 +118,19 @@ class AuditEvent:
     #   Not part of the canonical integrity hash (advisory enrichment only).
     tainted: bool | None = None
 
+    # CR-10 (WP-A1) — typed principal propagation.
+    #   principal_id: the FULL typed principal string (e.g. "human:kc-realm:alice",
+    #     "agent:lab-ca:cn-123", "human:apikey:svc-a") from request.state.principal_id.
+    #     This is the same value forwarded to upstream MCP servers as X-Principal-Id
+    #     and used as the credential_store owner key for new (typed) enrollments.
+    #   principal_issuer: the issuer/CA component of the typed principal (e.g. the
+    #     OIDC issuer id or mTLS CA id). None for API-key callers (no real issuer).
+    # Both are advisory enrichment only — NOT part of the canonical integrity hash
+    # (same treatment as principal_type/tainted above), so adding them here never
+    # invalidates previously-computed sha256_hash values.
+    principal_id: str | None = None
+    principal_issuer: str | None = None
+
     # NOTE: prev_hash was deleted in Task 1.2 (plan decision: delete, not wire).
     # Hash-chain / sequence tamper evidence is P5 scope; per-event HMAC (Task 0.2)
     # is the tamper-evidence mechanism for this build. Callers that previously
@@ -195,4 +208,7 @@ class AuditEvent:
             "roles": self.roles,
             "session_jti": self.session_jti,
             "tainted": self.tainted,
+            # CR-10 (WP-A1)
+            "principal_id": self.principal_id,
+            "principal_issuer": self.principal_issuer,
         }

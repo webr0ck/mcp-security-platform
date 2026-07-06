@@ -750,6 +750,10 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                 # 6.2: typed principal for the discovery==invoke entitlement gate.
                 principal_id=getattr(request.state, "principal_id", None),
                 principal_type=getattr(request.state, "principal_type", None),
+                # CR-10 (WP-A1): typed principal issuer/display-sub, forwarded
+                # downstream as X-Principal-Issuer / X-Principal-Display-Sub.
+                principal_issuer=getattr(request.state, "principal_issuer", None),
+                principal_display_sub=getattr(request.state, "principal_display_sub", None),
                 # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
                 user_kc_token=getattr(request.state, "user_kc_token", None),
                 # P1-F1: thread who-fields so MCP-path audit rows are non-NULL
@@ -1084,6 +1088,10 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 # 6.2: typed principal for the discovery==invoke entitlement gate.
                 principal_id=getattr(request.state, "principal_id", None),
                 principal_type=getattr(request.state, "principal_type", None),
+                # CR-10 (WP-A1): typed principal issuer/display-sub, forwarded
+                # downstream as X-Principal-Issuer / X-Principal-Display-Sub.
+                principal_issuer=getattr(request.state, "principal_issuer", None),
+                principal_display_sub=getattr(request.state, "principal_display_sub", None),
                 # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
                 user_kc_token=getattr(request.state, "user_kc_token", None),
                 # P1-F1: thread who-fields so MCP-path audit rows are non-NULL

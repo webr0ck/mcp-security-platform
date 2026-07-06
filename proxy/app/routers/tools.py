@@ -1436,6 +1436,10 @@ async def invoke_tool(
             # 6.2: typed principal for the discovery==invoke entitlement gate.
             principal_id=getattr(request.state, "principal_id", None),
             principal_type=getattr(request.state, "principal_type", None),
+            # CR-10 (WP-A1): typed principal issuer/display-sub, forwarded
+            # downstream as X-Principal-Issuer / X-Principal-Display-Sub.
+            principal_issuer=getattr(request.state, "principal_issuer", None),
+            principal_display_sub=getattr(request.state, "principal_display_sub", None),
             # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
             user_kc_token=getattr(request.state, "user_kc_token", None),
             # Task 1.2: "who" enrichment fields for the audit trail.

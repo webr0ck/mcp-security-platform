@@ -97,6 +97,33 @@ class CredentialInjectionError(RuntimeError):
     """
 
 
+class CrossTypePrincipalFallbackDenied(CredentialInjectionError):
+    """
+    CR-10 (WP-A1): raised when the per-user credential dual-read misses on the
+    typed principal key and the bare-sub fallback row belongs to a DIFFERENT
+    principal type than the caller (e.g. an mTLS agent and an OIDC human that
+    happen to share a bare subject string). This is deliberately NEVER treated
+    as a match — it is caught in services/invocation.py's dispatch_credential_
+    injection except block and turned into a distinct audited deny
+    ("cross_type_principal_fallback_denied"), never a silent fallback success.
+
+    Wraps app.credential_broker.principal_resolution.CrossTypePrincipalMismatch
+    so callers only need to catch CredentialInjectionError.
+    """
+
+    def __init__(self, service: str, caller_type: str, row_type: str) -> None:
+        self.service = service
+        self.caller_type = caller_type
+        self.row_type = row_type
+        super().__init__(
+            f"Credential dual-read for service '{service}' refused: caller "
+            f"principal_type={caller_type!r} does not match the existing "
+            f"bare-sub row's principal_type={row_type!r}. Re-enrollment under "
+            "the typed principal is required; the bare-sub row will NEVER be "
+            "matched across principal types."
+        )
+
+
 class CredentialEnrollmentRequiredError(CredentialInjectionError):
     """
     Raised when the user has not yet completed OAuth enrollment for a service.
@@ -139,6 +166,8 @@ async def dispatch_credential_injection(
     tool_record: dict[str, Any],
     client_id: str,
     user_kc_token: str | None = None,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
 ) -> dict[str, str]:
     """
     Returns HTTP headers dict to inject into the upstream call.
@@ -244,6 +273,8 @@ async def dispatch_credential_injection(
                 service_name=service_name,
                 inject_header=inject_header,
                 inject_prefix=inject_prefix,
+                principal_id=principal_id,
+                principal_type=principal_type,
             )
 
         case InjectionMode.BASIC_AUTH:
@@ -252,6 +283,8 @@ async def dispatch_credential_injection(
                 user_sub=client_id,
                 service_name=service_name,
                 inject_header=inject_header,
+                principal_id=principal_id,
+                principal_type=principal_type,
             )
 
         case InjectionMode.SERVICE_ACCOUNT:
@@ -313,6 +346,8 @@ async def dispatch_credential_injection(
                 service_name=service_name,
                 inject_header=inject_header,
                 inject_prefix=inject_prefix,
+                principal_id=principal_id,
+                principal_type=principal_type,
             )
 
     raise CredentialInjectionError(
@@ -323,6 +358,49 @@ async def dispatch_credential_injection(
 # ---------------------------------------------------------------------------
 # Private injection helpers
 # ---------------------------------------------------------------------------
+
+async def _resolve_owner_key_or_none(
+    *,
+    principal_id: str | None,
+    principal_type: str | None,
+    bare_sub: str,
+    service: str,
+) -> str | None:
+    """
+    CR-10 (WP-A1): shared entry point for the typed-principal dual-read used
+    by every per-user credential_store lookup (USER, BASIC_AUTH per-user leg,
+    ENTRA_USER_TOKEN).
+
+    Returns the credential_store.user_sub value to decrypt/update under
+    (either the typed principal_id or, for a same-type legacy row, the bare
+    subject), or None if the caller is not enrolled under either key.
+
+    Raises app.credential_broker.principal_resolution.CrossTypePrincipalMismatch
+    if a bare-sub row exists but belongs to a different principal type —
+    callers must NOT swallow this; it must become an audited deny.
+
+    principal_id is None only for call sites that predate CR-10 typing (there
+    are none left in the production invoke_tool path — AuthMiddleware always
+    populates request.state.principal_id for an authenticated request). In
+    that case there is no typed key to try; behave exactly as pre-CR-10 code
+    did and use the bare subject directly, without an extra DB round trip.
+    """
+    if principal_id is None:
+        return bare_sub
+
+    from app.core.database import AsyncSessionLocal
+    from app.credential_broker.principal_resolution import resolve_credential_owner
+
+    async with AsyncSessionLocal() as session:
+        resolved = await resolve_credential_owner(
+            session,
+            principal_id=principal_id,
+            principal_type=principal_type,
+            bare_sub=bare_sub,
+            service=service,
+        )
+    return resolved.owner_key if resolved is not None else None
+
 
 async def _inject_service_credential(
     tool_id: str | None,
@@ -357,21 +435,51 @@ async def _inject_user_credential(
     service_name: str,
     inject_header: str,
     inject_prefix: str,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
 ) -> dict[str, str]:
-    """Decrypt the per-user credential from credential_store."""
+    """Decrypt the per-user credential from credential_store.
+
+    CR-10 (WP-A1): resolves the owner key via the typed-principal dual-read
+    (principal_id first, bare user_sub fallback gated to same-type) before
+    decrypting. A cross-type fallback raises CrossTypePrincipalFallbackDenied
+    (a CredentialInjectionError) instead of silently matching.
+    """
     from app.credential_broker.approaches.approach_a import decrypt_credential
+    from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
 
     try:
-        plaintext = await decrypt_credential(
-            user_sub=user_sub,
+        owner_key = await _resolve_owner_key_or_none(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            bare_sub=user_sub,
             service=service_name,
-            tool_id=tool_id,
-            owner_type="user",
         )
-    except Exception as exc:
-        raise CredentialInjectionError(
-            f"User credential decryption raised for sub={user_sub} service={service_name}: {exc}"
-        ) from exc
+    except CrossTypePrincipalMismatch as _xtype_exc:
+        raise CrossTypePrincipalFallbackDenied(
+            service=service_name,
+            caller_type=_xtype_exc.caller_type,
+            row_type=_xtype_exc.row_type,
+        ) from _xtype_exc
+
+    if owner_key is None:
+        # Not enrolled under either key — fall through to the existing
+        # enrollment-required path below (decrypt_credential returns None too,
+        # but resolving here first avoids a second, redundant DB round trip
+        # when we already know no row exists).
+        plaintext = None
+    else:
+        try:
+            plaintext = await decrypt_credential(
+                user_sub=owner_key,
+                service=service_name,
+                tool_id=tool_id,
+                owner_type="user",
+            )
+        except Exception as exc:
+            raise CredentialInjectionError(
+                f"User credential decryption raised for sub={user_sub} service={service_name}: {exc}"
+            ) from exc
 
     if not plaintext:
         # Fail-closed with an ACTIONABLE enrollment link instead of a cryptic
@@ -393,6 +501,8 @@ async def _inject_basic_auth(
     user_sub: str | None,
     service_name: str,
     inject_header: str,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
 ) -> dict[str, str]:
     """
     RFC 7617 HTTP Basic injection (CR-05).
@@ -407,22 +517,40 @@ async def _inject_basic_auth(
     neither exists. inject_prefix is intentionally ignored — RFC 7617 mandates
     the "Basic" scheme; only the header NAME is overridable.
 
+    CR-10 (WP-A1): the per-user leg resolves through the typed-principal
+    dual-read (principal_id first, bare-sub fallback gated to same-type).
+
     REDACTION: neither username:secret nor its base64 form may ever appear in
     logs, audit rows, or exception messages raised from here.
     """
     import base64
 
     from app.credential_broker.approaches.approach_a import decrypt_credential
+    from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
 
     plaintext: str | None = None
     try:
         if user_sub:
-            plaintext = await decrypt_credential(
-                user_sub=user_sub,
-                service=service_name,
-                tool_id=tool_id,
-                owner_type="user",
-            )
+            try:
+                owner_key = await _resolve_owner_key_or_none(
+                    principal_id=principal_id,
+                    principal_type=principal_type,
+                    bare_sub=user_sub,
+                    service=service_name,
+                )
+            except CrossTypePrincipalMismatch as _xtype_exc:
+                raise CrossTypePrincipalFallbackDenied(
+                    service=service_name,
+                    caller_type=_xtype_exc.caller_type,
+                    row_type=_xtype_exc.row_type,
+                ) from _xtype_exc
+            if owner_key is not None:
+                plaintext = await decrypt_credential(
+                    user_sub=owner_key,
+                    service=service_name,
+                    tool_id=tool_id,
+                    owner_type="user",
+                )
         if not plaintext:
             plaintext = await decrypt_credential(
                 user_sub="__service__",
@@ -430,6 +558,8 @@ async def _inject_basic_auth(
                 tool_id=tool_id,
                 owner_type="service",
             )
+    except CrossTypePrincipalFallbackDenied:
+        raise
     except Exception as exc:
         raise CredentialInjectionError(
             f"basic_auth credential decryption raised for {service_name}/{tool_id}: "
@@ -788,6 +918,8 @@ async def _inject_entra_user_token(
     service_name: str,
     inject_header: str,
     inject_prefix: str,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
 ) -> dict[str, str]:
     """
     Inject a per-user DELEGATED Microsoft Graph token (acts AS the signed-in user).
@@ -798,12 +930,16 @@ async def _inject_entra_user_token(
       2. calls M365Adapter.refresh() to mint a fresh delegated access_token,
       3. re-stores the rotated refresh_token.
 
+    CR-10 (WP-A1): principal_id/principal_type are threaded into the broker's
+    dual-read (typed key first, bare-sub fallback gated to same-type).
+
     Fail-closed: if the caller has not enrolled, raise so the upstream call is
     aborted with an actionable "enroll first" message — never silently downgrade
     to app-only (which would broaden identity from the user to the application).
     """
     from app.services.invocation import broker_instance
     from app.credential_broker.broker import CredentialNotEnrolledError
+    from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
 
     if broker_instance is None:
         raise CredentialInjectionError(
@@ -818,7 +954,15 @@ async def _inject_entra_user_token(
             service=service_name,
             session_id=user_sub,
             approach="A",
+            principal_id=principal_id,
+            principal_type=principal_type,
         )
+    except CrossTypePrincipalMismatch as _xtype_exc:
+        raise CrossTypePrincipalFallbackDenied(
+            service=service_name,
+            caller_type=_xtype_exc.caller_type,
+            row_type=_xtype_exc.row_type,
+        ) from _xtype_exc
     except CredentialNotEnrolledError as exc:
         from app.core.config import get_settings
         base = get_settings().PROXY_BASE_URL.rstrip("/")

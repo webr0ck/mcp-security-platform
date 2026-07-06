@@ -316,6 +316,14 @@ async def enroll(service: str, request: Request) -> HTMLResponse:
     csrf_token = secrets.token_urlsafe(32)
     canonical = _canonical_scopes(requested_scopes)
 
+    # CR-10 (WP-A1): capture the typed principal at the authenticated GET step
+    # so the eventual credential_store write (at /callback, a PUBLIC path with
+    # no request.state identity of its own) can key under it. /auth/enroll/*
+    # is NOT a public path (see middleware/auth.py), so request.state is fully
+    # resolved here.
+    principal_id = getattr(request.state, "principal_id", None)
+    principal_type = getattr(request.state, "principal_type", None)
+
     from app.core.redis_client import redis_pool
     await redis_pool.client.setex(
         f"{_CONSENT_PREFIX}{csrf_token}",
@@ -324,6 +332,8 @@ async def enroll(service: str, request: Request) -> HTMLResponse:
             "client_id": client_id,
             "service": service,
             "requested_scopes": canonical,
+            "principal_id": principal_id,
+            "principal_type": principal_type,
         }),
     )
 
@@ -469,6 +479,14 @@ async def enroll_consent(
     nonce = secrets.token_urlsafe(32)
     code_verifier, code_challenge = _pkce_pair()
 
+    # CR-10 (WP-A1): re-derive the typed principal from THIS authenticated
+    # request (already re-confirmed == the GET step's session_client_id above)
+    # rather than trusting the Redis-stored consent record's copy, for the
+    # same reason session_client_id is re-checked here instead of reused
+    # verbatim from the consent record.
+    principal_id = getattr(request.state, "principal_id", None)
+    principal_type = getattr(request.state, "principal_type", None)
+
     await redis.setex(
         f"{_PENDING_PREFIX}{nonce}",
         _PENDING_TTL_SECONDS,
@@ -477,6 +495,8 @@ async def enroll_consent(
             "service": service,
             "cv": code_verifier,
             "scopes": consented_scopes,  # C6: store consent-time scopes with the flow
+            "principal_id": principal_id,
+            "principal_type": principal_type,
         }),
     )
 
@@ -537,6 +557,16 @@ async def callback(service: str, code: str, state: str, request: Request) -> HTM
         raise HTTPException(status_code=400, detail="OAuth state/service mismatch")
     code_verifier: str = flow["cv"]
 
+    # CR-10 (WP-A1): ALL NEW enrollments key the credential_store row by the
+    # typed principal_id (captured at the authenticated GET/POST consent
+    # steps — this /callback path is itself public/unauthenticated, per
+    # RFC-required OAuth redirect semantics, so it has no request.state
+    # identity of its own). Falls back to the bare client_id only if the
+    # flow record predates this field (defensive; should not occur for any
+    # flow started after this change ships).
+    principal_id: str = flow.get("principal_id") or client_id
+    principal_type: str | None = flow.get("principal_type")
+
     # C6: read the consent-time scopes from the flow record — NEVER re-read tool_registry
     # at callback time. The user consented to these exact scopes; the callback stores
     # exactly what was consented. TOCTOU note: if tool_registry.entra_scope changes
@@ -556,22 +586,26 @@ async def callback(service: str, code: str, state: str, request: Request) -> HTM
     )
     master = await kms.get_master_secret(settings.BROKER_MASTER_SECRET_PATH)
     # CB-001: encrypt under the AUTHENTICATED identity, never a header value.
-    encrypted = encrypt(refresh_token, client_id, master)
+    # CR-10 (WP-A1): keyed by the typed principal_id, not the bare client_id —
+    # this is the "writes are always typed" half of the dual-read migration.
+    encrypted = encrypt(refresh_token, principal_id, master)
 
     from app.core.database import get_db
     async for db in get_db():
         await db.execute(
             text(
-                "INSERT INTO credential_store (user_sub, service, encrypted_blob, scopes) "
-                "VALUES (:sub, :svc, :blob, :scopes) "
+                "INSERT INTO credential_store "
+                "(user_sub, service, encrypted_blob, scopes, principal_type) "
+                "VALUES (:sub, :svc, :blob, :scopes, :ptype) "
                 "ON CONFLICT (user_sub, service) DO UPDATE "
-                "SET encrypted_blob=:blob, scopes=:scopes"
+                "SET encrypted_blob=:blob, scopes=:scopes, principal_type=:ptype"
             ),
             {
-                "sub": client_id,
+                "sub": principal_id,
                 "svc": service,
                 "blob": encrypted,
                 "scopes": consented_scopes,  # C6: consent-time value from oauth_flow: record
+                "ptype": principal_type,
             },
         )
         await db.commit()

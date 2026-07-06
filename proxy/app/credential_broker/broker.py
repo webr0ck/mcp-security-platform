@@ -82,11 +82,16 @@ class CredentialBroker:
         service: str,
         session_id: str,
         approach: str,
+        principal_id: str | None = None,
+        principal_type: str | None = None,
     ) -> CredentialResult:
         if approach == "B":
             return await self._resolve_b(user_sub, service, session_id)
         if approach == "A":
-            return await self._resolve_a(user_sub, service, session_id)
+            return await self._resolve_a(
+                user_sub, service, session_id,
+                principal_id=principal_id, principal_type=principal_type,
+            )
         raise ValueError(f"Unknown approach: {approach}")
 
     async def _resolve_b(self, user_sub: str, service: str, session_id: str) -> CredentialResult:
@@ -120,32 +125,62 @@ class CredentialBroker:
             token_id=token.token_id,
         )
 
-    async def _resolve_a(self, user_sub: str, service: str, session_id: str) -> CredentialResult:
+    async def _resolve_a(
+        self,
+        user_sub: str,
+        service: str,
+        session_id: str,
+        principal_id: str | None = None,
+        principal_type: str | None = None,
+    ) -> CredentialResult:
         from sqlalchemy import text
+        from app.credential_broker.principal_resolution import resolve_credential_owner
 
         async with self._db_factory() as db:
-            row = await db.execute(
-                text("SELECT encrypted_blob FROM credential_store WHERE user_sub=:sub AND service=:svc"),
-                {"sub": user_sub, "svc": service},
+            # CR-10 (WP-A1): resolve the owner key via the typed-principal
+            # dual-read (typed key first, bare-sub fallback gated to
+            # same-type). Raises CrossTypePrincipalMismatch — NOT caught here,
+            # propagated to the caller (dispatcher._inject_entra_user_token)
+            # so it becomes an audited deny, never a silent match.
+            resolved = await resolve_credential_owner(
+                db,
+                principal_id=principal_id,
+                principal_type=principal_type,
+                bare_sub=user_sub,
+                service=service,
             )
-            record = row.fetchone()
             # Enrollment check MUST precede the KMS/Vault master-secret fetch. An
             # unenrolled caller has to receive an actionable CredentialNotEnrolledError
             # (→ "log in first" prompt) even when Vault is unreachable. Fetching the
             # master secret first would surface a generic KMSError on a Vault outage
             # and mask the real "not enrolled" signal — the m365-graph vs dex-calendar
             # divergence this ordering fixes.
+            if resolved is None:
+                raise CredentialNotEnrolledError(user_sub=user_sub, service=service)
+
+            owner_key = resolved.owner_key
+            row = await db.execute(
+                text("SELECT encrypted_blob FROM credential_store WHERE user_sub=:sub AND service=:svc"),
+                {"sub": owner_key, "svc": service},
+            )
+            record = row.fetchone()
             if record is None:
+                # Row vanished between the resolve check and this SELECT (race) —
+                # treat identically to "never enrolled" rather than raising a
+                # confusing AttributeError on record.encrypted_blob.
                 raise CredentialNotEnrolledError(user_sub=user_sub, service=service)
 
             master = await self._get_master_secret()
 
             # Pass full four-field AAD to match _make_aad() contract (FIND-010 / INV-013).
             # owner_type is always "user" on this path (service credentials use approach_a
-            # via decrypt_credential, not this broker method).
+            # via decrypt_credential, not this broker method). AAD/KEK derivation uses
+            # owner_key — the row's ACTUAL user_sub (typed principal_id for new rows,
+            # bare sub for a same-type legacy dual-read row) — since that is the value
+            # encrypt() was originally called with for this row.
             refresh_token = decrypt(
                 bytes(record.encrypted_blob),
-                user_sub,
+                owner_key,
                 master,
                 service=service,
                 tool_id=None,
@@ -156,7 +191,7 @@ class CredentialBroker:
 
             new_encrypted = encrypt(
                 new_refresh,
-                user_sub,
+                owner_key,
                 master,
                 service=service,
                 tool_id=None,
@@ -166,7 +201,7 @@ class CredentialBroker:
                 text(
                     "UPDATE credential_store SET encrypted_blob=:blob WHERE user_sub=:sub AND service=:svc"
                 ),
-                {"blob": new_encrypted, "sub": user_sub, "svc": service},
+                {"blob": new_encrypted, "sub": owner_key, "svc": service},
             )
             await db.commit()
 
