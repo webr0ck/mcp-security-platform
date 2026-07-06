@@ -1,3 +1,4 @@
 FROM gitea/gitea:1.22
-# No custom entrypoint — use the official one.
-# Admin user is created by lab/scripts/vault-init.sh after health check passes.
+COPY entrypoint.sh /lab-entrypoint.sh
+RUN chmod +x /lab-entrypoint.sh
+ENTRYPOINT ["/lab-entrypoint.sh"]
