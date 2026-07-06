@@ -36,7 +36,8 @@ from app.services.admin_audit import emit_admin_config_event
 from app.services.scaffold_generator import generate_prompts, generate_scaffold
 from app.services import prompt_store
 from app.services.server_onboarding import InvalidOnboardingConfig, validate_upstream_url_ssrf
-from app.services.submission_scanner import GITHUB_CLONE_ACCOUNT, scan_submission
+from app.services.submission_scanner import GITHUB_CLONE_ACCOUNT
+from app.services import scan_queue
 
 # R-2: cheap structural guard at submit time — well-formed https URL, no
 # embedded credentials, no whitespace/control chars. The authoritative
@@ -330,7 +331,11 @@ async def submit_for_review(
     new_status = row.submission_status
 
     if github_url:
-        background_tasks.add_task(scan_submission, server_id, github_url)
+        # CR-14: clone + scanner execution moved to the isolated scanner-worker
+        # service. The proxy only enqueues; scan_evaluator (proxy-side, never
+        # touches attacker-controlled repo content) applies policy once the
+        # worker writes a raw result.
+        background_tasks.add_task(scan_queue.enqueue_scan, server_id, github_url, "submission_scan")
 
     return JSONResponse({"server_id": server_id, "submission_status": new_status})
 

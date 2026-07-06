@@ -1,4 +1,24 @@
 """
+DEPRECATED execution path (CR-14 / WP-B1) — kept only for its still-used
+helpers (parse_sbom_components / GITHUB_CLONE_ACCOUNT / GITHUB_CLONE_TOKEN)
+and to avoid a disruptive mass-delete mid-program. The clone + scanner
+functions below (`_clone_repo`, `_run_trufflehog`, `_run_custom_rules`,
+`_run_pip_audit`, `_run_mcp_checker`, `scan_submission`, `scan_repo`) are NOT
+called from any live code path anymore — no router or scheduler imports
+them. Do not add new callers.
+
+Untrusted clone + scanner execution now runs in the isolated, unprivileged
+`scanner-worker` service (see scanner_worker/scan_engine.py, which is an
+intentional standalone re-implementation of the pipeline described below —
+not an import of this module, so the worker never depends on proxy
+application code). The proxy only enqueues (app/services/scan_queue.py) and
+evaluates raw results (app/services/scan_evaluator.py); it does not clone or
+exec scanners in-process, and its own container/image no longer bundles
+git/trufflehog/pip-audit/syft/semgrep (see proxy/Dockerfile).
+
+Original docstring, describing the now-dead-code pipeline below, preserved
+for context:
+
 Submission scanner — runs automated security checks on a GitHub repo before
 the submission enters the human review queue.
 
@@ -9,7 +29,6 @@ Pipeline:
   4. pip-audit dependency scan (if pip ecosystem enabled)
 
 Writes results to server_registry.scan_report (jsonb) and sets scan_status.
-Called as an asyncio background task from the submission router.
 
 If a scanner binary is absent, the scan fails closed:
   - missing git → scan_status='blocked' (cannot even clone)

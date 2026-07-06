@@ -165,6 +165,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Rescan scheduler failed to start: %s", exc)
 
+    # Step 5.6 (CR-14 / WP-B1): start the scan evaluator loop — the trusted
+    # side that reads scan_raw_results (written by the isolated
+    # scanner-worker) and drives server_registry scan_status/submission_status.
+    from app.services import scan_evaluator as _scan_evaluator
+    try:
+        _scan_evaluator.start()
+    except Exception as exc:
+        logger.warning("Scan evaluator failed to start: %s", exc)
+
     # Step 6: Initialize trust envelope labeler (PRD-0001 M3) — fail-graceful
     if settings.TRUST_ENVELOPE_ENABLED:
         from app.services.trust_labeler import init_labeler as _init_labeler
@@ -189,6 +198,10 @@ async def lifespan(app: FastAPI):
     # Shutdown — stop rescan loop
     from app.services import rescan_scheduler as _rescan_svc
     await _rescan_svc.stop()
+
+    # Shutdown — stop scan evaluator loop (CR-14 / WP-B1)
+    from app.services import scan_evaluator as _scan_evaluator
+    await _scan_evaluator.stop()
 
     # Shutdown — stop OPA data sync reconcile loop first
     if opa_data_sync is not None:
