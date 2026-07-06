@@ -18,35 +18,18 @@ WORKDIR /app
 
 # Install system dependencies:
 #   curl/ca-certificates - healthcheck + TLS
-#   git                  - submission scanner repo clone (R-0)
-# ponytail: trufflehog installed via upstream script below; sidecar image that
-# isolates untrusted-repo parsing from the enforcement point is the P1 follow-up
-# (PRD-0003 R-0) — this is the interim in-proxy fix so scans fail closed with
-# tooling present rather than silently skipping.
+#
+# CR-14 / WP-B1: git, trufflehog, syft, and semgrep used to be installed here
+# so the proxy could clone + scan untrusted submitted repos in-process — the
+# same process holding DB-admin creds, the Vault token, and the gateway
+# shared secret. That execution now happens in the isolated, unprivileged
+# scanner-worker service (see scanner_worker/Dockerfile); the proxy has no
+# need for any scanner binary and deliberately does not install one — a
+# compromised submitted repo can no longer reach proxy secrets via this path.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
-    git \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-       | sh -s -- -b /usr/local/bin v3.82.13 \
-    && curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-       | sh -s -- -b /usr/local/bin v1.18.1
-
-# semgrep — SAST engine for the vendored mcp_checker MCP rule pack
-# (proxy/vendor/mcp_checker/policies/semgrep.yml). Without it the SAST check
-# SKIPs; the scanner treats a missing engine as "did not run", not a pass.
-#
-# Installed in an ISOLATED venv, not the app env, because:
-#  - semgrep's opentelemetry dep imports pkg_resources, which setuptools 81+
-#    removed and slim Python omits — the venv pins setuptools<81 where nothing
-#    else can upgrade it (the app env resolves setuptools 83).
-#  - it keeps semgrep's heavy transitive deps from colliding with proxy deps.
-# The venv's own python is on the semgrep shebang; only the launcher is exposed.
-RUN python3 -m venv /opt/semgrep-venv \
-    && /opt/semgrep-venv/bin/pip install --no-cache-dir "setuptools<81" semgrep==1.86.0 \
-    && ln -sf /opt/semgrep-venv/bin/semgrep /usr/local/bin/semgrep \
-    && ln -sf /opt/semgrep-venv/bin/pysemgrep /usr/local/bin/pysemgrep
+    && rm -rf /var/lib/apt/lists/*
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
 FROM base AS builder

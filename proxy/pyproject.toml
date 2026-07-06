@@ -48,8 +48,10 @@ dependencies = [
     "tenacity==9.1.2",       # Retry logic for OPA/Ollama calls
     "jcs==0.1.0",            # RFC 8785 JSON Canonicalization Scheme — trust envelope signing
 
-    # Submission scanner (PRD-0003 R-0) — dependency-vuln check on submitted repos
-    "pip-audit==2.7.3",
+    # NOTE (CR-14 / WP-B1): pip-audit used to live here for the in-proxy
+    # scanner pipeline (PRD-0003 R-0). Scanner execution has moved to the
+    # isolated scanner-worker service (scanner_worker/requirements.txt) — the
+    # proxy no longer needs a scanner binary of any kind.
 
     # Internal
     "mcp-audit-logger",      # From observability/mcp-audit-logger (local package)
