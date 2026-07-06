@@ -462,6 +462,20 @@ scopes/redirect_uri/client_auth_method, all present in `external_oauth`'s config
   - Both fixes are auth-mode-agnostic (the shared `/auth/callback` handler, not anything
     Dex-specific) — every approach-A adapter's *actual* live enrollment (not pre-seeded) now
     completes correctly, not just the new `external_oauth_user_token` path.
+  - **A third bug, cosmetic but real:** `routers/oauth.py::enroll()`'s `GET /auth/enroll/{service}`
+    reads `adapter.scopes` to render the consent page and to persist `credential_store.scopes`
+    (an audit-only column). `GenericOAuthAdapter` (like every static approach-A adapter — dex.py,
+    m365.py, bitbucket.py all follow the same private-`_scopes`-only convention) had no public
+    `scopes` accessor, so this always raised `AttributeError` and silently fell into the
+    `except AttributeError: requested_scopes = settings.entra_scopes_list` branch — every dynamic
+    external_oauth enrollment's consent page and stored `scopes` column showed Entra's
+    env-configured scope list instead of the adapter's real ones. Non-security-critical
+    (`build_auth_url`/`exchange_code`/`refresh` all use `self._scopes` correctly regardless of
+    what the consent page displayed — the actual OAuth request sent to Dex was always right), but
+    a real, live-only-discoverable UX/audit-data bug; no unit test renders a real consent page
+    against a real adapter instance. Fixed by adding a public `scopes` property to
+    `GenericOAuthAdapter` (`adapters/generic_oauth.py`) — the static adapters' equivalent gap is
+    out of scope for this fix (recorded, not silently expanded).
 
 ### 4.7 Generic OAuth 2.0 substrate productization — provider profiles + service adapters (WP-A6)
 

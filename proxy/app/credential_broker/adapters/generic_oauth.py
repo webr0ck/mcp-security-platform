@@ -67,6 +67,22 @@ class GenericOAuthAdapter:
         self._token_endpoint = token_endpoint
         self._client_auth_method = client_auth_method
 
+    @property
+    def scopes(self) -> list[str]:
+        """
+        Public read accessor (WP-A3/Task-12 live-proof fix). routers/oauth.py's
+        GET /auth/enroll/{service} reads adapter.scopes to render the consent
+        page's requested-permissions list and to persist credential_store's
+        (audit-only) scopes column; without this, every dynamic external_oauth
+        enrollment silently fell into the `except AttributeError` branch and
+        displayed/recorded Entra's env-configured scope list instead of this
+        adapter's real ones — cosmetic (build_auth_url/exchange_code always
+        used self._scopes correctly), but a real live-only-discoverable bug:
+        no unit test exercises GET /enroll's consent-page rendering against a
+        real adapter instance.
+        """
+        return list(self._scopes)
+
     def build_auth_url(self, state: str, code_challenge: str | None = None) -> str:
         params = {
             "client_id": self._client_id,
