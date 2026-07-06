@@ -28,6 +28,21 @@ def _adapter(**overrides) -> GenericOAuthAdapter:
     return GenericOAuthAdapter(**base)
 
 
+def test_scopes_property_returns_configured_scopes():
+    """Task-12 live-proof regression: routers/oauth.py's GET /auth/enroll/{service}
+    reads adapter.scopes to render the consent page and persist credential_store's
+    scopes column. Without a public accessor this silently fell into an
+    `except AttributeError` fallback and showed the wrong (Entra) scope list for
+    every dynamic external_oauth enrollment — only discoverable by actually
+    rendering a real consent page, not a mocked test."""
+    adapter = _adapter(scopes=["read:issue", "write:issue"])
+    assert adapter.scopes == ["read:issue", "write:issue"]
+    # Must be a copy — mutating the returned list must not affect the adapter.
+    returned = adapter.scopes
+    returned.append("mutated")
+    assert adapter.scopes == ["read:issue", "write:issue"]
+
+
 class TestBuildAuthUrl:
     def test_contains_client_id_and_scopes(self):
         adapter = _adapter()
