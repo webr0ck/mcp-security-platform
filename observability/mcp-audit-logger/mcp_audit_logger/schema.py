@@ -33,6 +33,11 @@ class AuditEventType(str, Enum):
     TOOL_REGISTERED = "TOOL_REGISTERED"
     TOOL_STATUS_CHANGED = "TOOL_STATUS_CHANGED"
     TOOL_DELETED = "TOOL_DELETED"
+    # CR-07 (WP-B3 remainder): a dedicated, evidence-gated quarantine release —
+    # distinct from the generic TOOL_STATUS_CHANGED so an auditor can filter
+    # for "who released this tool and why" without pattern-matching status
+    # transitions. Emitted only by POST /api/v1/admin/tools/{id}/release.
+    TOOL_RELEASED = "TOOL_RELEASED"
     AUDIT_RERUN_TRIGGERED = "AUDIT_RERUN_TRIGGERED"
     COMPLIANCE_RUN_TRIGGERED = "COMPLIANCE_RUN_TRIGGERED"
     ANOMALY_ALERT_RESOLVED = "ANOMALY_ALERT_RESOLVED"
