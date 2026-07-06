@@ -419,6 +419,49 @@ scopes/redirect_uri/client_auth_method, all present in `external_oauth`'s config
   handles the OAuth token lifecycle only — resolving a Jira Cloud site's `cloudId` (a separate
   Atlassian API call required before any real Jira REST call) is left to the downstream Jira MCP
   tool, not the platform. This is a documented limitation, not a silent gap.
+- **Live proof: Dex as a second, non-Entra external IdP (Task 12).** Before this, the generic/
+  dynamic path above had only mocked unit-test coverage
+  (`proxy/tests/unit/test_dispatcher_external_oauth.py`) — every "2 different IdPs" claim rested
+  on Entra (`entra_user_token`/`entra_client_credentials`) being the only *externally-hosted*
+  IdP actually exercised live. `lab/tests/acceptance/test_at1_dex_external_oauth.py` closes that
+  gap: it drives a REAL browser-shaped authorization_code+PKCE enrollment (GET
+  `/auth/enroll/dex-external` → POST `/auth/enroll/dex-external/consent` → Dex's real
+  `authorization_endpoint` → Dex's real local-password login form as alice@corp → Dex's real
+  303 back to `/auth/callback/dex-external` → the proxy's real code-exchange against Dex's real
+  `token_endpoint`), then invokes `echo-dex-external` end-to-end through the full gateway/OPA/
+  entitlement/dispatcher chain — the broker decrypts the stored refresh_token and calls
+  `GenericOAuthAdapter.refresh()` (a second live HTTP call to Dex) to mint the injected access
+  token. `server_registry.service_name='dex-external'` uses a SECOND Dex OAuth client
+  (`mcp-dex-generic`, `lab/dex/config.lab.yaml`) distinct from the legacy static `dex.py`
+  adapter's `mcp-proxy` client (`service='dex'`, the `lab-dex-cal`/`dex-calendar` `user`-mode
+  enrollment) — the two never share a credential_store row or OAuth client. Seed data:
+  `lab/seeder/sql/dex_external_oauth.sql` (`oauth_provider_policy` row for Dex's issuer +
+  the `server_registry`/entitlement rows) and `seed.py` step 7d3 (the service-owned
+  client_secret). `token_endpoint` must use the container-network hostname
+  (`http://lab-dex:5556/dex/token`, called proxy-side) while `authorization_endpoint` stays
+  host-mapped (`http://localhost:5556/dex/auth`, followed browser-side) — mirrors the existing
+  `DEX_ISSUER_URL`/`DEX_INTERNAL_ISSUER_URL` split for the legacy adapter.
+  - **Two real bugs surfaced and fixed by actually driving this flow** (both in
+    `routers/oauth.py`'s `/auth/callback/{service}` handler, which no prior test had exercised —
+    every other approach-A "enrollment" in this lab, including `entra_user_token`'s own m365
+    delegated credential, is pre-seeded directly into `credential_store` rather than driven
+    through this live endpoint):
+    1. The `INSERT ... ON CONFLICT (user_sub, service) DO UPDATE` had no arbiter to match: V011
+       dropped the plain `(user_sub, service)` unique constraint in favor of a PARTIAL unique
+       index scoped to `owner_type='user'` (`uq_credential_user_mode`), and the conflict target
+       must repeat that predicate. Fixed to `ON CONFLICT (user_sub, service) WHERE owner_type =
+       'user' DO UPDATE ...`.
+    2. The credential's `encrypt()` call at write time omitted `service`/`tool_id`/`owner_type`,
+       so it used `encrypt()`'s `service=""` default — while `broker.py::_resolve_a`'s matching
+       `decrypt()` call passes the real four-field AAD (`service=<service>, tool_id=None,
+       owner_type="user"`, per FIND-010's `_make_aad` contract). Every real enrollment's
+       refresh_token was therefore encrypted under an AAD that could never actually be
+       decrypted (`cryptography.exceptions.InvalidTag`) the first time the broker tried to
+       refresh it. Fixed by passing the matching `service=service, tool_id=None,
+       owner_type="user"` at the `encrypt()` call site.
+  - Both fixes are auth-mode-agnostic (the shared `/auth/callback` handler, not anything
+    Dex-specific) — every approach-A adapter's *actual* live enrollment (not pre-seeded) now
+    completes correctly, not just the new `external_oauth_user_token` path.
 
 ### 4.7 Generic OAuth 2.0 substrate productization — provider profiles + service adapters (WP-A6)
 

@@ -360,6 +360,42 @@ ON CONFLICT (name, version) DO UPDATE SET
     inject_prefix  = EXCLUDED.inject_prefix,
     updated_at     = NOW();
 
+-- ── echo-dex-external — WP-A3 generic/dynamic external-OAuth path proof ──────
+-- (injection_mode=external_oauth_user_token, second/non-Entra external IdP)
+--
+-- Proves the NEW generic per-server adapter (credential_broker/adapters/
+-- generic_oauth.py + dynamic_external_oauth.py::resolve_external_oauth_adapter)
+-- against Dex acting as a plain second OIDC provider — completely distinct
+-- from the legacy static dex.py adapter (service='dex', used by the
+-- lab-dex-cal/dex-calendar 'user'-mode enrollment). service_name='dex-external'
+-- is a fresh credential_store namespace so the two never collide.
+--
+-- server_registry row (service_name, approved_upstream_idp_config,
+-- oauth_provider_policy) is seeded by dex_external_oauth.sql, which runs
+-- right after this file and this file's tool row both exist.
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode,
+    inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'echo-dex-external', '1.0.0',
+    'Echo server invoked with a broker-injected generic external-OAuth delegated token (external_oauth_user_token mode, Dex as a second/non-Entra IdP — WP-A3 dynamic adapter path).',
+    '{"type":"object","properties":{},"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-echo:8000/mcp',
+    'active', 'low', 5, '[]'::jsonb,
+    'lab-seeder', 'dex-external', null, 'external_oauth_user_token', 'Authorization', 'Bearer'
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url   = EXCLUDED.upstream_url,
+    service_name   = EXCLUDED.service_name,
+    injection_mode = EXCLUDED.injection_mode,
+    inject_header  = EXCLUDED.inject_header,
+    inject_prefix  = EXCLUDED.inject_prefix,
+    updated_at     = NOW();
+
 -- ── lab-tickets — KC token exchange to custom RS (Case 4, PRD-0002) ──────────
 -- proxy exchanges the user's KC bearer for an aud=lab-tickets exchanged token,
 -- then injects it as Authorization: Bearer <exchanged> to lab-mcp-lab-tickets.

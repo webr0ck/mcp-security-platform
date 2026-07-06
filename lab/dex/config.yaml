@@ -38,6 +38,22 @@ staticClients:
     name: MCP Security Proxy
     public: false
 
+  # WP-A3/Task-12 (CR-04 remainder): a SECOND external OAuth client, distinct
+  # from mcp-proxy above, used ONLY to prove the NEW generic/dynamic
+  # external_oauth_user_token dispatcher path (adapters/generic_oauth.py +
+  # dynamic_external_oauth.py, server_registry.service_name='dex-external')
+  # against Dex acting as a plain second IdP — never touches the legacy
+  # static dex.py adapter (service='dex', the mcp-proxy client above, used by
+  # the lab-dex-cal/dex-calendar enrollment). Redirect URIs cover both the
+  # real gateway HTTPS path (PROXY_BASE_URL) and the container-loopback path.
+  - id: mcp-dex-generic
+    secret: mcp-dex-generic-secret
+    redirectURIs:
+      - https://100.119.138.35:8443/auth/callback/dex-external
+      - http://localhost:8000/auth/callback/dex-external
+    name: MCP Generic External-OAuth Test Client (WP-A3 dynamic path)
+    public: false
+
 enablePasswordDB: true
 
 # Static test users — bcrypt cost 10, password: labpassword

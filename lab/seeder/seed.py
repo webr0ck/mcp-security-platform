@@ -23,6 +23,7 @@ Environment variables (all have safe defaults except DB_PASSWORD):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import secrets as secrets_module
@@ -1178,6 +1179,16 @@ async def main() -> None:
         log.error("servers.sql seeding failed: %s", exc)
         results["servers_sql"] = f"FAILED: {exc}"
 
+    # 4c. WP-A3/Task-12: Dex-as-second-external-IdP server_registry + oauth_provider_policy
+    # (generic dynamic external_oauth_user_token path — see docs/spec/01-authentication.md §4.6)
+    log.info("Seeding Dex external-OAuth server_registry/oauth_provider_policy...")
+    try:
+        await run_sql_file(conn, SQL_DIR / "dex_external_oauth.sql")
+        results["dex_external_oauth_sql"] = "OK"
+    except Exception as exc:
+        log.error("dex_external_oauth.sql seeding failed: %s", exc)
+        results["dex_external_oauth_sql"] = f"FAILED: {exc}"
+
     # 5. Insert RBAC seed rows
     log.info("Seeding RBAC roles...")
     try:
@@ -1292,6 +1303,45 @@ async def main() -> None:
         except Exception as exc:
             log.error("echo-basic basic_auth credential store failed: %s", exc)
             results["echo_basic_cred_store"] = f"FAILED: {exc}"
+
+    # 7d3. WP-A3/Task-12: seed the Dex OAuth client_secret (mcp-dex-generic,
+    # registered in lab/dex/config.lab.yaml) as a service-owned credential for
+    # echo-dex-external. resolve_external_oauth_adapter() finds it via
+    # tool_registry.credential_id (NOT the (service, tool_id) lookup the other
+    # static adapters use) and reads it back through
+    # services/credential_storage.retrieve_credential, which always
+    # json.loads() the decrypted plaintext (unlike the raw-string convention
+    # store_service_credential's other callers, e.g. echo-sa, rely on for
+    # their own direct-decrypt() call sites) — must store a JSON object with
+    # a "client_secret" key, not a bare string.
+    if master_hex and results.get("tools_sql") == "OK" and results.get("dex_external_oauth_sql") == "OK":
+        try:
+            conn_dex = await wait_for_postgres(max_wait=10)
+            await store_service_credential(
+                conn_dex, master_hex, "dex-external", "echo-dex-external",
+                json.dumps({
+                    "client_secret": os.environ.get(
+                        "DEX_GENERIC_CLIENT_SECRET", "mcp-dex-generic-secret"
+                    ),
+                }),
+                credential_type="external_oauth_client_secret",
+            )
+            await conn_dex.execute(
+                """
+                UPDATE tool_registry t
+                SET credential_id = c.id, updated_at = now()
+                FROM credential_store c
+                WHERE t.name = 'echo-dex-external'
+                  AND t.deleted_at IS NULL
+                  AND c.service = 'dex-external'
+                  AND c.owner_type = 'service'
+                """
+            )
+            await conn_dex.close()
+            results["echo_dex_external_cred_store"] = "OK"
+        except Exception as exc:
+            log.error("echo-dex-external client_secret store failed: %s", exc)
+            results["echo_dex_external_cred_store"] = f"FAILED: {exc}"
 
     # 7e. Seed per-user delegated m365 refresh tokens (entra_user_token mode,
     # mock-idp lab flow — see seed_m365_delegated_credentials docstring).

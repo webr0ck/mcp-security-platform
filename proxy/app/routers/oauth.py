@@ -671,16 +671,38 @@ async def callback(service: str, code: str, state: str, request: Request) -> HTM
     # CB-001: encrypt under the AUTHENTICATED identity, never a header value.
     # CR-10 (WP-A1): keyed by the typed principal_id, not the bare client_id —
     # this is the "writes are always typed" half of the dual-read migration.
-    encrypted = encrypt(refresh_token, principal_id, master)
+    #
+    # FIND-010 AAD: broker.py::_resolve_a's decrypt() call binds against the
+    # FULL four-field AAD (user_sub, service, tool_id=None, owner_type="user")
+    # — service/tool_id/owner_type must be passed here too, or every future
+    # refresh() decrypts against a mismatched AAD and raises InvalidTag.
+    # Discovered live: every prior "enrollment" for an approach-A adapter in
+    # this lab (m365 delegated, dex-calendar) was pre-seeded directly into
+    # credential_store using the CORRECT four-field AAD, so this endpoint's
+    # own encrypt() call (defaulting service="") was never actually exercised
+    # until the WP-A3 Dex-as-second-IdP live browser flow (Task 12).
+    encrypted = encrypt(
+        refresh_token, principal_id, master,
+        service=service, tool_id=None, owner_type="user",
+    )
 
     from app.core.database import get_db
+    # V011 dropped the plain (user_sub, service) UNIQUE constraint in favor of a
+    # PARTIAL unique index scoped to owner_type='user' (uq_credential_user_mode)
+    # — an ON CONFLICT target must repeat that predicate or Postgres has no
+    # arbiter to match, and 500s ("no unique or exclusion constraint matching
+    # the ON CONFLICT specification"). Discovered live: every prior
+    # "enrollment" test in this lab pre-seeds credential_store directly rather
+    # than driving this real /auth/callback endpoint, so this bug was never
+    # exercised end-to-end until the WP-A3 Dex-as-second-IdP live-flow proof
+    # (Task 12) actually completed a browser-driven authorization_code flow.
     async for db in get_db():
         await db.execute(
             text(
                 "INSERT INTO credential_store "
                 "(user_sub, service, encrypted_blob, scopes, principal_type) "
                 "VALUES (:sub, :svc, :blob, :scopes, :ptype) "
-                "ON CONFLICT (user_sub, service) DO UPDATE "
+                "ON CONFLICT (user_sub, service) WHERE owner_type = 'user' DO UPDATE "
                 "SET encrypted_blob=:blob, scopes=:scopes, principal_type=:ptype"
             ),
             {
