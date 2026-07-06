@@ -63,6 +63,7 @@ from app.services.server_onboarding import (
 )
 from app.services.ssrf import SSRFError, validate_server_url
 from app.credential_broker.adapters.healthcheck import get_healthcheck, HealthcheckFailed
+from app.services.auth_modes import all_mode_values
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -165,19 +166,10 @@ class ServerCreate(BaseModel):
     @field_validator("injection_mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        # AUTH-R6 (Task 3.4): passthrough and entra_user_token are now exposed.
-        # kc_token_exchange is the canonical name for the former oauth_user_token.
-        valid = {
-            "none",
-            "service",
-            "user",
-            "service_account",
-            "kc_token_exchange",
-            "oauth_user_token",   # accepted alias; normalised to kc_token_exchange in dispatcher
-            "passthrough",
-            "entra_user_token",
-            "entra_client_credentials",
-        }
+        # WP-A5 (CR-02 completion): sourced from the canonical AuthMode enum
+        # instead of a hand-maintained set (was missing basic_auth and both
+        # external_oauth_* modes — real drift, not just theoretical).
+        valid = all_mode_values()
         if v not in valid:
             raise ValueError(f"injection_mode must be one of {sorted(valid)}")
         return v
@@ -221,20 +213,11 @@ class ServerRegister(BaseModel):
     @field_validator("injection_mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        # AUTH-R6 (Task 3.4): passthrough and entra_user_token are now exposed.
-        # kc_token_exchange is the canonical name; oauth_user_token is accepted alias.
+        # WP-A5 (CR-02 completion): sourced from the canonical AuthMode enum
+        # instead of a hand-maintained set (was missing basic_auth and both
+        # external_oauth_* modes — real drift, not just theoretical).
         _ENTRA_MODES = {"entra_user_token", "entra_client_credentials"}
-        valid = {
-            "none",
-            "service",
-            "user",
-            "service_account",
-            "kc_token_exchange",
-            "oauth_user_token",   # accepted alias; normalised to kc_token_exchange in dispatcher
-            "passthrough",
-            "entra_user_token",
-            "entra_client_credentials",
-        }
+        valid = all_mode_values()
         if v not in valid:
             raise ValueError(f"injection_mode must be one of {sorted(valid)}")
         # Entra modes require AZURE_TENANT_ID (surfaced as ENTRA_TENANT_ID in settings).

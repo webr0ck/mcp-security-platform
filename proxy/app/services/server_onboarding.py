@@ -29,6 +29,7 @@ import socket
 from urllib.parse import urlparse
 
 from app.services.ssrf import _is_blocked_ip
+from app.services.auth_modes import all_mode_values
 
 logger = logging.getLogger(__name__)
 
@@ -65,30 +66,30 @@ def validate_mode_and_idp(
         InvalidOnboardingConfig: if incompatible combination
     """
     # Validate injection_mode is known
-    valid_modes = {
-        "none",
-        "service",
-        "user",
-        "service_account",
-        "oauth_user_token",
-        "entra_client_credentials",
-        "entra_user_token",
-        # WP-A3 (CR-04 remainder): generic external OAuth, governed by
-        # WP-A2's oauth_provider_policy at approval time.
-        "external_oauth_client_credentials",
-        "external_oauth_user_token",
-    }
+    # WP-A5 (CR-02 completion): sourced from the canonical AuthMode enum
+    # (services/auth_modes.py::all_mode_values) instead of a hand-maintained
+    # set. This function is called from server_registry.py's admin-ish
+    # create_server path, whose own ServerRegister/ServerCreate Pydantic
+    # models already accept basic_auth/passthrough — the old hardcoded set
+    # here did NOT, so a request with mode='basic_auth' would pass pydantic
+    # validation and then be rejected here as "unknown injection_mode": the
+    # exact cross-call-site drift CR-02 exists to eliminate.
+    valid_modes = all_mode_values()
     if injection_mode not in valid_modes:
         raise InvalidOnboardingConfig(
             f"unknown injection_mode '{injection_mode}'; "
             f"must be one of {valid_modes}"
         )
 
-    # oauth_user_token requires gateway_idp
-    if injection_mode == "oauth_user_token":
+    # kc_token_exchange (canonical name) / oauth_user_token (deprecated alias)
+    # both require gateway_idp. WP-A5: previously only the alias name was
+    # checked here — a real gap now that kc_token_exchange is the name
+    # submitters are steered toward (see submission.py's design-assist
+    # recommendation).
+    if injection_mode in ("oauth_user_token", "kc_token_exchange"):
         if upstream_idp_type != "gateway_idp":
             raise InvalidOnboardingConfig(
-                f"injection_mode='oauth_user_token' requires "
+                f"injection_mode='{injection_mode}' requires "
                 f"upstream_idp_type='gateway_idp', got '{upstream_idp_type}'"
             )
 

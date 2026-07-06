@@ -30,6 +30,26 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from app.services.auth_modes import AUTH_MODES
+
+
+def _injection_mode_filter_options() -> str:
+    """WP-A5 (CR-02 completion): the catalog filter's mode dropdown used to be
+    a hardcoded literal list that had drifted (included a nonexistent
+    'header' mode, omitted basic_auth/kc_token_exchange/entra_*/
+    external_oauth_*) — sourced from the canonical AUTH_MODES matrix instead,
+    labelled with each mode's human-facing label. Excludes the deprecated
+    oauth_user_token alias (kc_token_exchange covers the same filter intent)."""
+    from html import escape as _esc
+    from app.services.auth_modes import AuthMode
+
+    opts = ['<option value="">All injection modes</option>']
+    for mode, info in AUTH_MODES.items():
+        if mode is AuthMode.OAUTH_USER_TOKEN:
+            continue
+        opts.append(f'<option value="{_esc(mode.value)}">{_esc(info.label)}</option>')
+    return "\n        ".join(opts)
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/portal", tags=["Portal"])
 
@@ -1478,13 +1498,7 @@ async def fragment_catalog(request: Request):
         <option value="critical">Critical</option>
       </select>
       <select id="cat-mode" onchange="filterCatalog()">
-        <option value="">All injection modes</option>
-        <option value="none">None</option>
-        <option value="header">Header</option>
-        <option value="user">User</option>
-        <option value="service">Service</option>
-        <option value="service_account">Service Account</option>
-        <option value="oauth_user_token">OAuth User Token</option>
+        {_injection_mode_filter_options()}
       </select>
       <span style="font-size:0.8rem;color:var(--muted)">{len(tools)} tool{"s" if len(tools) != 1 else ""}</span>
     </div>

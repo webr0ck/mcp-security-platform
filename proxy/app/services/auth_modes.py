@@ -6,21 +6,21 @@ MCP tools, REST APIs, admin credential forms, dispatcher, and docs. This
 module is the START of a single source of truth: one enum, one set of
 human-facing labels, and one compatibility/status matrix.
 
-STATUS: additive only. This module does not yet replace the mode lists in
-submission.py, server_onboarding.py, admin_credentials.py, portal.py, or the
-dispatcher's own InjectionMode enum — those still exist and are the ones
-actually enforced at runtime. Migrating each call site to import from here
-instead of re-declaring its own list, and adding an approval-time validator
-that rejects unsupported mode/IdP combinations at draft/update time (not at
-invocation), is tracked as follow-up work in
-00_AI/mcp-security-platform/Codex_review/Claude_status.md (CR-02) — a
-multi-call-site migration, not something to do in one pass alongside
-everything else this module will eventually need to replace.
+STATUS (WP-A5 / CR-02 completion, 2026-07-06): this is now the single source
+of truth, enforced. `credential_broker/dispatcher.py::InjectionMode` is a
+direct import alias of this enum (`InjectionMode = AuthMode`) — same
+attribute names, same string values, zero duplication. submission.py,
+server_onboarding.py, admin_credentials.py, and server_registry.py all
+derive their accepted-mode sets from `all_mode_values()` /
+`self_service_mode_values()` below instead of re-declaring their own list.
+portal.py's UI dropdown is sourced from `AUTH_MODES` for the same reason.
 
-The canonical values below intentionally match
-credential_broker/dispatcher.py::InjectionMode exactly (same strings) so
-migrating a call site to use AuthMode instead of a local list, or instead of
-InjectionMode directly, is a safe drop-in rename — never a behavior change.
+The canonical member NAMES were chosen to match
+credential_broker/dispatcher.py's pre-existing `InjectionMode` attribute
+names exactly (`SERVICE` not `SERVICE_BEARER`, `USER` not `USER_BEARER`) —
+required for `InjectionMode = AuthMode` to be a behavior-preserving alias;
+every `InjectionMode.SERVICE`/`InjectionMode.USER` reference in dispatcher.py
+still resolves identically.
 """
 from __future__ import annotations
 
@@ -30,9 +30,9 @@ from enum import Enum
 
 class AuthMode(str, Enum):
     NONE = "none"
-    SERVICE_BEARER = "service"
+    SERVICE = "service"
     BASIC_AUTH = "basic_auth"
-    USER_BEARER = "user"
+    USER = "user"
     SERVICE_ACCOUNT = "service_account"
     KC_TOKEN_EXCHANGE = "kc_token_exchange"
     OAUTH_USER_TOKEN = "oauth_user_token"  # deprecated alias -> KC_TOKEN_EXCHANGE
@@ -65,7 +65,7 @@ AUTH_MODES: dict[AuthMode, AuthModeInfo] = {
         "The upstream requires no authentication from the platform.",
         "supported",
     ),
-    AuthMode.SERVICE_BEARER: AuthModeInfo(
+    AuthMode.SERVICE: AuthModeInfo(
         "Shared service credential",
         "A platform-managed shared API key or static bearer token, the same for every caller.",
         "supported",
@@ -75,7 +75,7 @@ AUTH_MODES: dict[AuthMode, AuthModeInfo] = {
         "Shared or per-user HTTP Basic auth (RFC 7617).",
         "supported",  # CR-05: dispatcher branch InjectionMode.BASIC_AUTH (_inject_basic_auth)
     ),
-    AuthMode.USER_BEARER: AuthModeInfo(
+    AuthMode.USER: AuthModeInfo(
         "Per-user identity (no credential injection)",
         "No credential is injected beyond X-User-Sub; the upstream manages its own per-user state.",
         "supported",
@@ -133,3 +133,22 @@ def is_self_service_selectable(mode: AuthMode) -> bool:
     flow, regardless of what this enum lists as existing.
     """
     return AUTH_MODES[mode].status == "supported"
+
+
+def all_mode_values() -> frozenset[str]:
+    """Every known mode value, including admin_only/alias ones (passthrough,
+    oauth_user_token). For admin-facing / server_owner-facing validators
+    (server_registry.py's ServerCreate/ServerRegister, server_onboarding.py's
+    validate_mode_and_idp) that intentionally expose a broader set than the
+    self-service submission wizard does — never silently narrower than what
+    the dispatcher actually supports, which is the CR-02 drift bug this
+    module exists to prevent."""
+    return frozenset(m.value for m in AuthMode)
+
+
+def self_service_mode_values() -> frozenset[str]:
+    """Mode values a self-service submission-wizard caller may choose
+    (routers/submission.py). Strictly the "supported" status tier — excludes
+    admin_only (passthrough), alias (oauth_user_token — canonical name
+    kc_token_exchange should be chosen instead going forward), and roadmap."""
+    return frozenset(m.value for m in AuthMode if is_self_service_selectable(m))

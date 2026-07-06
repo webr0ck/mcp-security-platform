@@ -50,13 +50,16 @@ from __future__ import annotations
 import json
 import logging
 import time
-from enum import Enum
 from typing import Any
 
 import jwt as _jwt
 from sqlalchemy import text
 from app.credential_broker.token_assert import assert_exchanged_token, ExchangedTokenError
 from app.credential_broker.keycloak_client import get_public_key_for_token
+# WP-A5 (CR-02 completion): InjectionMode is a direct alias of the canonical
+# AuthMode enum — see the note further below, right where the class used to
+# live, for why this is a behavior-preserving rename.
+from app.services.auth_modes import AuthMode as InjectionMode
 
 # S-6(b) / CR-03: proxy-side allowlist of audiences the KC realm may mint tokens
 # for via token exchange. Config-driven (KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES,
@@ -72,29 +75,13 @@ logger = logging.getLogger(__name__)
 _ENTRA_TOKEN_CACHE_MARGIN_SECONDS = 60
 
 
-class InjectionMode(str, Enum):
-    NONE = "none"
-    SERVICE = "service"
-    USER = "user"
-    # CR-05: RFC 7617 HTTP Basic. Stored as structured JSON {"username", "secret"}
-    # in credential_store (shared owner_type='service' or per-user owner_type='user');
-    # the Authorization: Basic <b64> header is built at injection time — never stored.
-    BASIC_AUTH = "basic_auth"
-    SERVICE_ACCOUNT = "service_account"
-    # AUTH-F11 / AUTH-R4 (Task 3.5): kc_token_exchange is the canonical name.
-    # oauth_user_token is an alias kept for backwards compat with existing DB rows.
-    KC_TOKEN_EXCHANGE = "kc_token_exchange"
-    OAUTH_USER_TOKEN = "oauth_user_token"          # alias → KC_TOKEN_EXCHANGE
-    PASSTHROUGH = "passthrough"
-    ENTRA_CLIENT_CREDENTIALS = "entra_client_credentials"
-    ENTRA_USER_TOKEN = "entra_user_token"
-    # WP-A3 (CR-04 remainder): generic, non-KC/non-Entra external OAuth 2.0.
-    # Cleanly separated from KC_TOKEN_EXCHANGE (same-realm RFC 8693) and
-    # ENTRA_* (Microsoft-specific) — the concrete IdP is resolved dynamically
-    # per-server from server_registry.approved_upstream_idp_config, governed
-    # by WP-A2's oauth_provider_policy (see services/oauth_policy.py).
-    EXTERNAL_OAUTH_CLIENT_CREDENTIALS = "external_oauth_client_credentials"
-    EXTERNAL_OAUTH_USER_TOKEN = "external_oauth_user_token"
+# WP-A5 (CR-02 completion): the InjectionMode enum used to be declared here
+# directly (`class InjectionMode(str, Enum): ...`). It is now imported from
+# services/auth_modes.py as InjectionMode = AuthMode (see the import at the
+# top of this file) — AuthMode's member names (SERVICE, USER, not
+# SERVICE_BEARER/USER_BEARER) were chosen to match exactly, so this is a
+# behavior-preserving rename: every `InjectionMode.X`/`InjectionMode(mode_str)`
+# reference below is unchanged.
 
 
 class CredentialInjectionError(RuntimeError):

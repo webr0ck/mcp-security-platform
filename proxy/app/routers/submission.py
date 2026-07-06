@@ -37,9 +37,15 @@ from app.core.database import AsyncSessionLocal
 from app.services.admin_audit import emit_admin_config_event
 from app.services.scaffold_generator import generate_prompts, generate_scaffold
 from app.services import prompt_store
-from app.services.server_onboarding import InvalidOnboardingConfig, validate_upstream_url_ssrf
+from app.services.server_onboarding import (
+    InvalidOnboardingConfig,
+    validate_mode_and_idp,
+    validate_upstream_idp_config,
+    validate_upstream_url_ssrf,
+)
 from app.services.submission_scanner import GITHUB_CLONE_ACCOUNT
 from app.services import scan_queue
+from app.services.auth_modes import self_service_mode_values
 
 # R-2: cheap structural guard at submit time — well-formed https URL, no
 # embedded credentials, no whitespace/control chars. The authoritative
@@ -53,12 +59,16 @@ _SAFE_REPO_URL_RE = re.compile(
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Submissions"])
 
-_VALID_MODES = {
-    "none", "service", "user", "service_account", "oauth_user_token",
-    "entra_client_credentials", "entra_user_token", "kc_token_exchange", "passthrough",
-    # WP-A3 (CR-04 remainder)
-    "external_oauth_client_credentials", "external_oauth_user_token",
-}
+# WP-A5 (CR-02 completion): sourced from the canonical AuthMode status
+# matrix (services/auth_modes.py) instead of a hand-maintained set — this
+# self-service submission wizard only ever offers "supported"-tier modes
+# (excludes admin_only passthrough and the deprecated oauth_user_token alias;
+# a self-service submitter choosing same-IdP token exchange must now name it
+# kc_token_exchange). Was a hardcoded set that had silently drifted behind
+# the canonical model: it included oauth_user_token/passthrough (neither
+# self-service-selectable) and omitted basic_auth (which is) — exactly the
+# drift-prone duplication CR-02 calls out.
+_VALID_MODES = self_service_mode_values()
 _VALID_CATEGORIES = {
     "pii", "financial", "health", "internal_docs", "source_code",
     "email_calendar", "infrastructure", "public",
@@ -255,6 +265,36 @@ async def update_draft(server_id: str, body: DraftUpdate, request: Request) -> J
     sub = await _get_submission(server_id, owner_sub=owner)
     if sub["submission_status"] not in ("draft", "changes_requested"):
         raise HTTPException(status_code=409, detail="submission is not in an editable state")
+
+    # WP-A5 (CR-02 completion): approval-time-style validator moved to
+    # draft/update time — this is the wizard's PATCH step, and previously
+    # nothing checked mode<->upstream_idp_type/config compatibility here at
+    # all (only the much-later oauth_policy approval gate did, and only for
+    # oauth-ish modes). A submitter could PATCH a genuinely contradictory
+    # combination (e.g. injection_mode='entra_user_token' with
+    # upstream_idp_type='gateway_idp') and only discover it was invalid at
+    # first invocation.
+    #
+    # Deliberately permissive on "not yet specified": the current wizard UI
+    # (portal.py's self-service flow) never sends upstream_idp_type at all —
+    # only injection_mode + upstream_idp_config. Only run the mode<->idp_type
+    # compatibility check when an upstream_idp_type IS actually present
+    # (either in this request or already stored) — this catches real
+    # contradictions (via direct API use, or a future wizard revision that
+    # does send it) without rejecting today's in-progress, idp_type-less
+    # drafts. Because this is a PARTIAL update across multiple wizard steps,
+    # the check uses the EFFECTIVE merged state (existing row + this patch),
+    # not just the fields present in this one request.
+    if body.injection_mode is not None or body.upstream_idp_type is not None or body.upstream_idp_config is not None:
+        effective_mode = body.injection_mode if body.injection_mode is not None else (sub.get("injection_mode") or "none")
+        effective_idp_type = body.upstream_idp_type if body.upstream_idp_type is not None else sub.get("upstream_idp_type")
+        effective_idp_config = body.upstream_idp_config if body.upstream_idp_config is not None else sub.get("upstream_idp_config")
+        if effective_idp_type:
+            try:
+                validate_mode_and_idp(effective_mode, effective_idp_type, effective_idp_config)
+                validate_upstream_idp_config(effective_idp_type, effective_idp_config)
+            except InvalidOnboardingConfig as exc:
+                raise HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": str(exc)}) from exc
 
     updates: dict[str, Any] = {"updated_at": "now()"}
     fields: list[str] = []
@@ -943,7 +983,8 @@ async def design_assist(request: Request, mode: Optional[str] = None) -> JSONRes
                     "question": "Is one token shared across all callers, or per-user?",
                     "options": {
                         "shared":   {"recommended_mode": "service_account"},
-                        "per_user": {"recommended_mode": "oauth_user_token"},
+                        # WP-A5: recommend the canonical name, not the deprecated alias.
+                        "per_user": {"recommended_mode": "kc_token_exchange"},
                     },
                 },
             ],
