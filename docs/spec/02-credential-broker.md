@@ -125,6 +125,60 @@ Credentialed backends are onboarded as **self-registering adapters**, so adding 
 - The Approach-A refresh path (`_resolve_a`) is reached **only** via `entra_user_token`, which is still not settable via the admin API **(roadmap)** — but the lab now exercises it end-to-end: the seeded `m365-graph-delegated` tool row (seeder SQL, injection_mode=`entra_user_token`, service_name=`m365`) drives `_resolve_a` → `M365Adapter.refresh()` per call. In the lab the adapter's endpoints are pointed at `lab-mock-idp` via the `ENTRA_TOKEN_URL`/`ENTRA_AUTH_URL` setting overrides (empty default = derive real `login.microsoftonline.com` URLs from `ENTRA_TENANT_ID`), and enrollment is seeded directly into `credential_store` (`seed.py::seed_m365_delegated_credentials`, deterministic `mock-refresh-<sub>` refresh tokens the mock IdP accepts statelessly).
 - `adapters/healthcheck.py` is a separate interface (server-approval reachability probe: `gitea`, `m365`), not a credential adapter.
 
+### 5.2 OAuth provider profile catalog + ServiceAdapter contract (WP-A6)
+
+See `docs/spec/08-finalization-findings-generic-oauth.md` Findings 1-3 for the product rationale. This
+layer sits ABOVE the per-issuer `oauth_provider_policy` enforcement table (§ below / WP-A2) — it does
+not replace it. A profile's issuer/scopes still validate against a matching `oauth_provider_policy` row
+at server-submission-approval time, unchanged.
+
+- **`oauth_provider_profile` table** (`V070`): an admin-curated, reviewer-approved catalog a
+  non-expert submitter picks from — `provider_type` one of `same_platform_idp` / `generic_oauth2` /
+  `entra` / `custom_oidc` / `jira_cloud` (the last reserved, not implemented — see below). Status
+  lifecycle `draft → approved | rejected`, gated by the same high-risk-scope-acknowledgement pattern
+  `oauth_policy.py` already uses (`app/services/oauth_provider_profile.py::approve_profile`).
+- **RFC 8414 / OIDC discovery** (`oauth_provider_profile.py::discover_metadata`): tries
+  `.well-known/oauth-authorization-server` then `.well-known/openid-configuration`; **fails soft to
+  `None`** (never raises) so a provider without published metadata can still be configured by manual
+  entry — this is a UX convenience, not a trust boundary, unlike every other fail-closed rule in this
+  document.
+- **Wizard mapping** (`oauth_provider_profile.py::recommend_provider_type`): a pure function mapping
+  the non-expert's plain-language answers (same IdP as platform? authz-code capable? per-user or
+  app-only? needs API key/basic instead?) to a concrete `provider_type`/`injection_mode`. The
+  `kc_token_exchange` implementation name is **never** exposed in `display_label` — the wizard-facing
+  string is always `"Same platform IdP"`.
+- **API**: `app/routers/oauth_provider_profiles.py` — `POST .../discover` (preview, no write),
+  `POST /api/v1/wizard/recommend-provider-type` (no admin gate — pure recommendation, no state
+  change), `GET|POST /api/v1/admin/oauth-provider-profiles`, `POST .../{id}/approve`,
+  `POST .../{id}/reject` (admin/platform_admin gated, mirrors `admin_prompts.py`).
+- **Same-IdP verify probe** (`app/services/same_idp_verify.py::run_same_idp_verify_probe`): a
+  **standalone** check (not yet wired into WP-B3's verify pipeline, which has landed only its schema
+  substrate as of this writing) that a deployed same-IdP MCP server itself rejects (a) a missing
+  token, (b) a wrong-audience token, (c) an expired token — sent directly to the upstream server URL,
+  bypassing the proxy, so it measures the upstream's OWN validation. Follow-up for whoever finishes
+  WP-B3: call this from the verify-phase worker and persist the result into
+  `server_registry.verification_report`.
+- **ServiceAdapter contract** (`app/credential_broker/adapters/service_adapter.py`): the interface a
+  service needing post-OAuth discovery (tenant/site/workspace resolution) implements —
+  `required_oauth_fields` / `default_scopes` / `validate_provider_config` /
+  `post_enrollment_discovery` / `select_resource` / `build_runtime_context` / `verify_access` /
+  `safe_probe_endpoint`. An adapter **never** stores refresh tokens or client secrets — those remain
+  exclusively in `credential_store`, managed by the broker; an adapter only receives an already-valid
+  access token and calls the resource API with it.
+  - **Reference implementation**: `GenericServiceAdapter`
+    (`app/credential_broker/adapters/generic_service_adapter.py`) — the "no extra discovery needed"
+    case (the common one: the OAuth access token alone is sufficient, no tenant/site resolution
+    step). Demonstrates the Finding 3 acceptance criterion that adding a plain external OAuth service
+    requires zero new Python module — only a new `oauth_provider_profile` row with
+    `service_adapter=NULL`.
+  - `server_registry.service_context` (`V070`, JSONB): the non-secret runtime context an adapter's
+    `build_runtime_context()` produces (e.g. resolved `api_base_url`, `resource_id`) — explicitly
+    separate from `credential_store`, which holds only encrypted secrets.
+  - **NOT built by WP-A6** (deliberately deprioritized per Finding 4/user direction "generic oidc, not
+    jira focused"): a `jira_cloud` ServiceAdapter resolving Atlassian's `cloudId` via the
+    accessible-resources endpoint. The `jira_cloud` `provider_type` enum value and `service_context`
+    shape are reserved so this adapter can slot in later without a schema change.
+
 ---
 
 ## 6. Admin credential management API
