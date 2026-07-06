@@ -447,6 +447,28 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # CR-14 / WP-B1: scanner-worker needs lab-net to reach the AT3 test
+  # fixture git host (lab-gitea-tls / lab-mcp-gitea) — the same reason the
+  # proxy service itself is on lab-net (see its comment above). This is a
+  # LAB-ONLY relaxation: production (base docker-compose.yml alone) keeps
+  # scanner-worker off lab-net entirely, reachable only via
+  # scanner-worker-db-net + the allowlisted scanner-worker-egress-net.
+  scanner-worker:
+    networks:
+      - lab-net
+    environment:
+      # lab-gitea-tls is an internal AT3 test fixture standing in for an
+      # enterprise git host (git_providers row 'gitea-lab') — it must bypass
+      # the allowlisting egress proxy (which only knows real external hosts
+      # like github.com), same as lab-mcp-m365's NO_PROXY for its mock stubs.
+      # NOTE: the self-signed-cert TRUST override (GIT_SSL_CAINFO) is applied
+      # separately and TEMPORARILY by
+      # lab/tests/acceptance/fixtures/setup_gitea_fixtures.sh — same reason
+      # the proxy's own equivalent override isn't baked in here permanently
+      # (it would silently break every real-github.com clone for the rest of
+      # the lab's life). See that script + fixtures/compose.scanner-worker-git-ca-override.yml.
+      NO_PROXY: "lab-gitea-tls,lab-gitea,lab-mcp-gitea,localhost,127.0.0.1"
+
   # ── M365 MCP Server — softeria/ms-365-mcp-server via Graph app-only token ───
   # AZURE_CLIENT_SECRET removed (Task 2.5): credential is broker-injected via
   # credential_store (entra_client_credentials mode). Proxy injects it at call time.
@@ -516,6 +538,7 @@ services:
       - ./lab/egress-proxy/squid.conf:/etc/squid/squid.conf:ro
     networks:
       - mcp-egress-net  # connects to lab MCP servers needing egress
+      - scanner-worker-egress-net  # CR-14: connects scanner-worker needing egress
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -1163,6 +1186,13 @@ networks:
   mcp-egress-net:
     driver: bridge
     internal: false   # this net has internet access via lab-egress-proxy NAT
+  # CR-14 / WP-B1: egress path for scanner-worker to reach configured git
+  # provider hosts + vuln-feed hosts. Overrides docker-compose.yml's
+  # internal:true default — same allowlisting egress-proxy pattern as
+  # mcp-egress-net above, reusing lab-egress-proxy rather than a second squid.
+  scanner-worker-egress-net:
+    driver: bridge
+    internal: false   # internet access via lab-egress-proxy NAT, allowlisted
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
 # Override the base docker-compose.yml's step_ca_password secret to point at

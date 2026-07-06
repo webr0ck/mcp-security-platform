@@ -96,14 +96,25 @@ cp "$FIXTURES/certs/lab-gitea-tls-ca.pem" "$FIXTURES/certs_for_proxy/lab-gitea-t
 $LAB_COMPOSE -f "$FIXTURES/compose.proxy-git-ca-override.yml" up -d --no-deps proxy
 echo "  proxy recreated trusting the lab-gitea-tls CA (GIT_SSL_CAINFO)"
 
+# CR-14 / WP-B1: the clone itself now happens in scanner-worker, not proxy —
+# apply the same trust override there (mirrors the proxy override above).
+$LAB_COMPOSE -f "$FIXTURES/compose.scanner-worker-git-ca-override.yml" up -d --no-deps scanner-worker
+echo "  scanner-worker recreated trusting the lab-gitea-tls CA (GIT_SSL_CAINFO)"
+
 for _ in $(seq 1 15); do
   podman ps --filter name=mcp-proxy --filter status=running --format '{{.Names}}' | grep -q mcp-proxy && break
+  sleep 2
+done
+for _ in $(seq 1 15); do
+  podman ps --filter name=mcp-scanner-worker --filter status=running --format '{{.Names}}' | grep -q mcp-scanner-worker && break
   sleep 2
 done
 sleep 3
 
 # 4. Confirm the proxy can actually reach + trust lab-gitea-tls before going further.
 podman exec mcp-proxy curl -sk -o /dev/null -w 'lab-gitea-tls reachable: HTTP %{http_code}\n' https://lab-gitea-tls/ --max-time 10
+podman exec mcp-scanner-worker sh -c "curl -sk -o /dev/null -w 'lab-gitea-tls reachable from scanner-worker: HTTP %{http_code}\n' https://lab-gitea-tls/ --max-time 10" \
+  || echo "  WARNING: scanner-worker curl check failed (curl may not be installed there; git clone check below is authoritative)"
 
 # 5. Create the two fixture repos under the Gitea admin user (idempotent —
 #    409 on rerun is fine, ignored).
@@ -148,8 +159,10 @@ SQL
 echo "  git_providers row seeded (provider=gitea-lab host=lab-gitea-tls allow_private=true)"
 
 # 8. Prove the clone actually works end-to-end before handing off to pytest.
-podman exec mcp-proxy sh -c 'rm -rf /tmp/_at_clone_check && git clone --depth=1 https://lab-gitea-tls/gitadmin/clean-mcp.git /tmp/_at_clone_check >/dev/null 2>&1 && echo "  clone-through-proxy OK" && rm -rf /tmp/_at_clone_check' \
-  || { echo "  FATAL: proxy cannot clone from lab-gitea-tls — see setup_gitea_fixtures.sh rationale" >&2; exit 1; }
+# CR-14 / WP-B1: the scan pipeline runs in scanner-worker now, not proxy —
+# that's the container whose clone path actually matters for AT3.
+podman exec mcp-scanner-worker sh -c 'rm -rf /tmp/_at_clone_check && git clone --depth=1 https://lab-gitea-tls/gitadmin/clean-mcp.git /tmp/_at_clone_check >/dev/null 2>&1 && echo "  clone-through-scanner-worker OK" && rm -rf /tmp/_at_clone_check' \
+  || { echo "  FATAL: scanner-worker cannot clone from lab-gitea-tls — see setup_gitea_fixtures.sh rationale" >&2; exit 1; }
 
 echo "MALICIOUS_URL=https://lab-gitea-tls/${GITEA_ADMIN_USER}/malicious-mcp.git"
 echo "CLEAN_URL=https://lab-gitea-tls/${GITEA_ADMIN_USER}/clean-mcp.git"

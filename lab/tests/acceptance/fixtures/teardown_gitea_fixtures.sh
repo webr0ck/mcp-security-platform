@@ -17,6 +17,9 @@ podman rm -f lab-gitea-tls >/dev/null 2>&1 && echo "  lab-gitea-tls sidecar remo
 $LAB_COMPOSE up -d --no-deps proxy >/dev/null 2>&1
 echo "  proxy recreated without the GIT_SSL_CAINFO override"
 
+$LAB_COMPOSE up -d --no-deps scanner-worker >/dev/null 2>&1
+echo "  scanner-worker recreated without the GIT_SSL_CAINFO override (CR-14 / WP-B1)"
+
 podman exec -i mcp-db psql -U mcp_app -d mcp_security -c \
   "UPDATE git_providers SET enabled=false WHERE provider='gitea-lab';" >/dev/null 2>&1 || true
 echo "  git_providers 'gitea-lab' row disabled"

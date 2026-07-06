@@ -1,0 +1,21 @@
+# QA acceptance-test fixture override — NOT part of the normal lab stack.
+#
+# scanner-worker (CR-14 / WP-B1) clones AT3's fixture repos from a
+# self-signed-TLS Gitea sidecar (lab-gitea-tls) the same way the OLD in-proxy
+# scanner used to (see compose.proxy-git-ca-override.yml, which this mirrors
+# exactly for the new isolated worker). Trusting that self-signed cert via
+# GIT_SSL_CAINFO is scoped to this scanner-worker container only and reverted
+# by removing this override + recreating the worker without it
+# (teardown_gitea_fixtures.sh does this).
+#
+# NOTE: GIT_SSL_CAINFO pins the ENTIRE container's git-over-https trust store
+# to this one CA file, so it would break a clone from a real public host (e.g.
+# github.com) for as long as this override is applied. Do not leave it applied
+# outside an AT3 run — a rescan of a real-github-hosted approved server would
+# fail closed (clone error -> scan_status='error') until reverted.
+services:
+  scanner-worker:
+    environment:
+      GIT_SSL_CAINFO: /fixtures-certs/lab-gitea-tls-ca.pem
+    volumes:
+      - ./lab/tests/acceptance/fixtures/certs:/fixtures-certs:ro
