@@ -6,7 +6,7 @@
 CREATE TABLE IF NOT EXISTS profile_tokens (
     token_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     jti             TEXT        NOT NULL UNIQUE,   -- JWT ID (sha256 of the signed token)
-    principal_type  TEXT        NOT NULL REFERENCES principal_type_enum (value),
+    principal_type  principal_type_enum NOT NULL,
     principal_id    TEXT        NOT NULL,          -- typed namespaced id
     server_id       UUID        NOT NULL REFERENCES server_registry (server_id) ON DELETE CASCADE,
     audience        TEXT        NOT NULL,          -- server upstream_url (bound)
