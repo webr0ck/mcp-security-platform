@@ -9,8 +9,15 @@ set -euo pipefail
 #   bash lab/scripts/lab-smoke.sh
 #
 # Prerequisites:
-#   - curl and jq installed
-#   - Lab stack running (proxy on localhost:8000, Dex on localhost:5556)
+#   - Lab stack running, mcp-proxy container healthy
+#
+# All requests run via `podman exec mcp-proxy curl ...` (true container
+# loopback), NOT the host-published :8000 port. The proxy's SEC-05 ingress
+# allowlist (proxy/app/middleware/ingress.py) only trusts the gateway
+# container and real loopback — a host curl to the published port arrives
+# NAT'd through rootless podman's slirp4netns/pasta gateway, which is
+# neither, and gets a correct 403. Running curl inside the container is
+# the same "own healthcheck" caller the middleware already trusts.
 #
 # Tests:
 #   1. Health check           — GET  /health/ready              → 200
@@ -19,9 +26,19 @@ set -euo pipefail
 #   4. Dex enrollment redirect— GET  /auth/enroll/dex            → 302 to localhost:5556
 # =============================================================================
 
+PROXY_CONTAINER="${PROXY_CONTAINER:-mcp-proxy}"
 PROXY_BASE="${PROXY_BASE:-http://localhost:8000}"
+# RT-NEW-005: the proxy only honours X-Client-Cert-CN when it also carries
+# X-Gateway-Secret matching GATEWAY_SHARED_SECRET — proof the header was set
+# by Nginx, not forged by whoever's calling. Nginx sets both on every proxied
+# request; since these tests stand in for Nginx, they must set both too.
+GATEWAY_SHARED_SECRET="${GATEWAY_SHARED_SECRET:-}"
 PASS=0
 FAIL=0
+
+pcurl() {
+    podman exec "${PROXY_CONTAINER}" curl "$@"
+}
 
 # ---------------------------------------------------------------------------
 # Helper: run a test, print PASS or FAIL
@@ -42,7 +59,7 @@ run_test() {
 
 echo ""
 echo "MCP Security Platform — Lab Smoke Tests"
-echo "Proxy: ${PROXY_BASE}"
+echo "Proxy: ${PROXY_BASE} (via podman exec ${PROXY_CONTAINER})"
 echo "========================================"
 
 # ---------------------------------------------------------------------------
@@ -51,7 +68,7 @@ echo "========================================"
 echo ""
 echo "Test 1: Health check (GET /health/ready)"
 HTTP_STATUS=$(
-    curl -s -o /dev/null -w "%{http_code}" \
+    pcurl -s -o /dev/null -w "%{http_code}" \
         "${PROXY_BASE}/health/ready"
 )
 if [[ "${HTTP_STATUS}" == "200" ]]; then
@@ -69,20 +86,22 @@ INVOKE_PAYLOAD='{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{}}'
 
 # Resolve grafana-query tool_id from registry (alice has read access)
 GRAFANA_TOOL_ID=$(
-    curl -sf "${PROXY_BASE}/api/v1/tools" \
-        -H "X-Client-Cert-CN: alice@corp" 2>/dev/null \
+    pcurl -sf "${PROXY_BASE}/api/v1/tools" \
+        -H "X-Client-Cert-CN: alice@corp" \
+        -H "X-Gateway-Secret: ${GATEWAY_SHARED_SECRET}" 2>/dev/null \
     | jq -r '.data[] | select(.name=="grafana-query") | .tool_id' 2>/dev/null | head -1 || echo ""
 )
 
-_TMPBODY=$(mktemp)
-INVOKE_STATUS=$(
-    curl -s -o "${_TMPBODY}" -w "%{http_code}" \
+INVOKE_RESP=$(
+    pcurl -s -w $'\n%{http_code}' \
         -X POST "${PROXY_BASE}/api/v1/tools/${GRAFANA_TOOL_ID}/invoke" \
         -H "Content-Type: application/json" \
         -H "X-Client-Cert-CN: alice@corp" \
+        -H "X-Gateway-Secret: ${GATEWAY_SHARED_SECRET}" \
         -d "${INVOKE_PAYLOAD}"
 )
-INVOKE_BODY=$(cat "${_TMPBODY}"); rm -f "${_TMPBODY}"
+INVOKE_STATUS=$(tail -n1 <<<"${INVOKE_RESP}")
+INVOKE_BODY=$(sed '$d' <<<"${INVOKE_RESP}")
 
 # Check for audit_id in meta or error.data (proxy always stamps audit_id)
 AUDIT_ID=$(echo "${INVOKE_BODY}" | jq -r '
@@ -101,15 +120,16 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "Test 3: OPA deny (X-Client-Cert-CN: unknown@external)"
-_TMPBODY=$(mktemp)
-DENY_STATUS=$(
-    curl -s -o "${_TMPBODY}" -w "%{http_code}" \
+DENY_RESP=$(
+    pcurl -s -w $'\n%{http_code}' \
         -X POST "${PROXY_BASE}/api/v1/tools/${GRAFANA_TOOL_ID}/invoke" \
         -H "Content-Type: application/json" \
         -H "X-Client-Cert-CN: unknown@external" \
+        -H "X-Gateway-Secret: ${GATEWAY_SHARED_SECRET}" \
         -d "${INVOKE_PAYLOAD}"
 )
-DENY_BODY=$(cat "${_TMPBODY}"); rm -f "${_TMPBODY}"
+DENY_STATUS=$(tail -n1 <<<"${DENY_RESP}")
+DENY_BODY=$(sed '$d' <<<"${DENY_RESP}")
 
 # Accept 403 HTTP status, or a JSON body with outcome=deny / error code 403
 if [[ "${DENY_STATUS}" == "403" ]]; then
@@ -133,15 +153,17 @@ fi
 echo ""
 echo "Test 4: Dex enrollment redirect (GET /auth/enroll/dex)"
 ENROLL_STATUS=$(
-    curl -s -o /dev/null -w "%{http_code}" \
+    pcurl -s -o /dev/null -w "%{http_code}" \
         -H "X-Session-Id: smoke-1" \
         -H "X-Client-Cert-CN: alice@corp" \
+        -H "X-Gateway-Secret: ${GATEWAY_SHARED_SECRET}" \
         "${PROXY_BASE}/auth/enroll/dex"
 )
 REDIRECT_URL=$(
-    curl -s -o /dev/null -w "%{redirect_url}" \
+    pcurl -s -o /dev/null -w "%{redirect_url}" \
         -H "X-Session-Id: smoke-1" \
         -H "X-Client-Cert-CN: alice@corp" \
+        -H "X-Gateway-Secret: ${GATEWAY_SHARED_SECRET}" \
         "${PROXY_BASE}/auth/enroll/dex"
 )
 

@@ -1040,6 +1040,9 @@ services:
       ENV_LAB_WRITE_PATH: /app/.env.lab
       LAB_GRAFANA_URL: http://lab-grafana:3000
       LAB_NETBOX_URL: http://lab-netbox:8080
+      # lab-setup.sh Step 8 provisions and writes this to .env.lab (unprefixed)
+      # after NetBox comes up; the seeder needs the LAB_-prefixed name to find it.
+      LAB_NETBOX_ADMIN_TOKEN: ${NETBOX_ADMIN_TOKEN:-}
       LAB_GITEA_URL: http://lab-gitea:3000
       LAB_GITEA_ADMIN_USER: ${GITEA_ADMIN_USER:-gitadmin}
       LAB_GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-labpassword}

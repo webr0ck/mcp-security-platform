@@ -164,7 +164,7 @@ wait_for_health "Grafana" "http://localhost:3001/api/health" 120 "200"
 # NetBox returns 403 on unauthenticated /api/ — that means it's up
 log "  Waiting for NetBox..."
 NB_ELAPSED=0
-until curl -s "http://localhost:8080/api/" 2>&1 | grep -qiE "Authentication|netbox|detail"; do
+until curl -s "http://localhost:8090/api/" 2>&1 | grep -qiE "Authentication|netbox|detail"; do
     [[ ${NB_ELAPSED} -ge 180 ]] && die "NetBox did not start within 180s"
     sleep 10; NB_ELAPSED=$((NB_ELAPSED + 10))
 done
@@ -279,7 +279,7 @@ fi
 # ── Step 8: Provision NetBox API token ───────────────────────────────────────
 log "Step 8: Provisioning NetBox admin API token"
 
-NETBOX_URL="http://localhost:8080"
+NETBOX_URL="http://localhost:8090"
 NETBOX_ADMIN_USER="admin"
 NETBOX_ADMIN_PASS="${LAB_NETBOX_ADMIN_PASSWORD:-labpassword}"
 
@@ -321,9 +321,34 @@ log "Step 9: Restarting proxy with updated credentials"
 ${LAB_COMPOSE} restart proxy 2>&1 | tee -a "${LOG_FILE}"
 sleep 5
 
-# Wait for proxy
-wait_for_health "Proxy" "http://localhost:8000/health" 60 "200"
-log_ok "Proxy restarted and healthy"
+# Wait for proxy. SEC-05 ingress allowlist rejects anything that isn't the
+# gateway container or true loopback — curling the published host port lands
+# as the rootless-podman NAT gateway address, not 127.0.0.1, so probe via
+# podman exec instead (that's genuine container-loopback, same as its own
+# healthcheck).
+log "  Waiting for Proxy..."
+PROXY_ELAPSED=0
+until podman exec mcp-proxy curl -sf -o /dev/null -w "%{http_code}" "http://localhost:8000/health" 2>/dev/null | grep -qE "^200$"; do
+    [[ ${PROXY_ELAPSED} -ge 60 ]] && die "Proxy did not become ready within 60s"
+    sleep 5; PROXY_ELAPSED=$((PROXY_ELAPSED + 5))
+done
+log_ok "Proxy restarted and healthy (${PROXY_ELAPSED}s)"
+
+# Wait for Gitea's admin user (lab/gitea/entrypoint.sh creates it after its own
+# health probe passes — first boot does SSH keygen + SQLite init and can take
+# a couple minutes, easily longer than everything above this point combined).
+# The seeder's create_gitea_token() needs this user to exist or it 401s.
+log "  Waiting for Gitea admin user..."
+GITEA_ELAPSED=0
+until curl -s -u "${GITEA_ADMIN_USER:-gitadmin}:${GITEA_ADMIN_PASSWORD:-labpassword}" \
+    "http://localhost:3002/api/v1/user" 2>/dev/null | grep -q '"login"'; do
+    if [[ ${GITEA_ELAPSED} -ge 300 ]]; then
+        log_warn "Gitea admin user not ready within 300s — gitea token seeding may fail"
+        break
+    fi
+    sleep 10; GITEA_ELAPSED=$((GITEA_ELAPSED + 10))
+done
+[[ ${GITEA_ELAPSED} -lt 300 ]] && log_ok "Gitea admin user ready (${GITEA_ELAPSED}s)"
 
 # ── Step 10: Run lab seeder ───────────────────────────────────────────────────
 log "Step 10: Running lab seeder (tool records + RBAC rows)"
@@ -333,6 +358,28 @@ ${LAB_COMPOSE} run --rm lab-seeder 2>&1 | tee -a "${LOG_FILE}" || {
 }
 
 log_ok "Seeder complete"
+
+# The seeder writes fresh tokens (GRAFANA_SERVICE_ACCOUNT_TOKEN, GITEA_ADMIN_TOKEN)
+# to .env.lab, but lab-mcp-grafana/lab-mcp-gitea's own Go/CLI clients read a
+# STATIC token from their own container env at process start — a per-request
+# broker-injected header isn't enough for these two (unlike netbox-query, which
+# has no static token and needs no recreate). `restart` reuses the existing
+# container's already-baked env; only recreating picks up the new .env.lab
+# value (same drift this file's own GITEA_ADMIN_TOKEN/self-service comment warns
+# about above).
+# Re-source .env.lab: compose variable substitution (${GRAFANA_SERVICE_ACCOUNT_TOKEN}
+# in podman-compose.lab.yml) prefers THIS PROCESS's already-exported env var over
+# --env-file's current file content. Step 2 exported the pre-seeder value; without
+# refreshing it here, the recreate below would still resolve to that stale value
+# even though .env.lab on disk now has the seeder's fresh one.
+set -a
+# shellcheck disable=SC1090
+source "${ENV_LAB}"
+set +a
+
+log "  Recreating lab-mcp-grafana, lab-mcp-gitea with refreshed tokens..."
+${LAB_COMPOSE} up -d --force-recreate --no-deps lab-mcp-grafana lab-mcp-gitea 2>&1 | tee -a "${LOG_FILE}"
+log_ok "MCP servers recreated with refreshed credentials"
 
 # ── Step 11: Smoke tests ──────────────────────────────────────────────────────
 if [[ "${SKIP_SMOKE}" == "true" ]]; then
@@ -354,7 +401,7 @@ echo "| Service     | URL                         | Credentials |"
 echo "|-------------|-----------------------------|-------------|"
 echo "| Proxy / MCP | http://localhost:8000        | mTLS header X-Client-Cert-CN |"
 echo "| Grafana     | http://localhost:3001        | admin / ${LAB_GRAFANA_ADMIN_PASSWORD:-labpassword} |"
-echo "| NetBox      | http://localhost:8080        | admin@lab.local / ${LAB_NETBOX_ADMIN_PASSWORD:-labpassword} |"
+echo "| NetBox      | http://localhost:8090        | admin@lab.local / ${LAB_NETBOX_ADMIN_PASSWORD:-labpassword} |"
 echo "| Vault       | http://localhost:8200        | token: ${VAULT_TOKEN:-lab-root-token} |"
 echo "| Dex OIDC    | http://localhost:5556/dex    | alice@corp or bob@corp / labpassword |"
 echo ""
