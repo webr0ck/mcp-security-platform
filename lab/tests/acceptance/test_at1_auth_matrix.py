@@ -55,25 +55,6 @@ def test_user_mode_netbox_list_ip_addresses(alice_token):
 
 # ── (c) entra_client_credentials: m365-graph ─────────────────────────────────
 
-@pytest.mark.xfail(
-    reason=(
-        "PRODUCT BUG (documented in REPORT.md): the entra_client_credentials "
-        "injector (proxy/app/credential_broker/dispatcher.py:562) retrieves the "
-        "stored credential via credential_storage.retrieve_credential(), which "
-        "decrypts with the raw KMS envelope (master secret only, kms.py "
-        "envelope_decrypt). But the only admin-facing write path, "
-        "PUT /admin/credentials/{tool_id} (admin_credentials.py:163-175), "
-        "always encrypts via approach_a.encrypt() — a per-user-KEK derived "
-        "scheme. The two are incompatible ciphertext formats, so decryption "
-        "fails with InvalidTag every time regardless of what's uploaded. There "
-        "is no working admin-API path to provision an entra_client_credentials "
-        "tool today. (Separately, admin_credentials.py:296 update_injection_mode "
-        "'valid_modes' doesn't even include 'entra_client_credentials', "
-        "'entra_user_token', or 'kc_token_exchange' — those tools can never be "
-        "range-configured through that endpoint either.)"
-    ),
-    strict=False,
-)
 def test_entra_client_credentials_m365_graph(alice_token):
     result = call_upstream_tool(alice_token, "m365-graph", "get_me", {})
     assert result is not None

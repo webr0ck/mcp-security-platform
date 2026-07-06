@@ -722,8 +722,15 @@ async def _inject_entra_client_credentials(
             cache_exc,
         )
 
-    # Step 6: Exchange credentials for access token via Entra
-    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    # Step 6: Exchange credentials for access token via Entra.
+    # Honour the ENTRA_TOKEN_URL override (lab points this at the mock IdP); it
+    # defaults to the real per-tenant Microsoft endpoint when unset, so prod
+    # multi-tenant behaviour is unchanged. Parity with _inject_entra_user_token.
+    from app.core.config import get_settings as _get_entra_settings
+    token_url = (
+        _get_entra_settings().ENTRA_TOKEN_URL
+        or f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    )
     try:
         async with httpx.AsyncClient(timeout=10.0) as http_client:
             resp = await http_client.post(

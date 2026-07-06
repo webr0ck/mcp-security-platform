@@ -898,6 +898,55 @@ async def seed_m365_delegated_credentials(conn: asyncpg.Connection, master_hex: 
     return results
 
 
+async def seed_m365_client_credentials(conn: asyncpg.Connection, master_hex: str) -> dict:
+    """
+    Provision the m365-graph tool's entra_client_credentials (app-only) service
+    credential — PRD-0002 Case 2 mock flow against lab-mock-idp.
+
+    The dispatcher's entra_client_credentials path looks the credential up by
+    tool_registry.credential_id and decrypts under the exact context tuple
+    (user_sub='__service__', service=<service_name>, tool_id=<m365-graph id>,
+    owner_type='service'). The mock IdP accepts any client_id + non-empty secret
+    for grant_type=client_credentials, and ENTRA_TOKEN_URL points the injector at
+    it, so this is just: store {tenant_id,client_id,client_secret} encrypted and
+    link credential_id on the tool row.
+    """
+    row = await conn.fetchrow(
+        "SELECT tool_id, COALESCE(service_name, name) AS svc FROM tool_registry "
+        "WHERE name='m365-graph' AND deleted_at IS NULL",
+    )
+    if not row:
+        log.info("m365-graph tool not found — skipping entra_client_credentials seeding")
+        return {"m365_client_credentials": "SKIPPED (tool not found)"}
+    tool_id, svc = str(row["tool_id"]), row["svc"]
+    master_bytes = bytes.fromhex(master_hex)
+    secret = json.dumps({
+        "tenant_id": os.environ.get("ENTRA_TENANT_ID", "e756f76f-bbde-4d68-903c-f8d8cda37d1a"),
+        "client_id": os.environ.get("AZURE_CLIENT_ID", "m365-lab-app"),
+        "client_secret": os.environ.get("AZURE_CLIENT_SECRET", "m365-lab-secret"),
+    })
+    blob = _encrypt_credential(
+        secret, "__service__", master_bytes,
+        service=svc, tool_id=tool_id, owner_type="service",
+    )
+    cred_id = await conn.fetchval(
+        """
+        INSERT INTO credential_store
+            (user_sub, service, tool_id, owner_type, credential_type, encrypted_blob)
+        VALUES ('__service__', $1, $2, 'service', 'entra_client_secret', $3)
+        ON CONFLICT (tool_id, service) WHERE owner_type = 'service' AND tool_id IS NOT NULL
+        DO UPDATE SET encrypted_blob = EXCLUDED.encrypted_blob, updated_at = now()
+        RETURNING id
+        """,
+        svc, tool_id, blob,
+    )
+    await conn.execute(
+        "UPDATE tool_registry SET credential_id=$1, entra_tenant_id=$2 WHERE tool_id=$3",
+        cred_id, json.loads(secret)["tenant_id"], row["tool_id"],
+    )
+    return {"m365_client_credentials": "OK"}
+
+
 async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     """
     Generate (or retrieve) a service API key for lab-mcp-self-service.
@@ -1250,6 +1299,13 @@ async def main() -> None:
         conn_m365d = await wait_for_postgres(max_wait=10)
         results.update(await seed_m365_delegated_credentials(conn_m365d, master_hex))
         await conn_m365d.close()
+
+    # 7f. Provision m365-graph app-only credential (entra_client_credentials mode,
+    # mock-idp lab flow — see seed_m365_client_credentials docstring).
+    if master_hex and results.get("tools_sql") == "OK":
+        conn_m365c = await wait_for_postgres(max_wait=10)
+        results.update(await seed_m365_client_credentials(conn_m365c, master_hex))
+        await conn_m365c.close()
 
     # 8. Seed self-service MCP API key (Task 2.2b / Task 2.5)
     log.info("Seeding lab-self-service API key...")
