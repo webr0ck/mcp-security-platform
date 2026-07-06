@@ -89,6 +89,13 @@ async def _evaluate_submission_scan(session, job, raw) -> None:
             sbom_components = CAST(:components AS jsonb),
             sbom_cyclonedx = CAST(:cyclonedx AS jsonb),
             scanned_at = now(),
+            -- CR-11/PRD-2 follow-up: a completed initial scan IS a fresh
+            -- scan for SCAN_FRESHNESS_ENFORCED purposes — without this, a
+            -- newly-approved server reads as stale (last_rescanned_at NULL)
+            -- until the periodic rescan_scheduler loop happens to reach it,
+            -- up to RESCAN_INTERVAL_HOURS later, making every freshly
+            -- onboarded server uninvocable for that whole window.
+            last_rescanned_at = now(),
             scan_commit = :commit,
             updated_at = now()
         WHERE server_id = :sid

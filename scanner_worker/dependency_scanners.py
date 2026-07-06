@@ -156,8 +156,19 @@ async def run_osv_scanner(run, repo_path: str, config: dict) -> list[dict]:
         ["osv-scanner", "--format=json", "--recursive", repo_path], timeout=timeout,
     )
     # osv-scanner exits 1 when it found vulnerabilities (not a tool error) and
-    # 0 when clean; anything else plus empty stdout is a genuine failure.
+    # 0 when clean; anything else plus empty stdout is a genuine failure —
+    # EXCEPT "no package sources found", which is osv-scanner's own way of
+    # saying the repo has zero manifests it recognizes across ANY ecosystem
+    # (e.g. a bare single-file Python script with no requirements.txt/
+    # package.json/go.mod at all). That is not incomplete coverage, it is
+    # correctly-complete coverage of an empty dependency surface — the same
+    # repo that pip-audit already reports as a benign "skipped" info finding
+    # for the Python-specific case. Treating it as review-required would
+    # force every dependency-less repo into manual review forever.
     if rc not in (0, 1) and not stdout.strip():
+        if "no package sources found" in stderr.lower():
+            logger.info("osv-scanner found no manifests of any ecosystem in %s; nothing to scan", repo_path)
+            return []
         logger.warning("osv-scanner exited %s with no output (stderr=%s)", rc, stderr[-300:])
         return [_dep_finding(
             scanner="osv-scanner", ecosystem=None, package=None, version=None, vuln_id=None,

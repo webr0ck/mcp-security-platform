@@ -91,6 +91,32 @@ def test_osv_scanner_unparseable_json_forces_review_required():
     assert findings[0]["block"] is False
 
 
+def test_osv_scanner_no_package_sources_is_clean_not_review_required():
+    """A repo with zero manifests of any ecosystem (e.g. a bare single-file
+    script) makes osv-scanner exit non-zero with no JSON output and a
+    "No package sources found" stderr message. That's correctly-complete
+    coverage of an empty dependency surface, not incomplete coverage — it
+    must resolve the same way pip-audit's own no-manifest case does (a clean
+    result), never review_required."""
+    with patch("shutil.which", return_value="/usr/bin/osv-scanner"):
+        findings = _run(ds.run_osv_scanner(
+            _run_returning(128, "", "No package sources found, --help for usage information."),
+            "/repo", _CFG,
+        ))
+    assert findings == []
+
+
+def test_osv_scanner_genuine_crash_still_forces_review_required():
+    """A non-zero exit with empty output and no "no package sources found"
+    marker is a real tool failure and must still force review-required."""
+    with patch("shutil.which", return_value="/usr/bin/osv-scanner"):
+        findings = _run(ds.run_osv_scanner(
+            _run_returning(2, "", "panic: unexpected fatal error"), "/repo", _CFG,
+        ))
+    assert len(findings) == 1
+    assert findings[0]["review_required"] is True
+
+
 # ---------------------------------------------------------------------------
 # npm audit
 # ---------------------------------------------------------------------------
