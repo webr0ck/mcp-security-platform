@@ -36,6 +36,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 : "${PROXY_DB_PASSWORD:?PROXY_DB_PASSWORD environment variable is required}"
 : "${COMPLIANCE_DB_PASSWORD:?COMPLIANCE_DB_PASSWORD environment variable is required}"
+: "${SCANNER_WORKER_DB_PASSWORD:?SCANNER_WORKER_DB_PASSWORD environment variable is required}"
 
 # ---------------------------------------------------------------------------
 # Connection defaults
@@ -79,6 +80,7 @@ check_role_exists() {
 
 check_role_exists "proxy_app"
 check_role_exists "compliance_checker_app"
+check_role_exists "scanner_worker_app"
 
 # ---------------------------------------------------------------------------
 # Set passwords via ALTER ROLE (passwords never written to disk or logged)
@@ -99,6 +101,11 @@ psql <<SQL
 ALTER ROLE compliance_checker_app PASSWORD '${COMPLIANCE_DB_PASSWORD}';
 SQL
 
+echo "[init-db-roles] Setting password for scanner_worker_app..."
+psql <<SQL
+ALTER ROLE scanner_worker_app PASSWORD '${SCANNER_WORKER_DB_PASSWORD}';
+SQL
+
 # ---------------------------------------------------------------------------
 # Verify connectivity with each application role
 # ---------------------------------------------------------------------------
@@ -108,6 +115,10 @@ PGUSER="proxy_app" PGPASSWORD="${PROXY_DB_PASSWORD}" \
 
 echo "[init-db-roles] Verifying compliance_checker_app can connect..."
 PGUSER="compliance_checker_app" PGPASSWORD="${COMPLIANCE_DB_PASSWORD}" \
+    psql -c "SELECT current_user, current_database();" 1>/dev/null
+
+echo "[init-db-roles] Verifying scanner_worker_app can connect..."
+PGUSER="scanner_worker_app" PGPASSWORD="${SCANNER_WORKER_DB_PASSWORD}" \
     psql -c "SELECT current_user, current_database();" 1>/dev/null
 
 echo "[init-db-roles] Role passwords set and connectivity verified."
