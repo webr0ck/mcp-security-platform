@@ -254,6 +254,20 @@ class Settings(BaseSettings):
     def kc_token_exchange_allowed_audiences_parsed(self) -> frozenset[str]:
         return frozenset(a.strip() for a in self.KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES.split(",") if a.strip())
 
+    # WP-A2 (CR-13): scope-SET allowlist for service_account mode's `scope`
+    # field (e.g. "openid"). Deliberately SEPARATE from
+    # KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES above — service_account's scope is a
+    # different validation shape (a set of OIDC scope strings) than
+    # kc_token_exchange's audience (a single opaque string). Defaults to the
+    # standard OIDC scopes every existing lab service_account tool already
+    # uses (lab-gitea, lab-grafana-mcp, lab-wazuh), so unset behavior is
+    # unchanged. Comma-separated.
+    SERVICE_ACCOUNT_ALLOWED_SCOPES: str = "openid,profile,email"
+
+    @property
+    def service_account_allowed_scopes_parsed(self) -> frozenset[str]:
+        return frozenset(s.strip() for s in self.SERVICE_ACCOUNT_ALLOWED_SCOPES.split(",") if s.strip())
+
     # =========================================================================
     # MinIO / S3
     # =========================================================================

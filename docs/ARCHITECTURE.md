@@ -185,13 +185,31 @@ Triggered by `invoke_tool()` when a tool's `injection_mode != none`. Crypto, per
   (alias `oauth_user_token`, RFC 8693), `entra_client_credentials` active; `passthrough` /
   `entra_user_token` exist in code but aren't settable via the admin API **(roadmap)**. An unknown
   mode **fails closed**.
-  `kc_token_exchange`'s proxy-side audience allowlist (Codex review CR-03, partially fixed) is
-  `KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES` (comma-separated env setting, default `lab-tickets`) —
-  previously a hardcoded Python-literal frozenset, which meant onboarding any new same-IdP
-  audience required a code change and redeploy. Still deliberately config/env-driven, not
-  DB-driven, so a malicious/buggy `server_registry` row cannot widen the mint. **Open**: no
-  per-server `approved_token_audience`/`approved_token_scopes` columns, no requested-vs-approved
-  reviewer UI, no full exchanged-token actor/delegation claim verification.
+  `kc_token_exchange`'s proxy-side audience allowlist (Codex review CR-03) is now two-layered
+  (WP-A2, `services/oauth_policy.py`): the **enforced per-server value** is
+  `server_registry.approved_token_audience`, set only by the admin `/approve` endpoint (never by
+  the submitter); `KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES` (comma-separated env setting, default
+  `lab-tickets`) remains as an outer/bootstrap ceiling — both must agree for a token exchange to
+  proceed. `tool_registry.kc_token_audience` (the value the dispatcher actually reads) is written
+  at tool-discovery time exclusively from `approved_token_audience`, never from the
+  submitter-requested `upstream_idp_config`, so the runtime dispatch path structurally cannot see
+  an unreviewed audience. Requested-vs-approved is surfaced via
+  `GET /api/v1/submissions/{id}` (`upstream_idp_config` vs `approved_upstream_idp_config` /
+  `approved_token_audience` / `approved_oauth_scopes`). **Open**: full exchanged-token
+  actor/delegation claim verification remains **(roadmap)**.
+- **OAuth/IdP policy engine (Codex review CR-13, WP-A2)**: `oauth_provider_policy` table
+  (issuer+tenant → allowed/blocked scopes, redirect patterns, client-auth methods, risk ceiling)
+  governs the scope-shaped dimension for `entra_client_credentials`/`entra_user_token` at
+  approval time (`services/oauth_policy.validate_requested_config`); an unknown issuer or a
+  scope outside the matching policy row's `allowed_scopes` (or explicitly `blocked_scopes`)
+  fails closed (422) at `/approve`. High-risk scopes (`write`, `admin`, `mail`, `files`,
+  `offline_access`) additionally require the reviewer to set `high_risk_scopes_approved=true`
+  in the same request — recorded as `server_registry.high_risk_scopes_approved_by`/`_at`.
+  `service_account` mode's `scope` field (e.g. `openid`) is validated by a **separate**
+  scope-set allowlist (`SERVICE_ACCOUNT_ALLOWED_SCOPES`, default `openid,profile,email`) —
+  deliberately not the `kc_token_exchange` audience allowlist above; an earlier attempt to
+  reuse one mechanism for both was tried and rejected because it broke every existing
+  service_account tool (lab-gitea, lab-grafana-mcp, lab-wazuh) on their default `openid` scope.
 - Resolved token is injected as `Authorization: Bearer …` and **never logged** (redacted).
 
 ### 5.4 Tool-manifest audit (registration time only)

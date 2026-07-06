@@ -321,6 +321,60 @@ Reference implementation: `auth.py::_is_session_jti_revoked` (~L401), `_redis_jt
 - A `nonce` bound at `/login` **MUST** be validated at `/callback`; a missing stored nonce **MUST**
   be treated as reject, not skip. Reference: `oidc_browser.py` ~L515–L531.
 
+### 4.5 OAuth/IdP policy engine — requested vs approved config (CR-13, CR-03 fold-in)
+
+An onboarded server's OAuth/IdP configuration (`server_registry.upstream_idp_config`) is always
+**submitter-requested**, never directly enforced. A separate reviewer-approved copy governs what
+the runtime actually does:
+
+- `server_registry.approved_upstream_idp_config` / `approved_token_audience` /
+  `approved_oauth_scopes` **MUST** be populated only by the admin `/approve` endpoint, after
+  policy validation (below) passes. They are never writable by the submitter.
+- All dispatch-time code (credential injection, tool discovery) **MUST** read only the
+  approved-* values — never `upstream_idp_config` directly. Reference implementation:
+  `routers/tools.py::resolve_approved_kc_token_audience` (writes `tool_registry.kc_token_audience`
+  from `approved_token_audience` at discovery time, never from the requested config);
+  `credential_broker/dispatcher.py::_inject_kc_token_exchange` then reads only that
+  already-approved value.
+
+**Two independent validation dimensions** (deliberately not collapsed into one allowlist — a
+prior attempt to do so broke every existing `service_account` tool on its default `openid`
+scope; see `services/oauth_policy.py` module docstring):
+
+1. **Scope-set dimension** — `oauth_provider_policy` table: issuer(+tenant) →
+   `allowed_scopes`/`blocked_scopes`/`allowed_redirect_patterns`/`allowed_client_auth_methods`/
+   `max_risk`. Governs `entra_client_credentials`/`entra_user_token` (and, via
+   `SERVICE_ACCOUNT_ALLOWED_SCOPES`, `service_account`'s `scope` field — a **separate**
+   allowlist from #2 below, keyed on scope tokens, not an audience string).
+   - An issuer/tenant with **no matching policy row** **MUST** fail closed (unknown issuer).
+   - A requested scope **MUST** be a subset of `allowed_scopes` and **MUST NOT** appear in
+     `blocked_scopes`. An empty `allowed_scopes` list **MUST** be read as "nothing approved
+     yet", not "anything goes".
+   - High-risk scopes — `write`, `admin`, `mail`, `files`, `offline_access` (the canonical
+     set) — **MUST** additionally require the reviewer to set
+     `high_risk_scopes_approved=true` on the `/approve` request; a policy-subset pass alone
+     is insufficient. Recorded as `server_registry.high_risk_scopes_approved_by`/`_at`.
+   - Reference implementation: `services/oauth_policy.py::validate_requested_config`,
+     invoked from `routers/submission.py::_validate_oauth_policy_at_approval`.
+2. **Audience-string dimension** — `kc_token_exchange` (RFC 8693): a single opaque audience
+   string (e.g. `lab-tickets`), not a scope set. Two gates, both enforced: the per-server
+   `approved_token_audience` (DB, reviewer-set) **MUST** equal the requested audience, **and**
+   the audience **MUST** be within the platform-wide `KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES`
+   env allowlist (outer/bootstrap ceiling; CR-03's original config-driven fix, kept as
+   defense in depth). A server with no `approved_token_audience` recorded **MUST** fail
+   closed — kc_token_exchange cannot be used until a reviewer approves it under this model.
+
+Requested-vs-approved is surfaced to reviewers via `GET /api/v1/submissions/{id}`, which
+returns both `upstream_idp_config`/`upstream_idp_type` (requested) and
+`approved_upstream_idp_config`/`approved_token_audience`/`approved_oauth_scopes`/
+`oauth_policy_id`/`high_risk_scopes_approved_by`/`_at` (approved) side by side.
+
+**Migration note**: servers already `status='approved'` before this policy engine existed are
+grandfathered — their `approved_upstream_idp_config`/`approved_token_audience`/
+`approved_oauth_scopes` were backfilled from the then-existing `upstream_idp_config` at
+migration time (V065), since they already passed human review under the pre-existing model.
+Only approvals from V065 onward go through `oauth_provider_policy` validation.
+
 ---
 
 ## 5. Browser OIDC session flow

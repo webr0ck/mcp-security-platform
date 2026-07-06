@@ -1712,6 +1712,29 @@ def resolve_kc_token_audience(injection_mode: str | None, upstream_idp_config) -
     return (cfg or {}).get("audience")
 
 
+def resolve_approved_kc_token_audience(
+    injection_mode: str | None, approved_token_audience: str | None
+) -> str | None:
+    """
+    WP-A2 (CR-13 + CR-03 fold-in): unlike resolve_kc_token_audience() above
+    (which reads the SUBMITTER-REQUESTED upstream_idp_config.audience — kept
+    only for its existing call sites/tests, never used for the live discovery
+    wiring below anymore), this reads the REVIEWER-APPROVED
+    server_registry.approved_token_audience column, set only by the admin
+    /approve endpoint after oauth_policy validation
+    (app.services.oauth_policy). Discovery time is where
+    tool_registry.kc_token_audience is written, so sourcing it from
+    approved_token_audience here — instead of the requested config — is the
+    wiring point that guarantees the runtime dispatcher
+    (credential_broker/dispatcher.py) can never see anything but a
+    reviewer-approved audience for kc_token_exchange/oauth_user_token mode.
+    """
+    mode = injection_mode or "none"
+    if mode not in ("kc_token_exchange", "oauth_user_token"):
+        return None
+    return approved_token_audience or None
+
+
 async def _run_tool_discovery(
     server_id: str,
     db: AsyncSession,
@@ -1757,7 +1780,8 @@ async def _run_tool_discovery(
             text(
                 """
                 SELECT server_id, upstream_url, service_name, status, upstream_allowlist_entry,
-                       sbom_components, github_repo_url, injection_mode, upstream_idp_config
+                       sbom_components, github_repo_url, injection_mode, upstream_idp_config,
+                       approved_token_audience
                 FROM server_registry
                 WHERE server_id = :server_id AND deleted_at IS NULL
                 LIMIT 1
@@ -1784,14 +1808,16 @@ async def _run_tool_discovery(
 
     upstream_url = server_row.upstream_url
 
-    # F-14 fix: carry the server's injection_mode onto each discovered tool, and —
-    # for kc_token_exchange mode — resolve kc_token_audience from the wizard's
-    # upstream_idp_config.audience. This is the wiring that was previously
-    # entirely missing: the wizard wrote server_registry.upstream_idp_config but
-    # nothing ever copied it onto tool_registry.kc_token_audience, the column the
-    # runtime dispatcher actually reads (credential_broker/dispatcher.py).
+    # F-14 fix (superseded by WP-A2/CR-13+CR-03): carry the server's
+    # injection_mode onto each discovered tool, and — for kc_token_exchange
+    # mode — resolve kc_token_audience from the REVIEWER-APPROVED
+    # approved_token_audience column (never the submitter-requested
+    # upstream_idp_config directly — that was the exact CR-13/CR-03 gap: an
+    # unreviewed submitter value flowing straight to the runtime dispatcher).
     _server_injection_mode = server_row.injection_mode or "none"
-    _kc_audience = resolve_kc_token_audience(_server_injection_mode, server_row.upstream_idp_config)
+    _kc_audience = resolve_approved_kc_token_audience(
+        _server_injection_mode, server_row.approved_token_audience
+    )
 
     # N3 fix: SSRF re-validation at call time (closes DNS-rebind window).
     # Step 2a: Static SSRF allowlist check.

@@ -646,10 +646,29 @@ async def _inject_service_account_token(
             "refusing to forward unauthenticated request"
         )
 
+    sa_scope = tool_record.get("kc_token_audience") or "openid"
+
+    # WP-A2 (CR-13): scope-SET validation, independent of kc_token_exchange's
+    # audience-string allowlist below (see oauth_policy module docstring —
+    # collapsing these into one allowlist previously broke every
+    # service_account tool, including this one).
+    from app.services.oauth_policy import validate_service_account_scope, ServiceAccountScopeViolation
+    from app.core.config import get_settings as _get_sa_settings
+
+    try:
+        validate_service_account_scope(
+            sa_scope, allowed_scopes=_get_sa_settings().service_account_allowed_scopes_parsed
+        )
+    except ServiceAccountScopeViolation as exc:
+        raise CredentialInjectionError(
+            f"service_account mode: scope {sa_scope!r} rejected for tool "
+            f"{tool_record.get('tool_id')}: {exc}"
+        ) from exc
+
     token = await get_service_account_token(
         client_id=kc_client_id,
         client_secret=client_secret.strip(),
-        scope=tool_record.get("kc_token_audience") or "openid",
+        scope=sa_scope,
     )
 
     if not token:
@@ -699,7 +718,13 @@ async def _inject_kc_token_exchange(
         )
 
     # S-6(b) / CR-03: proxy-side audience allowlist, config-driven — see the
-    # module-level comment above _inject_kc_token_exchange's imports.
+    # module-level comment above _inject_kc_token_exchange's imports. This is
+    # the outer/bootstrap ceiling; the per-server enforced value is
+    # server_registry.approved_token_audience, which is never read here
+    # directly — WP-A2 instead enforces it at the point tool_registry.kc_token_audience
+    # is WRITTEN (tools.py discover-tools, sourced from approved_token_audience,
+    # never from the submitter-requested upstream_idp_config). By construction,
+    # `audience` here can only ever be a value a reviewer approved.
     from app.core.config import get_settings as _get_kc_settings
     _allowed_audiences = _get_kc_settings().kc_token_exchange_allowed_audiences_parsed
     if audience not in _allowed_audiences:

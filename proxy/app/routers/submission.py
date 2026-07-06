@@ -31,6 +31,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, HttpUrl, field_validator
 from sqlalchemy import text
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.database import AsyncSessionLocal
 from app.services.admin_audit import emit_admin_config_event
 from app.services.scaffold_generator import generate_prompts, generate_scaffold
@@ -199,6 +201,17 @@ class DraftUpdate(BaseModel):
 
 class ReviewAction(BaseModel):
     notes: str = ""
+    # WP-A2 (CR-13 + CR-03 fold-in): explicit reviewer acknowledgement that
+    # high-risk scopes (write/admin/mail/files/offline_access) were reviewed
+    # and are intentionally approved. Approval-time validation rejects any
+    # submission requesting a high-risk scope unless this is true — a
+    # policy-subset pass alone is not sufficient for those scopes.
+    high_risk_scopes_approved: bool = False
+    # Optional reviewer override of the approved kc_token_exchange audience /
+    # scopes; when omitted, the requested upstream_idp_config values are used
+    # as-is (still subject to oauth_policy validation below).
+    approved_token_audience: Optional[str] = None
+    approved_token_scopes: Optional[list[str]] = None
 
 
 # ── Self-service endpoints ────────────────────────────────────────────────────
@@ -372,6 +385,18 @@ async def get_submission(server_id: str, request: Request) -> JSONResponse:
         "github_repo_url": safe.get("github_repo_url"),
         "review_notes": safe.get("review_notes"),
         "github_clone_account": GITHUB_CLONE_ACCOUNT,
+        # WP-A2 (CR-13 + CR-03 fold-in): requested-vs-approved OAuth/IdP config
+        # surfacing. upstream_idp_config/upstream_idp_type are the
+        # submitter-REQUESTED values; the approved_* fields are reviewer-set
+        # (null until /approve runs the oauth_policy gate).
+        "upstream_idp_type": safe.get("upstream_idp_type"),
+        "upstream_idp_config": safe.get("upstream_idp_config"),
+        "approved_upstream_idp_config": safe.get("approved_upstream_idp_config"),
+        "approved_token_audience": safe.get("approved_token_audience"),
+        "approved_oauth_scopes": list(safe.get("approved_oauth_scopes") or []),
+        "oauth_policy_id": safe.get("oauth_policy_id"),
+        "high_risk_scopes_approved_by": safe.get("high_risk_scopes_approved_by"),
+        "high_risk_scopes_approved_at": safe.get("high_risk_scopes_approved_at"),
     })
 
 
@@ -461,12 +486,128 @@ async def list_review_queue(request: Request) -> JSONResponse:
     return JSONResponse({"submissions": [_json_safe(dict(r._mapping)) for r in rows]})
 
 
+_OAUTH_EXCHANGE_MODES = ("kc_token_exchange", "oauth_user_token")
+_OAUTH_ISSUER_MODES = ("entra_client_credentials", "entra_user_token")
+
+
+def _parse_idp_config(raw: Any) -> dict | None:
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def _validate_oauth_policy_at_approval(
+    session: AsyncSession,
+    sub: dict[str, Any],
+    body: "ReviewAction",
+) -> dict[str, Any]:
+    """
+    WP-A2 (CR-13 + CR-03 fold-in): approval-time OAuth/IdP policy gate.
+
+    Returns a dict of columns to persist alongside submission_status:
+      approved_upstream_idp_config, approved_token_audience,
+      approved_token_scopes (persisted to the approved_oauth_scopes TEXT[]
+      column), oauth_policy_id, high_risk_scopes_approved_by,
+      high_risk_scopes_approved_at.
+
+    All values are None/empty when the submission has no OAuth/IdP config to
+    approve (service/user/service_account/basic_auth/none modes) — nothing to
+    validate, nothing changes for those submissions.
+
+    Raises HTTPException(422) — fail-closed — on any policy violation:
+    unknown issuer, overbroad/blocked scope, high-risk scope without explicit
+    ack, disallowed redirect/client-auth-method, or an unapproved
+    kc_token_exchange audience.
+    """
+    from app.services import oauth_policy
+
+    result: dict[str, Any] = {
+        "approved_upstream_idp_config": None,
+        "approved_token_audience": None,
+        "approved_token_scopes": [],
+        "oauth_policy_id": None,
+        # NOTE: this is a bool marker, not the reviewer identity — the caller
+        # (approve_submission) substitutes the actual reviewer sub only when
+        # this is truthy, so the reviewer identity is always read from the
+        # authenticated request, never from anything derived here.
+        "high_risk_scopes_approved_by": False,
+    }
+
+    effective_mode = sub.get("injection_mode") or sub.get("default_injection_mode") or "none"
+    requested_config = _parse_idp_config(sub.get("upstream_idp_config"))
+
+    if effective_mode in _OAUTH_EXCHANGE_MODES:
+        # Audience-STRING dimension (RFC 8693) — a completely different shape
+        # than the scope-set dimension below; see oauth_policy module docstring.
+        requested_audience = (requested_config or {}).get("audience") or body.approved_token_audience
+        if not requested_audience:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "OAUTH_POLICY_VIOLATION", "message": "kc_token_exchange mode requires an audience to approve"},
+            )
+        from app.core.config import get_settings as _get_kc_settings
+        env_allowed = _get_kc_settings().kc_token_exchange_allowed_audiences_parsed
+        if requested_audience not in env_allowed:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "OAUTH_POLICY_VIOLATION",
+                    "message": f"audience {requested_audience!r} not in platform KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES ceiling {sorted(env_allowed)}",
+                },
+            )
+        result["approved_upstream_idp_config"] = requested_config
+        result["approved_token_audience"] = body.approved_token_audience or requested_audience
+        return result
+
+    if effective_mode in _OAUTH_ISSUER_MODES:
+        # Scope-SET dimension — issuer/tenant-scoped oauth_provider_policy row.
+        if not requested_config:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "OAUTH_POLICY_VIOLATION", "message": f"{effective_mode} mode requires upstream_idp_config to approve"},
+            )
+        try:
+            validated = await oauth_policy.validate_requested_config(
+                session,
+                upstream_idp_config=requested_config,
+                high_risk_scopes_approved=body.high_risk_scopes_approved,
+            )
+        except oauth_policy.OAuthPolicyError as exc:
+            raise HTTPException(status_code=422, detail={"code": "OAUTH_POLICY_VIOLATION", "message": str(exc)}) from exc
+
+        result["approved_upstream_idp_config"] = requested_config
+        result["approved_token_scopes"] = (
+            body.approved_token_scopes if body.approved_token_scopes is not None else validated.approved_scopes
+        )
+        result["oauth_policy_id"] = validated.policy.id
+        result["high_risk_scopes_approved_by"] = bool(validated.high_risk_scopes)
+        return result
+
+    # Not an OAuth/IdP-governed mode: nothing to validate/approve.
+    return result
+
+
 @router.post("/api/v1/admin/submissions/{server_id}/approve")
 async def approve_submission(server_id: str, body: ReviewAction, request: Request) -> JSONResponse:
     """Approve submission — repo path moves to approved_pending_url (submitter still
     supplies the running URL); no-code path (F-15) has no URL to ever supply, so it
     goes straight to the terminal 'scaffold_ready' state instead — never
-    approved_pending_url, never "active"/"running" language."""
+    approved_pending_url, never "active"/"running" language.
+
+    WP-A2 (CR-13 + CR-03 fold-in): this is also the single reviewer gate where
+    requested OAuth/IdP config (server_registry.upstream_idp_config,
+    submitter-controlled) is validated against oauth_provider_policy and, if
+    it passes, copied into the approved_* columns that dispatch-time code
+    actually reads. A policy violation blocks approval entirely (422) — the
+    submission stays 'awaiting_review' until re-submitted with a compliant
+    config or a policy row is added by an admin.
+    """
     _require_submission_reviewer(request)
     reviewer = _client_id(request)
     sub = await _get_submission(server_id)
@@ -483,18 +624,42 @@ async def approve_submission(server_id: str, body: ReviewAction, request: Reques
     new_status = "approved_pending_url" if sub.get("github_repo_url") else "scaffold_ready"
 
     async with AsyncSessionLocal() as session:
+        oauth_approval = await _validate_oauth_policy_at_approval(session, sub, body)
+        high_risk_by = reviewer if oauth_approval.get("high_risk_scopes_approved_by") else None
         await session.execute(text("""
             UPDATE server_registry
             SET submission_status = :new_status,
                 review_notes = :notes,
                 reviewed_by = :reviewer,
                 reviewed_at = now(),
-                updated_at = now()
+                updated_at = now(),
+                approved_upstream_idp_config = CAST(:approved_idp_config AS jsonb),
+                approved_token_audience = :approved_token_audience,
+                approved_oauth_scopes = :approved_oauth_scopes,
+                oauth_policy_id = CAST(:oauth_policy_id AS uuid),
+                high_risk_scopes_approved_by = :high_risk_by,
+                high_risk_scopes_approved_at = CASE WHEN :high_risk_by IS NOT NULL THEN now() ELSE high_risk_scopes_approved_at END
             WHERE server_id = :sid
-        """), {"notes": body.notes, "reviewer": reviewer, "sid": server_id, "new_status": new_status})
+        """), {
+            "notes": body.notes, "reviewer": reviewer, "sid": server_id, "new_status": new_status,
+            "approved_idp_config": json.dumps(oauth_approval["approved_upstream_idp_config"]) if oauth_approval["approved_upstream_idp_config"] is not None else None,
+            "approved_token_audience": oauth_approval["approved_token_audience"],
+            # approved_oauth_scopes is TEXT[] (pre-existing V014 column, now wired
+            # up) — a plain Python list binds directly, same pattern as
+            # data_categories elsewhere in this file.
+            "approved_oauth_scopes": oauth_approval["approved_token_scopes"] or [],
+            "oauth_policy_id": oauth_approval["oauth_policy_id"],
+            "high_risk_by": high_risk_by,
+        })
         await session.commit()
     await emit_admin_config_event(
-        reviewer, "submission_approve", server_id, {"notes": body.notes, "submission_status": new_status},
+        reviewer, "submission_approve", server_id,
+        {
+            "notes": body.notes,
+            "submission_status": new_status,
+            "oauth_policy_id": oauth_approval.get("oauth_policy_id"),
+            "high_risk_scopes_approved_by": high_risk_by,
+        },
     )
     return JSONResponse({"server_id": server_id, "submission_status": new_status})
 
