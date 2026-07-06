@@ -110,7 +110,18 @@ set +a
 log_ok ".env.lab validated"
 
 # ── Step 3: Optional reset ───────────────────────────────────────────────────
-LAB_COMPOSE="podman compose -f docker-compose.yml -f docker-compose.dev.yml -f podman-compose.lab.yml"
+# `podman-compose` (the standalone Python tool), NOT `podman compose` (the
+# built-in subcommand) — on this environment `podman compose` shells out to an
+# external `/usr/local/bin/docker-compose` v2 binary as a "compose provider",
+# which has repeatedly mishandled this repo's compose files during a real
+# from-scratch boot: seccomp security_opt paths get corrupted into
+# "file name too long" errors, external-network declarations get treated
+# inconsistently across -f file merges, and same-named x-* extension fields
+# get merged in ways that produce self-conflicting pids_limit/deploy.resources
+# values. `podman-compose` does not exhibit any of these — Makefile.lab's
+# LAB_COMPOSE already correctly uses it; this was the one place still using
+# the buggy alternative.
+LAB_COMPOSE="podman-compose --env-file .env.lab -f docker-compose.yml -f docker-compose.dev.yml -f podman-compose.lab.yml"
 
 if [[ "${DO_RESET}" == "true" ]]; then
     log "Step 3: Resetting lab (destroying volumes)"
