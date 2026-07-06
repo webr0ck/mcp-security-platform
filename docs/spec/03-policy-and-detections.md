@@ -40,7 +40,7 @@ an error at a stage denies the call (or 503s), never allows it.
 | 2 | **RBAC** | Platform role resolved from `role_assignments` (latest-event-wins, append-only). | `middleware/auth.py::_load_roles`, `middleware/rbac.py` |
 | 3 | **Quarantine / status gate (INV-005)** | Tool `status ∈ {disabled, quarantined, deprecated}` ⇒ deny **pre-policy, pre-OPA**, with **no admin exception**. | `invocation.py` Step 1 |
 | 3a | Debug/maintenance gate | Server in `debug_mode` ⇒ only `owner_sub` + `maintainers` may invoke; no role bypass; DB error ⇒ fail-closed deny. | `invocation.py` Step 1.1 |
-| 3b | Scan-freshness gate | If `SCAN_FRESHNESS_ENFORCED`, stale/never-scanned server ⇒ deny (audited). Default warn-only. | `invocation.py` Step 1.2 |
+| 3b | Scan-freshness gate | If `SCAN_FRESHNESS_ENFORCED`, stale/never-scanned server ⇒ deny (audited). Default enforced (`true`) as of 2026-07-06 (PRD-2); lookup errors always fail closed regardless of the flag. | `invocation.py` Step 1.2 |
 | 4 | **Entitlement (discovery==invoke)** | Server-linked tool ⇒ caller **MUST** be entitled to that `server_id` via the same resolver used for discovery; **no role exception** (admin included). Unlinked tools skip this. | `invocation.py` Step 1.5, `services/entitlement.py::enforce_tool_entitlement` |
 | 5 | **Taint floor** | Biba-style integrity floor (see §5); fail-closed; only active when `TAINT_FLOOR_ENABLED`. | `invocation.py` Step 1.6, `services/taint_floor.py` |
 | 6 | **Anomaly heuristic (advisory input)** | Static score computed and threaded into OPA input; a failure defaults the score to `0.0` and **MUST NOT** block. | `invocation.py` Step 2, `services/anomaly.py` |

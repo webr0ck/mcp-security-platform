@@ -165,12 +165,13 @@ class Settings(BaseSettings):
     # SCAN_MAX_AGE_HOURS: how old last_rescanned_at may be before a server is
     # considered stale.  Default 168 h (7 days).
     # SCAN_FRESHNESS_ENFORCED: when True, a stale or never-rescanned server
-    # blocks calls at invocation time.  Default False (warn-only) so existing
-    # labs keep working until the rescan loop has run at least once.
+    # blocks calls at invocation time.  Default True (fail closed) — the
+    # rescan loop is proven and all lab servers carry a fresh
+    # last_rescanned_at (PRD-2 / CR-11 remainder, 2026-07-06).
     # RESCAN_INTERVAL_HOURS: how often the background loop re-checks all
     # approved servers.  Default 24 h.
     SCAN_MAX_AGE_HOURS: int = 168
-    SCAN_FRESHNESS_ENFORCED: bool = False
+    SCAN_FRESHNESS_ENFORCED: bool = True
     RESCAN_INTERVAL_HOURS: int = 24
 
     # CR-08: POST /api/v1/servers (self-service direct registration) skips the
