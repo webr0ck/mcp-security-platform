@@ -82,6 +82,7 @@ async def test_entra_client_credentials_reads_from_vault():
     tool_record = {
         "tool_id": tool_id,
         "name": "entra-graph-tool",
+        "service_name": "entra",
         "injection_mode": "entra_client_credentials",
         "credential_id": credential_id,
         "inject_header": "Authorization",

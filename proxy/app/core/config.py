@@ -370,6 +370,12 @@ class Settings(BaseSettings):
     ENTRA_TENANT_ID: str = ""
     ENTRA_REDIRECT_URI: str = "https://localhost/auth/callback/m365"
     ENTRA_SCOPES: str = "Mail.Read Calendars.Read"
+    # Optional explicit endpoint overrides. Empty (default) = derive the real
+    # login.microsoftonline.com URLs from ENTRA_TENANT_ID. The lab points these
+    # at lab-mock-idp so entra_user_token works without a real Entra tenant
+    # (PRD-0002 Case 1 mock flow).
+    ENTRA_TOKEN_URL: str = ""
+    ENTRA_AUTH_URL: str = ""
 
     @property
     def entra_scopes_list(self) -> list[str]:
@@ -377,11 +383,11 @@ class Settings(BaseSettings):
 
     @property
     def entra_token_url(self) -> str:
-        return f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/token"
+        return self.ENTRA_TOKEN_URL or f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/token"
 
     @property
     def entra_auth_url(self) -> str:
-        return f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/authorize"
+        return self.ENTRA_AUTH_URL or f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/authorize"
 
     # =========================================================================
     # Credential Broker — Bitbucket

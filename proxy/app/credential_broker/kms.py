@@ -1,19 +1,15 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
-import os
 import re
 
 import httpx
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = logging.getLogger(__name__)
 
 # Envelope encryption constants
-_NONCE_SIZE = 12  # 96-bit nonce for AES-GCM
-_KEK_SIZE = 32    # 256-bit KEK for AES-256-GCM
+_KEK_SIZE = 32    # 256-bit master secret for AES-256-GCM (approach_a derives per-blob KEKs)
 
 
 class KMSError(Exception):
@@ -95,52 +91,9 @@ async def load_master_secret_standalone() -> bytes:
     return await client.get_master_secret(settings.BROKER_MASTER_SECRET_PATH)
 
 
-def envelope_encrypt(plaintext: str, kek: bytes) -> tuple[bytes, bytes]:
-    """
-    AES-256-GCM envelope encryption of plaintext credential data.
-
-    Args:
-        plaintext: JSON or plaintext string to encrypt
-        kek: 32-byte Key Encryption Key from Vault
-
-    Returns:
-        (nonce, ciphertext) tuple where nonce is 12 bytes and ciphertext
-        includes the authentication tag appended by AESGCM.
-
-    Raises:
-        ValueError: if kek is not 32 bytes
-    """
-    if len(kek) != _KEK_SIZE:
-        raise ValueError(f"KEK must be {_KEK_SIZE} bytes; got {len(kek)}")
-
-    nonce = os.urandom(_NONCE_SIZE)
-    cipher = AESGCM(kek)
-    # Encrypt plaintext; AESGCM appends the 16-byte auth tag automatically
-    ciphertext = cipher.encrypt(nonce, plaintext.encode("utf-8"), None)
-    return nonce, ciphertext
-
-
-def envelope_decrypt(ciphertext: bytes, nonce: bytes, kek: bytes) -> str:
-    """
-    AES-256-GCM envelope decryption of encrypted credential data.
-
-    Args:
-        ciphertext: encrypted data (includes the 16-byte auth tag)
-        nonce: 12-byte nonce used during encryption
-        kek: 32-byte Key Encryption Key from Vault
-
-    Returns:
-        Decrypted plaintext string.
-
-    Raises:
-        ValueError: if kek or nonce are wrong size
-        cryptography.exceptions.InvalidTag: if ciphertext is tampered or wrong KEK
-    """
-    if len(kek) != _KEK_SIZE:
-        raise ValueError(f"KEK must be {_KEK_SIZE} bytes; got {len(kek)}")
-    if len(nonce) != _NONCE_SIZE:
-        raise ValueError(f"Nonce must be {_NONCE_SIZE} bytes; got {len(nonce)}")
-
-    cipher = AESGCM(kek)
-    plaintext_bytes = cipher.decrypt(nonce, ciphertext, None)
-    return plaintext_bytes.decode("utf-8")
+# envelope_encrypt/envelope_decrypt were deleted (credential write/read interop
+# fix): they implemented a SECOND ciphertext codec (nonce||ct, raw KEK, no AAD)
+# that was incompatible with approach_a's salt||nonce||ct format used by every
+# writer, so credential_storage.retrieve_credential hit InvalidTag on anything
+# the admin path stored. There is exactly ONE credential codec now:
+# app.credential_broker.approaches.approach_a.encrypt/decrypt.

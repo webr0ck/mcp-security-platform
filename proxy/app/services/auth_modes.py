@@ -73,7 +73,7 @@ AUTH_MODES: dict[AuthMode, AuthModeInfo] = {
     AuthMode.BASIC_AUTH: AuthModeInfo(
         "Basic auth",
         "Shared or per-user HTTP Basic auth (RFC 7617).",
-        "roadmap",  # CR-05: no dispatcher branch exists; needs a product decision first
+        "supported",  # CR-05: dispatcher branch InjectionMode.BASIC_AUTH (_inject_basic_auth)
     ),
     AuthMode.USER_BEARER: AuthModeInfo(
         "Per-user identity (no credential injection)",

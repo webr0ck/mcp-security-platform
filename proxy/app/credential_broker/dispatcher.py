@@ -6,6 +6,8 @@ Routes credential injection to the correct approach based on tool.injection_mode
   none                      — no-op; upstream called without injected credentials
   service                   — shared service credential (API key or client secret)
   user                      — per-user credential keyed by Keycloak sub
+  basic_auth                — RFC 7617 HTTP Basic; stored {"username","secret"} JSON
+                              (shared or per-user), header built at injection time
   service_account           — Keycloak client_credentials token for the tool's KC client
   kc_token_exchange         — RFC 8693 subject token exchange WITHIN the Keycloak realm only.
                               The user's KC access token is exchanged for an upstream-audience
@@ -73,6 +75,10 @@ class InjectionMode(str, Enum):
     NONE = "none"
     SERVICE = "service"
     USER = "user"
+    # CR-05: RFC 7617 HTTP Basic. Stored as structured JSON {"username", "secret"}
+    # in credential_store (shared owner_type='service' or per-user owner_type='user');
+    # the Authorization: Basic <b64> header is built at injection time — never stored.
+    BASIC_AUTH = "basic_auth"
     SERVICE_ACCOUNT = "service_account"
     # AUTH-F11 / AUTH-R4 (Task 3.5): kc_token_exchange is the canonical name.
     # oauth_user_token is an alias kept for backwards compat with existing DB rows.
@@ -208,7 +214,12 @@ async def dispatch_credential_injection(
     # on service_name. With the submitter-controlled name fallback removed, an
     # unset service_name must NOT silently proceed — refuse rather than risk
     # resolving under an unintended/attacker-influenced key.
-    if mode in (InjectionMode.SERVICE, InjectionMode.USER, InjectionMode.ENTRA_USER_TOKEN) and not service_name:
+    if mode in (
+        InjectionMode.SERVICE,
+        InjectionMode.USER,
+        InjectionMode.BASIC_AUTH,
+        InjectionMode.ENTRA_USER_TOKEN,
+    ) and not service_name:
         raise CredentialInjectionError(
             f"injection_mode='{mode.value}' requires an approval-set service_name; none configured "
             f"for tool {tool_id}. Fail-closed (CRITICAL-1) — the tool name is no longer a credential key."
@@ -233,6 +244,14 @@ async def dispatch_credential_injection(
                 service_name=service_name,
                 inject_header=inject_header,
                 inject_prefix=inject_prefix,
+            )
+
+        case InjectionMode.BASIC_AUTH:
+            return await _inject_basic_auth(
+                tool_id=tool_id,
+                user_sub=client_id,
+                service_name=service_name,
+                inject_header=inject_header,
             )
 
         case InjectionMode.SERVICE_ACCOUNT:
@@ -367,6 +386,85 @@ async def _inject_user_credential(
         )
     token = plaintext.strip()
     return {inject_header: f"{inject_prefix} {token}".strip()}
+
+
+async def _inject_basic_auth(
+    tool_id: str | None,
+    user_sub: str | None,
+    service_name: str,
+    inject_header: str,
+) -> dict[str, str]:
+    """
+    RFC 7617 HTTP Basic injection (CR-05).
+
+    The stored secret is structured JSON {"username": ..., "secret": ...}
+    (written by admin_credentials / credential_storage with the shared
+    approach_a codec) — NEVER a prebuilt header. The Authorization value is
+    assembled here, at injection time: "Basic " + base64(username:secret).
+
+    Resolution: a per-user row (owner_type='user', keyed by the caller's sub)
+    wins over the shared service row (owner_type='service'). Fail-closed when
+    neither exists. inject_prefix is intentionally ignored — RFC 7617 mandates
+    the "Basic" scheme; only the header NAME is overridable.
+
+    REDACTION: neither username:secret nor its base64 form may ever appear in
+    logs, audit rows, or exception messages raised from here.
+    """
+    import base64
+
+    from app.credential_broker.approaches.approach_a import decrypt_credential
+
+    plaintext: str | None = None
+    try:
+        if user_sub:
+            plaintext = await decrypt_credential(
+                user_sub=user_sub,
+                service=service_name,
+                tool_id=tool_id,
+                owner_type="user",
+            )
+        if not plaintext:
+            plaintext = await decrypt_credential(
+                user_sub="__service__",
+                service=service_name,
+                tool_id=tool_id,
+                owner_type="service",
+            )
+    except Exception as exc:
+        raise CredentialInjectionError(
+            f"basic_auth credential decryption raised for {service_name}/{tool_id}: "
+            f"{type(exc).__name__}"
+        ) from exc
+
+    if not plaintext:
+        raise ServiceCredentialMissingError(service=service_name, tool_id=tool_id)
+
+    try:
+        data = json.loads(plaintext)
+        username = data["username"]
+        secret = data["secret"]
+        if not isinstance(username, str) or not isinstance(secret, str) or not username:
+            raise KeyError("username/secret")
+    except Exception:
+        # Deliberately NO exception chaining and NO payload excerpt — the
+        # decrypted plaintext must never leak through an error message.
+        raise CredentialInjectionError(
+            f"basic_auth credential for service '{service_name}' is not the structured "
+            '{"username", "secret"} JSON payload; re-provision it (fail-closed).'
+        ) from None
+    finally:
+        plaintext = None
+
+    if ":" in username:
+        # RFC 7617 §2: the user-id must not contain a colon (it would be
+        # indistinguishable from the password separator).
+        raise CredentialInjectionError(
+            f"basic_auth credential for service '{service_name}' has a colon in the "
+            "username, which RFC 7617 forbids; re-provision it (fail-closed)."
+        )
+
+    b64 = base64.b64encode(f"{username}:{secret}".encode("utf-8")).decode("ascii")
+    return {inject_header: f"Basic {b64}"}
 
 
 async def _inject_service_account_token(
@@ -563,12 +661,16 @@ async def _inject_entra_client_credentials(
             "cannot retrieve credential from credential_store"
         )
 
-    # Step 3: Retrieve encrypted credential from credential_store
+    # Step 3: Retrieve encrypted credential from credential_store.
+    # Context tuple MUST match what admin_credentials.upload_credential wrote
+    # (user_sub="__service__", service=tool.service_name or tool.name, tool_id,
+    # owner_type="service") — the AAD binds decryption to these exact values.
+    cred_service = tool_record.get("service_name") or tool_record.get("name") or ""
     try:
         credential_dict = await retrieve_credential(
             credential_id=credential_id,
             user_sub="__service__",  # Service-owned credential
-            service="entra",
+            service=cred_service,
             tool_id=tool_record.get("tool_id"),
             owner_type="service",
             vault_client=vault_client,

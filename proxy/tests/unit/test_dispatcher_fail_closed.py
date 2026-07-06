@@ -9,8 +9,8 @@ Invariants:
     never return an empty headers dict.
   - A recognised InjectionMode that has no match-arm handler must also raise
     CredentialInjectionError, never silently fall through to return {}.
-  - basic_auth is intentionally unsupported (DB enum entry retained; no
-    migration needed). It must raise, not pass through.
+  - basic_auth is now a SUPPORTED mode (CR-05, V061 migration) — see
+    test_dispatcher_basic_auth.py for its own fail-closed coverage.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ async def test_unknown_injection_mode_raises():
     CredentialInjectionError with 'unsupported injection_mode' in the message.
     Previously returned {} — which silently forwarded an unauthenticated call.
     """
-    tool = {"tool_id": "t-1", "injection_mode": "basic_auth", "service_name": "x"}
+    tool = {"tool_id": "t-1", "injection_mode": "ntlm", "service_name": "x"}
     with pytest.raises(CredentialInjectionError, match="unsupported injection_mode"):
         await dispatch_credential_injection(tool, client_id="agent-001")
 

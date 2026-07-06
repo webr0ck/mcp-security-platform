@@ -34,7 +34,9 @@ def test_is_self_service_selectable_matches_supported_status():
         assert is_self_service_selectable(mode) == expected
 
 
-@pytest.mark.parametrize("mode", ["passthrough", "basic_auth",
+# basic_auth left this list with CR-05: it now has a dispatcher branch
+# (_inject_basic_auth) and is status="supported"/selectable.
+@pytest.mark.parametrize("mode", ["passthrough",
                                    "external_oauth_client_credentials",
                                    "external_oauth_user_token"])
 def test_non_self_service_modes_are_not_selectable(mode):

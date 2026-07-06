@@ -1,19 +1,25 @@
 """
 MCP Security Platform — Credential Envelope Storage Service
 
-Implements AES-256-GCM envelope encryption of stored credentials.
-Credentials (e.g., Entra client secrets) are encrypted with a KEK from Vault,
-persisted with nonce in credential_store, and decrypted on retrieval.
+Implements AES-256-GCM encryption of stored credentials using the SAME codec
+as every other credential_store writer/reader (approach_a: salt || nonce ||
+ciphertext, HKDF-derived KEK, AAD bound to user_sub/service/tool_id/owner_type).
+
+One-codec invariant (credential write/read interop fix): admin_credentials,
+oauth, oidc_browser, portal and broker all use approach_a.encrypt/decrypt.
+This module previously used a private nonce||ciphertext envelope, so anything
+written by the admin path failed with InvalidTag when read here. Do NOT
+reintroduce a second ciphertext format.
 
 Guarantees:
   - Plaintext never persists to disk
-  - Each credential is encrypted with a fresh nonce
-  - KEK is derived from Vault at runtime (never stored)
+  - Each credential is encrypted with a fresh salt + nonce
+  - KEK is HKDF-derived from the Vault master secret at runtime (never stored)
   - Decryption fails if any context metadata has changed (user_sub, service, tool_id, owner_type)
 
 Key processes:
-  1. store_credential: fetch KEK → encrypt plaintext → INSERT encrypted_blob + nonce
-  2. retrieve_credential: SELECT encrypted_blob + nonce → fetch KEK → decrypt
+  1. store_credential: fetch master secret → approach_a.encrypt → INSERT encrypted_blob
+  2. retrieve_credential: SELECT encrypted_blob → fetch master secret → approach_a.decrypt
 """
 from __future__ import annotations
 
@@ -22,7 +28,10 @@ import logging
 import uuid
 from typing import Any
 
-from app.credential_broker.kms import envelope_decrypt, envelope_encrypt
+from app.credential_broker.approaches.approach_a import (
+    decrypt as approach_a_decrypt,
+    encrypt as approach_a_encrypt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +81,17 @@ async def store_credential(
         logger.error("Failed to fetch KEK from Vault", extra={"error": str(exc)})
         raise
 
-    # Step 2: Convert credential_data to JSON and encrypt
+    # Step 2: Convert credential_data to JSON and encrypt with the shared
+    # approach_a codec so retrieve_credential AND the broker paths can read it.
     plaintext = json.dumps(credential_data)
-    nonce, ciphertext = envelope_encrypt(plaintext, master_secret)
+    blob = approach_a_encrypt(
+        plaintext,
+        user_sub,
+        master_secret,
+        service=service,
+        tool_id=str(tool_id) if tool_id is not None else None,
+        owner_type=owner_type,
+    )
 
     # Step 3: Store in credential_store table
     credential_id = str(uuid.uuid4())
@@ -96,7 +113,7 @@ async def store_credential(
                     "tid": tool_id,
                     "ctype": credential_type,
                     "otype": owner_type,
-                    "blob": nonce + ciphertext,  # Store nonce || ciphertext
+                    "blob": blob,  # approach_a format: salt || nonce || ciphertext+tag
                 },
             )
             await session.commit()
@@ -221,20 +238,18 @@ async def retrieve_credential(
             "Credential context mismatch; decryption would be insecure"
         )
 
-    # Step 3: Split nonce (first 12 bytes) and ciphertext
-    _NONCE_SIZE = 12
-    if len(encrypted_blob) < _NONCE_SIZE + 1:
-        raise ValueError(
-            f"Encrypted blob too short ({len(encrypted_blob)} bytes); "
-            f"expected at least {_NONCE_SIZE + 1}"
-        )
-
-    nonce = encrypted_blob[:_NONCE_SIZE]
-    ciphertext = encrypted_blob[_NONCE_SIZE:]
-
-    # Step 4: Decrypt
+    # Step 3+4: Decrypt with the shared approach_a codec (salt || nonce || ct).
+    # The AAD binds decryption to the same context tuple used at write time,
+    # so a wrong user_sub/service/tool_id/owner_type raises InvalidTag.
     try:
-        plaintext = envelope_decrypt(ciphertext, nonce, master_secret)
+        plaintext = approach_a_decrypt(
+            bytes(encrypted_blob),
+            user_sub,
+            master_secret,
+            service=service,
+            tool_id=str(tool_id) if tool_id is not None else None,
+            owner_type=owner_type,
+        )
     except Exception as exc:
         logger.error(
             "Failed to decrypt credential",

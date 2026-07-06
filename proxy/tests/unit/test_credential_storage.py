@@ -94,7 +94,7 @@ async def test_store_and_retrieve_credential():
 
     # Retrieve the credential
     with patch(
-        "app.services.credential_storage.envelope_decrypt"
+        "app.services.credential_storage.approach_a_decrypt"
     ) as mock_decrypt:
         # When we decrypt, we should get back the original data
         mock_decrypt.return_value = '{"client_id": "app-xyz", "client_secret": "super-secret-value-xyz", "tenant_id": "tenant-123"}'
@@ -146,10 +146,10 @@ async def test_store_credential_encrypts_with_kek():
     mock_db_conn.execute = AsyncMock()
     mock_db_conn.commit = AsyncMock()
 
-    # Patch envelope_encrypt to track calls
-    with patch("app.services.credential_storage.envelope_encrypt") as mock_encrypt:
-        # Simulate encryption output
-        mock_encrypt.return_value = (b"nonce", b"ciphertext")
+    # Patch approach_a_encrypt to track calls
+    with patch("app.services.credential_storage.approach_a_encrypt") as mock_encrypt:
+        # Simulate encryption output (approach_a returns a single blob)
+        mock_encrypt.return_value = b"salt-nonce-ciphertext-blob"
 
         stored_id = await store_credential(
             credential_data=credential_data,
@@ -166,7 +166,7 @@ async def test_store_credential_encrypts_with_kek():
         # Verify Vault was called to get master secret
         mock_vault_client.get_master_secret.assert_called_once()
 
-        # Verify envelope_encrypt was called with the plaintext
+        # Verify approach_a encrypt was called with the plaintext
         assert mock_encrypt.called
 
 
@@ -206,8 +206,8 @@ async def test_retrieve_credential_decrypts_with_kek():
     _mock_cm.__aexit__ = AsyncMock(return_value=False)
     mock_db_pool = MagicMock(return_value=_mock_cm)
 
-    # Patch envelope_decrypt
-    with patch("app.services.credential_storage.envelope_decrypt") as mock_decrypt:
+    # Patch approach_a_decrypt
+    with patch("app.services.credential_storage.approach_a_decrypt") as mock_decrypt:
         mock_decrypt.return_value = '{"token": "secret-token"}'
 
         retrieved = await retrieve_credential(
@@ -226,7 +226,7 @@ async def test_retrieve_credential_decrypts_with_kek():
         # Verify DB SELECT was called
         assert mock_db_conn.execute.called
 
-        # Verify envelope_decrypt was called with encrypted_blob and KEK
+        # Verify approach_a decrypt was called with encrypted_blob and master secret
         assert mock_decrypt.called
 
         # Verify result
@@ -261,8 +261,8 @@ async def test_store_credential_uses_correct_kek_path():
     mock_db_conn.execute = AsyncMock()
     mock_db_conn.commit = AsyncMock()
 
-    with patch("app.services.credential_storage.envelope_encrypt") as mock_encrypt:
-        mock_encrypt.return_value = (b"nonce", b"ct")
+    with patch("app.services.credential_storage.approach_a_encrypt") as mock_encrypt:
+        mock_encrypt.return_value = b"salt-nonce-ct-blob"
 
         await store_credential(
             credential_data=credential_data,

@@ -32,9 +32,10 @@ router = APIRouter(prefix="/admin/credentials", tags=["Admin: Credentials"])
 class CredentialUpload(BaseModel):
     """Body for PUT /admin/credentials/{tool_id}"""
     secret: str                         # plaintext secret to encrypt + store
-    credential_type: str = "api_key"    # api_key | oauth2_refresh | entra_client_secret | ...
+    credential_type: str = "api_key"    # api_key | oauth2_refresh | entra_client_secret | basic_auth | ...
     owner_type: str = "service"         # service | user
     user_sub: str | None = None         # required when owner_type='user'
+    username: str | None = None         # required when credential_type='basic_auth' (RFC 7617)
     description: str | None = None
 
 
@@ -159,6 +160,19 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
     if owner_type == "user" and not user_sub:
         raise HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": "user_sub required for user-mode credentials."})
 
+    # CR-05: basic_auth is stored as the structured JSON payload the dispatcher's
+    # _inject_basic_auth expects — {"username", "secret"} — NEVER a prebuilt
+    # "Basic <b64>" header. Same unified approach_a codec as every other type.
+    if body.credential_type == "basic_auth":
+        if not body.username:
+            raise HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": "username required for basic_auth credentials."})
+        if ":" in body.username:
+            raise HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": "RFC 7617 forbids ':' in the username."})
+        import json as _json
+        plaintext = _json.dumps({"username": body.username, "secret": body.secret})
+    else:
+        plaintext = body.secret
+
     # Encrypt with Approach A
     try:
         from app.credential_broker.kms import load_master_secret_standalone
@@ -166,11 +180,13 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
 
         master = await load_master_secret_standalone()
         blob = encrypt(
-            body.secret,
+            plaintext,
             user_sub,
             master,
             service=service_name,
-            tool_id=tool_id,
+            # Canonical UUID string from the DB row (not the raw path param) so the
+            # AAD matches exactly what dispatcher/retrieve_credential rebuilds.
+            tool_id=str(tool.tool_id),
             owner_type=owner_type,
         )
     except Exception as exc:
@@ -182,7 +198,7 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
         from sqlalchemy import text
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
-            await session.execute(
+            result = await session.execute(
                 text("""
                     INSERT INTO credential_store
                         (user_sub, service, encrypted_blob, owner_type, tool_id, credential_type, description)
@@ -195,6 +211,7 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
                             description = EXCLUDED.description,
                             rotated_at = NOW(),
                             updated_at = NOW()
+                    RETURNING id
                 """),
                 {
                     "sub": user_sub,
@@ -206,6 +223,15 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
                     "desc": body.description,
                 },
             )
+            credential_id = result.scalar_one()
+            if owner_type == "service":
+                # Link the tool to its default credential so the dispatcher's
+                # stored-credential modes (e.g. entra_client_credentials) can
+                # resolve it via tool_record["credential_id"].
+                await session.execute(
+                    text("UPDATE tool_registry SET credential_id = :cid WHERE tool_id = :tid"),
+                    {"cid": credential_id, "tid": tool_id},
+                )
             await session.commit()
     except Exception as exc:
         logger.error("DB error storing credential: %s", exc)
