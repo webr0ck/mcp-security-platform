@@ -27,6 +27,7 @@ FROM (VALUES
     ('lab-search',       'http://lab-mcp-search:8000/mcp',        'none',                     false),
     ('lab-notes',        'http://lab-mcp-notes:8000/mcp',         'none',                     false),
     ('lab-m365',         'http://lab-mcp-m365:8000/mcp',          'entra_client_credentials', false),
+    ('lab-tickets',      'http://lab-mcp-lab-tickets:8000/mcp',   'kc_token_exchange',        false),
     ('lab-dex-cal',      'http://lab-dex:5556/mcp',               'user',                     true),
     ('lab-rag',          'http://lab-rag-assistant:8000/mcp',     'none',                     false),
     ('lab-self-service', 'http://lab-mcp-self-service:8000/mcp',  'none',                     false),

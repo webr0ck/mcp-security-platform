@@ -81,24 +81,58 @@ def test_entra_client_credentials_m365_graph(alice_token):
 
 # ── (d) kc_token_exchange: lab-tickets-query ─────────────────────────────────
 
-@pytest.mark.xfail(
-    reason=(
-        "ENVIRONMENT BUG (documented in REPORT.md): lab-tickets-query had no "
-        "server_registry row at all (tool_registry.server_id was NULL), so the "
-        "DNS-rebind revalidation guard always fails-closed with "
-        "'registered as public but resolves to private IP(s)'. A server_registry "
-        "row + entitlement grant were added directly (matching the pattern the "
-        "other 3 lab tools use) to unblock the entitlement/credential path, and "
-        "the proxy now DOES perform the kc_token_exchange and forward the call — "
-        "but the lab-mcp-lab-tickets container itself then rejects it with "
-        "'Unauthorized: [Errno -2] Name or service not known', a DNS/config "
-        "issue inside that container unrelated to the platform's auth path."
-    ),
-    strict=False,
-)
 def test_kc_token_exchange_lab_tickets(alice_token):
+    """lab-tickets-query is seeded with a server_registry row (servers.sql) and
+    lab-mcp-lab-tickets sits on lab-net so it can fetch KC JWKS to validate the
+    exchanged aud=lab-tickets token — the full RFC 8693 path is exercised."""
     result = call_upstream_tool(alice_token, "lab-tickets-query", "list_tickets", {})
     assert result is not None
+
+
+# ── (d2) service_account: echo-sa ─────────────────────────────────────────────
+
+def test_service_account_mode_echo_sa(alice_token):
+    """echo-sa (injection_mode=service_account) — the broker mints a KC
+    client_credentials token for kc_client_id=lab-test and injects it; echo's
+    whoami reflects a redacted preview of the injected Bearer.
+
+    loopback: the upstream tool is literally named 'whoami', which the gateway
+    WAF (CRS 932260 Unix-RCE wordlist) rightly 403s; every proxy-side gate is
+    still exercised via the container-loopback path."""
+    result = call_upstream_tool(alice_token, "echo-sa", "whoami", {}, loopback=True)
+    assert result["has_credential"] is True, result
+    assert result["sub"] == "alice@corp", result  # caller identity preserved
+
+
+# ── (d2b) basic_auth: echo-basic (CR-05, RFC 7617) ────────────────────────────
+
+def test_basic_auth_mode_echo_basic(alice_token):
+    """echo-basic (injection_mode=basic_auth) — the broker decrypts the shared
+    {"username","secret"} JSON row (service='lab-basic'), builds
+    Authorization: Basic base64(username:secret) at call time, and injects it;
+    echo's whoami reflects a redacted first-8/last-4 preview (spec H8 — never
+    the raw header), so the preview + exact length pin the expected base64.
+
+    loopback: same CRS 932260 'whoami' WAF false-positive as echo-sa."""
+    import base64
+    expected = "Basic " + base64.b64encode(b"labuser:lab-basic-secret").decode()
+    result = call_upstream_tool(alice_token, "echo-basic", "whoami", {}, loopback=True)
+    assert result["has_credential"] is True, result
+    assert result["sub"] == "alice@corp", result
+    assert result["credential_len"] == len(expected), result
+    assert result["credential_preview"] == f"{expected[:8]}...{expected[-4:]}", result
+
+
+# ── (d3) entra_user_token: m365-graph-delegated ──────────────────────────────
+
+def test_entra_user_token_m365_delegated(alice_token):
+    """m365-graph-delegated (injection_mode=entra_user_token) — the broker
+    decrypts alice's stored refresh token, refreshes it against lab-mock-idp,
+    and injects the delegated token; lab-mcp-m365 (REQUIRE_DELEGATED) resolves
+    /me against the mock Graph, so a Graph-style profile proves the delegated
+    path end-to-end (an enrollment prompt would trip the failure sentinels)."""
+    result = call_upstream_tool(alice_token, "m365-graph-delegated", "get_me", {})
+    assert result.get("display_name"), result
 
 
 # ── (e) KC service-account JWT invoking a service-mode tool ──────────────────

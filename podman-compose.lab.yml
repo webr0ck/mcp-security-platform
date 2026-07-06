@@ -360,10 +360,15 @@ services:
       lab-keycloak:
         condition: service_healthy
     networks:
-      # HIGH-2: dropped shared lab-net (no backend) — no MCP-to-MCP path
       - mcp-lab-tickets-net   # pairwise net with proxy only
+      # lab-net restored (was dropped by HIGH-2): this RS validates the exchanged
+      # KC JWT itself, so it MUST reach lab-keycloak for JWKS. A new pairwise net
+      # would renumber every 10.89.x subnet (see the networks note at file end).
+      - lab-net
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      # /mcp requires a valid exchanged JWT (401s an unauth'd initialize), so
+      # probe the unauthenticated /health liveness route instead.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\" 2>/dev/null"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -1060,8 +1065,9 @@ services:
       - lab-net
       - mcp-m365-net   # reachable from lab-mcp-m365 when AZURE_MODE=mock
     restart: unless-stopped
-    profiles:
-      - mock
+    # No 'profiles: mock' gate: the lab always runs M365 in mock mode now
+    # (M365_GRAPH_BASE/M365_TOKEN_URL in .env.lab point here; entra_user_token
+    # delegated flow depends on this stub being up).
 
 # ── Named volumes ────────────────────────────────────────────────────────────
 volumes:

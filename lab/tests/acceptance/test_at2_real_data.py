@@ -62,6 +62,9 @@ def _extract_devices(payload) -> list[dict]:
         for key in ("results", "devices"):
             if isinstance(payload.get(key), list):
                 return payload[key]
+            # netbox MCP server wraps the raw DRF page: {"devices": {"count":N,"results":[...]}}
+            if isinstance(payload.get(key), dict) and isinstance(payload[key].get("results"), list):
+                return payload[key]["results"]
         if "_raw_text" in payload:
             try:
                 return json.loads(payload["_raw_text"]).get("results", [])
@@ -75,6 +78,9 @@ def _extract_ips(payload) -> list[dict]:
         for key in ("results", "addresses", "ip_addresses"):
             if isinstance(payload.get(key), list):
                 return payload[key]
+            # netbox MCP server wraps the raw DRF page (see _extract_devices)
+            if isinstance(payload.get(key), dict) and isinstance(payload[key].get("results"), list):
+                return payload[key]["results"]
     return []
 
 

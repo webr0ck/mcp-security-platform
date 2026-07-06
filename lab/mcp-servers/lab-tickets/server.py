@@ -70,6 +70,9 @@ def _validate_token(token: str, public_key) -> dict:
 class _AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         from starlette.responses import JSONResponse
+        # ponytail: unauthenticated liveness path for the container healthcheck only
+        if request.url.path == "/health":
+            return JSONResponse({"status": "ok"})
         auth = request.headers.get("Authorization", "")
         if not auth.lower().startswith("bearer "):
             return JSONResponse({"error": "Missing Bearer token"}, status_code=401)
