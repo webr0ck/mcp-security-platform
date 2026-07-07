@@ -260,6 +260,10 @@ services:
       # NOTE: mcps.yaml removed (Task 9) — servers now loaded from DB registry
       # PRD-0001 M3: trust envelope labeler certs (read-only — sidecar holds sub_ca.key)
       - labeler-data:/labeler:ro
+      # WP-D2 (CR-19): user/admin docs served read-only at /docs/* so portal
+      # screens can link straight to the markdown source — git is the source
+      # of truth, same bind-mount pattern as policies/rego above.
+      - ./docs:/app/docs:ro
     tmpfs:
       - /tmp:size=64m,mode=1777
     # Non-root user (UID 1001 defined in proxy/Dockerfile)

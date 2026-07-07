@@ -5298,7 +5298,11 @@ async def fragment_admin_submissions(request: Request):
     )
     return HTMLResponse(f"""
     <div class="section-title">&#x1F4E5; Submissions <span class="count">{count_badge}</span>
-      <button class="btn-secondary" style="margin-left:auto;font-size:12px"
+      <a href="/docs/admin/reviewer-approval-guide.md" target="_blank" rel="noopener"
+         style="margin-left:auto;font-size:12px;color:var(--blue);text-decoration:none;align-self:center">
+        Reviewer guide &#x2197;
+      </a>
+      <button class="btn-secondary" style="font-size:12px"
               hx-get="/portal/fragments/admin/submissions" hx-target="#adm-content" hx-swap="innerHTML">
         &#x21BB; Refresh
       </button>
@@ -5664,6 +5668,12 @@ async def submit_wizard_page(request: Request):
       <a href="/portal" style="color:var(--muted);font-size:13px;text-decoration:none">&#x2190; Portal</a>
       <span style="color:#334155">/</span>
       <span style="font-weight:700">Submit MCP Server</span>
+      <a href="/docs/user/self-service-onboarding.md" target="_blank" rel="noopener"
+         style="margin-left:auto;color:var(--blue);font-size:12px;text-decoration:none">Walkthrough docs &#x2197;</a>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin:-1rem 0 1.5rem">
+      Not sure which auth mode to pick? See the
+      <a href="/docs/user/auth-mode-decision-guide.md" target="_blank" rel="noopener" style="color:var(--blue)">auth-mode decision guide</a>.
     </div>
 
     <div class="wiz-steps" id="wiz-steps">

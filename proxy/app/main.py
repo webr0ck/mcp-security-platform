@@ -22,6 +22,7 @@ from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
 from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
+from app.routers import metrics as metrics_router
 from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, admin_prompts, admin_llm, admin_git, portal, server_registry, catalog, lab_links, entitlements, profiles, submission, oauth_provider_profiles
 from app.core.config import settings
 from app.core.database import check_database_health
@@ -306,6 +307,7 @@ if os.environ.get("PROXY_INGRESS_ALLOWLIST_ENABLED", "").lower() in ("1", "true"
 # Health endpoints are at root level (no prefix).
 # ============================================================================
 app.include_router(health.router, tags=["Health"])
+app.include_router(metrics_router.router, tags=["Metrics"])  # CR-17 / WP-D1
 app.include_router(tools.router, prefix="/api/v1", tags=["Tools"])
 app.include_router(tools.servers_router, prefix="/api/v1", tags=["Tools"])
 app.include_router(policy.router, prefix="/api/v1", tags=["Policy"])
@@ -337,6 +339,15 @@ app.include_router(lab_links.router)          # Lab convenience: / → portal, /
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(_static_dir):
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+# WP-D2 (CR-19): user/admin docs served read-only at /docs/* (bind-mounted
+# from repo root docs/ — see docker-compose.yml's mcp-proxy volumes — with a
+# Dockerfile COPY fallback for non-compose builds) so portal screens can link
+# directly to the markdown source. No auth required — same posture as
+# /static; nothing here is sensitive.
+_docs_dir = os.path.join(os.path.dirname(__file__), "..", "docs")
+if os.path.isdir(_docs_dir):
+    app.mount("/docs", StaticFiles(directory=_docs_dir), name="docs")
 
 
 # ============================================================================

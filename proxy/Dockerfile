@@ -76,6 +76,11 @@ COPY --chown=appuser:appgroup proxy/app/ /app/app/
 # Vendored mcp_checker engine — MCP-specific static security scan (see
 # proxy/vendor/mcp_checker/VENDORED.md). Dev target gets this via the bind mount.
 COPY --chown=appuser:appgroup proxy/vendor/ /app/vendor/
+# WP-D2 (CR-19): user/admin docs, served at /docs/* (main.py's StaticFiles
+# mount). docker-compose.yml bind-mounts ./docs:/app/docs:ro at runtime,
+# shadowing this layer — the COPY here is only a fallback for non-compose
+# builds, same convention as the dev-target comment above.
+COPY --chown=appuser:appgroup docs/ /app/docs/
 
 USER appuser
 EXPOSE 8000
