@@ -1034,7 +1034,10 @@ _ADMIN_GROUPS: list[dict] = [
 def _panel_group(tab: str) -> dict:
     """Return the _ADMIN_GROUPS entry containing `tab`, defaulting to the
     'servers' group for an unrecognized tab (matches the pre-existing
-    fallback behavior in portal_admin_tab)."""
+    fallback behavior in portal_admin_tab).
+
+    NOTE: Currently unused — group resolution happens client-side in JS
+    (_admGroupFor / _ADM_GROUPS). Kept for any future server-side resolution need."""
     for group in _ADMIN_GROUPS:
         if tab in group["panels"]:
             return group
@@ -2255,7 +2258,8 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             }});
             const d = await r.json();
             if (!r.ok) {{ alert(d.detail || 'Failed to go live'); return; }}
-            htmx.ajax('GET', '/portal/fragments/my-access', {{target:'#portal-body', swap:'innerHTML'}});
+            await htmx.ajax('GET', '/portal/fragments/my-access', {{target:'#portal-body', swap:'innerHTML'}});
+            ssShowTab('submit');
           }} catch (e) {{ alert('Network error: ' + e); }}
         }}
         </script>"""
