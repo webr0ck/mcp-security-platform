@@ -124,16 +124,16 @@ _FONTS_LINK = (
 
 _CSS = """
   :root {
-    --bg:      #0f172a;
-    --surface: #1e293b;
-    --border:  #334155;
-    --text:    #e2e8f0;
-    --muted:   #94a3b8;
-    --primary: #38bdf8;
+    --bg:      #0a0c11;
+    --surface: #12161e;
+    --border:  rgba(255,255,255,0.07);
+    --text:    #e7eaf0;
+    --muted:   #8a93a4;
+    --primary: #4f9cf9;
     --primary-dark: #0284c7;
     --green:   #4ade80;
     --red:     #f87171;
-    --amber:   #fbbf24;
+    --amber:   #eab308;
     --cyan:    #67e8f9;
   }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
