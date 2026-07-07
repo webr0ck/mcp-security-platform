@@ -172,6 +172,34 @@ log_ok "NetBox ready (${NB_ELAPSED}s)"
 
 log_ok "All infrastructure services running"
 
+# ── Step 4.5: Set application-role passwords ─────────────────────────────────
+# V003/V063/V072 create proxy_app/compliance_checker_app/scanner_worker_app/
+# build_worker_app with a literal 'PLACEHOLDER_REPLACED_AT_RUNTIME' password
+# (passwords never live in migrations, INV-008) — this step is what actually
+# replaces it, via infra/scripts/init-db-roles.sh. WITHOUT this step, every
+# fresh boot leaves scanner-worker/build-worker unable to authenticate as
+# their narrow DB roles (found by the 2026-07 WP-D3 full-wipe closeout gate —
+# an accreted, never-wiped lab masks this because the role's password was set
+# once, historically, and persists in the DB volume).
+log "Step 4.5: Setting application DB role passwords (init-db-roles.sh)"
+podman cp "${SCRIPT_DIR}/../../infra/scripts/init-db-roles.sh" mcp-db:/tmp/init-db-roles.sh
+if podman exec \
+    -e "PROXY_DB_PASSWORD=${PROXY_DB_PASSWORD:-}" \
+    -e "COMPLIANCE_DB_PASSWORD=${COMPLIANCE_DB_PASSWORD:-}" \
+    -e "SCANNER_WORKER_DB_PASSWORD=${SCANNER_WORKER_DB_PASSWORD:-}" \
+    -e "BUILD_WORKER_DB_PASSWORD=${BUILD_WORKER_DB_PASSWORD:-}" \
+    -e "PGPASSWORD=${DB_PASSWORD:-}" \
+    mcp-db bash /tmp/init-db-roles.sh 2>&1 | tee -a "${LOG_FILE}"; then
+    log_ok "Application DB role passwords set"
+else
+    die "init-db-roles.sh failed — scanner-worker/build-worker cannot authenticate to Postgres"
+fi
+# Recreate the workers so their already-correct env-var password now matches
+# the DB role's actual password (a plain restart is not enough if the
+# container was created before this step ran in the same lab-setup pass).
+${LAB_COMPOSE} up -d --force-recreate scanner-worker 2>&1 | tee -a "${LOG_FILE}" || \
+    log_warn "scanner-worker recreate failed — check manually"
+
 # ── Step 5: Apply V007 DB migration ─────────────────────────────────────────
 log "Step 5: Applying V007 DB migration (credential broker columns)"
 
