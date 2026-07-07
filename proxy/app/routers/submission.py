@@ -839,34 +839,51 @@ async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
         await session.commit()
 
     # R-10: provisioning is synchronous (the submitter is waiting on this response) —
-    # discover the upstream's tools right now and register them quarantined
-    # (INV-005 unchanged: auto-provisioning is not an auto-quarantine-release).
+    # run the SAME verify-phase probes (healthcheck -> quarantined discovery ->
+    # invocation probe) the platform-managed /apply pipeline uses (CR-01 /
+    # WP-B3 phase 5 "provide-url parity" — exactly one verification code
+    # path, not two independently-maintained copies). Self-hosted has no
+    # build/deploy step of its own, so this call straight into the shared
+    # verify half after upstream_url is already set above.
     # FM: if the upstream is unreachable at this exact moment, the approval above
-    # already committed — a discovery failure here must not roll that back or
+    # already committed — a probe failure here must not roll that back or
     # fail this request; tools_provisioned=0 is reported and the existing manual
     # discover-tools admin route remains the retry path.
+    from app.services.deploy_verifier import VerificationFailedError, run_verification_probes
+
     tools_provisioned = 0
     tools_skipped: list[dict] = []
+    verification_report: dict | None = None
     try:
-        from app.routers.tools import _run_tool_discovery
-        async with AsyncSessionLocal() as disc_session:
-            disc_response = await _run_tool_discovery(
-                server_id, disc_session, actor_client_id=sub.get("reviewed_by") or owner,
-            )
-        if disc_response.status_code == 200:
-            _disc_body = json.loads(disc_response.body)
-            tools_provisioned = _disc_body.get("discovered", 0)
-            tools_skipped = _disc_body.get("skipped", [])
-        else:
-            logger.warning(
-                "R-10 auto-provisioning: discovery returned %s for server_id=%s",
-                disc_response.status_code, server_id,
-            )
-    except Exception as exc:
+        verification_report = await run_verification_probes(
+            server_id, upstream_url, actor_client_id=sub.get("reviewed_by") or owner,
+        )
+        tools_provisioned = verification_report.get("tools_discovered", 0)
+        tools_skipped = verification_report.get("tools_skipped", [])
+    except VerificationFailedError as exc:
+        verification_report = exc.report
         logger.warning(
-            "R-10 auto-provisioning: discovery failed for server_id=%s (approval already committed): %s",
+            "provide-url verification probes failed for server_id=%s (approval already committed): %s",
             server_id, exc,
         )
+    except Exception as exc:
+        logger.warning(
+            "provide-url verification probes crashed for server_id=%s (approval already committed): %s",
+            server_id, exc,
+        )
+        verification_report = {"healthcheck": False, "tools_discovered": 0, "tools_skipped": [],
+                               "invocation_probe_ok": False, "contract_check": None, "error": str(exc)}
+
+    if verification_report is not None:
+        async with AsyncSessionLocal() as vr_session:
+            await vr_session.execute(text(
+                """
+                UPDATE server_registry
+                SET verification_report = CAST(:report AS jsonb), updated_at = now()
+                WHERE server_id = :sid
+                """
+            ), {"report": json.dumps(verification_report), "sid": server_id})
+            await vr_session.commit()
 
     next_msg = (
         f"{tools_provisioned} tool(s) discovered and registered quarantined; "
@@ -884,6 +901,97 @@ async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
         "tools_skipped": tools_skipped,
         "quarantined": True,
         "next": next_msg,
+    })
+
+
+# ---------------------------------------------------------------------------
+# POST /apply, GET /verification-report — CR-01 (WP-B3 phase 5): the
+# platform-managed build->deploy->verify entry point, for submitters who do
+# NOT want to self-host (the provide-url path above remains unchanged and is
+# the only route for self-hosted submitters — they never call /apply).
+# ---------------------------------------------------------------------------
+_APPLY_ELIGIBLE_STATUSES = ("scaffold_ready", "approved_pending_url")
+
+
+@router.post("/api/v1/submissions/{server_id}/apply")
+async def apply_submission(server_id: str, request: Request) -> JSONResponse:
+    """
+    Kick off the platform-managed build->deploy->verify pipeline for a
+    submission that has NOT been self-hosted. Only valid from
+    'scaffold_ready' or 'approved_pending_url' — the two states a
+    self-hosted submitter would otherwise call provide-url from instead.
+    Enqueues a build_requested job (claimed by build_worker, WP-B3 phase 2)
+    reusing the existing scan_jobs queue (no new job table), pinning
+    scan_jobs.expected_digest to this server's already-scanned+approved
+    commit (server_registry.scan_commit) — the TOCTOU guard build_engine.py
+    refuses to build past (PRD-8 sec 2).
+    """
+    owner = _client_id(request)
+    sub = await _get_submission(server_id, owner_sub=owner)
+
+    if sub["submission_status"] not in _APPLY_ELIGIBLE_STATUSES:
+        raise HTTPException(status_code=409, detail=(
+            f"submission_status is {sub['submission_status']!r}; /apply is only valid from "
+            f"{_APPLY_ELIGIBLE_STATUSES!r} — a self-hosted submission should call provide-url instead"
+        ))
+
+    github_url = sub.get("github_repo_url")
+    if not github_url:
+        raise HTTPException(status_code=422, detail=(
+            "submission has no github_repo_url — the platform-managed build pipeline "
+            "requires a repository to build; a no-code submission cannot use /apply"
+        ))
+
+    expected_digest = sub.get("scan_commit")
+    if not expected_digest:
+        raise HTTPException(status_code=422, detail=(
+            "submission has no recorded scan_commit yet — a scan must complete before "
+            "/apply can pin a build to a specific approved commit"
+        ))
+
+    job_id = await scan_queue.enqueue_scan(server_id, github_url, job_type="build_requested")
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(text(
+            """
+            UPDATE scan_jobs SET expected_digest = :digest WHERE job_id = :job_id
+            """
+        ), {"digest": expected_digest, "job_id": job_id})
+        await session.execute(text(
+            """
+            UPDATE server_registry
+            SET deployment_status = 'build_requested', updated_at = now()
+            WHERE server_id = :sid
+            """
+        ), {"sid": server_id})
+        await session.commit()
+
+    logger.info("apply_submission enqueued build_requested job_id=%s server_id=%s", job_id, server_id)
+    return JSONResponse({
+        "server_id": server_id,
+        "job_id": job_id,
+        "deployment_status": "build_requested",
+        "next": "Poll GET /api/v1/submissions/{server_id}/verification-report for pipeline progress.",
+    })
+
+
+@router.get("/api/v1/submissions/{server_id}/verification-report")
+async def get_verification_report(server_id: str, request: Request) -> JSONResponse:
+    """Plain read of server_registry.verification_report — 404 if the verify
+    phase has never run for this server (still building/deploying, or a
+    self-hosted submission that hasn't called provide-url yet)."""
+    owner = _client_id(request)
+    sub = await _get_submission(server_id, owner_sub=owner)
+    report = sub.get("verification_report")
+    if report is None:
+        raise HTTPException(status_code=404, detail=(
+            "no verification_report recorded yet for this server "
+            f"(deployment_status={sub.get('deployment_status')!r})"
+        ))
+    return JSONResponse({
+        "server_id": server_id,
+        "deployment_status": sub.get("deployment_status"),
+        "verification_report": report,
     })
 
 
