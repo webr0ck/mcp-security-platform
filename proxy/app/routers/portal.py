@@ -659,6 +659,11 @@ _CSS = """
     color: #cbd0d7; font-size: 12px; font-weight: 600; padding: 7px 14px;
     border-radius: 8px; cursor: pointer; white-space: nowrap; font-family: var(--ff-sans);
   }
+  .adm-migration-banner {
+    display: flex; align-items: flex-start; gap: 14px; padding: 13px 15px;
+    background: rgba(192,132,252,0.07); border: 1px solid rgba(192,132,252,0.22);
+    border-radius: 12px; margin: 0 22px 12px;
+  }
 
   /* ---- Server registry toolbar ---- */
   .srv-toolbar {
@@ -1141,6 +1146,19 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
       </a>
     </div>
 
+    <div id="adm-migration-banner" class="adm-migration-banner" style="display:none">
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">The admin nav is now grouped into 5 sections</div>
+        <div style="font-size:12px;color:var(--adm-muted);display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:4px 16px">
+          <div>Dashboard, Detections &rarr; <b>Overview</b></div>
+          <div>MCP Servers, Submissions, SBOM &rarr; <b>Servers</b></div>
+          <div>Access, Credentials, Request Limits &rarr; <b>Access</b></div>
+          <div>Identity, Prompts, LLM, Git &rarr; <b>Settings</b></div>
+        </div>
+      </div>
+      <button onclick="_dismissMigrationBanner()" style="background:none;border:none;color:var(--adm-muted);cursor:pointer;font-size:16px;padding:4px 8px">&times;</button>
+    </div>
+
     <div class="adm-tabs-bar" id="adm-tabs-bar"></div>
 
     <!-- Content -->
@@ -1217,6 +1235,17 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
     }}
   }});
   _renderTabsBar(_admGroupFor('{esc_py(initial_tab)}'), '{esc_py(initial_tab)}');
+  (function() {{
+    if (!localStorage.getItem('adm_nav_regroup_seen')) {{
+      const b = document.getElementById('adm-migration-banner');
+      if (b) b.style.display = 'flex';
+    }}
+  }})();
+  function _dismissMigrationBanner() {{
+    localStorage.setItem('adm_nav_regroup_seen', '1');
+    const b = document.getElementById('adm-migration-banner');
+    if (b) b.style.display = 'none';
+  }}
   // Legacy alias used by existing admin sub-fragments
   function activateAdminTab(name) {{ loadAdminTab(name); }}
 </script>
