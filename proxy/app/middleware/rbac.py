@@ -59,6 +59,16 @@ ROLE_LEVELS: dict[str, int] = {
 PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     # (method_or_ANY, path_prefix, allowed_roles)
     ("POST", "/api/v1/tools/{tool_id}/invoke", {"admin", "platform_admin", "agent", "user"}),
+    # CR-07 (WP-B3): release_tool's OWN inline role check (routers/tools.py)
+    # accepts admin/platform_admin/security_reviewer, but without this rule
+    # the plain-prefix "/api/v1/tools" POST rule below (admin/platform_admin
+    # only) matches first and denies a security_reviewer-only principal
+    # before release_tool's code ever runs — found live (WP-B3 phase 2-6
+    # acceptance test): a Keycloak realm role of "security_reviewer" alone
+    # 403'd here despite being an explicitly-accepted role in the handler.
+    # Must precede the generic /api/v1/tools rule (longer/more-specific
+    # match wins by being listed first — see _resolve_allowed_roles).
+    ("POST", "/api/v1/tools/{tool_id}/release", {"admin", "platform_admin", "security_reviewer"}),
     ("POST", "/api/v1/tools", {"admin", "platform_admin"}),
     ("PATCH", "/api/v1/tools", {"admin", "platform_admin"}),
     ("DELETE", "/api/v1/tools", {"admin", "platform_admin"}),

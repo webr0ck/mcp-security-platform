@@ -164,3 +164,29 @@ async def test_podman_run_failure_fails_closed(monkeypatch):
 
     assert result["deployment_status"] == "failed"
     probe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_podman_invocation_raising_fails_closed_not_stuck(monkeypatch):
+    """Found live against the lab: if podman itself cannot even be invoked
+    (binary missing, no container-runtime access) _run_podman raises instead
+    of returning an rc — this must still fail closed to 'failed', never
+    propagate uncaught and leave deployment_status stuck at 'deploying'."""
+    row = {"server_id": "s-1", "deployment_status": "built",
+           "build_artifact_digest": "sha256:stub-abc123",
+           "build_provenance": {"image_ref": "mcp-server-s1:latest"}}
+    session = _patch_session(monkeypatch, row)
+
+    monkeypatch.setattr(deploy_launcher, "_run_podman",
+                        AsyncMock(side_effect=FileNotFoundError("podman: command not found")))
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(deploy_launcher, "_probe_healthcheck", probe)
+
+    result = await deploy_launcher.deploy_server("s-1")
+
+    assert result["deployment_status"] == "failed"
+    assert result["runtime_url"] is None
+    assert "podman invocation failed" in result["error"]
+    probe.assert_not_called()
+    executed_sql = " | ".join(sql for sql, _ in session.executed)
+    assert "deployment_status = 'failed'" in executed_sql

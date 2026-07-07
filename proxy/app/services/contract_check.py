@@ -3,10 +3,17 @@ CR-06 (WP-B3 phase 6) — machine-testable subset of the MCP server
 compatibility contract.
 
 Validates the SHAPE of a live server's `initialize` and `tools/list`
-JSON-RPC responses against docs/reference/mcp-server-contract.schema.json
-(a direct transcription of the compatibility contract doc sec 2 — nothing
-invented beyond what that doc already specifies), plus a plain `GET
-/health` reachability check.
+JSON-RPC responses against this module's sibling
+mcp-server-contract.schema.json (a direct transcription of the
+compatibility contract doc's sec 2 — nothing invented beyond what that doc
+already specifies), plus a plain `GET /health` reachability check.
+
+The schema file lives HERE (proxy/app/services/), not under docs/, even
+though it documents docs/reference/mcp-server-compatibility-contract.md —
+found live: docker-compose.dev.yml bind-mounts `./proxy:/app:cached` at
+runtime, so anything the running container needs to read at import/call
+time must live under `proxy/`, not the repo-root `docs/` tree (which the
+dev container never sees). The compatibility contract doc links back here.
 
 This is deliberately narrow: it validates response SHAPE, not runtime
 correctness. A safe representative `tools/call` smoke-invocation remains
@@ -29,7 +36,7 @@ import jsonschema
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_PATH = Path(__file__).resolve().parents[3] / "docs" / "reference" / "mcp-server-contract.schema.json"
+_SCHEMA_PATH = Path(__file__).resolve().parent / "mcp-server-contract.schema.json"
 _PROBE_TIMEOUT_SECONDS = 10
 
 _schema_cache: dict | None = None

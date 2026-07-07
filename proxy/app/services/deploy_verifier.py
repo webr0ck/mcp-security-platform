@@ -10,14 +10,20 @@ requirement, there is exactly one place that runs the healthcheck +
 discovery + invocation-probe sequence, not two independently-maintained
 copies.
 
-`verify_server` additionally promotes `runtime_url` -> `upstream_url` and
-`server_registry.status` -> 'approved' — but ONLY after every probe in
-`run_verification_probes` has succeeded. A probe failure never advances
-`deployment_status` past 'failed'; a quarantine-then-review path is the
-only way from there to invocable, exactly like `provide-url`'s existing
-"set status='approved', discover tools quarantined" sequence (INV-005
-unchanged — this module never releases anything, it only discovers tools
-quarantined, same as `_run_tool_discovery` always does).
+`verify_server` promotes `runtime_url` -> `upstream_url` and
+`server_registry.status` -> 'approved' BEFORE running the probes (not
+after) — `run_verification_probes`' discovery step reuses the existing
+`_run_tool_discovery`, which both requires `status='approved'` as a
+precondition AND reads `upstream_url` directly from `server_registry`
+itself, so both columns must already reflect the target being verified or
+discovery cannot run at all. This exactly mirrors `provide-url`'s existing
+ordering (self-hosted also sets `upstream_url`+`status='approved'` before
+its own verification call) — "approval already committed, verification is
+diagnostic from here" in both paths; a probe failure still never advances
+`deployment_status` past `'failed'`, and a quarantine-then-review path is
+the only way from there to invocable (INV-005 unchanged — this module
+never releases anything, it only discovers tools quarantined, same as
+`_run_tool_discovery` always does).
 """
 from __future__ import annotations
 
@@ -158,10 +164,11 @@ async def _mark_failed(server_id: str, report: dict | None) -> None:
 async def verify_server(server_id: str) -> dict:
     """
     Platform-managed verify phase: reads server_registry.runtime_url (set by
-    deploy_launcher.deploy_server), runs the shared verification probes, and
-    ONLY on full success promotes runtime_url -> upstream_url, sets
-    status='approved' and deployment_status='verified', and persists
-    verification_report. Any probe failure fails deployment_status closed to
+    deploy_launcher.deploy_server), promotes runtime_url -> upstream_url and
+    status='approved' BEFORE running the shared verification probes (see
+    module docstring — discovery requires both already set), then runs
+    them. Only on full probe success does deployment_status become
+    'verified'; any probe failure fails deployment_status closed to
     'failed' and still records whatever partial report was gathered.
     """
     async with AsyncSessionLocal() as session:
@@ -181,10 +188,24 @@ async def verify_server(server_id: str) -> dict:
             return report
 
         runtime_url = row["runtime_url"]
+        # status='approved' AND upstream_url must both be set BEFORE the
+        # probes run, not after — found live: run_verification_probes'
+        # discovery step reuses the existing _run_tool_discovery, which (a)
+        # requires status='approved' as a precondition and (b) reads
+        # upstream_url directly from server_registry itself (not from a
+        # parameter), so discovery would target the WRONG url (or 400 on a
+        # null one) unless upstream_url already reflects runtime_url before
+        # discovery runs. This exactly mirrors provide_running_url's
+        # existing ordering for the self-hosted path (it sets upstream_url +
+        # status='approved' before its own verification call, with the same
+        # accepted risk noted there: "the approval above already committed —
+        # a discovery failure here must not roll that back"). Final
+        # promotion below re-asserts both columns for a clean audit trail,
+        # not because they weren't already set.
         await session.execute(text(
-            "UPDATE server_registry SET deployment_status = 'verifying', updated_at = now() "
-            "WHERE server_id = :sid"
-        ), {"sid": str(server_id)})
+            "UPDATE server_registry SET deployment_status = 'verifying', status = 'approved', "
+            "upstream_url = :upstream_url, updated_at = now() WHERE server_id = :sid"
+        ), {"upstream_url": runtime_url, "sid": str(server_id)})
         await session.commit()
 
     try:

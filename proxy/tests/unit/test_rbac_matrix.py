@@ -425,3 +425,48 @@ def test_no_role_inherits_another():
     # auditor can read policy rules; agent cannot
     assert _allowed("GET", "/api/v1/policy/rules", "auditor")
     assert not _allowed("GET", "/api/v1/policy/rules", "agent")
+
+
+class TestPostToolRelease:
+    """POST /api/v1/tools/{tool_id}/release — CR-07 (WP-B3) evidence-gated
+    quarantine release. Found live (WP-B3 phase 2-6 acceptance test): without
+    a specific rule here, this path fell through to the generic
+    POST /api/v1/tools prefix rule (admin/platform_admin only), silently
+    denying security_reviewer — a role release_tool's OWN inline check
+    (routers/tools.py) explicitly accepts — before its handler ever ran."""
+
+    PATH = "/api/v1/tools/11111111-1111-1111-1111-111111111111/release"
+    METHOD = "POST"
+
+    @pytest.mark.unit
+    def test_admin_allowed(self):
+        assert _allowed(self.METHOD, self.PATH, "admin")
+
+    @pytest.mark.unit
+    def test_platform_admin_allowed(self):
+        assert _allowed(self.METHOD, self.PATH, "platform_admin")
+
+    @pytest.mark.unit
+    def test_security_reviewer_allowed(self):
+        """The specific regression this test guards: a security_reviewer-only
+        principal must reach release_tool's own role/evidence gate, not be
+        turned away by RBAC middleware first."""
+        assert _allowed(self.METHOD, self.PATH, "security_reviewer")
+
+    @pytest.mark.unit
+    def test_agent_denied(self):
+        assert not _allowed(self.METHOD, self.PATH, "agent")
+
+    @pytest.mark.unit
+    def test_auditor_denied(self):
+        assert not _allowed(self.METHOD, self.PATH, "auditor")
+
+    @pytest.mark.unit
+    def test_more_specific_release_rule_precedes_generic_tools_rule(self):
+        """The plain POST /api/v1/tools rule (admin/platform_admin only)
+        must not shadow this more specific one — release_tool's release path
+        resolves to the release-specific rule, not the generic one."""
+        from app.middleware.rbac import _resolve_allowed_roles
+        assert _resolve_allowed_roles(self.METHOD, self.PATH) == {
+            "admin", "platform_admin", "security_reviewer",
+        }

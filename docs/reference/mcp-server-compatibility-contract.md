@@ -100,7 +100,7 @@ both the platform-managed apply/deploy/verify pipeline and the self-hosted `prov
   answered once but degraded mid-discovery).
 - **CR-06 machine-testable contract subset** (`app.services.contract_check.run_contract_check`):
   validates the SHAPE of the `initialize` and `tools/list` JSON-RPC responses against
-  [`mcp-server-contract.schema.json`](mcp-server-contract.schema.json) — a direct transcription of §2
+  [`mcp-server-contract.schema.json`](../../proxy/app/services/mcp-server-contract.schema.json) — a direct transcription of §2
   above. Recorded in `verification_report.contract_check` and `server_registry.contract_version`
   (currently `"v0.1"`, matching this doc's Status line). A contract-schema violation is diagnostic
   (recorded in `violations`) — it does not by itself fail the healthcheck/discovery/invocation-probe
@@ -112,7 +112,7 @@ both the platform-managed apply/deploy/verify pipeline and the self-hosted `prov
 
 This document describes the current, honest state of the security envelope. Sec 2's `initialize`/
 `tools/list` response shape now has a machine-testable subset —
-[`mcp-server-contract.schema.json`](mcp-server-contract.schema.json) plus
+[`mcp-server-contract.schema.json`](../../proxy/app/services/mcp-server-contract.schema.json) plus
 `app/services/contract_check.py` — but there is still no full automated conformance test suite that
 any implementation (Python/TypeScript/Go/etc.) can run standalone against this doc; the schema above
 covers only the two response shapes it lists, and CR-06's `tools/call` smoke-invocation is still

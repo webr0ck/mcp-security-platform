@@ -125,3 +125,33 @@ async def test_successful_verify_promotes_runtime_url_and_approves(monkeypatch):
     assert "contract_version = 'v0.1'" in executed_sql
     upstream_params = [params for _, params in session.executed if params and "upstream_url" in params]
     assert upstream_params and upstream_params[0]["upstream_url"] == "http://127.0.0.1:8000/"
+    # status='approved' must be set on the 'verifying' UPDATE (BEFORE probes
+    # run), not only on final success -- found live: _run_tool_discovery
+    # requires status='approved' as a precondition, so setting it only after
+    # a successful probe would make discovery itself always 403.
+    verifying_sql = [sql for sql, _ in session.executed if "'verifying'" in sql]
+    assert verifying_sql and "status = 'approved'" in verifying_sql[0]
+
+
+@pytest.mark.asyncio
+async def test_status_approved_set_before_probes_run_not_only_on_success(monkeypatch):
+    """Regression: discovery (inside run_verification_probes) requires
+    status='approved' as a precondition -- if that UPDATE only happened on
+    full success, discovery would always 403 for the platform-managed path."""
+    row = {"server_id": "s-1", "deployment_status": "deployed", "runtime_url": "http://127.0.0.1:8000/"}
+    session = _patch_session(monkeypatch, row)
+
+    seen_status_at_probe_time = {}
+
+    async def _capturing_probes(server_id, url, actor_client_id):
+        seen_status_at_probe_time["sql"] = " | ".join(sql for sql, _ in session.executed)
+        raise deploy_verifier.VerificationFailedError("boom", {"healthcheck": False, "tools_discovered": 0,
+                                                                "tools_skipped": [], "invocation_probe_ok": False,
+                                                                "contract_check": None})
+
+    with patch.object(deploy_verifier, "run_verification_probes", new=_capturing_probes):
+        await deploy_verifier.verify_server("s-1")
+
+    assert "status = 'approved'" in seen_status_at_probe_time["sql"], (
+        "status='approved' must already be committed before run_verification_probes is called"
+    )

@@ -171,7 +171,25 @@ async def deploy_server(server_id: str) -> dict:
     port = 8000
     cmd = _build_podman_run_cmd(server_id, image_ref, container_name, port)
 
-    rc, stdout, stderr = await _run_podman(cmd)
+    # Deliberately broad except: ANY failure to even invoke podman (binary
+    # missing, no container-runtime access in this process's environment,
+    # a crash inside _run_podman) must fail closed to deployment_status=
+    # 'failed' — never leave the row stuck at 'deploying' with an unhandled
+    # exception propagating out of this function. Found live: this
+    # environment's mcp-proxy container has no podman binary/socket at all
+    # (a separate, narrower-scoped privileged launcher process would carry
+    # that access in a real deployment — see module docstring), and prior
+    # to this fix that FileNotFoundError propagated uncaught, leaving
+    # deployment_status stuck at 'deploying' forever instead of failing
+    # closed.
+    try:
+        rc, stdout, stderr = await _run_podman(cmd)
+    except Exception as exc:
+        error = f"podman invocation failed: {exc}"
+        async with AsyncSessionLocal() as session:
+            await _mark_failed(session, server_id, error)
+        return {"runtime_url": None, "deployment_status": "failed", "error": error}
+
     if rc != 0:
         error = f"podman run failed (rc={rc}): {stderr.strip() or stdout.strip()}"
         async with AsyncSessionLocal() as session:
