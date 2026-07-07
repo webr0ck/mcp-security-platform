@@ -40,7 +40,7 @@ curl -sf -X DELETE http://localhost:8000/admin/credentials/$TOOL_ID -H "Authoriz
 The tool immediately stops being able to authenticate upstream — any in-flight or new invocation
 using `service`/`service_account`/etc. injection fails closed
 (`CredentialInjectionError` → a JSON-RPC error, never a silent unauthenticated forward — see
-[../troubleshooting/common-errors.md](../troubleshooting/common-errors.md)).
+[../troubleshooting/credential-injection.md](../troubleshooting/credential-injection.md)).
 
 ## Microsoft Entra ID setup
 
@@ -81,4 +81,4 @@ way (`PUT /admin/credentials/{tool_id}`, `credential_type: "client_secret"`, `ow
 path at all — the END USER enrolls themselves (`GET /auth/status/{service}` →
 `enrollment_url` if not yet enrolled). Nothing for an admin to upload per-user; the admin's job for
 these modes is approving the provider config (see
-[reviewer-approval-guide.md](reviewer-approval-guide.md)), not uploading a shared secret.
+[submission-review.md](submission-review.md)), not uploading a shared secret.

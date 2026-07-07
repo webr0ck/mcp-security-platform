@@ -95,5 +95,5 @@ Every gate in the invoke path (auth → SSRF/network → entitlement → OPA pol
 injection) returns its failure as a JSON-RPC **`error`** object in an HTTP 200 response, never as
 an HTTP 4xx/5xx for the tool-call step itself. **Always check for an `"error"` key in the response
 body, not just the HTTP status code.** See
-[../troubleshooting/common-errors.md](../troubleshooting/common-errors.md) for what each error
+[../troubleshooting/credential-injection.md](../troubleshooting/credential-injection.md) for what each error
 `code`/`message` means and how to fix it.

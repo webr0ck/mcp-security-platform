@@ -95,11 +95,11 @@ curl -sf http://localhost:8000/api/v1/submissions/$SID -H "Authorization: Bearer
 ## Step 5 — Wait for reviewer approval
 
 An admin/reviewer now needs to approve your submission (see
-[../admin/reviewer-approval-guide.md](../admin/reviewer-approval-guide.md) — that's their side of
+[../admin/submission-review.md](../admin/submission-review.md) — that's their side of
 this walkthrough). This must be a **different** identity than the one that submitted — the
 platform blocks self-review even for an admin (`carol` cannot approve her own submission; get a
 token for `alice`/`bob` instead, the same way as step 0, and re-run the approve call from
-[reviewer-approval-guide.md](../admin/reviewer-approval-guide.md) with that token). Once approved,
+[submission-review.md](../admin/submission-review.md) with that token). Once approved,
 `submission_status` becomes `approved_pending_url` (if you gave a repo URL) or `scaffold_ready`
 (no-code).
 
@@ -129,7 +129,7 @@ curl -sf -X POST http://localhost:8000/api/v1/submissions/$SID/apply -H "Authori
 curl -sf http://localhost:8000/api/v1/submissions/$SID/verification-report -H "Authorization: Bearer $TOKEN"
 ```
 
-See [../admin/deploy-verify-operations.md](../admin/deploy-verify-operations.md) for what each
+See [../admin/post-approval-activation.md](../admin/post-approval-activation.md) for what each
 `deployment_status` value means while you're polling.
 
 ## Step 7 — Your tools are quarantined — ask for release
@@ -144,11 +144,11 @@ curl -sf -X POST http://localhost:8000/mcp -H "Authorization: Bearer $TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"walkthrough","version":"1.0"}}}'
 ```
 
-See [invoking-tools.md](invoking-tools.md) for the full invoke sequence and expected responses.
+See [using-approved-server.md](using-approved-server.md) for the full invoke sequence and expected responses.
 
 ## Troubleshooting
 
 If any step above didn't match its expected output, check
-[../troubleshooting/common-errors.md](../troubleshooting/common-errors.md) before assuming it's a
+[../troubleshooting/onboarding.md](../troubleshooting/onboarding.md) before assuming it's a
 bug — most non-200 responses at this stage are a state-machine mismatch (e.g. calling `apply`
 before a scan finishes) or an auth-mode config gap, both documented there with the exact fix.

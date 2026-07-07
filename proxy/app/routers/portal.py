@@ -5298,7 +5298,7 @@ async def fragment_admin_submissions(request: Request):
     )
     return HTMLResponse(f"""
     <div class="section-title">&#x1F4E5; Submissions <span class="count">{count_badge}</span>
-      <a href="/docs/admin/reviewer-approval-guide.md" target="_blank" rel="noopener"
+      <a href="/docs/admin/submission-review.md" target="_blank" rel="noopener"
          style="margin-left:auto;font-size:12px;color:var(--blue);text-decoration:none;align-self:center">
         Reviewer guide &#x2197;
       </a>

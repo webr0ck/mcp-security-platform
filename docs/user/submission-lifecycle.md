@@ -73,7 +73,7 @@ the final verification report (probe results, tools discovered).
 
 **Where this is enforced:** `server_registry.deployment_status`, CHECK constraint
 `ck_deployment_status_valid` (`infra/db/migrations/V068__deploy_verify_schema.sql`). See
-[../admin/deploy-verify-operations.md](../admin/deploy-verify-operations.md) for the admin-facing
+[../admin/post-approval-activation.md](../admin/post-approval-activation.md) for the admin-facing
 operational view of this pipeline.
 
 ## 3. Tool quarantine (separate from both state machines above)
@@ -101,4 +101,4 @@ Tool status values: `active` (invocable) | `quarantined` (discovered, awaiting r
 | Anyone | Tools show up but calls fail with "quarantined" | Normal — ask an admin to release the tool once they've reviewed it. |
 
 See also: [self-service-onboarding.md](self-service-onboarding.md) (the full walkthrough) and
-[../admin/reviewer-approval-guide.md](../admin/reviewer-approval-guide.md) (the reviewer's side).
+[../admin/submission-review.md](../admin/submission-review.md) (the reviewer's side).

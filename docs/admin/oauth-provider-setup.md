@@ -12,7 +12,7 @@ There are two related-but-distinct concepts — don't conflate them:
 - **`oauth_provider_policy`** (per issuer+tenant) — the low-level enforcement row: allowed/blocked
   scopes, redirect patterns, client-auth methods. Every `entra_*`/`external_oauth_*` submission is
   validated against a matching row at approval time (see
-  [reviewer-approval-guide.md](reviewer-approval-guide.md)). This is the thing that actually gates
+  [submission-review.md](submission-review.md)). This is the thing that actually gates
   approval — it must exist for approval to succeed.
 - **`oauth_provider_profile`** (this doc) — a curated *catalog* sitting above that, so a
   non-expert submitter can pick "Generic OAuth 2.0" or "Same platform IdP" from a list instead of
@@ -80,7 +80,7 @@ curl -sf -X POST http://localhost:8000/api/v1/admin/oauth-provider-profiles/$PRO
 - **Missing required fields** (e.g. `generic_oauth2` with no `token_endpoint` — discovery never
   ran or failed and nobody filled it in) → the profile stays unapprovable, not silently passed.
 - **Unknown issuer** — the profile's issuer must already have a matching `oauth_provider_policy`
-  row (create one first if it doesn't — see [reviewer-approval-guide.md](reviewer-approval-guide.md)
+  row (create one first if it doesn't — see [submission-review.md](submission-review.md)
   for what that row needs). `422` otherwise.
 - **High-risk scope** (`write`/`admin`/`mail`/`files`/`offline_access`, checked across BOTH
   `default_scopes` and `allowed_scopes`) requires explicit acknowledgement:

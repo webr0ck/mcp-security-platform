@@ -23,7 +23,7 @@ never a warning-only TOCTOU gap.
 - **Deploy** (`services/deploy_launcher.py`) runs the built image in an isolated lab launcher.
 - **Verify** (`services/deploy_verifier.py::run_verification_probes`) is the **exact same**
   verification code path the self-hosted `provide-url` flow uses — healthcheck, tool discovery
-  (into quarantine — see [reviewer-approval-guide.md](reviewer-approval-guide.md)), then an
+  (into quarantine — see [submission-review.md](submission-review.md)), then an
   invocation probe. This is deliberate: there is exactly one verification implementation, not two
   that could silently diverge.
 
@@ -64,4 +64,4 @@ want that extra assurance before releasing its tools.
 ## Releasing tools after verification
 
 `verified`/`active` does **not** make tools invocable — see
-[reviewer-approval-guide.md](reviewer-approval-guide.md#after-approval--releasing-tools).
+[submission-review.md](submission-review.md#after-approval--releasing-tools).

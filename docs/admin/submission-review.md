@@ -79,7 +79,7 @@ acknowledgement.
 
 **Result:** `submission_status` becomes `approved_pending_url` (has a repo URL) or
 `scaffold_ready` (no-code). Neither is invocable yet — the submitter still needs to provide a
-running URL or call `/apply` (see [deploy-verify-operations.md](deploy-verify-operations.md)).
+running URL or call `/apply` (see [post-approval-activation.md](post-approval-activation.md)).
 
 ## Reject
 

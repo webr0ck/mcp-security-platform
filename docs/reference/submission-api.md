@@ -15,8 +15,8 @@ authoritative schema for every field.
 | GET | `/api/v1/submissions` | owner (own only) | — |
 | GET | `/api/v1/submissions/{id}` | owner | [../user/submission-lifecycle.md](../user/submission-lifecycle.md) |
 | POST | `/api/v1/submissions/{id}/provide-url` | owner | [../user/self-service-onboarding.md](../user/self-service-onboarding.md) |
-| POST | `/api/v1/submissions/{id}/apply` | owner | [../admin/deploy-verify-operations.md](../admin/deploy-verify-operations.md) |
-| GET | `/api/v1/submissions/{id}/verification-report` | owner | [../admin/deploy-verify-operations.md](../admin/deploy-verify-operations.md) |
+| POST | `/api/v1/submissions/{id}/apply` | owner | [../admin/post-approval-activation.md](../admin/post-approval-activation.md) |
+| GET | `/api/v1/submissions/{id}/verification-report` | owner | [../admin/post-approval-activation.md](../admin/post-approval-activation.md) |
 | GET | `/api/v1/submissions/{id}/scaffold` | owner | — (no-code path scaffold download) |
 | GET | `/api/v1/design-assist` | any | agent-native wizard question API |
 
@@ -24,20 +24,20 @@ authoritative schema for every field.
 
 | Method | Path | Role required | See |
 |---|---|---|---|
-| GET | `/api/v1/admin/submissions` | reviewer (read: `admin`/`platform_admin`/`security_auditor`/`auditor`) | [../admin/reviewer-approval-guide.md](../admin/reviewer-approval-guide.md) |
-| GET | `/api/v1/admin/submissions/{id}/sbom` | reviewer | [../admin/reviewer-approval-guide.md](../admin/reviewer-approval-guide.md) |
-| POST | `/api/v1/admin/submissions/{id}/approve` | `admin`/`platform_admin`/`security_reviewer` | [../admin/reviewer-approval-guide.md](../admin/reviewer-approval-guide.md) |
-| POST | `/api/v1/admin/submissions/{id}/reject` | `admin`/`platform_admin`/`security_reviewer` | [../admin/reviewer-approval-guide.md](../admin/reviewer-approval-guide.md) |
-| POST | `/api/v1/admin/submissions/{id}/request-changes` | `admin`/`platform_admin`/`security_reviewer` | [../admin/reviewer-approval-guide.md](../admin/reviewer-approval-guide.md) |
-| POST | `/api/v1/admin/tools/{tool_id}/release` | `admin`/`platform_admin`/`security_reviewer` | [../admin/reviewer-approval-guide.md](../admin/reviewer-approval-guide.md) |
+| GET | `/api/v1/admin/submissions` | reviewer (read: `admin`/`platform_admin`/`security_auditor`/`auditor`) | [../admin/submission-review.md](../admin/submission-review.md) |
+| GET | `/api/v1/admin/submissions/{id}/sbom` | reviewer | [../admin/submission-review.md](../admin/submission-review.md) |
+| POST | `/api/v1/admin/submissions/{id}/approve` | `admin`/`platform_admin`/`security_reviewer` | [../admin/submission-review.md](../admin/submission-review.md) |
+| POST | `/api/v1/admin/submissions/{id}/reject` | `admin`/`platform_admin`/`security_reviewer` | [../admin/submission-review.md](../admin/submission-review.md) |
+| POST | `/api/v1/admin/submissions/{id}/request-changes` | `admin`/`platform_admin`/`security_reviewer` | [../admin/submission-review.md](../admin/submission-review.md) |
+| POST | `/api/v1/admin/tools/{tool_id}/release` | `admin`/`platform_admin`/`security_reviewer` | [../admin/submission-review.md](../admin/submission-review.md) |
 
 ## Credentials (admin)
 
 | Method | Path | Role required | See |
 |---|---|---|---|
-| PUT | `/admin/credentials/{tool_id}` | `admin` | [../admin/credential-management.md](../admin/credential-management.md) |
-| DELETE | `/admin/credentials/{tool_id}` | `admin` | [../admin/credential-management.md](../admin/credential-management.md) |
-| PUT | `/admin/credentials/{tool_id}/injection-mode` | `admin` | [../admin/credential-management.md](../admin/credential-management.md) |
+| PUT | `/admin/credentials/{tool_id}` | `admin` | [../admin/credential-provisioning.md](../admin/credential-provisioning.md) |
+| DELETE | `/admin/credentials/{tool_id}` | `admin` | [../admin/credential-provisioning.md](../admin/credential-provisioning.md) |
+| PUT | `/admin/credentials/{tool_id}/injection-mode` | `admin` | [../admin/credential-provisioning.md](../admin/credential-provisioning.md) |
 | POST | `/admin/credentials/{tool_id}/enroll` | `admin` | device-flow OAuth2 enrollment |
 | GET | `/auth/status/{service}` | any authenticated principal | per-user enrollment status check |
 
@@ -66,7 +66,7 @@ authoritative schema for every field.
 
 | Method | Path | Role required | See |
 |---|---|---|---|
-| POST | `/mcp` (JSON-RPC: `initialize`, `tools/list`, `tools/call`) | any entitled principal | [../user/invoking-tools.md](../user/invoking-tools.md) |
+| POST | `/mcp` (JSON-RPC: `initialize`, `tools/list`, `tools/call`) | any entitled principal | [../user/using-approved-server.md](../user/using-approved-server.md) |
 
 ## Envelope conventions
 
@@ -75,4 +75,4 @@ each endpoint's own shape above). Errors from these REST endpoints use standard 
 (401/403/404/409/422/503) with a `detail` field — sometimes a plain string, sometimes a structured
 `{"code": "...", "message": "..."}` object for policy-shaped rejections (e.g.
 `OAUTH_POLICY_VIOLATION`). MCP tool-invocation errors are different — see
-[../user/invoking-tools.md#important-http-200-does-not-mean-success](../user/invoking-tools.md#important-http-200-does-not-mean-success).
+[../user/using-approved-server.md#important-http-200-does-not-mean-success](../user/using-approved-server.md#important-http-200-does-not-mean-success).

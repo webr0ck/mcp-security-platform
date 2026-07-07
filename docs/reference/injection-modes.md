@@ -16,7 +16,7 @@ configurable — most modes format the header as `f"{inject_prefix} {token}"`.
 | Mode | What's injected | Token lifecycle |
 |---|---|---|
 | `none` | Nothing. | N/A |
-| `service` | A static, platform-stored bearer token/API key. | Never expires from the platform's perspective — rotate via [../admin/credential-management.md](../admin/credential-management.md). |
+| `service` | A static, platform-stored bearer token/API key. | Never expires from the platform's perspective — rotate via [../admin/credential-provisioning.md](../admin/credential-provisioning.md). |
 | `basic_auth` | `Authorization: Basic <base64(username:password)>` — `inject_prefix` is ignored (RFC 7617 mandates `Basic`). | Static, same rotation path as `service`. |
 | `user` | Nothing credential-shaped; `X-User-Sub` carries the caller's identity. Your server manages its own per-user auth/session. | N/A |
 | `service_account` | A Keycloak `client_credentials` access token for a registered KC client. | Minted per call (cached briefly), platform-managed. |
@@ -35,14 +35,14 @@ server would:
 
 1. Issuer matches the platform's Keycloak realm issuer.
 2. Audience matches the one you registered (see
-   [../admin/reviewer-approval-guide.md](../admin/reviewer-approval-guide.md)).
+   [../admin/submission-review.md](../admin/submission-review.md)).
 3. Not expired (`exp`).
 4. Signature valid against the platform's JWKS.
 5. Use `sub` as the calling user's identity for any per-user authorization you do.
 
 `services/same_idp_verify.py::run_same_idp_verify_probe` (platform-side) is an automated check
 against a deployed server for exactly this — it confirms missing/wrong-audience/expired tokens are
-all rejected. See [../admin/deploy-verify-operations.md](../admin/deploy-verify-operations.md).
+all rejected. See [../admin/post-approval-activation.md](../admin/post-approval-activation.md).
 
 ## Failure behavior (important for debugging)
 
@@ -50,7 +50,7 @@ all rejected. See [../admin/deploy-verify-operations.md](../admin/deploy-verify-
 credential, failed refresh, no enrollment yet, policy violation), the dispatcher raises
 `CredentialInjectionError` — the request is **never forwarded upstream without the intended
 credential**. This surfaces to the caller as a JSON-RPC `error` in an HTTP 200 response (not a
-silent pass-through) — see [../troubleshooting/common-errors.md](../troubleshooting/common-errors.md).
+silent pass-through) — see [../troubleshooting/credential-injection.md](../troubleshooting/credential-injection.md).
 
 ## The `ServiceAdapter` contract (advanced)
 
