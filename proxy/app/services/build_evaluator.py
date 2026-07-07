@@ -51,7 +51,13 @@ def _decide_build_status(build_artifact_digest: str | None, worker_error: str | 
 
 async def _evaluate_build_requested(session, job, raw) -> None:
     status = _decide_build_status(raw.build_artifact_digest, raw.worker_error)
-    provenance = raw.provenance if raw.provenance is not None else {}
+    provenance = dict(raw.provenance) if raw.provenance is not None else {}
+    # image_ref lives on build_results as its own column (not inside the
+    # worker-authored provenance dict) — fold it into build_provenance here
+    # so deploy_launcher.py (Task 4) has a single place to read it from
+    # server_registry without a second table join.
+    if raw.image_ref:
+        provenance["image_ref"] = raw.image_ref
     await session.execute(text(
         """
         UPDATE server_registry
