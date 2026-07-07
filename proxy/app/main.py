@@ -174,6 +174,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Scan evaluator failed to start: %s", exc)
 
+    # Step 5.7 (CR-01 / WP-B3): start the build evaluator loop — the trusted
+    # side that reads build_results (written by the isolated build-worker)
+    # and drives server_registry.deployment_status for build_requested jobs.
+    from app.services import build_evaluator as _build_evaluator
+    try:
+        _build_evaluator.start()
+    except Exception as exc:
+        logger.warning("Build evaluator failed to start: %s", exc)
+
     # Step 6: Initialize trust envelope labeler (PRD-0001 M3) — fail-graceful
     if settings.TRUST_ENVELOPE_ENABLED:
         from app.services.trust_labeler import init_labeler as _init_labeler
@@ -202,6 +211,10 @@ async def lifespan(app: FastAPI):
     # Shutdown — stop scan evaluator loop (CR-14 / WP-B1)
     from app.services import scan_evaluator as _scan_evaluator
     await _scan_evaluator.stop()
+
+    # Shutdown — stop build evaluator loop (CR-01 / WP-B3)
+    from app.services import build_evaluator as _build_evaluator
+    await _build_evaluator.stop()
 
     # Shutdown — stop OPA data sync reconcile loop first
     if opa_data_sync is not None:
