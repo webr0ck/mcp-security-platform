@@ -271,8 +271,20 @@ migration `V054`.*
 
 ### 5.5 Submission scan pipeline (self-service onboarding)
 
-A self-service submission carrying a GitHub repo URL is statically scanned **before** it enters the
-human review queue (`services/submission_scanner.py`, background task). Four scanners run:
+**2026-07 update (CR-14/WP-B1, CR-12/WP-B2): scanning moved out of the proxy process.** The
+paragraphs below describing an in-proxy `services/submission_scanner.py` background task are
+historical — that code path is now dead (unreferenced, kept only for its module docstring). The
+live pipeline is a Postgres-backed job queue (`scan_jobs`, migration `V063`) consumed by a
+separate, unprivileged `scanner-worker` service (`scanner_worker/`) that holds **no** proxy
+secrets, DB-admin credentials, Vault token, or gateway shared secret — only its own narrow
+`scanner_worker_app` DB role (INSERT-only on `scan_raw_results`, UPDATE limited to its own
+claim/heartbeat columns on `scan_jobs`). This is a deliberate **execution/adjudication split**: the
+worker clones the repo and runs every scanner below, emitting RAW findings only — it structurally
+cannot write `scan_status`/`block`/any verdict. A trusted **evaluator** inside the proxy
+(`services/scan_evaluator.py`, never touches attacker-controlled repo content — only the
+structured JSON the worker already produced) reads `scan_raw_results` and drives
+`server_registry.scan_status`/`submission_status`. A dead-lettered job (worker crashed before
+producing a result) fails closed to `scan_status='error'`, never `passed`. Four scanners run:
 
 The repo is cloned from a configured **git provider** (PRD-0005 R-2). GitHub and corporate
 **Bitbucket** (Data Center `/scm/<proj>/<repo>.git` + `/<proj>/repos/<repo>`, and Cloud
@@ -286,8 +298,15 @@ hardening (https-only, option-injection `--` guard, shallow, tmpfs, read-only to
 *Reference: `services/git_providers.py`, `routers/admin_git.py`, migration `V055`.*
 
 - **trufflehog** — verified secrets only (`--only-verified`); a live-confirmed secret blocks.
-- **pip-audit** — Python-dependency CVEs; blocks at `critical`. No-ops on non-pip repos (recorded as
-  an informational note, not a false "ran").
+- **pip-audit** — Python-dependency CVEs, alongside **OSV-Scanner** (broad multi-ecosystem),
+  **npm audit** (Node, lockfile-only, never `npm install`), and **govulncheck** (Go reachability) —
+  CR-12/WP-B2. All four are RAW-finding scanners; policy (`services/dependency_policy.py`)
+  alias-collapses findings across scanners and applies a severity threshold, never inferred from
+  fix-version presence. A `review_required` verdict (distinct from `blocked`/`error`/`passed`) is
+  forced — never a silent pass — for unknown-severity CVEs, a Node project with no lockfile, or a
+  Go module that fails to load under govulncheck (a submitter could otherwise break their own
+  `go.mod` to downgrade coverage and slip through). Reviewer-authorized, exact-match, expiring
+  waivers (`scan_waivers` table) can clear a finding; waived findings stay visible, never deleted.
 - **custom regex rules** — `scan-config.yaml` patterns (hardcoded IPs, credential logging, `eval`);
   advisory by default.
 - **mcp_checker** — the vendored MCP-specific static engine (`proxy/vendor/mcp_checker/`, sourced
@@ -302,17 +321,33 @@ that cannot run fails **closed** (`scan_status='error'`, never `passed`). **The 
 only** — a `passed` scan moves the submission to `awaiting_review`; it does not approve it. Human
 review (§6.5 `security_reviewer`, with self-review forbidden) remains the authoritative gate.
 
-**Post-approval state machine + deploy model (be honest — validation CRITICAL-2).** Approval does
-**NOT** build or launch a container. The platform automates *intake → scan → human review*; it does
-**not** automate "running isolated container behind the gateway." The submitter **self-hosts** the
-server on their own infrastructure and hands the URL back. The state machine:
-`awaiting_review` → **approve** (`submission.py::approve_submission`) → `approved_pending_url`
-(repo-backed) or `scaffold_ready` (no-code) — *DB fields only, nothing is deployed* → submitter runs
-the server, then `POST /api/v1/submissions/{id}/provide-url` (SSRF-validated) → discovery runs
-**synchronously** (`await _run_tool_discovery`, tools registered **quarantined**, INV-005) → `active`.
-No podman/docker/systemd/ansible/compose call exists in the approval path. **Auto-deploy into a
-per-server isolated network with the gateway as sole ingress is (roadmap)** — do not describe the
-current flow as "submit git URL → running isolated container, zero manual steps."
+**Post-approval state machine + deploy model — updated 2026-07 (CR-01/WP-B3).** Two paths now
+exist side by side, sharing one verification implementation. **Self-hosted (original path,
+unchanged):** `awaiting_review` → **approve** → `approved_pending_url`/`scaffold_ready` (DB fields
+only) → submitter runs the server themselves → `POST .../provide-url` (SSRF-validated) → discovery
+(quarantined, INV-005) → `active`. **Platform-managed (new, CR-01):** `POST
+/api/v1/submissions/{id}/apply` pins the exact scanned+approved commit/content digest (never a
+re-clone of branch HEAD — a submitter moving HEAD between approval and build must not swap in
+unscanned code) and enqueues a `build_requested` job on the same `scan_jobs` queue WP-B1 built.
+An **unprivileged build worker** (`build_worker/`, mirrors `scanner_worker/`'s isolation: no proxy
+secrets, no container socket) builds the artifact, which passes back through the CR-12 scan layer;
+a trusted **build evaluator** (`services/build_evaluator.py`) drives `deployment_status`
+(`build_requested→building→built→deploy_requested→deploying→deployed→verify_requested→
+verifying→verified→failed`, `infra/db/migrations/V068`). A separate, narrowly-scoped **launcher**
+(`services/deploy_launcher.py`) is the *only* code path that shells out to `podman run` — it
+re-reads `deployment_status='built'` fresh (never trusts a cached value) before launching, on a
+per-server isolated network with the same hardening flags (`--read-only`, `no-new-privileges`,
+resource limits) as every other lab MCP server. This permanently separates the SEC-05-trusted
+components from the socket-capable one (resolves CR-18's "no env is both" contradiction
+architecturally, not just by documenting it). **Verify is ONE shared code path for both flows**
+(`services/deploy_verifier.py::run_verification_probes` — healthcheck → quarantined discovery →
+invocation probe → CR-06 machine-testable contract check → `verification_report` write); deploy/
+build success never auto-releases tools, release still requires the explicit evidence-gated
+`POST /api/v1/tools/{id}/release` (CR-07). **Known limitation, not hidden:** no real `buildah`/
+`kaniko` binary or container registry exists in the dev/lab sandbox this was built against — the
+image-build step is a named, tested stub with a concrete upgrade path (mirror
+`scanner_worker/Dockerfile`'s binary-install pattern); every other part of the pipeline (queue,
+digest pinning, evaluator, launcher hardening, verify, contract check, API) is real and tested.
 
 **End-to-end acceptance (PRD-0005 R-4)**: `lab/tests/submission_lifecycle_e2e.sh` drives the whole
 lifecycle over the real gateway — submit (alice) → automated scan (mcp_checker findings + both SBOMs)
@@ -471,6 +506,21 @@ an "overridden" badge. Mutations flow through the HMAC-signed admin audit chain.
 - Events flow stdout → Promtail → Loki → Grafana; Alertmanager for alerting; MinIO for archival
   (Object-Lock **GOVERNANCE** retention — note: not tamper-proof WORM, see ROADMAP).
 - A daily `compliance-checker` samples the audit trail for integrity.
+- **2026-07 (CR-17/WP-D1): `/metrics`** (Prometheus format, `prometheus_client`) is exposed on the
+  proxy, `scanner-worker`, and `build-worker` — authz allow/deny decisions, OPA/Vault reachability,
+  credential-broker failures, audit-emit failures, scan-queue depth by status, dead-letter count,
+  quarantine backlog, stale-scan count. A Prometheus instance (`observability/prometheus/`) scrapes
+  all three over a dedicated read-only `metrics-net`; alert rules fire on hard invariants (OPA/Vault
+  unreachable, audit-emit failure, scanner dead-letter, stale scans, rising deny rate) with
+  thresholds explicitly labeled `initial_default: "true"` (no production reference environment
+  exists yet to calibrate against — see D4 in the platform-finalisation PRD). Grafana dashboard
+  `wp-d1-observability` (provisioned, `lab/grafana/provisioning/dashboards/`) covers the submission
+  funnel, scan queue, quarantine backlog, invocation denies, and credential failures. A synthetic
+  end-to-end probe (`lab/scripts/synthetic_probe.py`, `make -f Makefile.lab lab-probe`) runs
+  login → low-risk invoke → audit-emission check. 9 runbooks live under `docs/runbooks/` (Vault
+  init/unseal, OPA bundle signing, Keycloak client setup, git provider setup, private CIDR
+  allowlisting, scanner failure, quarantine release, audit restore, incident triage), each verified
+  against the live lab, not written from memory.
 
 ---
 
@@ -490,15 +540,23 @@ Headline properties and how they're met:
 
 **Known residual items** (tracked openly): MinIO GOVERNANCE ≠ MFA-WORM; the `X-Client-Cert-CN` trust
 is IP-gated defense-in-depth; the anomaly detector is an advisory heuristic, not a learned model;
-per-server network isolation and per-tool rate limiting are **(roadmap)**.
+per-tool rate limiting is **(roadmap)**. Per-server network isolation for the platform-managed
+deploy path now exists (CR-01/WP-B3's `deploy_launcher.py`, one isolated network per launched
+server) — the self-hosted `provide-url` path still relies on the submitter's own infrastructure
+isolation, unchanged.
 
 ---
 
 ## 9. Status & roadmap
 
 Current per-control status is the [README Enforced-vs-Roadmap table](../README.md#enforced-today-vs-roadmap).
-Notable **(roadmap)** items: SPDX SBOM, outbound Jira, Helm/K8s, learned anomaly baseline,
-server-owner onboarding wizard, per-server network isolation.
+Notable **(roadmap)** items: SPDX SBOM, outbound Jira, Helm/K8s (compose remains the only
+supported production deployment target — D3), learned anomaly baseline, Jira Cloud `cloudId`
+resolution (adapter exists, per-D2 fast-follow), real `buildah`/registry integration for the
+CR-01 build pipeline (stubbed with a named upgrade path, see §5.5), per-tool rate limiting.
+2026-07's platform-finalisation program closed CR-01 through CR-19 (see
+`Codex_review/Claude_status.md`) — the server-owner onboarding wizard and per-server network
+isolation items previously listed here are done, not roadmap.
 
 > Keep this document matched to code. If you change a control, update this doc and the README table
 > in the same change — a claim without backing code is treated as a bug.
