@@ -1141,6 +1141,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
       </a>
     </div>
 
+    <div class="adm-tabs-bar" id="adm-tabs-bar"></div>
 
     <!-- Content -->
     <div class="adm-body" id="adm-content"
@@ -1162,37 +1163,50 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
     detections:  'Detections',
     sbom:        'SBOM',
     submissions: 'Submissions',
+    prompts:     'Wizard Prompts',
+    llm:         'LLM Provider',
+    git:         'Git Providers',
     profile:     'Profile',
     access:      'Access',
   }};
+  const _ADM_GROUPS = [
+    {{id:'overview', label:'Overview', panels:['dashboard','detections']}},
+    {{id:'servers',  label:'Servers',  panels:['servers','submissions','sbom']}},
+    {{id:'access',   label:'Access',   panels:['access','credentials','limits']}},
+    {{id:'settings', label:'Settings', panels:['identity','prompts','llm','git']}},
+    {{id:'profile',  label:'Profile',  panels:['profile']}},
+  ];
+  function _admGroupFor(name) {{
+    return _ADM_GROUPS.find(g => g.panels.includes(name)) || _ADM_GROUPS[1];
+  }}
+  function _renderTabsBar(group, activeName) {{
+    const bar = document.getElementById('adm-tabs-bar');
+    if (!bar) return;
+    if (group.panels.length <= 1) {{ bar.style.display = 'none'; bar.innerHTML = ''; return; }}
+    bar.style.display = 'flex';
+    bar.innerHTML = group.panels.map(p => {{
+      const active = p === activeName;
+      return '<button class="adm-tab' + (active ? ' active' : '') + '" ' +
+             'onclick="loadAdminTab(\\'' + p + '\\')">' + (_TAB_MAP[p] || p) + '</button>';
+    }}).join('');
+  }}
   function loadAdminTab(name, opts) {{
     opts = opts || {{}};
+    const group = _admGroupFor(name);
     // Update breadcrumb
     const bc = document.getElementById('adm-breadcrumb-page');
     if (bc) bc.textContent = _TAB_MAP[name] || name;
-    // Update sidebar active item
+    // Update sidebar active group
     document.querySelectorAll('.adm-nav-item').forEach(b => {{
-      const match = b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + name + "'");
+      const match = b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + group.panels[0] + "'");
       b.classList.toggle('active', match);
       const dot = b.querySelector('.adm-nav-dot');
       if (dot) dot.classList.toggle('active', match);
     }});
-    // Update top tab bar
-    document.querySelectorAll('#adm-tabs-bar .adm-tab').forEach(b => {{
-      const match = b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + name + "'");
-      b.classList.toggle('active', match);
-    }});
+    // Update subtab bar
+    _renderTabsBar(group, name);
     // Load fragment
     htmx.ajax('GET', '/portal/fragments/admin/' + name, {{target: '#adm-content', swap: 'innerHTML'}});
-    // Browser back/forward support: tab switches previously pushed no history
-    // entry at all, so Back skipped straight past the whole admin console to
-    // whatever page loaded before it. /portal/admin/{{tab}} is a real,
-    // server-rendered route for every tab (see portal_admin_tab), so pushing
-    // it here means Back/Forward can just do a normal reload at that URL and
-    // get the correct page every time — no fragile client-side state to keep
-    // in sync, no reliance on this htmx build's undocumented ajax() history
-    // options (tested empirically: passing pushUrl to htmx.ajax() here had no
-    // effect on this bundled htmx version).
     if (!opts.fromPopState) {{
       history.pushState({{admTab: name}}, '', '/portal/admin/' + name);
     }}
@@ -1202,6 +1216,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
       location.reload();
     }}
   }});
+  _renderTabsBar(_admGroupFor('{esc_py(initial_tab)}'), '{esc_py(initial_tab)}');
   // Legacy alias used by existing admin sub-fragments
   function activateAdminTab(name) {{ loadAdminTab(name); }}
 </script>
