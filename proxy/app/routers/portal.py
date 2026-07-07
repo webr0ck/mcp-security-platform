@@ -632,6 +632,20 @@ _CSS = """
     content: ''; position: absolute; left: 0; right: 0; bottom: 0;
     height: 2px; background: var(--adm-blue); border-radius: 2px;
   }
+  .ss-tabs-bar {
+    display: flex; align-items: center; gap: 26px; margin: 4px 0 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .ss-home-tiles {
+    display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr));
+    gap: 14px; margin: 16px 0;
+  }
+  .ss-home-tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; cursor: pointer;
+  }
+  .ss-home-tile-val { font-size: 26px; font-weight: 800; }
+  .ss-home-tile-label { font-size: 12px; color: var(--muted); margin-top: 3px; }
   .adm-body {
     overflow-y: auto; padding: 18px 22px; display: block;
     height: calc(100vh - 56px); box-sizing: border-box;
@@ -2259,6 +2273,59 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
     }
     mcp_json = json.dumps(mcp_config, indent=2)
 
+    home_html = f"""
+    <div class="srv-strip">
+      <div class="srv-strip-cnt">{len(granted_svcs)} servers</div>
+      <div class="srv-strip-div"></div>
+      <div class="srv-strip-item"><span class="dot-green"></span>{n_active} active</div>
+      <div class="srv-strip-item"><span class="dot-red"></span>{n_suspended} suspended</div>
+      <div class="srv-strip-item"><span class="dot-amber"></span>{n_awaiting} awaiting approval</div>
+    </div>
+    <div class="ss-home-tiles">
+      <div class="ss-home-tile" onclick="ssShowTab('catalog')">
+        <div class="ss-home-tile-val">{len(granted_svcs)}</div>
+        <div class="ss-home-tile-label">Servers you can use</div>
+      </div>
+      <div class="ss-home-tile" onclick="ssShowTab('submit')">
+        <div class="ss-home-tile-val" style="color:var(--amber)">{n_awaiting}</div>
+        <div class="ss-home-tile-label">Submissions in review</div>
+      </div>
+    </div>"""
+
+    catalog_html = f"""
+    <!-- Card grid -->
+    <div class="srv-card-grid">
+      {"".join(cards_html) if cards_html else '<div class="empty-state">No servers accessible for this identity.</div>'}
+    </div>
+
+    <!-- MCP Config snippet (collapsed by default) -->
+    <details style="margin-top:8px">
+      <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#9aa1ab;padding:8px 0;font-family:var(--ff-sans)">
+        MCP config snippet
+      </summary>
+      <div style="margin-top:8px">
+        <p style="font-size:12px;color:#5b626c;margin-bottom:8px">
+          Paste into <code style="font-family:var(--ff-mono);color:#7aa7ff">~/.mcp.json</code>.
+          {"Append <code style=\"font-family:var(--ff-mono)\">?key=YOUR_API_KEY</code> to pre-fill." if not api_key else "API key pre-filled."}
+        </p>
+        <div class="code-block" id="mcp-config-block">{esc_py(mcp_json)}</div>
+        <button class="btn-secondary btn-sm" style="margin-top:0.5rem" onclick="
+          navigator.clipboard.writeText(document.getElementById('mcp-config-block').textContent).then(()=>{{
+            this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',2000);
+          }})">Copy</button>
+      </div>
+    </details>"""
+
+    submit_html = f"""
+    {"" if is_auditor else '''<div style="display:flex;justify-content:flex-end;margin-bottom:1rem">
+      <a href="/portal/submit" style="display:inline-flex;align-items:center;gap:0.4rem;
+         background:var(--blue);color:#fff;border-radius:8px;padding:0.45rem 1rem;
+         font-size:13px;font-weight:600;text-decoration:none">
+        &#x2B; Submit MCP Server
+      </a>
+    </div>'''}
+    {my_submissions_html if my_submissions_html else '<div class="empty-state">No submissions yet.</div>'}"""
+
     return f"""
     <!-- Hero -->
     <div class="portal-hero">
@@ -2289,48 +2356,31 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
       </span>
     </div>
 
-    <!-- Summary strip -->
-    <div class="srv-strip">
-      <div class="srv-strip-cnt">{len(granted_svcs)} servers</div>
-      <div class="srv-strip-div"></div>
-      <div class="srv-strip-item"><span class="dot-green"></span>{n_active} active</div>
-      <div class="srv-strip-item"><span class="dot-red"></span>{n_suspended} suspended</div>
-      <div class="srv-strip-item"><span class="dot-amber"></span>{n_awaiting} awaiting approval</div>
+    <div class="ss-tabs-bar" id="ss-tabs-bar">
+      <button class="adm-tab active" onclick="ssShowTab('home')">Home</button>
+      <button class="adm-tab" onclick="ssShowTab('catalog')">Catalog</button>
+      <button class="adm-tab" onclick="ssShowTab('submit')">Submit</button>
+      <button class="adm-tab" onclick="ssShowTab('profile')">Profile</button>
     </div>
 
-    {my_submissions_html}
+    <div id="ss-panel-home" class="ss-panel">{home_html}</div>
+    <div id="ss-panel-catalog" class="ss-panel" style="display:none">{catalog_html}</div>
+    <div id="ss-panel-submit" class="ss-panel" style="display:none">{submit_html}</div>
+    <div id="ss-panel-profile" class="ss-panel" style="display:none"></div>
 
-    <!-- Submit server CTA (hidden for read-only auditor) -->
-    {"" if is_auditor else '''<div style="display:flex;justify-content:flex-end;margin-bottom:1rem">
-      <a href="/portal/submit" style="display:inline-flex;align-items:center;gap:0.4rem;
-         background:var(--blue);color:#fff;border-radius:8px;padding:0.45rem 1rem;
-         font-size:13px;font-weight:600;text-decoration:none">
-        &#x2B; Submit MCP Server
-      </a>
-    </div>'''}
-
-    <!-- Card grid -->
-    <div class="srv-card-grid">
-      {"".join(cards_html) if cards_html else '<div class="empty-state">No servers accessible for this identity.</div>'}
-    </div>
-
-    <!-- MCP Config snippet (collapsed by default) -->
-    <details style="margin-top:8px">
-      <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#9aa1ab;padding:8px 0;font-family:var(--ff-sans)">
-        MCP config snippet
-      </summary>
-      <div style="margin-top:8px">
-        <p style="font-size:12px;color:#5b626c;margin-bottom:8px">
-          Paste into <code style="font-family:var(--ff-mono);color:#7aa7ff">~/.mcp.json</code>.
-          {"Append <code style=\"font-family:var(--ff-mono)\">?key=YOUR_API_KEY</code> to pre-fill." if not api_key else "API key pre-filled."}
-        </p>
-        <div class="code-block" id="mcp-config-block">{esc_py(mcp_json)}</div>
-        <button class="btn-secondary btn-sm" style="margin-top:0.5rem" onclick="
-          navigator.clipboard.writeText(document.getElementById('mcp-config-block').textContent).then(()=>{{
-            this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',2000);
-          }})">Copy</button>
-      </div>
-    </details>
+    <script>
+    function ssShowTab(name) {{
+      document.querySelectorAll('.ss-panel').forEach(p => p.style.display = 'none');
+      document.querySelectorAll('#ss-tabs-bar .adm-tab').forEach(b => b.classList.remove('active'));
+      document.getElementById('ss-panel-' + name).style.display = 'block';
+      const idx = ['home','catalog','submit','profile'].indexOf(name);
+      document.querySelectorAll('#ss-tabs-bar .adm-tab')[idx].classList.add('active');
+      if (name === 'profile' && !document.getElementById('ss-panel-profile').dataset.loaded) {{
+        htmx.ajax('GET', '/portal/fragments/profile', {{target: '#ss-panel-profile', swap: 'innerHTML'}});
+        document.getElementById('ss-panel-profile').dataset.loaded = '1';
+      }}
+    }}
+    </script>
     """
 
 
