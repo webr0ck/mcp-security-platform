@@ -577,6 +577,10 @@ _CSS = """
     opacity: 0.55;
   }
   .adm-nav-dot.active { background: var(--adm-blue); opacity: 1; box-shadow: 0 0 8px rgba(79,156,249,0.7); }
+  .adm-nav-badge {
+    margin-left: auto; font: 700 10px var(--ff-sans); color: var(--adm-blue);
+    background: rgba(79,156,249,0.16); padding: 1px 7px; border-radius: 10px;
+  }
   .adm-user-panel {
     margin-top: auto; display: flex; align-items: center; gap: 10px;
     padding: 10px; border-radius: 10px;
@@ -999,6 +1003,24 @@ _TAB_MAP_PY = {
 }
 _VALID_TABS = frozenset(_TAB_MAP_PY)
 
+_ADMIN_GROUPS: list[dict] = [
+    {"id": "overview", "label": "Overview", "panels": ["dashboard", "detections"]},
+    {"id": "servers",  "label": "Servers",   "panels": ["servers", "submissions", "sbom"]},
+    {"id": "access",   "label": "Access",    "panels": ["access", "credentials", "limits"]},
+    {"id": "settings", "label": "Settings",  "panels": ["identity", "prompts", "llm", "git"]},
+    {"id": "profile",  "label": "Profile",   "panels": ["profile"]},
+]
+
+
+def _panel_group(tab: str) -> dict:
+    """Return the _ADMIN_GROUPS entry containing `tab`, defaulting to the
+    'servers' group for an unrecognized tab (matches the pre-existing
+    fallback behavior in portal_admin_tab)."""
+    for group in _ADMIN_GROUPS:
+        if tab in group["panels"]:
+            return group
+    return _ADMIN_GROUPS[1]  # "servers" group
+
 
 @router.get("", response_class=HTMLResponse)
 async def portal_shell(request: Request):
@@ -1013,7 +1035,7 @@ async def portal_shell(request: Request):
         tab = request.query_params.get("tab", "servers")
         if tab not in _VALID_TABS:
             tab = "servers"
-        return HTMLResponse(content=_build_admin_shell(cid, roles, initial_tab=tab))
+        return HTMLResponse(content=await _build_admin_shell(cid, roles, initial_tab=tab))
     return HTMLResponse(content=_build_agent_shell(cid, roles))
 
 
@@ -1026,7 +1048,7 @@ async def portal_admin_tab(tab: str, request: Request):
         raise HTTPException(status_code=403, detail="admin role required")
     if tab not in _VALID_TABS:
         tab = "servers"
-    return HTMLResponse(content=_build_admin_shell(_client_id(request), roles, initial_tab=tab))
+    return HTMLResponse(content=await _build_admin_shell(_client_id(request), roles, initial_tab=tab))
 
 
 def _aegis_logo_mark(size: int = 24, glow: bool = True) -> str:
@@ -1038,18 +1060,38 @@ def _aegis_logo_mark(size: int = 24, glow: bool = True) -> str:
     )
 
 
-def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> str:
+async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> str:
     """Full-page admin sidebar layout."""
     initials = "".join(w[0].upper() for w in cid.replace("-", " ").split()[:2]) or "?"
     display_name = cid
 
-    def _nav(label: str, tab: str, active: bool = False) -> str:
-        cls = "adm-nav-item active" if active else "adm-nav-item"
-        dot_cls = "adm-nav-dot active" if active else "adm-nav-dot"
+    try:
+        from sqlalchemy import text as _sidebar_text
+        from app.core.database import AsyncSessionLocal as _SidebarSession
+        async with _SidebarSession() as _sidebar_session:
+            _admin_awaiting_review_count = (await _sidebar_session.execute(_sidebar_text(
+                "SELECT count(*) FROM server_registry "
+                "WHERE submission_status = 'awaiting_review' AND deleted_at IS NULL"
+            ))).scalar()
+    except Exception:
+        _admin_awaiting_review_count = None
+
+    def _nav_group(group: dict, active_tab: str) -> str:
+        active_panel = active_tab if active_tab in group["panels"] else None
+        cls = "adm-nav-item active" if active_panel else "adm-nav-item"
+        dot_cls = "adm-nav-dot active" if active_panel else "adm-nav-dot"
+        # Clicking a group jumps to its first panel; loadAdminTab resolves
+        # the group/subtab bar from there (see Task 2).
+        first_panel = group["panels"][0]
+        badge_html = ""
+        if group["id"] == "servers" and _admin_awaiting_review_count is not None:
+            badge_html = f'<span class="adm-nav-badge">{_admin_awaiting_review_count}</span>'
         return (
-            f'<button class="{cls}" onclick="loadAdminTab(\'{esc_py(tab)}\')">'
-            f'<span class="{dot_cls}"></span>{esc_py(label)}</button>'
+            f'<button class="{cls}" onclick="loadAdminTab(\'{esc_py(first_panel)}\')">'
+            f'<span class="{dot_cls}"></span>{esc_py(group["label"])}{badge_html}</button>'
         )
+
+    nav_html = "".join(_nav_group(g, initial_tab) for g in _ADMIN_GROUPS)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1073,22 +1115,7 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
       </div>
     </div>
 
-    <div class="adm-nav-group">SECURITY</div>
-    {_nav("Dashboard",  "dashboard",  active=initial_tab == "dashboard")}
-    {_nav("Detections", "detections", active=initial_tab == "detections")}
-    {_nav("SBOM",       "sbom",       active=initial_tab == "sbom")}
-
-    <div class="adm-nav-group">ADMIN</div>
-    {_nav("Identity (OIDC)", "identity",    active=initial_tab == "identity")}
-    {_nav("MCP Servers",     "servers",     active=initial_tab == "servers")}
-    {_nav("Access",          "access",      active=initial_tab == "access")}
-    {_nav("Submissions",     "submissions", active=initial_tab == "submissions")}
-    {_nav("Wizard Prompts",  "prompts",     active=initial_tab == "prompts")}
-    {_nav("LLM Provider",    "llm",         active=initial_tab == "llm")}
-    {_nav("Git Providers",   "git",         active=initial_tab == "git")}
-    {_nav("Credentials",     "credentials", active=initial_tab == "credentials")}
-    {_nav("Request Limits",  "limits",      active=initial_tab == "limits")}
-    {_nav("Profile",         "profile",     active=initial_tab == "profile")}
+    {nav_html}
 
     <div class="adm-user-panel" onclick="loadAdminTab('profile')" style="cursor:pointer" title="View profile">
       <div class="adm-avatar">{esc_py(initials)}</div>
