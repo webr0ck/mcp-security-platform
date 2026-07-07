@@ -113,14 +113,21 @@ async def run_verification_probes(server_id: str, url: str, actor_client_id: str
              "tools_skipped": tools_skipped, "invocation_probe_ok": False, "contract_check": None},
         )
 
-    # contract_check is populated by Task 7 (CR-06 machine-testable subset);
-    # left None until then per the plan's explicit interface note.
+    # CR-06 (WP-B3 phase 6): machine-testable contract subset — validates
+    # initialize/tools-list response SHAPE against
+    # docs/reference/mcp-server-contract.schema.json. A contract violation
+    # is recorded in the report but does NOT by itself fail verification —
+    # it is diagnostic (CR-06 scope), distinct from the hard healthcheck/
+    # discovery/invocation-probe gates above which DO fail closed.
+    from app.services.contract_check import run_contract_check
+    contract_check = await run_contract_check(url)
+
     return {
         "healthcheck": True,
         "tools_discovered": tools_discovered,
         "tools_skipped": tools_skipped,
         "invocation_probe_ok": True,
-        "contract_check": None,
+        "contract_check": contract_check,
     }
 
 
@@ -194,6 +201,7 @@ async def verify_server(server_id: str) -> dict:
                 upstream_url = :upstream_url,
                 status = 'approved',
                 verification_report = CAST(:report AS jsonb),
+                contract_version = 'v0.1',
                 updated_at = now()
             WHERE server_id = :sid
             """

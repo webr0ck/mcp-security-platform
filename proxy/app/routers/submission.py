@@ -879,7 +879,9 @@ async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
             await vr_session.execute(text(
                 """
                 UPDATE server_registry
-                SET verification_report = CAST(:report AS jsonb), updated_at = now()
+                SET verification_report = CAST(:report AS jsonb),
+                    contract_version = 'v0.1',
+                    updated_at = now()
                 WHERE server_id = :sid
                 """
             ), {"report": json.dumps(verification_report), "sid": server_id})

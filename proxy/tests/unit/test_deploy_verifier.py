@@ -108,16 +108,20 @@ async def test_successful_verify_promotes_runtime_url_and_approves(monkeypatch):
         resp.body = b'{"discovered": 3, "skipped": []}'
         return resp
 
+    fake_contract_report = {"initialize_ok": True, "tools_list_ok": True, "health_ok": True, "violations": []}
+
     with patch.object(deploy_verifier, "_probe_initialize", new_callable=AsyncMock, return_value=True), \
-         patch("app.routers.tools._run_tool_discovery", new=_fake_discovery):
+         patch("app.routers.tools._run_tool_discovery", new=_fake_discovery), \
+         patch("app.services.contract_check.run_contract_check", new=AsyncMock(return_value=fake_contract_report)):
         result = await deploy_verifier.verify_server("s-1")
 
     assert result["healthcheck"] is True
     assert result["tools_discovered"] == 3
     assert result["invocation_probe_ok"] is True
-    assert result["contract_check"] is None
+    assert result["contract_check"] == fake_contract_report
     executed_sql = " | ".join(sql for sql, _ in session.executed)
     assert "deployment_status = 'verified'" in executed_sql
     assert "status = 'approved'" in executed_sql
+    assert "contract_version = 'v0.1'" in executed_sql
     upstream_params = [params for _, params in session.executed if params and "upstream_url" in params]
     assert upstream_params and upstream_params[0]["upstream_url"] == "http://127.0.0.1:8000/"
