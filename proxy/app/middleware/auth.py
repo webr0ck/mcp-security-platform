@@ -95,6 +95,7 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/",           # redirects to /portal
     "/health",
     "/health/ready",
+    "/metrics",    # CR-17 / WP-D1: Prometheus scrape endpoint — counts/gauges only, no secrets
     "/api/v1/auth/oidc/login",
     "/api/v1/auth/oidc/callback",
     "/api/v1/auth/oidc/token/refresh",    # self-authenticated via current JWT

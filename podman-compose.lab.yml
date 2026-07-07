@@ -941,7 +941,7 @@ services:
       # every such call still carries the caller's real OAuth bearer token — this
       # only grants network-level ingress, not an authn bypass.
       - PROXY_INGRESS_ALLOWLIST_ENABLED=true
-      - PROXY_INGRESS_TRUSTED_HOSTS=gateway,lab-mcp-self-service
+      - PROXY_INGRESS_TRUSTED_HOSTS=gateway,lab-mcp-self-service,prometheus
       # Option B: derive the OIDC callback URL from the incoming request's Host
       # header so the proxy works from any IP (LAN, Tailscale, localhost) without
       # reconfiguring PROXY_BASE_URL. Safe here because all traffic is on trusted

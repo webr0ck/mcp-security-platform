@@ -1,0 +1,14 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # uid must match the datasourceUid used by any Prometheus-backed Grafana
+    # alert rule and the CR-17 dashboard's panels (observability/prometheus.json).
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: false
+    jsonData:
+      timeInterval: 15s

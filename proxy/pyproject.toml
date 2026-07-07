@@ -45,6 +45,7 @@ dependencies = [
 
     # Utilities
     "structlog==24.4.0",
+    "prometheus-client==0.21.1",  # CR-17 / WP-D1: GET /metrics
     "tenacity==9.1.2",       # Retry logic for OPA/Ollama calls
     "jcs==0.1.0",            # RFC 8785 JSON Canonicalization Scheme — trust envelope signing
     "jsonschema==4.26.0",    # CR-06 (WP-B3 phase 6) — validates initialize/tools-list shape against mcp-server-contract.schema.json

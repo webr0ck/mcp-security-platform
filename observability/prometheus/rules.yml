@@ -1,0 +1,145 @@
+# Prometheus alert rules (CR-17 / WP-D1).
+#
+# Hard invariants first, per the finding's own warning ("too many alerts
+# will be ignored, alert on user-visible symptoms and hard security
+# invariants first"). Thresholds are labeled "initial defaults" per the D4
+# decision (no production reference environment to calibrate against yet) —
+# revisit once a real deployment exists.
+#
+# Fires into the same Alertmanager the Loki ruler already uses
+# (observability/loki/rules/mcp_alerts.yml) — one alerting pipeline, two
+# rule sources (log-derived security detections vs metric-derived
+# availability/invariant alerts).
+groups:
+  - name: mcp_platform_invariants
+    interval: 30s
+    rules:
+
+      # ── OPA unreachable (INV-004: fail closed on OPA outage) ────────────────
+      - alert: MCPOPAUnreachable
+        expr: mcp_opa_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          initial_default: "true"
+        annotations:
+          summary: "OPA is unreachable from the proxy"
+          description: >
+            mcp_opa_up has been 0 for 1m. Per INV-004 every invocation now
+            fails closed (503 OPA_UNAVAILABLE) — this is a full outage of the
+            invoke path, not a degraded mode. See docs/runbooks/opa-bundle-signing.md.
+
+      # ── Vault/KMS failure (credential decrypt/enrollment path down) ─────────
+      - alert: MCPVaultUnreachable
+        expr: mcp_vault_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          initial_default: "true"
+        annotations:
+          summary: "Vault/KMS is unreachable from the proxy"
+          description: >
+            mcp_vault_up has been 0 for 1m. Every credentialed tool call and
+            every new OAuth enrollment fails closed until this recovers.
+            See docs/runbooks/vault-init-unseal.md.
+
+      # ── Audit emission failure (INV-001: no invocation without an audit record) ──
+      - alert: MCPAuditEmissionFailing
+        expr: increase(mcp_audit_emit_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          initial_default: "true"
+        annotations:
+          summary: "Audit event emission is failing (INV-001 boundary tripping)"
+          description: >
+            At least one request in the last 5m hit the INV-001 boundary
+            (audit emission failed -> the request was aborted with a 500
+            rather than proceeding un-audited). Likely a DB outage/permission
+            problem on audit_events. See docs/runbooks/audit-restore.md.
+
+      # ── Scanner dead-letter (CR-14: a job exhausted retries) ────────────────
+      - alert: MCPScannerDeadLetterJobs
+        expr: mcp_scan_queue_depth{status="dead_letter"} > 0
+        for: 5m
+        labels:
+          severity: warning
+          initial_default: "true"
+        annotations:
+          summary: "One or more scan jobs are dead-lettered"
+          description: >
+            {{ $value }} scan job(s) have exhausted max_attempts. The
+            affected submission(s) are stuck at scan_status='error' (fail
+            closed, per scan_evaluator.py) until manually investigated.
+            See docs/runbooks/scanner-failure.md.
+
+      # ── Scan queue backing up (worker not keeping pace) ─────────────────────
+      - alert: MCPScanQueueBackingUp
+        expr: mcp_scan_queue_depth{status="queued"} > 5
+        for: 10m
+        labels:
+          severity: warning
+          initial_default: "true"
+        annotations:
+          summary: "Scan job queue is backing up"
+          description: >
+            {{ $value }} jobs have been queued for over 10m without being
+            claimed — scanner-worker may be down, crash-looping, or
+            under-provisioned for the submission rate. See
+            docs/runbooks/scanner-failure.md.
+
+      # ── Stale scans (SCAN_FRESHNESS_ENFORCED — an approved server's periodic
+      # re-scan has fallen behind RESCAN_INTERVAL_HOURS). Distinct from the
+      # queue-backing-up alert above: this fires even when the queue itself
+      # is empty (e.g. rescan_scheduler.py's own loop stalled or crashed) —
+      # docs/spec/03-policy-and-detections.md §3b already denies invocation
+      # on a stale scan; this alert is the "someone should look at this
+      # before a support ticket does" signal for that same enforcement gate.
+      - alert: MCPStaleScans
+        expr: mcp_stale_scan_count > 0
+        for: 15m
+        labels:
+          severity: warning
+          initial_default: "true"
+        annotations:
+          summary: "One or more approved servers have a stale supply-chain scan"
+          description: >
+            {{ $value }} approved server(s) have last_rescanned_at older
+            than RESCAN_INTERVAL_HOURS. SCAN_FRESHNESS_ENFORCED already
+            denies invocation on these until rescanned — check
+            rescan_scheduler.py is running (proxy logs) and scanner-worker
+            is healthy. See docs/runbooks/scanner-failure.md.
+
+      # ── Rising deny rate (possible probing, or a real misconfiguration) ─────
+      - alert: MCPRisingDenyRate
+        expr: |
+          (
+            sum(rate(mcp_authz_decisions_total{decision="deny"}[10m]))
+            /
+            sum(rate(mcp_authz_decisions_total[10m]))
+          ) > 0.3
+        for: 5m
+        labels:
+          severity: warning
+          initial_default: "true"
+        annotations:
+          summary: "Authorization deny rate is elevated"
+          description: >
+            Over 30% of authz decisions in the last 10m were denies. Could be
+            a misconfigured client, a revoked-but-still-calling integration,
+            or active probing (see MCPPolicyProbeBurst in the Loki ruler for
+            the per-client burst variant). See docs/runbooks/incident-triage.md.
+
+      # ── Quarantine backlog (informational — not paged, just visible) ────────
+      - alert: MCPQuarantineBacklogNonZero
+        expr: mcp_quarantine_backlog > 0
+        for: 30m
+        labels:
+          severity: info
+          initial_default: "true"
+        annotations:
+          summary: "Quarantined tools awaiting review"
+          description: >
+            {{ $value }} tool(s) have been quarantined for over 30m. Not
+            itself an outage — a reminder that the review queue has a
+            backlog. See docs/runbooks/quarantine-release.md.

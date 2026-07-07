@@ -746,6 +746,8 @@ async def invoke_tool(
                 _deny_primary = "enrollment_required"
             else:
                 _deny_primary = "credential_injection_failed"
+            from app.services.metrics import record_credential_broker_failure
+            record_credential_broker_failure(_deny_primary)
             await _emit_audit_event(
                 tool_id=str(tool_id),
                 tool_name=tool_name,

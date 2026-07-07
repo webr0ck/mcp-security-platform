@@ -10,7 +10,7 @@ LAB_COMPOSE = podman-compose --env-file .env.lab \
 
 .PHONY: lab-setup lab-up lab-down lab-reset lab-rebuild lab-init lab-test lab-smoke \
         lab-logs lab-dex-logs lab-ps lab-entra-check lab-vault-init \
-        lab-proxy-shell lab-netbox-shell smoke-four lab-acceptance wazuh-up wazuh-dashboard-up incidents help
+        lab-proxy-shell lab-netbox-shell smoke-four lab-acceptance lab-probe wazuh-up wazuh-dashboard-up incidents help
 
 ## lab-setup       Zero-to-usable: start stack, migrate DB, provision tokens, seed, smoke test
 lab-setup:
@@ -69,6 +69,10 @@ lab-test:
 ## lab-smoke        Run the smoke-test script against live endpoints
 lab-smoke:
 	bash lab/scripts/lab-smoke.sh
+
+## lab-probe        CR-17 / WP-D1 synthetic probe: login -> low-risk invoke -> audit check
+lab-probe:
+	python3 lab/scripts/synthetic_probe.py
 
 ## smoke-four       PRD-0002 P0 acceptance test — verify 3/4 auth cases registered
 smoke-four:

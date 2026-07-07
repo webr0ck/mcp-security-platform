@@ -304,3 +304,59 @@ The persisted `audit_events` row additionally carries `hmac_signature`,
 3. **RFC-0002 §5.4** is cited by `transparency_log.py`, but no RFC document exists
    in the repo at HEAD — the citation is a code-comment anchor. The module is a
    fail-closed stub (§4).
+
+---
+
+## 11. Metrics, dashboards, alerts, runbooks (CR-17 / WP-D1)
+
+**`GET /metrics`** on the proxy (`proxy/app/routers/metrics.py` +
+`app/services/metrics.py`, public path — no secrets in a counter/gauge) and
+on scanner-worker (`scanner_worker/metrics.py`, its own tiny
+`prometheus_client.start_http_server(9100)` since it's a bare poll loop, not
+an ASGI app). Deliberately a small, hand-picked set tied to CR-17's own hard
+invariants rather than blanket auto-instrumentation:
+
+| Series | Kind | Updated |
+|---|---|---|
+| `mcp_authz_decisions_total{decision}` | counter | inline, `services/policy.py::evaluate_policy` (every OPA call) |
+| `mcp_opa_up` / `mcp_vault_up` | gauge | inline, on every OPA call / `kms.py::get_master_secret` call |
+| `mcp_audit_emit_failures_total` | counter | inline, `middleware/audit.py::_audit_500_response` (the INV-001 boundary itself) |
+| `mcp_credential_broker_failures_total{error_type}` | counter | inline, `services/invocation.py`'s `CredentialInjectionError` handler |
+| `mcp_scan_queue_depth{status}` | gauge | scrape-time DB query (reuses `scan_queue.queue_depth()`) |
+| `mcp_quarantine_backlog` | gauge | scrape-time DB query (`tool_registry.status='quarantined'`) |
+| `mcp_stale_scan_count` | gauge | scrape-time DB query (`server_registry` past `RESCAN_INTERVAL_HOURS`, mirrors the `SCAN_FRESHNESS_ENFORCED` gate) |
+| `mcp_scanner_worker_jobs_{claimed,completed,requeued,dead_letter}_total`, `mcp_scanner_worker_job_duration_seconds` | counter/histogram | inline, `scanner_worker/worker.py::_process_one` |
+
+**Prometheus** (`observability/prometheus/`, new `prometheus` service in
+`docker-compose.yml`) scrapes both targets every 15s and evaluates
+`rules.yml`'s 8 alert rules, firing into the **same Alertmanager** the Loki
+ruler already used (one alerting pipeline, two rule sources — log-derived
+security detections vs metric-derived availability/invariant alerts). All
+thresholds carry `initial_default: "true"` per the D4 decision (no
+production reference environment exists yet to calibrate against).
+
+**Dashboards** extend both Grafana instances already in the lab:
+`observability/grafana/dashboards/observability-cr17.json` (the base/
+production-shaped `grafana` service, 12 panels) and
+`lab/grafana/provisioning/dashboards/wp-d1-observability.json` (`lab-grafana`,
+8 panels, includes a Loki-based submission-funnel panel alongside the
+Prometheus ones since no Prometheus counter exists for submission lifecycle
+stages).
+
+**9 runbooks** under `docs/runbooks/`: `vault-init-unseal.md`,
+`opa-bundle-signing.md`, `keycloak-client-setup.md`,
+`git-provider-setup.md`, `private-cidr-allowlisting.md`,
+`scanner-failure.md`, `quarantine-release.md`, `audit-restore.md`,
+`incident-triage.md` — each walked once against the live lab.
+
+**Synthetic probe** (`lab/scripts/synthetic_probe.py`, `make -f
+Makefile.lab lab-probe`): login (real Keycloak password grant) → low-risk
+invoke (`echo-sa`/`whoami`, the same fixture the AT1 auth matrix uses) →
+audit-emission check (polls `audit_events` for the matching
+`TOOL_INVOCATION` row — fails the probe if the invocation succeeded but left
+no audit trail, not just if the invocation itself failed). Confirmed green
+against the live lab.
+
+**CR-15 remainder** (`init-engine.sh`/`init-standard.sh` preflight +
+`make smoke-engine`/`smoke-standard`) was **not** folded in — out of capacity
+for this pass; still open.

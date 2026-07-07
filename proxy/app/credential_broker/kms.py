@@ -58,21 +58,27 @@ class VaultKMSClient:
         Returns raw bytes (base64-decoded from Vault value).
         Raises KMSError on any failure.
         """
+        from app.services.metrics import record_vault_reachable
+
         url = f"{self._addr}/v1/{path}"
         try:
             async with httpx.AsyncClient(timeout=5.0, verify=self._verify) as client:
                 resp = await client.get(url, headers=self._headers)
                 resp.raise_for_status()
         except httpx.HTTPError as exc:
+            record_vault_reachable(False)
             raise KMSError(f"Vault unreachable: {exc}") from exc
 
         try:
             # Vault stores the KEK under "value" (written by lab/seeder/vault-init.sh).
             data = resp.json()["data"]["data"]
             encoded = data.get("master_secret") or data["value"]
-            return _decode_master_secret(encoded)
+            secret = _decode_master_secret(encoded)
         except (KeyError, ValueError) as exc:
+            record_vault_reachable(False)
             raise KMSError(f"Unexpected Vault response structure: {exc}") from exc
+        record_vault_reachable(True)
+        return secret
 
 
 async def load_master_secret_standalone() -> bytes:

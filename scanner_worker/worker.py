@@ -23,7 +23,7 @@ import os
 import socket
 import sys
 
-from . import db, scan_engine
+from . import db, scan_engine, metrics
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -109,22 +109,31 @@ async def _mark_failed_or_dead_letter(pool, job_id, attempts: int, max_attempts:
 
 async def _process_one(pool, job: dict) -> None:
     job_id = job["job_id"]
+    metrics.jobs_claimed_total.inc()
     logger.info("claimed job %s server_id=%s type=%s attempt=%d/%d",
                job_id, job["server_id"], job["job_type"], job["attempts"] + 1, job["max_attempts"])
-    try:
-        result = await scan_engine.run_scan(pool, job["github_url"])
-        await _write_raw_result(pool, job_id, job["server_id"], result)
-        await _mark_completed(pool, job_id)
-        logger.info("job %s completed findings=%d worker_error=%s",
-                   job_id, len(result["raw_findings"]), result.get("worker_error"))
-    except Exception as exc:
-        logger.exception("job %s crashed during processing: %s", job_id, exc)
-        await _mark_failed_or_dead_letter(pool, job_id, job["attempts"], job["max_attempts"], str(exc))
+    with metrics.job_duration_seconds.time():
+        try:
+            result = await scan_engine.run_scan(pool, job["github_url"])
+            await _write_raw_result(pool, job_id, job["server_id"], result)
+            await _mark_completed(pool, job_id)
+            metrics.jobs_completed_total.inc()
+            logger.info("job %s completed findings=%d worker_error=%s",
+                       job_id, len(result["raw_findings"]), result.get("worker_error"))
+        except Exception as exc:
+            logger.exception("job %s crashed during processing: %s", job_id, exc)
+            new_attempts = job["attempts"] + 1
+            if new_attempts >= job["max_attempts"]:
+                metrics.jobs_dead_letter_total.inc()
+            else:
+                metrics.jobs_requeued_total.inc()
+            await _mark_failed_or_dead_letter(pool, job_id, job["attempts"], job["max_attempts"], str(exc))
 
 
 async def main() -> None:
     logger.info("scanner-worker starting identity=%s poll_interval=%ss",
                WORKER_IDENTITY, POLL_INTERVAL_SECONDS)
+    metrics.start_metrics_server()
     pool = await db.get_pool()
     try:
         while True:

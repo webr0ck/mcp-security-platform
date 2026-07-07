@@ -26,7 +26,7 @@ import os
 import socket
 import sys
 
-from . import build_engine, db
+from . import build_engine, db, metrics
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -117,43 +117,52 @@ async def _mark_failed_or_dead_letter(pool, job_id, attempts: int, max_attempts:
 async def _process_one(pool, job: dict) -> None:
     job_id = job["job_id"]
     job_type = job["job_type"]
+    metrics.jobs_claimed_total.inc()
     logger.info("claimed job %s server_id=%s type=%s attempt=%d/%d",
                job_id, job["server_id"], job_type, job["attempts"] + 1, job["max_attempts"])
-    try:
-        if job_type == "build_requested":
-            result = await build_engine.run_build(
-                pool, job["server_id"], job["github_url"], job.get("expected_digest"),
-                job_id=job_id,
-            )
-        else:
-            # deploy_requested/verify_requested are handled by the trusted,
-            # privileged launcher/verifier inside the proxy (Tasks 4-5) — the
-            # unprivileged build worker has no podman/container-runtime
-            # access at all. It still claims the job (single queue, single
-            # claim path) but records that this job_type is out of its
-            # scope, and the corresponding proxy-side service does the real
-            # work against server_registry directly rather than via
-            # build_results for these two types.
-            result = {
-                "build_artifact_digest": None, "image_ref": None,
-                "provenance": {}, "sbom_cyclonedx": None,
-                "worker_error": (
-                    f"{job_type} is handled by the proxy's privileged launcher/verifier, "
-                    "not the build worker — see deploy_launcher.py / deploy_verifier.py"
-                ),
-            }
-        await _write_build_result(pool, job_id, job["server_id"], job_type, result)
-        await _mark_completed(pool, job_id)
-        logger.info("job %s completed digest=%s worker_error=%s",
-                   job_id, result.get("build_artifact_digest"), result.get("worker_error"))
-    except Exception as exc:
-        logger.exception("job %s crashed during processing: %s", job_id, exc)
-        await _mark_failed_or_dead_letter(pool, job_id, job["attempts"], job["max_attempts"], str(exc))
+    with metrics.job_duration_seconds.time():
+        try:
+            if job_type == "build_requested":
+                result = await build_engine.run_build(
+                    pool, job["server_id"], job["github_url"], job.get("expected_digest"),
+                    job_id=job_id,
+                )
+            else:
+                # deploy_requested/verify_requested are handled by the trusted,
+                # privileged launcher/verifier inside the proxy (Tasks 4-5) — the
+                # unprivileged build worker has no podman/container-runtime
+                # access at all. It still claims the job (single queue, single
+                # claim path) but records that this job_type is out of its
+                # scope, and the corresponding proxy-side service does the real
+                # work against server_registry directly rather than via
+                # build_results for these two types.
+                result = {
+                    "build_artifact_digest": None, "image_ref": None,
+                    "provenance": {}, "sbom_cyclonedx": None,
+                    "worker_error": (
+                        f"{job_type} is handled by the proxy's privileged launcher/verifier, "
+                        "not the build worker — see deploy_launcher.py / deploy_verifier.py"
+                    ),
+                }
+            await _write_build_result(pool, job_id, job["server_id"], job_type, result)
+            await _mark_completed(pool, job_id)
+            metrics.jobs_completed_total.inc()
+            logger.info("job %s completed digest=%s worker_error=%s",
+                       job_id, result.get("build_artifact_digest"), result.get("worker_error"))
+        except Exception as exc:
+            logger.exception("job %s crashed during processing: %s", job_id, exc)
+            new_attempts = job["attempts"] + 1
+            if new_attempts >= job["max_attempts"]:
+                metrics.jobs_dead_letter_total.inc()
+            else:
+                metrics.jobs_requeued_total.inc()
+            await _mark_failed_or_dead_letter(pool, job_id, job["attempts"], job["max_attempts"], str(exc))
 
 
 async def main() -> None:
     logger.info("build-worker starting identity=%s poll_interval=%ss",
                WORKER_IDENTITY, POLL_INTERVAL_SECONDS)
+    metrics.start_metrics_server()
     pool = await db.get_pool()
     try:
         while True:
