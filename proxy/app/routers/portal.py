@@ -1959,7 +1959,9 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             # R-6: caller's own in-flight submissions (not yet active/rejected),
             # so "submitted successfully" isn't the last thing a submitter ever sees.
             mine_result = await session.execute(text("""
-                SELECT server_id, name, submission_status, scan_status, scan_report, updated_at
+                SELECT server_id, name, submission_status, scan_status, scan_report, updated_at,
+                       injection_mode, service_name, upstream_url, github_repo_url,
+                       requested_upstream_url
                 FROM server_registry
                 WHERE owner_sub = :cid
                   AND submission_status NOT IN ('draft')
@@ -2127,6 +2129,21 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             findings = sub.get("scan_report") or []
             n_block = sum(1 for f in findings if isinstance(f, dict) and f.get("block")) if isinstance(findings, list) else 0
             finding_note = f' · <span style="color:#fca5a5">{n_block} blocking finding{"s" if n_block != 1 else ""}</span>' if n_block else ""
+            _mode = sub.get("injection_mode") or "none"
+            _svc = sub.get("service_name")
+            _url = sub.get("upstream_url") or sub.get("requested_upstream_url")
+            _url_label = "backend" if sub.get("upstream_url") else "backend (requested)"
+            backend_bits = [f'auth: <span style="color:var(--text)">{esc_py(_mode)}</span>']
+            if _svc:
+                backend_bits.append(f'credential: <span style="color:var(--text)">{esc_py(_svc)}</span>')
+            if _url:
+                backend_bits.append(f'{_url_label}: <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(_url)}</span>')
+            _repo = sub.get("github_repo_url")
+            if _repo and str(_repo).startswith("https://"):
+                backend_bits.append(f'code: <a href="{esc_py(_repo)}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan)">{esc_py(_repo)}</a>')
+            backend_note = (
+                f'<div style="font-size:11px;color:var(--muted);margin-top:2px">{" · ".join(backend_bits)}</div>'
+            )
             scaffold_note = ""
             if st == "scaffold_ready":
                 _ssid = esc_py(str(sub.get("server_id") or ""))
@@ -2137,6 +2154,17 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
                     f'<a href="/api/v1/submissions/{_ssid}/scaffold" style="color:var(--cyan)">Download scaffold.zip</a>'
                     f'</div>'
                 )
+            provide_url_form = ""
+            if st == "approved_pending_url":
+                _psid = esc_py(str(sub.get("server_id") or ""))
+                provide_url_form = f"""
+                <div style="display:flex;gap:6px;margin-top:6px">
+                  <input id="provurl-{_psid}" type="url" placeholder="https://your-server.example.com/mcp"
+                         style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;
+                                color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
+                  <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.75rem"
+                          onclick="providePendingUrl('{_psid}')">Go live</button>
+                </div>"""
             rows_html.append(f"""
             <div style="padding:0.5rem 0;border-bottom:1px solid #1e293b">
               <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2146,7 +2174,9 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
                                border-radius:20px;padding:1px 8px;font-weight:600">{esc_py(label)}</span>{finding_note}
                 </span>
               </div>
+              {backend_note}
               {scaffold_note}
+              {provide_url_form}
             </div>""")
         my_submissions_html = f"""
         <details style="margin-bottom:1rem" open>
@@ -2154,7 +2184,23 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             My submissions <span class="count">{len(my_submissions)}</span>
           </summary>
           <div style="margin-top:0.25rem">{"".join(rows_html)}</div>
-        </details>"""
+        </details>
+        <script>
+        async function providePendingUrl(sid) {{
+          const input = document.getElementById('provurl-' + sid);
+          const url = (input.value || '').trim();
+          if (!url) {{ alert('Enter the URL your server is running at.'); return; }}
+          try {{
+            const r = await fetch('/api/v1/submissions/' + sid + '/provide-url', {{
+              method: 'POST', headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify({{upstream_url: url}}),
+            }});
+            const d = await r.json();
+            if (!r.ok) {{ alert(d.detail || 'Failed to go live'); return; }}
+            htmx.ajax('GET', '/portal/fragments/my-access', {{target:'#portal-body', swap:'innerHTML'}});
+          }} catch (e) {{ alert('Network error: ' + e); }}
+        }}
+        </script>"""
 
     # 5. MCP config snippet (compact, below cards)
     platform_host = os.environ.get("PLATFORM_HOST", "https://mcp.example.com")
@@ -5047,7 +5093,8 @@ async def fragment_admin_submissions(request: Request):
                 SELECT server_id, name, owner_sub, submission_status, scan_status,
                        injection_mode, data_categories, has_write_ops,
                        github_repo_url, scan_report, review_notes, updated_at,
-                       upstream_idp_config, sbom_components,
+                       upstream_idp_config, sbom_components, service_name, upstream_url,
+                       description, requested_upstream_url,
                        (sbom_cyclonedx IS NOT NULL) AS has_cyclonedx
                 FROM server_registry
                 WHERE submission_status NOT IN ('draft')
@@ -5291,8 +5338,11 @@ async def fragment_admin_submissions(request: Request):
             <span style="background:{color}22;color:{color};border:1px solid {color}44;
                          border-radius:20px;padding:2px 10px;font-size:12px;font-weight:600">{esc_py(label)}</span>
           </div>
+          {f'<div style="margin-top:0.4rem;font-size:13px;color:var(--text)">{esc_py(r.description)}</div>' if r.description else '<div style="margin-top:0.4rem;font-size:12px;color:#fca5a5">&#x26A0; No description provided — ask the submitter what this server does before approving.</div>'}
           <div style="margin-top:0.5rem;display:flex;gap:1rem;flex-wrap:wrap;font-size:12px;color:var(--muted)">
             <span>Mode: <span style="color:var(--text)">{esc_py(r.injection_mode or '—')}</span></span>
+            {f'<span>Credential: <span style="color:var(--text)">{esc_py(r.service_name)}</span></span>' if r.service_name else ''}
+            {f'<span>Backend (live): <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(r.upstream_url)}</span></span>' if r.upstream_url else (f'<span>Backend (requested): <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(r.requested_upstream_url)}</span></span>' if r.requested_upstream_url else '<span style="color:#fbbf24">Backend URL: not stated yet</span>')}
             <span>Write ops: <span style="color:var(--text)">{'Yes' if r.has_write_ops else 'No'}</span></span>
           </div>
           {f'<div style="margin-top:0.4rem">{cats_html}</div>' if cats_html else ''}
@@ -5719,7 +5769,7 @@ async def submit_wizard_page(request: Request):
 <script>
 // Wizard state — accumulated across steps, submitted in one shot
 const _wiz = {{
-  name: '', description: '', github_repo_url: null,
+  name: '', description: '', github_repo_url: null, requested_upstream_url: null,
   injection_mode: null, upstream_idp_type: null, upstream_idp_config: {{}},
   mode_override_reason: null,
   data_categories: [], has_write_ops: false,
@@ -5747,8 +5797,8 @@ function showStep1() {{
       <label class="wiz-label">Server name (slug, e.g. <code style="color:var(--cyan)">my-analytics</code>)</label>
       <input id="s1-name" class="wiz-input" placeholder="my-mcp-server" value="${{_wiz.name}}">
 
-      <label class="wiz-label" style="margin-top:1rem">Short description</label>
-      <input id="s1-desc" class="wiz-input" placeholder="What does this server do?" value="${{_wiz.description}}">
+      <label class="wiz-label" style="margin-top:1rem">Short description <span style="color:#f87171">*</span></label>
+      <input id="s1-desc" class="wiz-input" placeholder="What does this server do? (required — the reviewer approves based on this)" value="${{_wiz.description}}">
 
       <label class="wiz-label" style="margin-top:1rem">GitHub repository URL</label>
       <input id="s1-repo" class="wiz-input" placeholder="https://github.com/your-org/your-repo"
@@ -5757,6 +5807,14 @@ function showStep1() {{
         &#x1F511; The platform will clone your repository using the account
         <strong style="color:var(--text)">${{_CLONE_ACCT}}</strong>.<br>
         Grant this account <strong>read access</strong> to your repository before submitting.
+      </div>
+
+      <label class="wiz-label" style="margin-top:1rem" id="s1-backend-url-label">Backend URL (where will this run?) <span style="color:#f87171">*</span></label>
+      <input id="s1-backend-url" class="wiz-input" placeholder="https://your-server.example.com/mcp"
+             value="${{_wiz.requested_upstream_url || ''}}">
+      <div style="font-size:11px;color:var(--muted);margin-top:0.35rem">
+        Informational for the reviewer only — not validated yet. You'll provide the live, verified URL after approval.
+        Required when you have a repository; not applicable if you don't have code yet.
       </div>
 
       <label style="display:flex;align-items:center;gap:0.5rem;margin-top:1rem;font-size:13px;cursor:pointer">
@@ -5776,8 +5834,17 @@ function showStep1() {{
 
 function toggleNoCode(cb) {{
   const repoField = document.getElementById('s1-repo');
+  const urlField = document.getElementById('s1-backend-url');
+  const urlLabel = document.getElementById('s1-backend-url-label');
   repoField.disabled = cb.checked;
-  if (cb.checked) {{ repoField.value = ''; _wiz.github_repo_url = null; }}
+  urlField.disabled = cb.checked;
+  if (cb.checked) {{
+    repoField.value = ''; _wiz.github_repo_url = null;
+    urlField.value = ''; _wiz.requested_upstream_url = null;
+    urlLabel.innerHTML = 'Backend URL (where will this run?) <span style="color:var(--muted)">— not applicable, no code yet</span>';
+  }} else {{
+    urlLabel.innerHTML = 'Backend URL (where will this run?) <span style="color:#f87171">*</span>';
+  }}
   document.getElementById('clone-helper').style.display = 'none';
 }}
 
@@ -5785,14 +5852,20 @@ function submitStep1() {{
   const name = document.getElementById('s1-name').value.trim().toLowerCase();
   const desc = document.getElementById('s1-desc').value.trim();
   const repo = document.getElementById('s1-repo').value.trim();
+  const backendUrl = document.getElementById('s1-backend-url').value.trim();
   const nocode = document.getElementById('s1-nocode')?.checked;
   if (!name) {{ alert('Server name is required'); return; }}
   if (!/^[a-z0-9][a-z0-9\\-]{{1,62}}$/.test(name)) {{
     alert('Name must be 2-63 chars, lowercase letters, numbers, and hyphens only'); return;
   }}
+  if (!desc) {{ alert('Description is required — the reviewer approves your server based on this.'); return; }}
+  if (!nocode && repo && !backendUrl) {{
+    alert('Backend URL is required for a repo-backed submission — where will this server run?'); return;
+  }}
   _wiz.name = name;
   _wiz.description = desc;
   _wiz.github_repo_url = (nocode || !repo) ? null : repo;
+  _wiz.requested_upstream_url = (nocode || !repo) ? null : (backendUrl || null);
   showStep2();
 }}
 
@@ -6213,6 +6286,8 @@ function showStep4() {{
             <td style="font-weight:600">${{_wiz.name}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Repository</td>
             <td>${{repoLine}}</td></tr>
+        <tr><td style="color:var(--muted);padding:0.35rem 0">Backend URL</td>
+            <td>${{_wiz.requested_upstream_url || '<span style="color:var(--muted)">Not stated — you\\'ll provide it after approval</span>'}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Auth mode</td>
             <td style="font-weight:600">${{modeLabel}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Data categories</td>
@@ -6267,6 +6342,7 @@ async function doSubmit() {{
         data_categories: _wiz.data_categories,
         has_write_ops: _wiz.has_write_ops,
         description: _wiz.description,
+        requested_upstream_url: _wiz.requested_upstream_url,
       }}),
     }});
 
