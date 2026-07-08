@@ -28,8 +28,14 @@ echo "== R-2 mTLS agent-identity setup + smoke =="
 
 # --- setup (idempotent) ---
 mkdir -p "$CERTS" "$SECRETS"
-podman exec mcp-step-ca cat /home/step/certs/root_ca.crt > "$CERTS/step-ca-root.crt"
-[ -s "$CERTS/step-ca-root.crt" ] && ok "step-ca root CA extracted" || { bad "CA extract"; exit 1; }
+# nginx's ssl_client_certificate needs the FULL chain, not just the root —
+# step ca certificate issues agent certs signed by the intermediate CA, and
+# nginx (unlike a browser) won't fetch/complete an intermediate on its own.
+# Root-only here previously chain-verified as: intermediate-signed leaf ->
+# untrusted intermediate -> 400 "The SSL certificate error" for every
+# freshly minted agent cert.
+podman exec mcp-step-ca cat /home/step/certs/intermediate_ca.crt /home/step/certs/root_ca.crt > "$CERTS/step-ca-root.crt"
+[ -s "$CERTS/step-ca-root.crt" ] && ok "step-ca root+intermediate CA chain extracted" || { bad "CA extract"; exit 1; }
 
 SECRET=$(grep -E '^GATEWAY_SHARED_SECRET=' "$ROOT/.env.lab" | cut -d= -f2)
 printf 'proxy_set_header X-Gateway-Secret "%s";\n' "$SECRET" > "$SECRETS/gateway-secret.conf"
