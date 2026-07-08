@@ -5371,6 +5371,12 @@ async def fragment_admin_submissions(request: Request):
 
         review_action = ""
         if st == "awaiting_review":
+            approve_note = (
+                '<div style="margin-top:0.5rem;font-size:11.5px;color:var(--muted)">'
+                '&#x2139; No repository — Approve issues a starter scaffold only. Nothing goes live; '
+                'the submitter must build it and resubmit with a repo to actually go live.</div>'
+                if not r.github_repo_url else ""
+            )
             review_action = f"""
             <div style="display:flex;gap:0.5rem;margin-top:0.75rem;align-items:center">
               <textarea id="notes-{esc_py(sid)}" placeholder="Review notes (optional)"
@@ -5384,7 +5390,8 @@ async def fragment_admin_submissions(request: Request):
                 <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:12px;padding:0.3rem 0.75rem"
                         onclick="reviewAction('{esc_py(sid)}','reject')">Reject</button>
               </div>
-            </div>"""
+            </div>
+            {approve_note}"""
 
         github_link = ""
         if r.github_repo_url:
@@ -5475,7 +5482,7 @@ async def fragment_admin_submissions(request: Request):
           <div style="margin-top:0.5rem;display:flex;gap:1rem;flex-wrap:wrap;font-size:12px;color:var(--muted)">
             <span>Mode: <span style="color:var(--text)">{esc_py(r.injection_mode or '—')}</span></span>
             {f'<span>Credential: <span style="color:var(--text)">{esc_py(r.service_name)}</span></span>' if r.service_name else ''}
-            {f'<span>Backend (live): <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(r.upstream_url)}</span></span>' if r.upstream_url else (f'<span>Backend (requested): <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(r.requested_upstream_url)}</span></span>' if r.requested_upstream_url else '<span style="color:#fbbf24">Backend URL: not stated yet</span>')}
+            {f'<span>Backend (live): <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(r.upstream_url)}</span></span>' if r.upstream_url else (f'<span>Backend (requested): <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(r.requested_upstream_url)}</span></span>' if r.requested_upstream_url else ('<span style="color:var(--muted)">Backend URL: n/a (no repo yet)</span>' if not r.github_repo_url else '<span style="color:#fbbf24">&#x26A0; Backend URL: not stated — check the description before approving</span>'))}
             <span>Write ops: <span style="color:var(--text)">{'Yes' if r.has_write_ops else 'No'}</span></span>
           </div>
           {f'<div style="margin-top:0.4rem">{cats_html}</div>' if cats_html else ''}
