@@ -179,6 +179,8 @@ curl -s http://localhost:8000/api/v1/tools \
 | Proxy MCP endpoint | `http://localhost:8000/mcp` | Streamable HTTP transport |
 | Proxy health | `http://localhost:8000/health/ready` | No auth |
 | Proxy admin credentials UI | `http://localhost:8000/admin/credentials` | Requires `admin` role (alice) |
+| Hardened gateway (TLS + WAF, remote access) | `https://<LAB_HOST>:8443` | Public/OAuth/MCP traffic — everything except `/api/v1/tools/`. mTLS is **off** here (see troubleshooting) |
+| Hardened gateway, mTLS-required tools API | `https://<LAB_HOST>:8445` | `/api/v1/tools/` only — the only path that still does optional client-cert verification (PRD-0006 R-2). Not reachable on `:8443`. |
 
 ### Identity providers
 
@@ -500,6 +502,29 @@ If the MCP client is on a different machine and the browser redirect opens `loca
 | Keycloak not reachable on `:8082` | Check `OIDC_ISSUER_URL` and firewall |
 | User has no role assigned | `make assign-role CLIENT_ID=<email> ROLE=agent` |
 | Redis error (rate limit fails closed) | Check Redis: `make -f Makefile.lab lab-logs` |
+
+### MCP client on Windows fails the TLS handshake connecting to `:8443` (Codex, other Rust/Schannel clients)
+
+Symptom: `curl` and browser-based OIDC login work fine against `https://<LAB_HOST>:8443`, but the
+MCP client itself fails before even getting an HTTP response — e.g. Codex reports `error sending
+request ... client error (Connect): The message received was unexpected or badly formatted. (os
+error -2146893018)`. That error code is Windows Schannel's `SEC_E_ILLEGAL_MESSAGE` (`0x80090326`).
+
+Root cause: until 2026-07-08 the `:8443` listener sent an optional client-certificate request
+during the TLS 1.3 handshake on *every* connection (`ssl_verify_client optional` is listener-wide,
+not scopeable to a location) — needed only for `/api/v1/tools/`, but sent to `/mcp` traffic too.
+Some Windows Schannel versions choke on that handshake message. Fixed by moving mTLS to its own
+dedicated `:8445` listener (`GATEWAY_MTLS_PORT`); `:8443` no longer requests a client cert at all
+(verify with `openssl s_client -connect <LAB_HOST>:8443 -tls1_3 -msg | grep CertificateRequest` —
+should print nothing on `:8443`, and show `CertificateRequest` on `:8445`).
+
+If you still hit this after a fresh `lab-up`, the gateway container needs a **recreate**, not just a
+restart, to pick up the new port mapping:
+
+```bash
+podman-compose -f docker-compose.yml -f docker-compose.dev.yml -f podman-compose.lab.yml -f compose.wazuh.yml \
+  up -d --force-recreate --no-deps gateway
+```
 
 ### Session JWT invalid / 401 after proxy restart
 

@@ -86,6 +86,19 @@ Three enforcement layers sit in front of network-isolated backends.
 Backend MCP servers are **not** on this diagram's trust plane: they sit behind the proxy with no
 inbound route to it (see §4).
 
+**mTLS listener split (lab only, 2026-07-08).** `ssl_verify_client optional` is a TLS-handshake-time,
+listener-wide setting — nginx cannot scope it to a location, so the single `:8443` listener sent an
+optional client-certificate request on *every* connection, including `/mcp` traffic that never goes
+near `/api/v1/tools/`. Windows Schannel-based MCP clients (observed: Codex) fail that handshake with
+`SEC_E_ILLEGAL_MESSAGE` (`0x80090326`) before the request layer ever sees it — curl and OIDC/OAuth
+flows are unaffected, which is why this only surfaced for one client. The lab config
+(`lab/nginx/conf.d/mcp-proxy-lab.conf`) now runs two listeners: `:8443` with `ssl_verify_client off`
+for all public/OAuth/MCP traffic, and a dedicated `:8445` (`GATEWAY_MTLS_PORT`) that keeps
+`ssl_verify_client optional` and serves `/api/v1/tools/` only. **Production
+(`gateway/nginx/conf.d/mcp-proxy.conf`) still has the single-listener design and has not been split**
+— any Windows-Schannel MCP client hitting a production deployment's `:443` would hit the same failure.
+Tracked as an open item, not yet fixed (production nginx changes need their own sign-off).
+
 ---
 
 ## 3. Service catalogue
@@ -579,7 +592,7 @@ ones are gated by `make security-check`; the rest are enforced by design and rev
 | INV-006 | Every registered tool has an HMAC-signed SBOM; no `active` status without a valid signature. Releasing from `quarantined` (Codex review CR-07) additionally requires the parent `server_registry` row to be `status='approved'` with `scan_status` passed — a bare admin cannot release a tool whose server is still pending or whose scan failed/blocked, closing the "generic PATCH bypasses release evidence" gap. **Open**: no dedicated `POST .../release` endpoint, `released_by`/`released_at` columns, or distinct `TOOL_RELEASED` audit event yet — this is enforced inline in the existing PATCH path (`routers/tools.py::update_tool`). | `services/sbom.py`, `routers/tools.py::update_tool`, DB constraint |
 | INV-007 | Audit archive bucket has Object-Lock (≥GOVERNANCE, 90d); no app/API/Make path may delete it | `compliance-checker/checker.py`, `setup-minio.sh` |
 | INV-008 | No secret value in any git-tracked file (`.env.example` placeholders only) | trufflehog in CI / `make security-check` |
-| INV-009 | `/tools/{id}/invoke` requires mTLS cert or API key or OIDC JWT; unauthenticated ⇒ 401 before app logic | gateway `ssl_verify_client` + auth middleware |
+| INV-009 | `/tools/{id}/invoke` requires mTLS cert or API key or OIDC JWT; unauthenticated ⇒ 401 before app logic. Lab: enforced on the dedicated `:8445` listener (see §2 mTLS listener split note) — the main `:8443` listener always 401s `/api/v1/tools/` since it doesn't request a client cert. Production: still one listener, `ssl_verify_client optional` scoped by the `$ssl_client_verify` check inside the location block. | gateway `ssl_verify_client` + auth middleware |
 | INV-010 | mTLS client certs have ≤24h TTL | step-ca provisioner config |
 | INV-011 | Only the `proxy_app` DB role may write registry/audit/credential tables; only `compliance_checker` writes `compliance_reports` | PostgreSQL grants (`V003`/`V009`) |
 | INV-012 | Signed OPA bundles in staging/production (HS256 `--verification-key`); **signed is the default**. No tier's OPA command may carry `--scope=write` — `opa build` (the repo's only signing tool) cannot embed a `scope` claim, so it always produces `scope=None` and OPA rejects the flag with "scope mismatch" (crashloop). `docker-compose.yml` had already dropped the flag; `compose.engine.yml` had drifted and still carried it (Codex review CR-15, fixed) — check any new compose tier's OPA command against this before adding it. | `docker-compose.yml`, `compose.engine.yml`, `check_signed_default.sh` |
