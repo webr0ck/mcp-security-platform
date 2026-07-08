@@ -168,6 +168,11 @@ services:
       # binding privileged ports on the host.
       - "${GATEWAY_HTTP_PORT:-80}:80"
       - "${GATEWAY_HTTPS_PORT:-443}:443"
+      # GATEWAY_MTLS_PORT: lab-only dedicated mTLS listener (lab/nginx/conf.d/
+      # mcp-proxy-lab.conf), unused in production (gateway/nginx/conf.d/
+      # mcp-proxy.conf has no :8445 server block, so nothing binds it there —
+      # harmless unused port mapping, not a functional change in prod).
+      - "${GATEWAY_MTLS_PORT:-8445}:8445"
     volumes:
       - ./gateway/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./gateway/nginx/conf.d:/etc/nginx/conf.d:ro
