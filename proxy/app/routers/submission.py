@@ -183,6 +183,7 @@ class DraftUpdate(BaseModel):
     description: Optional[str] = None
     github_repo_url: Optional[str] = None
     injection_mode: Optional[str] = None
+    requested_upstream_url: Optional[str] = None
 
     @field_validator("github_repo_url")
     @classmethod
@@ -244,15 +245,16 @@ async def create_draft(body: DraftCreate, request: Request) -> JSONResponse:
         await session.execute(text("""
             INSERT INTO server_registry
                 (server_id, name, upstream_url, status, owner_sub, injection_mode,
-                 github_repo_url, submission_status, scan_status)
+                 github_repo_url, description, submission_status, scan_status)
             VALUES
                 (:sid, :name, '', 'pending', :owner, 'none',
-                 :repo_url, 'draft', 'pending')
+                 :repo_url, :description, 'draft', 'pending')
         """), {
             "sid": sid,
             "name": body.name,
             "owner": owner,
             "repo_url": body.github_repo_url,
+            "description": body.description,
         })
         await session.commit()
     return JSONResponse({"server_id": sid, "submission_status": "draft"}, status_code=201)
@@ -305,6 +307,8 @@ async def update_draft(server_id: str, body: DraftUpdate, request: Request) -> J
             updates[col] = val
 
     _set("github_repo_url", body.github_repo_url)
+    _set("description", body.description)
+    _set("requested_upstream_url", body.requested_upstream_url)
     _set("injection_mode", body.injection_mode)
     _set("upstream_idp_type", body.upstream_idp_type)
     _set("mode_override_reason", body.mode_override_reason)
@@ -345,6 +349,37 @@ async def submit_for_review(
 ) -> JSONResponse:
     """Submit the draft for automated scan + security review."""
     owner = _client_id(request)
+
+    # A reviewer cannot approve a server they don't understand. Require the
+    # submitter to actually answer "what does this do" and "where will it
+    # run" before the submission can even enter the queue — description was
+    # previously collected by the wizard and silently dropped, so submissions
+    # with no description at all reached awaiting_review. requested_upstream_url
+    # used to be required only for repo-backed submissions (the no-code path
+    # has no server yet) — but that carve-out let a no-code submission reach
+    # the SAME awaiting_review queue as a real one with nothing but a free-text
+    # description, indistinguishable to a reviewer from an incomplete config.
+    # Both fields — and injection_mode, the auth *type* (never the secret
+    # itself) — are now required unconditionally: get_server_scaffold remains
+    # available with no submission at all for "I don't have code/a server yet",
+    # so this doesn't block that path, it just keeps it out of the review queue.
+    sub = await _get_submission(server_id, owner_sub=owner)
+    missing: list[str] = []
+    if not (sub.get("description") or "").strip():
+        missing.append("description")
+    if not (sub.get("requested_upstream_url") or "").strip():
+        missing.append("requested_upstream_url")
+    if not (sub.get("injection_mode") or "").strip():
+        missing.append("injection_mode")
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INCOMPLETE_SUBMISSION",
+                "message": f"Missing required field(s) before submitting for review: {', '.join(missing)}",
+                "missing_fields": missing,
+            },
+        )
 
     # M1 fix: atomic conditional update — no separate read-then-write.
     # If two concurrent requests race, only one wins the CAS; the other gets rowcount=0 → 409.
@@ -402,7 +437,8 @@ async def list_submissions(request: Request) -> JSONResponse:
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(text("""
             SELECT server_id, name, submission_status, scan_status,
-                   injection_mode, data_categories, github_repo_url, updated_at
+                   injection_mode, data_categories, github_repo_url, updated_at,
+                   description, requested_upstream_url, upstream_url, service_name
             FROM server_registry
             WHERE owner_sub = :owner AND deleted_at IS NULL
             ORDER BY updated_at DESC
@@ -425,6 +461,10 @@ async def get_submission(server_id: str, request: Request) -> JSONResponse:
         "injection_mode": safe.get("injection_mode"),
         "data_categories": list(safe.get("data_categories") or []),
         "github_repo_url": safe.get("github_repo_url"),
+        "description": safe.get("description"),
+        "requested_upstream_url": safe.get("requested_upstream_url"),
+        "upstream_url": safe.get("upstream_url") or None,
+        "service_name": safe.get("service_name"),
         "review_notes": safe.get("review_notes"),
         "github_clone_account": GITHUB_CLONE_ACCOUNT,
         # WP-A2 (CR-13 + CR-03 fold-in): requested-vs-approved OAuth/IdP config
@@ -487,7 +527,12 @@ async def download_scaffold(server_id: str, request: Request) -> StreamingRespon
     sub = await _get_submission(server_id, owner_sub=None if is_reviewer else caller)
     mode = sub.get("injection_mode") or "none"
     name = sub["name"]
-    files = generate_scaffold(name, mode)
+    from app.core.config import get_settings as _get_scaffold_settings
+    _issuer = _get_scaffold_settings().OIDC_ISSUER_URL
+    files = generate_scaffold(
+        name, mode, issuer=_issuer,
+        jwks_uri=f"{_issuer.rstrip('/')}/protocol/openid-connect/certs" if _issuer else "",
+    )
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -513,7 +558,9 @@ async def list_review_queue(request: Request) -> JSONResponse:
             SELECT server_id, name, owner_sub, submission_status, scan_status,
                    injection_mode, data_categories, has_write_ops,
                    github_repo_url, scan_report, review_notes,
-                   reviewed_by, reviewed_at, created_at, updated_at
+                   reviewed_by, reviewed_at, created_at, updated_at,
+                   upstream_url, service_name, upstream_idp_type, upstream_idp_config,
+                   description, requested_upstream_url
             FROM server_registry
             WHERE submission_status NOT IN ('draft')
               AND deleted_at IS NULL
@@ -1019,7 +1066,12 @@ async def design_assist_scaffold(request: Request, mode: str = "none") -> JSONRe
     from app.services.scaffold_generator import generate_scaffold
     # L1 fix: coerce unknown mode values before reflection in the response.
     safe_mode = mode if mode in _VALID_MODES else "none"
-    files = generate_scaffold("my-mcp-server", safe_mode)
+    from app.core.config import get_settings as _get_scaffold_settings
+    _issuer = _get_scaffold_settings().OIDC_ISSUER_URL
+    files = generate_scaffold(
+        "my-mcp-server", safe_mode, issuer=_issuer,
+        jwks_uri=f"{_issuer.rstrip('/')}/protocol/openid-connect/certs" if _issuer else "",
+    )
     return JSONResponse({"injection_mode": safe_mode, "files": files})
 
 

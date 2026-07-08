@@ -5949,16 +5949,17 @@ function showStep1() {{
         Grant this account <strong>read access</strong> to your repository before submitting.
       </div>
 
-      <label class="wiz-label" style="margin-top:1rem" id="s1-backend-url-label">Backend URL (where will this run?) <span style="color:#f87171">*</span></label>
+      <label class="wiz-label" style="margin-top:1rem">Backend URL (where does/will this run?) <span style="color:#f87171">*</span></label>
       <input id="s1-backend-url" class="wiz-input" placeholder="https://your-server.example.com/mcp"
              value="${{_wiz.requested_upstream_url || ''}}">
       <div style="font-size:11px;color:var(--muted);margin-top:0.35rem">
-        Informational for the reviewer only — not validated yet. You'll provide the live, verified URL after approval.
-        Required when you have a repository; not applicable if you don't have code yet.
+        Always required — a reviewer cannot approve a server they can't locate. Informational only at
+        this stage (not validated yet); you'll confirm the live, verified URL after approval.
+        No backend at all yet? Don't submit — call get_server_scaffold instead, no review needed for that.
       </div>
 
       <label style="display:flex;align-items:center;gap:0.5rem;margin-top:1rem;font-size:13px;cursor:pointer">
-        <input type="checkbox" id="s1-nocode" onchange="toggleNoCode(this)"> I don&rsquo;t have code yet
+        <input type="checkbox" id="s1-nocode" onchange="toggleNoCode(this)"> I don&rsquo;t have a repo yet (backend already running elsewhere)
       </label>
 
       <div style="margin-top:1.5rem;display:flex;justify-content:flex-end">
@@ -5974,17 +5975,8 @@ function showStep1() {{
 
 function toggleNoCode(cb) {{
   const repoField = document.getElementById('s1-repo');
-  const urlField = document.getElementById('s1-backend-url');
-  const urlLabel = document.getElementById('s1-backend-url-label');
   repoField.disabled = cb.checked;
-  urlField.disabled = cb.checked;
-  if (cb.checked) {{
-    repoField.value = ''; _wiz.github_repo_url = null;
-    urlField.value = ''; _wiz.requested_upstream_url = null;
-    urlLabel.innerHTML = 'Backend URL (where will this run?) <span style="color:var(--muted)">— not applicable, no code yet</span>';
-  }} else {{
-    urlLabel.innerHTML = 'Backend URL (where will this run?) <span style="color:#f87171">*</span>';
-  }}
+  if (cb.checked) {{ repoField.value = ''; _wiz.github_repo_url = null; }}
   document.getElementById('clone-helper').style.display = 'none';
 }}
 
@@ -5999,13 +5991,13 @@ function submitStep1() {{
     alert('Name must be 2-63 chars, lowercase letters, numbers, and hyphens only'); return;
   }}
   if (!desc) {{ alert('Description is required — the reviewer approves your server based on this.'); return; }}
-  if (!nocode && repo && !backendUrl) {{
-    alert('Backend URL is required for a repo-backed submission — where will this server run?'); return;
+  if (!backendUrl) {{
+    alert('Backend URL is required — a reviewer cannot approve a server they can\\'t locate. No backend yet? Use "Get scaffold" from the self-service tools instead of this wizard.'); return;
   }}
   _wiz.name = name;
   _wiz.description = desc;
   _wiz.github_repo_url = (nocode || !repo) ? null : repo;
-  _wiz.requested_upstream_url = (nocode || !repo) ? null : (backendUrl || null);
+  _wiz.requested_upstream_url = backendUrl;
   showStep2();
 }}
 
@@ -6427,7 +6419,7 @@ function showStep4() {{
         <tr><td style="color:var(--muted);padding:0.35rem 0">Repository</td>
             <td>${{repoLine}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Backend URL</td>
-            <td>${{_wiz.requested_upstream_url || '<span style="color:var(--muted)">Not stated — you\\'ll provide it after approval</span>'}}</td></tr>
+            <td>${{_wiz.requested_upstream_url}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Auth mode</td>
             <td style="font-weight:600">${{modeLabel}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Data categories</td>
@@ -6448,7 +6440,7 @@ function showStep4() {{
       <div style="margin-top:1.5rem;display:flex;justify-content:space-between;align-items:center">
         <button class="btn-secondary" onclick="showStep3()">&#x2190; Back</button>
         <button class="btn-primary" id="submit-btn" onclick="doSubmit()">
-          ${{_wiz.github_repo_url ? 'Submit for review &#x2192;' : 'Get scaffold &#x2193;'}}
+          Submit for review &#x2192;
         </button>
       </div>
     </div>`;
@@ -6544,9 +6536,11 @@ async function showResult(status) {{
   document.getElementById('wiz-body').innerHTML = `
     <div class="wiz-card">
       <div style="font-size:36px;margin-bottom:0.5rem;text-align:center">&#x1F4E6;</div>
-      <div style="font-size:20px;font-weight:700;margin-bottom:0.25rem;text-align:center">Scaffold ready</div>
+      <div style="font-size:20px;font-weight:700;margin-bottom:0.25rem;text-align:center">Submitted for review — scaffold ready</div>
       <div style="font-size:13px;color:var(--muted);text-align:center;margin-bottom:1.5rem">
-        Answer the design questions below, then download your starter code.
+        This design just entered the security review queue. Download the scaffold below and start
+        building while the reviewer looks at it — approval issues starter code only, nothing goes live
+        until you resubmit with a real repository.
       </div>
 
       <div style="font-size:13px;font-weight:600;margin-bottom:0.75rem;color:var(--muted)">

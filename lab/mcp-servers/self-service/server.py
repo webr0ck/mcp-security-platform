@@ -450,6 +450,15 @@ async def plan_mcp_server(intent: str) -> dict:
             "(pii / financial / health / internal_docs / source_code / email_calendar / infrastructure / public)",
             "Does the server perform write operations (create/update/delete)? (yes/no)",
         ],
+        "backend_questions": [
+            "What will this server actually do, in a sentence a security reviewer can approve on? "
+            "(this becomes submit_mcp_server's required 'description' — a reviewer cannot approve "
+            "a server they don't understand)",
+            "Where will it run — the URL or IP of the backend, if you have one yet? "
+            "(this becomes submit_mcp_server's 'upstream_url'; required for any submission with a "
+            "github_repo_url, informational only pre-approval — you still confirm the live URL "
+            "after approval via check_submission_status's provide-url step)",
+        ],
         "decision_tree": data.get("decision_tree", []),
         "hint": "Once you have the answers, call get_auth_mode_recommendation.",
     }
@@ -508,29 +517,57 @@ async def submit_mcp_server(
     injection_mode: str,
     data_categories: list,
     has_write_ops: bool,
+    upstream_url: str,
     github_repo_url: Optional[str] = None,
 ) -> dict:
     """
     Create and submit an MCP server for security review.
 
+    A reviewer cannot approve a server they don't understand or locate.
+    description, injection_mode (the auth TYPE — never the secret itself),
+    and upstream_url are all required and checked before this call even
+    reaches the platform. There is no code-less/no-URL shortcut into the
+    review queue: if you don't have a server running yet, call
+    get_server_scaffold instead — that needs no submission at all and never
+    touches the review queue. Only call submit_mcp_server once you have a
+    real (even if not-yet-public) upstream_url to give a reviewer.
+
     If github_repo_url is provided the platform will clone and scan it
-    automatically before human review.  If omitted the submission goes
-    directly to review and scaffold code is generated for download.
+    automatically before human review. If omitted the submission goes
+    straight to human review (no automated scan possible without code).
 
     Args:
         name: Unique server name, 2-63 chars, lowercase letters/numbers/hyphens.
-        description: What the server does (shown in the review queue).
-        injection_mode: Auth mode — one of: none, service, user, service_account,
-                        oauth_user_token, entra_client_credentials, entra_user_token,
+        description: What the server does — required, shown in the review queue.
+                     Write this so a security reviewer can approve on it alone.
+        injection_mode: Auth mode (the TYPE of credential the server needs —
+                        never the credential value itself, that is uploaded
+                        separately after approval) — one of: none, service,
+                        user, service_account, oauth_user_token,
+                        entra_client_credentials, entra_user_token,
                         kc_token_exchange.
         data_categories: List of data sensitivity categories the server exposes.
                          Values: pii, financial, health, internal_docs, source_code,
                          email_calendar, infrastructure, public.
         has_write_ops: True if the server performs any create/update/delete operations.
+        upstream_url: The URL/IP this server runs (or will run) at. Required —
+                      informational for the reviewer only, not validated yet.
+                      You still confirm the live URL after approval
+                      (check_submission_status will tell you when).
         github_repo_url: https://github.com/<owner>/<repo> — leave None if no code yet.
 
     Returns: {server_id, submission_status, next_steps}
     """
+    if not description or not description.strip():
+        return {"error": "description_required",
+                "detail": "description is required — a reviewer cannot approve a server they don't understand."}
+    if not injection_mode or not injection_mode.strip():
+        return {"error": "injection_mode_required",
+                "detail": "injection_mode is required — a reviewer needs to know the auth TYPE, even if the credential itself is uploaded later."}
+    if not upstream_url or not upstream_url.strip():
+        return {"error": "upstream_url_required",
+                "detail": "upstream_url is required — where does/will this server run? No code yet? Call get_server_scaffold instead; it needs no submission."}
+
     caller_sub = _ctx_caller_sub.get()
     base = f"{PROXY_BASE_URL}/api/v1/submissions"
     hdrs = _oauth_headers()  # user's OAuth token — proxy resolves real owner_sub
@@ -553,6 +590,7 @@ async def submit_mcp_server(
             "injection_mode": injection_mode,
             "data_categories": data_categories,
             "has_write_ops": has_write_ops,
+            "requested_upstream_url": upstream_url,
         }))
 
     # 3. Submit

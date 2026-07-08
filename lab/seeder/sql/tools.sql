@@ -270,7 +270,7 @@ INSERT INTO tool_registry (
     gen_random_uuid(),
     'submit_mcp_server', '1.0.0',
     'Create and submit an MCP server for automated scan and security team review.',
-    '{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"injection_mode":{"type":"string"},"data_categories":{"type":"array","items":{"type":"string"}},"has_write_ops":{"type":"boolean"},"github_repo_url":{"type":"string"}},"required":["name","description","injection_mode","data_categories","has_write_ops"]}'::jsonb,
+    '{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string","description":"Required — what the server does. A reviewer approves based on this alone."},"injection_mode":{"type":"string","description":"Required — the auth TYPE (never the secret itself)."},"data_categories":{"type":"array","items":{"type":"string"}},"has_write_ops":{"type":"boolean"},"upstream_url":{"type":"string","description":"Required — where the backend runs or will run. No server yet? Use get_server_scaffold instead; it needs no submission."},"github_repo_url":{"type":"string"}},"required":["name","description","injection_mode","data_categories","has_write_ops","upstream_url"]}'::jsonb,
     'http://lab-mcp-self-service:8000/mcp',
     'active', 'medium', 30, '["Creates records in server_registry","Triggers git clone and security scan of provided repo"]'::jsonb,
     'lab-seeder', null, null, 'passthrough', null, null
@@ -296,6 +296,7 @@ INSERT INTO tool_registry (
 ON CONFLICT (name, version) DO UPDATE SET
     upstream_url   = EXCLUDED.upstream_url,
     description    = EXCLUDED.description,
+    schema         = EXCLUDED.schema,
     injection_mode = EXCLUDED.injection_mode,
     updated_at     = NOW();
 
