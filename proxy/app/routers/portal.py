@@ -1145,8 +1145,13 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
         # the group/subtab bar from there (see Task 2).
         first_panel = group["panels"][0]
         badge_html = ""
-        if group["id"] == "servers" and _admin_awaiting_review_count is not None:
-            badge_html = f'<span class="adm-nav-badge">{_admin_awaiting_review_count}</span>'
+        # Badge is the awaiting-review count, NOT total registered servers —
+        # a fresh boot seeds servers already-approved (never through the
+        # review pipeline), so this is legitimately 0 while real servers
+        # exist. Hide at 0 like any other pending-count badge; showing
+        # "Servers 0" reads as "zero servers", not "zero pending reviews".
+        if group["id"] == "servers" and _admin_awaiting_review_count:
+            badge_html = f'<span class="adm-nav-badge" title="{_admin_awaiting_review_count} awaiting review">{_admin_awaiting_review_count}</span>'
         return (
             f'<button class="{cls}" onclick="loadAdminTab(\'{esc_py(first_panel)}\')">'
             f'<span class="{dot_cls}"></span>{esc_py(group["label"])}{badge_html}</button>'
