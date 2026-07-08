@@ -733,6 +733,30 @@ _CSS = """
   .srv-cell-url    { font: 400 12px var(--ff-mono); color: var(--adm-muted); }
   .srv-cell-owner  { font: 400 12px var(--ff-mono); color: var(--adm-muted); }
   .srv-cell-updated { font: 400 11px var(--ff-mono); color: var(--adm-dim); }
+
+  /* ---- Server registry card grid (matches MCP Console design's Registry view) ---- */
+  .srv-card-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px;
+  }
+  .srv-card {
+    background: var(--adm-surface); border: 1px solid var(--adm-border);
+    border-radius: 13px; padding: 16px; transition: border-color .15s;
+  }
+  .srv-card:hover { border-color: rgba(79,156,249,0.5); }
+  .srv-card.row-pending { border-color: rgba(251,191,36,0.35); }
+  .srv-card.row-quarantined { border-color: rgba(248,113,113,0.35); }
+  .srv-card-top {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px;
+  }
+  .srv-card-name {
+    font-weight: 700; font-size: 14px; font-family: var(--ff-mono); color: var(--adm-text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .srv-card-meta { font-size: 11.5px; color: var(--adm-muted); margin-bottom: 12px; font-family: var(--ff-mono); }
+  .srv-card-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+  .srv-card-updated { font: 400 11px var(--ff-mono); color: var(--adm-dim); margin-left: auto; }
+  .srv-card-actions { display: flex; justify-content: flex-end; }
+
   /* Console KPI tile (design §4): card + colored top accent bar */
   .kpi {
     position: relative; overflow: hidden; background: var(--adm-surface);
@@ -952,6 +976,21 @@ _CSS = """
 """
 
 _JS_COMMON = """
+  // Session expiry: htmx does not swap non-2xx responses by default, so an
+  // expired session silently no-ops every tab click (or, depending on the
+  // route's Accept-header branch, dumps a raw JSON error into the content
+  // pane) with no visible sign of what's wrong — the only working recovery
+  // was a full page reload (which sends a browser-navigation Accept header
+  // and correctly hits the login-redirect branch). Catch it at the network
+  // layer instead: any htmx request that comes back 401 means the session
+  // is gone, so send the user to login immediately rather than leaving a
+  // dead tab on screen.
+  document.body.addEventListener('htmx:responseError', function(evt) {
+    if (evt.detail && evt.detail.xhr && evt.detail.xhr.status === 401) {
+      window.location.href = '/api/v1/auth/oidc/login?redirect=' + encodeURIComponent(window.location.pathname);
+    }
+  });
+
   // XSS-safe text setter
   function esc(str) {
     const d = document.createElement('div');
@@ -1010,7 +1049,7 @@ _TAB_MAP_PY = {
     "servers":     "MCP Servers",
     "credentials": "Credentials",
     "limits":      "Request Limits",
-    "dashboard":   "Dashboard",
+    "dashboard":   "Posture",
     "detections":  "Detections",
     "sbom":        "SBOM",
     "submissions": "Submissions",
@@ -1023,9 +1062,9 @@ _TAB_MAP_PY = {
 _VALID_TABS = frozenset(_TAB_MAP_PY)
 
 _ADMIN_GROUPS: list[dict] = [
-    {"id": "overview", "label": "Overview", "panels": ["dashboard", "detections"]},
-    {"id": "servers",  "label": "Servers",   "panels": ["servers", "submissions", "sbom"]},
-    {"id": "access",   "label": "Access",    "panels": ["access", "credentials", "limits"]},
+    {"id": "security", "label": "Security", "panels": ["dashboard", "detections"]},
+    {"id": "servers",  "label": "Servers",   "panels": ["servers", "submissions", "sbom", "credentials"]},
+    {"id": "access",   "label": "Access",    "panels": ["access", "limits"]},
     {"id": "settings", "label": "Settings",  "panels": ["identity", "prompts", "llm", "git"]},
     {"id": "profile",  "label": "Profile",   "panels": ["profile"]},
 ]
@@ -1153,7 +1192,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
     <!-- Topbar -->
     <div class="adm-topbar">
       <div class="adm-breadcrumb">
-        Admin <span class="adm-breadcrumb-sep">/</span>
+        MCP Console <span class="adm-breadcrumb-sep">/</span>
         <span class="adm-breadcrumb-page" id="adm-breadcrumb-page">{esc_py(_TAB_MAP_PY.get(initial_tab, initial_tab))}</span>
       </div>
       <a href="/portal/submit" style="display:inline-flex;align-items:center;gap:0.35rem;
@@ -1167,9 +1206,9 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
       <div style="flex:1">
         <div style="font-weight:600;font-size:13px;margin-bottom:6px">The admin nav is now grouped into 5 sections</div>
         <div style="font-size:12px;color:var(--adm-muted);display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:4px 16px">
-          <div>Dashboard, Detections &rarr; <b>Overview</b></div>
-          <div>MCP Servers, Submissions, SBOM &rarr; <b>Servers</b></div>
-          <div>Access, Credentials, Request Limits &rarr; <b>Access</b></div>
+          <div>Dashboard (now Posture), Detections &rarr; <b>Security</b></div>
+          <div>MCP Servers, Submissions, SBOM, Credentials &rarr; <b>Servers</b></div>
+          <div>Access, Request Limits &rarr; <b>Access</b></div>
           <div>Identity, Prompts, LLM, Git &rarr; <b>Settings</b></div>
         </div>
       </div>
@@ -1194,7 +1233,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
     servers:     'MCP Servers',
     credentials: 'Credentials',
     limits:      'Request Limits',
-    dashboard:   'Dashboard',
+    dashboard:   'Posture',
     detections:  'Detections',
     sbom:        'SBOM',
     submissions: 'Submissions',
@@ -1205,9 +1244,9 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
     access:      'Access',
   }};
   const _ADM_GROUPS = [
-    {{id:'overview', label:'Overview', panels:['dashboard','detections']}},
-    {{id:'servers',  label:'Servers',  panels:['servers','submissions','sbom']}},
-    {{id:'access',   label:'Access',   panels:['access','credentials','limits']}},
+    {{id:'security', label:'Security', panels:['dashboard','detections']}},
+    {{id:'servers',  label:'Servers',  panels:['servers','submissions','sbom','credentials']}},
+    {{id:'access',   label:'Access',   panels:['access','limits']}},
     {{id:'settings', label:'Settings', panels:['identity','prompts','llm','git']}},
     {{id:'profile',  label:'Profile',  panels:['profile']}},
   ];
@@ -2666,17 +2705,17 @@ async def fragment_admin_servers(request: Request):
             )
 
         rows_html.append(f"""
-        <div class="srv-tbl-row {row_cls}">
-          <div>
-            <div class="srv-cell-name">{esc_py(s.name or "")}</div>
-            <div class="srv-cell-alias">{esc_py(s.name or "")}</div>
+        <div class="srv-card {row_cls}">
+          <div class="srv-card-top">
+            <span class="srv-card-name">{esc_py(s.name or "")}</span>
+            <span class="pill {pill_cls}"><span class="pill-dot"></span>{pill_label}</span>
           </div>
-          <div class="srv-cell-url">{esc_py(s.upstream_url or "—")}</div>
-          <div><span class="pill {pill_cls}"><span class="pill-dot"></span>{pill_label}</span>{maint_badge}{public_badge}</div>
-          <div class="srv-cell-owner">{esc_py(s.owner_sub or "—")}</div>
-          <div><span class="mode-chip">{esc_py(mode_label)}</span></div>
-          <div class="srv-cell-updated">{esc_py(_fmt_time(s.updated_at))}</div>
-          {action_html}
+          <div class="srv-card-meta">{esc_py(s.upstream_url or "—")} &middot; owner: {esc_py(s.owner_sub or "—")}</div>
+          <div class="srv-card-badges">
+            <span class="mode-chip">{esc_py(mode_label)}</span>{maint_badge}{public_badge}
+            <span class="srv-card-updated">{esc_py(_fmt_time(s.updated_at))}</span>
+          </div>
+          <div class="srv-card-actions">{action_html}</div>
         </div>""")
 
     rows_block = "".join(rows_html) if rows_html else (
@@ -2702,12 +2741,8 @@ async def fragment_admin_servers(request: Request):
       </button>
     </div>
 
-    <!-- Table -->
-    <div class="srv-tbl">
-      <div class="srv-tbl-head">
-        <div>SERVER</div><div>UPSTREAM URL</div><div>STATUS</div>
-        <div>OWNER</div><div>INJECTION</div><div>UPDATED</div><div></div>
-      </div>
+    <!-- Card grid -->
+    <div class="srv-card-grid">
       {rows_block}
     </div>
 
@@ -2715,7 +2750,7 @@ async def fragment_admin_servers(request: Request):
     function filterSrv(btn, status) {{
       document.querySelectorAll('#srv-seg .srv-seg-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      document.querySelectorAll('.srv-tbl-row').forEach(r => {{
+      document.querySelectorAll('.srv-card').forEach(r => {{
         if (!status) {{ r.style.display=''; return; }}
         const hasStatus = r.classList.contains('row-' + status) ||
           (!r.classList.contains('row-pending') && !r.classList.contains('row-quarantined') && status === 'approved');
