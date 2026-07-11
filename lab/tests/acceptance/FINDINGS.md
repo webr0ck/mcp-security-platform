@@ -102,3 +102,61 @@ scanners share a non-reentrant resource. Bound concurrency explicitly if needed.
 `kc_token_exchange` / lab-tickets-query xfails (AT1/AT2) trace to a **lab-seeding gap**:
 no `server_registry` row for `lab-tickets-query`. Re-seed fix is documented in
 `README.md`. No code change required.
+
+---
+
+## T5 — taint-floor live verification (2026-07-11, VERIFY loop, one-off manual run)
+
+Article 4 (`Vault/00_AI/mcp-security-platform-launch/article_4_signed-trust-envelope_v3.md`)
+claims the taint floor is "Built and tested" but cites only unit/adversarial
+tests; no acceptance test exercised it live and `TAINT_FLOOR_ENABLED` defaults
+to `False` in `proxy/app/core/config.py`. This lab's `.env.lab` already sets
+`TAINT_FLOOR_ENABLED=true` (line 198) — no flag flip or restart was required;
+`podman exec mcp-proxy env` confirmed it live before starting.
+
+**Steps run against the live stack** (not added as a permanent acceptance test
+in this pass — a manual, reproducible one-off; commands below are the record):
+
+1. `UPDATE server_registry SET trust_tier=0 WHERE name='lab-echo';` — made an
+   already-approved, already-invokable server temporarily untrusted (stands in
+   for "register a trust_tier=0 server").
+2. Invoked `ping` on `lab-echo` through the real gateway as alice → `200`,
+   real echo response. Restored `trust_tier=2` immediately after.
+3. Confirmed the taint write landed in Redis:
+   `GET mcp_taint:244e5ee0cc237be3` → `1`, `TTL` → `3590` (~1h, matches the
+   article's "up to an hour" claim). Key = `mcp_taint:` +
+   `sha256("alice@corp")[:16]`, per `taint_store.py`.
+4. Invoked `grafana-query.list_datasources` (credential-injecting, so its
+   effective `required_integrity` is bumped to ≥1 per `taint_floor.py`) as the
+   now-tainted alice → `200` with body text `"Access denied: session
+   restricted by trust policy"` (the friendly HTTP-200 wrapper — same class
+   documented elsewhere in this file). `audit_events` for that call:
+   `outcome=deny`, `opa_reasons=["taint_floor:required_integrity=1"]`,
+   confirming the deny fired for the exact reason the article claims, not a
+   coincidental other gate.
+5. Cleaned up: `DEL mcp_taint:...` in Redis; `trust_tier` was already restored
+   to 2 in step 2.
+
+**Verdict: steps 1–3 of the article's 4-step experiment are CONFIRMED live**
+against the running lab, with the flag already on (not a synthetic/simulated
+run).
+
+**Step 4 (Redis-failure fail-closed) — NOT executed live.** Stopping/killing
+`mcp-redis` would have broken every other service on the shared, currently-up
+lab stack mid-verification-loop (session state, rate limiting, anomaly
+scoring) — judged too destructive to run unilaterally. Verified by code
+inspection instead: `taint_store.py`'s `is_tainted()` catches any read
+exception and returns `True` (fail-closed tainted); `mark_tainted()` raises
+`TaintStoreError` on a write failure, which `invocation.py`'s write-before-
+forward call site does not catch, so it propagates to a fail-closed request
+failure (comment: "A write failure raises TaintStoreError -> the request
+fails closed (500)."). This matches the article's claim, but is a code-level
+citation, not a live-observed outage test. **NEEDS_USER_INPUT if a live Redis
+outage test is required**: it would need either a dedicated/disposable Redis
+instance for this one test, or an accepted window of full lab downtime — flag
+before scheduling.
+
+No permanent acceptance test was added for this (out of scope for a
+one-off verification pass); if this becomes a permanent regression gate, the
+steps above are the exact commands to encode into a
+`lab/tests/acceptance/test_at5_taint_floor.py`.
