@@ -341,3 +341,157 @@ disconnect/reconnect is disruptive enough (breaks the fail-open session
 cache and rate limiting for the whole window, not just the taint check)
 that it shouldn't run unattended in the pinned suite; this is a documented,
 repeatable manual procedure per the task's own fallback allowance.
+
+---
+
+## T2 — TRUST_ENVELOPE_ENFORCE deny path, live on and off (2026-07-11, VERIFY loop 3)
+
+**Method:** T1 (this loop's engineer) added `TRUST_ENVELOPE_ENFORCE` (default
+`false`) gating the direct `tools/call {"name": "<registry-tool>", ...}`
+dispatch path (`mcp_server.py::_route_to_registry`, ~line 979) — a rejected
+verdict with reason `signature_invalid`/`no_envelope`/`chain_validation_failed`
+fails the call instead of only logging. Per test_at2_trust_envelope_verify.py's
+own analysis there is no reachable network seam for a client to tamper an
+envelope in flight — the observer only ever re-verifies the envelope the
+proxy process itself just signed. To prove the deny live over the real wire
+(not the podman-exec synthetic probe), this test breaks the on-disk PKI the
+running process reads instead: swaps `leaf.key` on the shared `labeler-data`
+volume for an unrelated keypair (mismatches the leaf cert's declared public
+key), sets `TRUST_ENVELOPE_ENFORCE=true` via `.env` (loaded through proxy's
+`env_file: - .env` directive — no `podman-compose.yml`/`docker-compose.yml`
+change), force-recreates `mcp-proxy` so it cold-loads the corrupted key, then
+drives a real `tools/call` for `gitea-repos` (credential-injecting,
+`injection_mode=service`) through the live gateway as alice.
+
+**Live evidence — deny (TRUST_ENVELOPE_ENFORCE=true, corrupted key):**
+```
+HTTP 200
+{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"Tool result rejected: trust envelope verification failed","data":{"reason":"signature_invalid"}}}
+```
+`podman logs mcp-proxy`:
+```
+{"level": "DEBUG", "logger": "app.services.trust_verifier", "message": "TrustVerifier rejected: signature_invalid"}
+{"level": "WARNING", "logger": "app.services.trust_observer", "message": "TrustObserver rejected tool=gitea-repos server=6b8d4092-b96c-43c5-82d4-d8a51895402e result_id=req_xIpCcC1MpcF2_aKJ3MZFPQ reason=signature_invalid"}
+```
+(matches this codebase's universal `_err()` convention: JSON-RPC error inside
+an HTTP 200, same shape as every other deny in `mcp_server.py`.)
+
+**Live evidence — restore, same call, TRUST_ENVELOPE_ENFORCE at lab default
+(false), original matching key:**
+```
+HTTP 200
+{"jsonrpc":"2.0","id":2,"result":{"content":[...],"_meta":{"io.mcp-security-platform/trust-envelope/v0.1":{...,"sig":{"alg":"ES256",...}}}}}
+```
+`podman logs mcp-proxy`: `TrustObserver accepted tool=gitea-repos ... rank=2`.
+
+**Permanent acceptance test added:** `test_at2_trust_envelope_enforce.py` —
+`test_enforce_true_denies_broken_signature_live` and
+`test_enforce_default_false_accepts_same_call`. Self-contained: a
+`corrupted_leaf_key_and_enforce_on` fixture does the corrupt/flip/recreate in
+setup and un-does all three in a `finally` (teardown never skipped, even on
+assertion failure — verified by inspecting live state after several
+deliberately-failed dry runs while building this test). Runs live every time
+the file executes (no env-based skip), at the cost of ~3-4 recreate cycles
+(~4 min) — the only test in the suite that touches `mcp-proxy`'s own
+container lifecycle.
+
+**Real gotchas hit building this, all now handled in the fixture/test:**
+1. `renew_once()` in `labeler-renewal` fires immediately on container
+   start — a naive stop/start cycle around the corrupted-key window can
+   regenerate a fresh *matching* pair mid-test, silently turning the
+   intended deny into an accept. Fixed: stop `labeler-renewal` right after
+   corrupting the key (freezes its 720s timer); restore is "start it again"
+   (not replaying old key bytes), since its own `renew_once()` always
+   regenerates `leaf.crt`+`leaf.key` together as a guaranteed-matching pair.
+2. SEC-05's `IngressAllowlistMiddleware` resolves+caches the `gateway`
+   hostname's IP at proxy startup, re-resolving at most once per 30s — if
+   `mcp-gateway` itself also gets recreated (see #3), calls through the real
+   gateway URl can 403 `INGRESS_DENIED` for up to ~30-60s after a proxy
+   recreate. Fixed: generous retry/backoff in the direct-dispatch HTTP helper.
+3. **The big one:** a bare `podman-compose up -d --force-recreate proxy`
+   (no `--no-deps`) makes compose recompute the whole dependency graph and
+   cascade-recreate services whose config hash it decides changed —
+   observed live recreating `mcp-gateway`, `mcp-scanner-worker`, and
+   `lab-keycloak-seeder`. The gateway/scanner-worker recreates transiently
+   dropped the AT3 gitea-fixture's `GIT_SSL_CAINFO` CA-trust override
+   (`fixtures/compose.{proxy,scanner-worker}-git-ca-override.yml`),
+   breaking every AT3/AT4 git-clone test in the same pytest session
+   ("certificate signer not trusted") the first two times this fixture ran
+   inside the full suite. Worse: `lab-keycloak-seeder` re-running reseeds/
+   rotates `lab-self-service`'s API key in `api_keys` (revoking the old row)
+   WITHOUT recreating `lab-mcp-self-service` to match, so it kept presenting
+   an already-revoked key — `test_at3_self_service_mcp_tool.py` failed with
+   `"unauthenticated: No valid identity could be resolved"` even in
+   isolation, requiring a one-time manual `up -d --no-deps
+   lab-mcp-self-service` to resync. **Root-caused and fixed properly**: the
+   fixture's recreate now always passes `--no-deps` (mirrors exactly how
+   `setup_gitea_fixtures.sh` already does its own proxy/scanner-worker CA
+   overrides) — this stops the cascade at the source rather than papering
+   over each downstream symptom. A defense-in-depth reapply of the proxy CA
+   override is kept in case `--no-deps` ever still lets it lapse for some
+   other reason.
+
+**Full-suite regression proof:** `bash lab/scripts/run_full_acceptance.sh`
+after all fixes — **40 passed, 0 failed, 0 skipped** (285s), run
+`20260711T115005Z`. (Pre-loop-3 baseline was 32 passed / 2 skipped / 0
+failed across 34 collected tests — this run adds T2's 2 tests + T6's 3
+catfacts tests = 5 new, and the two previously-`skip`ped xfail-style AT2
+cases now pass because the labeler-renewal PKI is live and unattended,
+consistent with T3 landing.)
+
+---
+
+## T4 — leaf rotates unattended before the 15-min TTL expires (2026-07-11, VERIFY loop 3)
+
+**Method:** captured the live leaf cert's serial + `notAfter` at t0, then
+polled every 15s until the serial changed (deadline 16 min, comfortably past
+the sidecar's 720s/12-min renewal interval), then made one more real AT2
+`tools/call` through the gateway with **no manual `make labeler-init`**
+in between.
+
+**Live evidence:**
+```
+t0  (2026-07-11T11:25:32Z): serial=25F6ACA89117A3C03F73DF3D31E7C1AF73EE0DEE  notAfter=Jul 11 11:38:31 2026 GMT
+t1  (2026-07-11T11:30:36Z, ROTATED): serial=73C9A959DDAE1E7FC2F6C886C6CE24DC80F541B3  notAfter=Jul 11 11:45:30 2026 GMT
+```
+(rotation happened ~5 minutes into the poll — matches the sidecar's own
+`[renew] Leaf rotated at 2026-07-11T11:23:31...` / next-at-~11:35:31 log
+line from just before t0; timing lines up with the 720s interval measured
+from its own prior rotation, not from t0.)
+
+Follow-up AT2 call after rotation, unattended, through the live gateway —
+`TrustObserver accepted tool=gitea-repos ... rank=2` in `podman logs
+mcp-proxy`, real signed envelope returned, **no manual re-init performed**.
+
+**Conclusion:** T3's Dockerfile fix genuinely closed loop-2's documented gap
+("no working renewal sidecar" → `chain_validation_failed` ~15 min after
+`make labeler-init`). The sidecar now rotates unattended, on schedule, and
+every downstream AT2 envelope-verify call keeps working through at least one
+full rotation cycle with zero manual intervention.
+
+---
+
+## T6 — catfacts (T5) live acceptance coverage + kc_token_exchange gap re-check (2026-07-11, VERIFY loop 3)
+
+**Catfacts (T5's new server):** confirmed live via a new
+`test_at3_catfacts_onboarding.py` — (1) `server_registry`/`tool_registry`
+rows land `approved`/`active` from the seeder INSERT itself (no submission-
+lifecycle transition to drive, unlike AT3's malicious/clean walk); (2) a real
+`get_fact` call through the gateway → `lab-mcp-catfacts` → `lab-egress-proxy`
+(squid, `catfact.ninja` allowlisted) → `catfact.ninja`, asserting the actual
+upstream JSON shape (`fact`/`length`), not just absence-of-error; (3) same
+chain for `get_breeds`, asserting 3 real breed records
+(`Abyssinian`/`Aegean`/`American Curl` — genuine catfact.ninja data, not lab
+fixture data). All 3 pass live.
+
+**kc_token_exchange (lab-tickets) — lead's premise was stale, not a real
+gap.** The task described this as "zero live acceptance coverage... never
+exercised end-to-end." `git log` shows `test_kc_token_exchange_lab_tickets`
+in `test_at1_auth_matrix.py` was added in commit `2c045d1` (predates this
+loop, predates even loop 2/3's T2/T3 work) and asserts the full RFC 8693
+token-exchange path — a real `list_tickets` call through
+`lab-tickets-query`, verified to reach `lab-mcp-lab-tickets` (which fetches
+KC JWKS to validate the exchanged `aud=lab-tickets` token) and return real
+data. Ran it standalone to confirm: **PASSED** (2.5s). No duplicate test
+added — would have been dead weight. Flagging the stale premise so it
+doesn't get re-litigated next loop.
