@@ -255,6 +255,13 @@ services:
       SECRET_KEY: ${LAB_NETBOX_SECRET_KEY:-change-me-32-chars-minimum-here}
       SUPERUSER_EMAIL: admin@lab.local
       SUPERUSER_PASSWORD: ${LAB_NETBOX_ADMIN_PASSWORD:-labpassword}
+      # Fixes a bootstrap gap: without this, netboxcommunity/netbox mints a
+      # random, uncaptured superuser API token on first boot, so the seeder's
+      # create_netbox_token() (lab/seeder/seed.py) has nothing to authenticate
+      # with after a volume wipe (LAB_NETBOX_ADMIN_TOKEN was never set anywhere)
+      # and every NetBox seed call 403s. SUPERUSER_API_TOKEN makes the token
+      # deterministic across resets, matching how Vault's bootstrap token works.
+      SUPERUSER_API_TOKEN: ${LAB_NETBOX_ADMIN_TOKEN:-fcea2b11ef1f9b4111a7c94aae2dd3d2dd328794}
       ALLOWED_HOSTS: "lab-netbox localhost 127.0.0.1 ${LAB_HOST:-localhost}"
       SKIP_SUPERUSER: "false"
     networks:
@@ -1080,9 +1087,13 @@ services:
       ENV_LAB_WRITE_PATH: /app/.env.lab
       LAB_GRAFANA_URL: http://lab-grafana:3000
       LAB_NETBOX_URL: http://lab-netbox:8080
-      # lab-setup.sh Step 8 provisions and writes this to .env.lab (unprefixed)
-      # after NetBox comes up; the seeder needs the LAB_-prefixed name to find it.
-      LAB_NETBOX_ADMIN_TOKEN: ${NETBOX_ADMIN_TOKEN:-}
+      # NetBox now boots with a deterministic SUPERUSER_API_TOKEN (see the
+      # lab-netbox service above), so the seeder reads LAB_NETBOX_ADMIN_TOKEN
+      # directly from .env.lab/.env.lab.example instead of the old
+      # lab-setup.sh Step 8 login-then-mint dance (unprefixed NETBOX_ADMIN_TOKEN,
+      # written only by full `lab-setup.sh`, never by `lab-reset`/`lab-up` —
+      # which is exactly why a clean `lab-reset` always 403'd on NetBox seeding).
+      LAB_NETBOX_ADMIN_TOKEN: ${LAB_NETBOX_ADMIN_TOKEN:-}
       LAB_GITEA_URL: http://lab-gitea:3000
       LAB_GITEA_ADMIN_USER: ${GITEA_ADMIN_USER:-gitadmin}
       LAB_GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-labpassword}

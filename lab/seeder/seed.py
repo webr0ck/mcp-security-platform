@@ -416,7 +416,27 @@ async def fix_oidc_issuer_placeholder(conn: asyncpg.Connection) -> int:
     environment-specific and cannot be hardcoded in a portable migration file.
     The seeder runs after migrations and substitutes the real value on every
     run (idempotent — a second run finds 0 rows to update).
+
+    Collision-safe: lab-init's unconditional migration-replay loop (Makefile.lab
+    lab-init) can reinsert a fresh placeholder row for a claim_value whose real
+    issuer was already substituted in a prior run, since V002's own
+    ON CONFLICT DO NOTHING only guards against duplicate placeholder rows, not
+    against a placeholder colliding with an already-substituted real-issuer row.
+    A plain UPDATE then hits oidc_role_mappings_unique. Delete the now-redundant
+    placeholder row instead of updating it whenever the target (real_issuer,
+    claim_key, claim_value) already exists; only UPDATE the rows that don't.
     """
+    await conn.execute(
+        """
+        DELETE FROM oidc_role_mappings AS placeholder
+        USING oidc_role_mappings AS real
+        WHERE placeholder.oidc_issuer = '__OIDC_ISSUER_PLACEHOLDER__'
+          AND real.oidc_issuer = $1
+          AND real.claim_key = placeholder.claim_key
+          AND real.claim_value = placeholder.claim_value
+        """,
+        OIDC_ISSUER_URL,
+    )
     result = await conn.execute(
         """
         UPDATE oidc_role_mappings

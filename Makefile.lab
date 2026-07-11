@@ -65,7 +65,19 @@ lab-init:
 	else \
 	  echo "  All migrations OK"; \
 	fi
+	@echo "Setting application DB role passwords (init-db-roles.sh) — was lab-setup.sh-only (Step 4.5), which lab-reset/lab-up never called, so a clean wipe always left scanner_worker_app/compliance_checker_app unable to authenticate..."
+	podman cp infra/scripts/init-db-roles.sh mcp-db:/tmp/init-db-roles.sh
+	set -a; . ./.env.lab; set +a; \
+	podman exec \
+	  -e "PROXY_DB_PASSWORD=$${PROXY_DB_PASSWORD:-}" \
+	  -e "COMPLIANCE_DB_PASSWORD=$${COMPLIANCE_DB_PASSWORD:-}" \
+	  -e "SCANNER_WORKER_DB_PASSWORD=$${SCANNER_WORKER_DB_PASSWORD:-}" \
+	  -e "BUILD_WORKER_DB_PASSWORD=$${BUILD_WORKER_DB_PASSWORD:-}" \
+	  -e "PGPASSWORD=$${DB_PASSWORD:-}" \
+	  mcp-db bash /tmp/init-db-roles.sh
 	$(LAB_COMPOSE) run --rm lab-seeder
+	@echo "Recreating containers whose env-baked credential was just (re)minted by init-db-roles.sh/lab-seeder — a plain restart does not reload podman-compose-interpolated env vars..."
+	$(LAB_COMPOSE) up -d --force-recreate --no-deps scanner-worker compliance-checker lab-mcp-grafana lab-mcp-self-service
 
 ## lab-test         Run integration / e2e tests (excludes unit-only tests)
 lab-test:
