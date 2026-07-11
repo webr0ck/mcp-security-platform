@@ -77,8 +77,10 @@ def renew_once() -> None:
     )
     leaf_cert_pem = leaf_cert.public_bytes(serialization.Encoding.PEM)
 
-    _atomic_write(LABELER_DIR / "leaf.key", leaf_key_pem)
-    _atomic_write(LABELER_DIR / "leaf.crt", leaf_cert_pem)
+    # World-readable: the proxy (uid 1001) reads these to sign with; see
+    # init-labeler-pki.py for why (rootless-Podman uid mapping, lab-only).
+    _atomic_write(LABELER_DIR / "leaf.key", leaf_key_pem, mode=0o644)
+    _atomic_write(LABELER_DIR / "leaf.crt", leaf_cert_pem, mode=0o644)
     print(f"[renew] Leaf rotated at {now.isoformat()}; expires in {LEAF_TTL_MINUTES}m", flush=True)
 
 

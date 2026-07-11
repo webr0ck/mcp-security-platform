@@ -160,3 +160,184 @@ No permanent acceptance test was added for this (out of scope for a
 one-off verification pass); if this becomes a permanent regression gate, the
 steps above are the exact commands to encode into a
 `lab/tests/acceptance/test_at5_taint_floor.py`.
+
+---
+
+## T2 — ES256 trust-envelope sign/verify, live (2026-07-11, VERIFY loop 2)
+
+**Starting state: the mechanism was live-untested AND not even switched on.**
+`podman exec mcp-proxy env` showed `TRUST_ENVELOPE_ENABLED=false` and no
+`TRUST_OBSERVER_ENABLED` at all — both default `False` in `config.py`, and
+`TRUST_OBSERVER_ENABLED` was never wired into `docker-compose.yml`'s proxy
+`environment:` block in the first place (only `TRUST_ENVELOPE_ENABLED` was).
+Turning it on live surfaced three real, unrelated bugs, all fixed on `main`:
+
+1. **Volume-name mismatch.** `make labeler-init` bind-mounts the literal
+   `labeler-data` volume; podman-compose (no `name:` pin) creates
+   `mcp-security-platform_labeler-data` instead — two different volumes, so
+   the proxy mounted an empty one and `TrustVerifier` init threw
+   `FileNotFoundError`. Fixed: pinned `name: labeler-data` in
+   `docker-compose.yml`'s volume def.
+2. **0700-root / 0600-root file perms unreadable by the proxy's non-root
+   uid (1001).** `infra/pki/init-labeler-pki.py` wrote the whole `/labeler`
+   dir and every file inside it (including the *public* certs) as
+   owner-only, owned by whatever uid the root-in-container init job mapped
+   to under rootless Podman — not uid 1001. Fixed: dir now `0755`;
+   `sub_ca.crt`/`leaf.crt`/`leaf.key` now `0644` (world-readable — they're
+   either public or the proxy is the intended reader); `sub_ca.key` stays
+   `0600` (the "proxy can never access sub_ca.key" invariant is enforced by
+   this file mode, since proxy mounts the *same* directory read-only).
+   Applied the same fix to `renew-labeler-leaf.py`.
+3. **Unhandled crash on verifier-init failure.** `main.py`'s
+   `TRUST_OBSERVER_ENABLED` block called `init_verifier()` (eager file I/O)
+   with no try/except, unlike every sibling optional-startup step — bug #1
+   crash-looped the whole proxy instead of degrading gracefully. Fixed:
+   wrapped in try/except + `logger.warning`, matching the existing pattern.
+
+With those three fixed, `TrustLabeler`/`TrustVerifier` both initialise
+cleanly (`podman logs mcp-proxy`: `"TrustLabeler initialised"` /
+`"TrustVerifier initialised (sub_ca=/labeler/sub_ca.crt)"`).
+
+**Architecture caveat that shapes what "reject" can mean here:**
+`trust_observer.py`'s docstring is explicit — *"Never blocks or raises — the
+observer is advisory (demonstrations D4/D5/D6 only)."* Grepped the whole
+`proxy/app` tree for any code that reads `VerifierVerdict.accepted`: zero
+call sites outside the observer and its own tests. **No code path in this
+repo gates, denies, or 403s a request on envelope-verify failure.** The
+observer only ever re-verifies the envelope the proxy itself *just signed*,
+synchronously, in the same function, before the response leaves the process
+— there is no reachable seam where a client-supplied tampered envelope could
+be fed back in over the wire. This matters for article 4: "signed trust
+envelopes" is real, live, ES256, and independently verifiable — but it is
+**not currently a live enforcement control**, only an advisory/log-only one
+(the actual live *enforcement* control for tainted-session denial is the
+separate SEP-1913 taint floor already verified in the T5 entry above).
+
+**Live proof, committed as `lab/tests/acceptance/test_at2_trust_envelope_verify.py`:**
+
+1. `test_valid_envelope_accepted_end_to_end` — real credential-injecting call
+   (`gitea-repos`/`list_repos`, `injection_mode=service`) through the full
+   gateway → auth → entitlement → OPA → credential-broker chain as alice;
+   asserts the response's `_meta["io.mcp-security-platform/trust-envelope/v0.1"]`
+   carries a genuine `alg=ES256` signature with a real x5c chain, and that
+   the actual gitea repo data (`gitadmin/clean-mcp` etc.) came back — i.e.
+   the credential injection genuinely happened, not just the envelope math.
+   `podman logs mcp-proxy` for this call:
+   `TrustObserver accepted tool=gitea-repos server=6b8d... rank=2` (direct
+   registry-tool dispatch path only — see note below on `invoke_tool`).
+2. `test_tampered_and_unsigned_envelopes_rejected` — signs a real envelope
+   with `TrustLabeler` pointed at the *same* live-mounted PKI files
+   (`/labeler/leaf.{crt,key}`, `/labeler/sub_ca.crt`) the running proxy
+   process uses for every real request (its in-memory singleton isn't
+   reachable from a fresh interpreter, but the on-disk cert/key material is
+   identical), then proves `TrustVerifier.verify()` rejects: a corrupted
+   `content_hash` → `signature_invalid`, a corrupted signature value →
+   `signature_invalid`, the same valid envelope replayed against a
+   different `result_id` (binding mismatch) → `signature_invalid`, and no
+   envelope at all → `no_envelope`. Executed via `podman exec mcp-proxy
+   python3 -c <probe>` — same code, same live cert material, same process
+   image as production requests.
+
+Both tests pass in a live `run_full_acceptance.sh` run: `33 passed, 2
+skipped, 0 failed` (see run below).
+
+**Note — `invoke_tool` wrapper calls don't hit the observer.** The
+platform's `invoke_tool` meta-tool builds its own envelope
+(`server_id="__platform__"`, `trust_tier=4`) via a second, separate call
+site in `mcp_server.py` (~line 1608) that does **not** call
+`trust_observer.observe_result()` — only the direct
+`tools/call {"name": "<registered-tool>", ...}` dispatch path does (~line
+979). Both paths sign; only one is observed. Not fixed (out of scope for a
+verify loop — flagging for the architect/engineer if per-call observability
+is meant to be universal).
+
+**Known operational gap — 15-minute leaf TTL, no working renewal.** The
+`labeler-renewal` sidecar (compose profile `trust-envelope`) is supposed to
+rotate the leaf cert every 12 minutes, but it currently **cannot start** in
+this lab: it's wired to `observability-net` only, which has no egress, so
+its `pip install cryptography` at container start fails DNS resolution and
+it crash-loops forever. Net effect: ~15 minutes after `make labeler-init`,
+every envelope verify starts failing `chain_validation_failed` (confirmed —
+this is exactly what happened mid-loop when the full suite was re-run ~15
+min after the initial PKI generation; fixed by re-running `make
+labeler-init`, which is idempotent for the sub-CA and reissues a fresh
+leaf). **NEEDS_USER_INPUT / follow-up**: either give `labeler-renewal`
+egress (a network it's currently not on) or bake `cryptography` into a
+purpose-built image instead of `pip install`-ing python:3.12-slim at
+startup — until then, `TRUST_ENVELOPE_ENABLED=true` in this lab needs
+`make labeler-init` re-run roughly every 15 minutes, and the new AT2 test
+will start failing with `chain_validation_failed` (not a regression, just an
+expired lab cert) whenever that lapses. Documented in `.env.lab.example`.
+
+**Flags are lab-local only.** `.env.lab` is gitignored; `TRUST_ENVELOPE_ENABLED=true`
+/ `TRUST_OBSERVER_ENABLED=true` were added there for this loop's live proof
+but will NOT persist to a fresh lab bring-up or CI unless someone copies
+them from `.env.lab.example` (documented there with the caveats above) —
+this is intentional (matches how every other lab secret/flag is handled),
+just flagging so a future loop doesn't wonder why the observer is silent
+again.
+
+---
+
+## T3 — Redis fail-closed for the taint floor, live (2026-07-11, VERIFY loop 2)
+
+**Method:** scoped `podman network disconnect` of `mcp-proxy` from the
+pairwise `proxy-redis-net` (the *only* network `mcp-redis` is reachable on
+besides `internal-net`, and `mcp-redis` is proxy's private Redis — nothing
+else in the stack dials it). This cuts Redis reachability for `mcp-proxy`
+only; every other container, including `mcp-redis` itself, is fully up and
+undisturbed for the whole test window.
+
+**Procedure and live evidence:**
+
+1. **Baseline** — alice invokes `gitea-repos`/`list_repos` (a real
+   credential-injecting call) through the gateway: `200`, real repo data
+   back (`gitadmin/clean-mcp`, `gitadmin/lab-demo`, `gitadmin/malicious-mcp`).
+2. `podman network disconnect mcp-security-platform_proxy-redis-net
+   mcp-proxy` — confirmed with `podman exec mcp-proxy getent hosts
+   mcp-redis` → `unreachable`.
+3. **Same call, same token, during the outage** → `429
+   {"error": {"code": "RATE_LIMITED", "message": "Too many requests"}}` —
+   i.e. denied, not allowed through. `podman logs mcp-proxy` for this
+   window: `ERROR app.services.limits get_rate_limit failed for
+   alice@corp, using role_default=300: Error -2 connecting to redis:6379.
+   Name or service not known` plus `WARNING Redis roles cache miss` /
+   `WARNING Failed to cache roles in Redis` — a genuine, logged Redis
+   outage, not a coincidental rate limit from prior traffic.
+4. `podman network connect mcp-security-platform_proxy-redis-net mcp-proxy`
+   — `podman exec mcp-proxy getent hosts mcp-redis` resolves again.
+5. **After recovery** (past the per-client rate-limit window) — same call →
+   `200`, real repo data again. Normal operation resumed.
+
+**Important precision on what this proves vs. what it doesn't isolate.**
+The deny observed here (`429 RATE_LIMITED`) comes from
+`mcp_server.py::_check_rate_limit` (`app.services.limits.get_rate_limit`),
+**not** from `taint_store.py`'s `is_tainted()`/`mark_tainted()` directly —
+that per-client rate limiter also talks to Redis and, per its own
+`_RATE_LIMIT_FAIL_OPEN` env-gated default (`false` unless
+`RATE_LIMIT_FAIL_OPEN=true` is set — it is not, in this lab), **also** fails
+closed on a Redis exception (comment: `# MCP-006: fail closed by default`).
+Because this rate-limit check runs earlier in the request path than the
+taint-floor gate, it intercepts first during a full Redis outage — the
+credential-injecting call never reaches `taint_store.is_tainted()` in this
+particular live run, so `taint_store.py`'s own fail-closed branch specifically
+was **not** independently exercised over the wire (it remains verified only
+by code inspection: `is_tainted()`'s bare `except Exception: return True`,
+`mark_tainted()`'s `raise TaintStoreError` propagating uncaught to a 500 at
+the write-before-forward call site in `invocation.py`).
+
+**Net result:** the *system-level* guarantee the article implies (a Redis
+outage cannot silently fail a credential-injecting call open) is **live-
+confirmed end-to-end** — every credential-injecting call denied during the
+outage, none silently allowed, and full recovery afterward. The *specific*
+taint-floor fail-closed code path is still only code-verified, not
+wire-verified in isolation, because a different, earlier fail-closed gate
+(the per-client rate limiter, same Redis dependency) masks it under a full
+outage. Isolating `taint_store.py` alone would need bypassing or exempting
+the rate limiter for one test client — not attempted (would mean patching
+production dispatch code just to make a gap testable, out of scope for this
+loop). Not added as a permanent acceptance test — the network
+disconnect/reconnect is disruptive enough (breaks the fail-open session
+cache and rate limiting for the whole window, not just the taint check)
+that it shouldn't run unattended in the pinned suite; this is a documented,
+repeatable manual procedure per the task's own fallback allowance.

@@ -115,8 +115,13 @@ def generate_leaf(sub_ca_key, sub_ca_cert):
 
 
 def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(str(OUTPUT_DIR), 0o700)  # tighten if dir existed with wider perms
+    # Dir must be traversable by the proxy's non-root uid (1001), which does not
+    # share a user namespace with this (root-in-container) init job under rootless
+    # Podman — 0700 root-owned made every file unreadable to the proxy, including
+    # leaf.crt/leaf.key/sub_ca.crt, which are meant to be shared with it (only
+    # sub_ca.key is proxy-forbidden, per the "sidecar-only" invariant below).
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+    os.chmod(str(OUTPUT_DIR), 0o755)
     sub_ca_key_path = OUTPUT_DIR / "sub_ca.key"
 
     if sub_ca_key_path.exists():
@@ -126,14 +131,21 @@ def main() -> None:
     else:
         print("[labeler-init] Generating sub-CA...")
         sub_ca_key, sub_ca_cert = generate_sub_ca()
-        _atomic_write(OUTPUT_DIR / "sub_ca.key", _pem_key(sub_ca_key))
-        _atomic_write(OUTPUT_DIR / "sub_ca.crt", _pem_cert(sub_ca_cert))
+        # sub_ca.key: owner-only (0600) — this is the "proxy can never access
+        # sub_ca.key" boundary (docker-compose.yml comment); proxy mounts this
+        # same directory read-only, so file mode IS the enforcement here.
+        _atomic_write(OUTPUT_DIR / "sub_ca.key", _pem_key(sub_ca_key), mode=0o600)
+        # sub_ca.crt is public (distributed to verifiers) — world-readable.
+        _atomic_write(OUTPUT_DIR / "sub_ca.crt", _pem_cert(sub_ca_cert), mode=0o644)
         print(f"[labeler-init] sub-CA written to {OUTPUT_DIR}/sub_ca.{{crt,key}}")
 
     print("[labeler-init] Generating labeler leaf cert...")
     leaf_key, leaf_cert = generate_leaf(sub_ca_key, sub_ca_cert)
-    _atomic_write(OUTPUT_DIR / "leaf.key", _pem_key(leaf_key))
-    _atomic_write(OUTPUT_DIR / "leaf.crt", _pem_cert(leaf_cert))
+    # leaf.key/leaf.crt: the proxy itself signs with these — must be readable
+    # by the proxy's uid, which we cannot pin exactly across host subuid maps,
+    # so world-readable (0644) is the practical boundary for this lab PKI.
+    _atomic_write(OUTPUT_DIR / "leaf.key", _pem_key(leaf_key), mode=0o644)
+    _atomic_write(OUTPUT_DIR / "leaf.crt", _pem_cert(leaf_cert), mode=0o644)
     print(f"[labeler-init] Leaf cert written to {OUTPUT_DIR}/leaf.{{crt,key}} (TTL={LEAF_TTL_MINUTES}m)")
     print(f"[labeler-init] Sub-CA fingerprint: {sub_ca_cert.fingerprint(hashes.SHA256()).hex()}")
     print("[labeler-init] Done. Distribute sub_ca.crt to verifiers.")

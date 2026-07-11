@@ -136,7 +136,12 @@ volumes:
   vault-tls:
     driver: local
   # PRD-0001 M3: shared labeler PKI volume — sidecar writes sub_ca.key + leaf.*; proxy reads leaf.* + sub_ca.crt
+  # explicit name: `make labeler-init` creates/mounts the literal "labeler-data"
+  # volume (no compose project prefix); without this pin, compose creates a
+  # separate "<project>_labeler-init" volume the proxy mounts empty, and
+  # TrustVerifier init crashes on startup (FileNotFoundError: sub_ca.crt).
   labeler-data:
+    name: labeler-data
     driver: local
   # Shared tmpfs volume for rendered alertmanager config (init container → alertmanager)
   alertmanager-rendered:
@@ -326,6 +331,10 @@ services:
       - LABELER_CERT_PATH=/labeler/leaf.crt
       - LABELER_KEY_PATH=/labeler/leaf.key
       - LABELER_SUB_CA_PATH=/labeler/sub_ca.crt
+      # PRD-0001 M4/W4.2: passive envelope verifier/observer (advisory only,
+      # never blocks). Was missing from compose entirely (config.py default
+      # False, no env wired) — added so it can be toggled like the labeler.
+      - TRUST_OBSERVER_ENABLED=${TRUST_OBSERVER_ENABLED:-false}
     logging: *default-logging
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health/ready"]
