@@ -3,19 +3,23 @@ Supply-chain re-scan scheduler (Stage 3).
 
 Runs in the background and periodically re-evaluates every approved server's
 security posture:
-  - Servers with github_repo_url: full submission_scanner pipeline
-    (secrets scan + dependency audit + custom regex rules).
+  - Servers with github_repo_url: enqueues a 'rescan' scan_jobs row. The
+    isolated scanner-worker service (CR-14 / WP-B1) executes the pipeline
+    (secrets scan + dependency audit + custom regex rules) and writes RAW
+    output; scan_evaluator applies policy once the worker completes.
   - Servers without github_repo_url (direct-add / lab servers): no scannable
     source; last_rescanned_at is updated immediately so they don't trip the
     freshness gate.
 
-Only scan_status, scan_report, and last_rescanned_at are updated — submission_status
-is untouched so approved servers stay approved.
+Only scan_status, scan_report, and last_rescanned_at are updated by the
+evaluator for rescan jobs — submission_status is untouched so approved
+servers stay approved. This scheduler itself no longer clones or executes
+scanners in-process (CR-14) — it only enqueues and, for repo-less servers,
+stamps last_rescanned_at directly.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import datetime, timezone
 
@@ -29,7 +33,7 @@ _task: asyncio.Task | None = None
 
 
 async def _rescan_all() -> None:
-    from app.services.submission_scanner import scan_repo
+    from app.services import scan_queue
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(text(
@@ -45,38 +49,32 @@ async def _rescan_all() -> None:
 
     for row in rows:
         server_id, name, repo_url = row
-        now = datetime.now(timezone.utc)
 
         if repo_url:
-            logger.info("Rescan: scanning %s (%s)", name, repo_url)
+            logger.info("Rescan: enqueueing scan job for %s (%s)", name, repo_url)
             try:
-                findings, status = await scan_repo(repo_url)
+                await scan_queue.enqueue_scan(str(server_id), repo_url, job_type="rescan")
             except Exception as exc:
-                logger.warning("Rescan: scanner error for %s: %s", name, exc)
-                findings, status = [{"error": str(exc)}], "error"
-        else:
-            # No source repo — nothing to scan; mark fresh.
-            findings, status = [], "passed"
+                # Enqueue itself failing (DB error) is logged but not fatal to
+                # the loop — the next periodic pass will retry this server.
+                logger.warning("Rescan: failed to enqueue job for %s: %s", name, exc)
+            continue
 
+        # No source repo — nothing to scan; mark fresh directly (no job needed).
+        now = datetime.now(timezone.utc)
         async with AsyncSessionLocal() as session:
             await session.execute(text(
                 """
                 UPDATE server_registry
-                SET scan_status       = :scan_status,
-                    scan_report       = CAST(:report AS jsonb),
+                SET scan_status       = 'passed',
+                    scan_report       = '[]'::jsonb,
                     last_rescanned_at = :now,
                     updated_at        = :now
                 WHERE server_id = :sid
                 """
-            ), {
-                "scan_status": status,
-                "report": json.dumps(findings),
-                "now": now,
-                "sid": str(server_id),
-            })
+            ), {"now": now, "sid": str(server_id)})
             await session.commit()
-
-        logger.info("Rescan: %s → status=%s findings=%d", name, status, len(findings))
+        logger.info("Rescan: %s has no source repo; marked fresh", name)
 
 
 async def _loop(interval_hours: int) -> None:

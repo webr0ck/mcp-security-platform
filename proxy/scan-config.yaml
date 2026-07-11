@@ -24,11 +24,45 @@ scanners:
 
   dependency_audit:
     enabled: true
+    # NOTE (CR-12/WP-B2): block_on is READ BY THE EVALUATOR
+    # (proxy/app/services/dependency_policy.py), not by this worker-side
+    # pip-audit runner — pip-audit itself never decides block anymore (see
+    # scan_engine.py._run_pip_audit comment). Kept here because this file is
+    # the one canonical, human-editable scan-policy config for both worker
+    # and evaluator (baked into the worker image, read by dependency_policy
+    # at evaluation time via the same path convention).
     # Block on packages with CVEs at this severity or above: critical|high|medium|low
-    block_on: critical
+    block_on: high
     # Ecosystems to scan (pip = Python requirements*.txt / pyproject.toml)
     ecosystems:
       - pip
+
+  # CR-12 (WP-B2): broad multi-ecosystem CVE coverage (Go, npm, PyPI, and
+  # more) via Google's OSV-Scanner. Runs alongside the ecosystem-native
+  # scanners below; alias-collapsed against them by the evaluator.
+  osv_scanner:
+    enabled: true
+    timeout_seconds: 180
+
+  # CR-12 (WP-B2): npm-native lockfile audit. REQUIRES a lockfile
+  # (package-lock.json / npm-shrinkwrap.json) to run deterministically — a
+  # Node project without one is routed to review-required, never a silent
+  # pass. Uses `npm audit --package-lock-only` — this NEVER runs `npm
+  # install`, which would execute the submitted package's own
+  # preinstall/postinstall scripts (arbitrary attacker code) inside the
+  # scanner-worker container.
+  npm_audit:
+    enabled: true
+    timeout_seconds: 120
+
+  # CR-12 (WP-B2): Go reachability-aware vulnerability check. If the module
+  # fails to load/build, this is treated as INCOMPLETE and forced to
+  # review-required — never a silent pass (a submitter could otherwise break
+  # their own go.mod to bypass the gate). OSV-Scanner's manifest-only go.mod
+  # parse remains the coverage floor when govulncheck itself can't run.
+  govulncheck:
+    enabled: true
+    timeout_seconds: 240
 
   # MCP-specific static security checks (vendored mcp_checker engine —
   # see proxy/vendor/mcp_checker/VENDORED.md). Covers malicious code patterns,

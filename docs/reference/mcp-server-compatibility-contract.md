@@ -88,21 +88,34 @@ for a server author writing debuggable error messages, not an enforced contract 
 
 ## 8. Verification
 
-Before a submitted/discovered server is treated as usable, the platform can run:
+Before a submitted/discovered server is treated as usable, the platform runs (via
+`app.services.deploy_verifier.run_verification_probes` — the single shared verify code path used by
+both the platform-managed apply/deploy/verify pipeline and the self-hosted `provide-url` flow):
 
 - `GET /health` (see §5)
-- `tools/list` (confirms the manifest is retrievable and well-formed)
-- A safe, representative `tools/call` (**roadmap** — no automated "smoke call a low-risk tool"
-  verification step exists yet; discovery today only calls `tools/list`, then quarantines every
-  discovered tool per INV-005, requiring a human release decision — see CR-07/`docs/ARCHITECTURE.md`
+- `initialize` + `tools/list` (confirms the manifest is retrievable and well-formed) — quarantines
+  every discovered tool per INV-005, requiring a human release decision (CR-07/`docs/ARCHITECTURE.md`
   §5.5 and the INV-006 release-evidence gate).
+- A final invocation probe (re-runs the `initialize` handshake once more, to catch a server that
+  answered once but degraded mid-discovery).
+- **CR-06 machine-testable contract subset** (`app.services.contract_check.run_contract_check`):
+  validates the SHAPE of the `initialize` and `tools/list` JSON-RPC responses against
+  [`mcp-server-contract.schema.json`](../../proxy/app/services/mcp-server-contract.schema.json) — a direct transcription of §2
+  above. Recorded in `verification_report.contract_check` and `server_registry.contract_version`
+  (currently `"v0.1"`, matching this doc's Status line). A contract-schema violation is diagnostic
+  (recorded in `violations`) — it does not by itself fail the healthcheck/discovery/invocation-probe
+  gates above, which remain the hard fail-closed checks.
+- A safe, representative `tools/call` smoke-invocation remains **roadmap** — the contract check above
+  only validates `initialize`/`tools/list` shape, not an actual tool invocation.
 
 ## What this contract is NOT (yet)
 
-This document describes the current, honest state of the security envelope — it is not a formal
-JSON/YAML-testable contract definition, and there is no automated conformance test suite that any
-implementation (Python/TypeScript/Go/etc.) can run against it. Those are tracked as open work
-(Codex review CR-06) — see `00_AI/mcp-security-platform/Codex_review/Claude_status.md`. Treat this
-file as the source of truth for "what must a server do", and update it in the same commit as any
-change to `dispatcher.py`'s injection modes, the identity headers actually forwarded, or the
-discovery/verification pipeline.
+This document describes the current, honest state of the security envelope. Sec 2's `initialize`/
+`tools/list` response shape now has a machine-testable subset —
+[`mcp-server-contract.schema.json`](../../proxy/app/services/mcp-server-contract.schema.json) plus
+`app/services/contract_check.py` — but there is still no full automated conformance test suite that
+any implementation (Python/TypeScript/Go/etc.) can run standalone against this doc; the schema above
+covers only the two response shapes it lists, and CR-06's `tools/call` smoke-invocation is still
+roadmap (see §8). Treat this file as the source of truth for "what must a server do", and update it
+in the same commit as any change to `dispatcher.py`'s injection modes, the identity headers actually
+forwarded, the discovery/verification pipeline, or the contract schema.

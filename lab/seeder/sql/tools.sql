@@ -77,6 +77,42 @@ ON CONFLICT (name, version) DO UPDATE SET
     inject_prefix       = EXCLUDED.inject_prefix,
     updated_at          = NOW();
 
+-- ── M365 delegated — per-user Entra token via broker refresh (entra_user_token) ──
+-- Second tool row against the same lab-mcp-m365 upstream: the broker decrypts the
+-- caller's stored refresh token (credential_store, service='m365', owner_type='user'
+-- — seeded by seed.py::seed_m365_delegated_credentials) and refreshes it against
+-- ENTRA_TOKEN_URL (lab-mock-idp), then injects the delegated access token.
+-- entra_* columns mirror m365-graph (both NULL there; the broker's M365 adapter
+-- reads ENTRA_* proxy settings instead).
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode,
+    inject_header, inject_prefix, entra_tenant_id, entra_client_id, entra_scope
+)
+SELECT
+    gen_random_uuid(),
+    'm365-graph-delegated', '1.0.0',
+    'Microsoft 365 Graph API — delegated per-user access (acts AS the signed-in user via broker-refreshed Entra token).',
+    '{"type":"object","properties":{"tool":{"type":"string"},"arguments":{"type":"object"}}}'::jsonb,
+    'http://lab-mcp-m365:8000/mcp',
+    'active', 'medium', 35,
+    '["Acts as the signed-in user against M365 tenant data","Delegated token minted per call from stored refresh token"]'::jsonb,
+    'lab-seeder', 'm365', 'A', 'entra_user_token',
+    'Authorization', 'Bearer ', t.entra_tenant_id, t.entra_client_id, t.entra_scope
+FROM tool_registry t
+WHERE t.name = 'm365-graph' AND t.deleted_at IS NULL
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url    = EXCLUDED.upstream_url,
+    service_name    = EXCLUDED.service_name,
+    injection_mode  = EXCLUDED.injection_mode,
+    inject_header   = EXCLUDED.inject_header,
+    inject_prefix   = EXCLUDED.inject_prefix,
+    entra_tenant_id = EXCLUDED.entra_tenant_id,
+    entra_client_id = EXCLUDED.entra_client_id,
+    entra_scope     = EXCLUDED.entra_scope,
+    updated_at      = NOW();
+
 -- ── RAG Assistant — no credentials (read-only public docs) ────────────────────
 INSERT INTO tool_registry (
     tool_id, name, version, description, schema, upstream_url,
@@ -234,7 +270,7 @@ INSERT INTO tool_registry (
     gen_random_uuid(),
     'submit_mcp_server', '1.0.0',
     'Create and submit an MCP server for automated scan and security team review.',
-    '{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"injection_mode":{"type":"string"},"data_categories":{"type":"array","items":{"type":"string"}},"has_write_ops":{"type":"boolean"},"github_repo_url":{"type":"string"}},"required":["name","description","injection_mode","data_categories","has_write_ops"]}'::jsonb,
+    '{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string","description":"Required — what the server does. A reviewer approves based on this alone."},"injection_mode":{"type":"string","description":"Required — the auth TYPE (never the secret itself)."},"data_categories":{"type":"array","items":{"type":"string"}},"has_write_ops":{"type":"boolean"},"upstream_url":{"type":"string","description":"Required — where the backend runs or will run. No server yet? Use get_server_scaffold instead; it needs no submission."},"github_repo_url":{"type":"string"}},"required":["name","description","injection_mode","data_categories","has_write_ops","upstream_url"]}'::jsonb,
     'http://lab-mcp-self-service:8000/mcp',
     'active', 'medium', 30, '["Creates records in server_registry","Triggers git clone and security scan of provided repo"]'::jsonb,
     'lab-seeder', null, null, 'passthrough', null, null
@@ -260,7 +296,105 @@ INSERT INTO tool_registry (
 ON CONFLICT (name, version) DO UPDATE SET
     upstream_url   = EXCLUDED.upstream_url,
     description    = EXCLUDED.description,
+    schema         = EXCLUDED.schema,
     injection_mode = EXCLUDED.injection_mode,
+    updated_at     = NOW();
+
+-- ── echo-sa — Keycloak service-account injection (injection_mode=service_account) ──
+-- Broker fetches a client_credentials token for kc_client_id and injects it as
+-- Authorization: Bearer. The KC client secret lives in credential_store under
+-- (service='lab-test', tool_id=echo-sa) — seeded by seed.py's
+-- store_service_credential (dispatcher._inject_service_account_token contract).
+-- Upstream is the echo server, whose whoami tool reflects (a redacted preview
+-- of) the injected credential, making the injection observable end-to-end.
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode,
+    inject_header, inject_prefix, kc_client_id
+) VALUES
+(
+    gen_random_uuid(),
+    'echo-sa', '1.0.0',
+    'Echo server invoked with a broker-injected Keycloak service-account token (service_account mode).',
+    '{"type":"object","properties":{},"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-echo:8000/mcp',
+    'active', 'low', 5, '[]'::jsonb,
+    'lab-seeder', 'lab-test', null, 'service_account', 'Authorization', 'Bearer', 'lab-test'
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url   = EXCLUDED.upstream_url,
+    service_name   = EXCLUDED.service_name,
+    injection_mode = EXCLUDED.injection_mode,
+    inject_header  = EXCLUDED.inject_header,
+    inject_prefix  = EXCLUDED.inject_prefix,
+    kc_client_id   = EXCLUDED.kc_client_id,
+    updated_at     = NOW();
+
+-- ── echo-basic — RFC 7617 HTTP Basic injection (injection_mode=basic_auth, CR-05) ──
+-- Broker decrypts the shared {"username","secret"} JSON row from credential_store
+-- (service='lab-basic', owner_type='service' — seeded by seed.py's
+-- store_service_credential with credential_type='basic_auth') and injects
+-- Authorization: Basic base64(username:secret) built at call time. Upstream is
+-- the echo server, whose whoami tool reflects a redacted preview of the injected
+-- header, making the injection observable end-to-end.
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode,
+    inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'echo-basic', '1.0.0',
+    'Echo server invoked with a broker-injected RFC 7617 Basic credential (basic_auth mode).',
+    '{"type":"object","properties":{},"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-echo:8000/mcp',
+    'active', 'low', 5, '[]'::jsonb,
+    'lab-seeder', 'lab-basic', null, 'basic_auth', 'Authorization', 'Basic'
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url   = EXCLUDED.upstream_url,
+    service_name   = EXCLUDED.service_name,
+    injection_mode = EXCLUDED.injection_mode,
+    inject_header  = EXCLUDED.inject_header,
+    inject_prefix  = EXCLUDED.inject_prefix,
+    updated_at     = NOW();
+
+-- ── echo-dex-external — WP-A3 generic/dynamic external-OAuth path proof ──────
+-- (injection_mode=external_oauth_user_token, second/non-Entra external IdP)
+--
+-- Proves the NEW generic per-server adapter (credential_broker/adapters/
+-- generic_oauth.py + dynamic_external_oauth.py::resolve_external_oauth_adapter)
+-- against Dex acting as a plain second OIDC provider — completely distinct
+-- from the legacy static dex.py adapter (service='dex', used by the
+-- lab-dex-cal/dex-calendar 'user'-mode enrollment). service_name='dex-external'
+-- is a fresh credential_store namespace so the two never collide.
+--
+-- server_registry row (service_name, approved_upstream_idp_config,
+-- oauth_provider_policy) is seeded by dex_external_oauth.sql, which runs
+-- right after this file and this file's tool row both exist.
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode,
+    inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'echo-dex-external', '1.0.0',
+    'Echo server invoked with a broker-injected generic external-OAuth delegated token (external_oauth_user_token mode, Dex as a second/non-Entra IdP — WP-A3 dynamic adapter path).',
+    '{"type":"object","properties":{},"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-echo:8000/mcp',
+    'active', 'low', 5, '[]'::jsonb,
+    'lab-seeder', 'dex-external', null, 'external_oauth_user_token', 'Authorization', 'Bearer'
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url   = EXCLUDED.upstream_url,
+    service_name   = EXCLUDED.service_name,
+    injection_mode = EXCLUDED.injection_mode,
+    inject_header  = EXCLUDED.inject_header,
+    inject_prefix  = EXCLUDED.inject_prefix,
     updated_at     = NOW();
 
 -- ── lab-tickets — KC token exchange to custom RS (Case 4, PRD-0002) ──────────

@@ -3,9 +3,9 @@
 # init-db-roles.sh
 # MCP Security Platform — PostgreSQL Application Role Initialisation
 # =============================================================================
-# Sets passwords for the proxy_app and compliance_checker_app PostgreSQL roles
-# created by V003__db_roles.sql. Passwords are read from environment variables
-# and never stored in any file (INV-008).
+# Sets passwords for the proxy_app, compliance_checker_app, scanner_worker_app,
+# and build_worker_app PostgreSQL roles (created by V003/V063/V072). Passwords
+# are read from environment variables and never stored in any file (INV-008).
 #
 # Idempotent: uses ALTER ROLE (not CREATE ROLE). If the role does not exist
 # yet (e.g., migration has not run), this script exits with an error — run
@@ -20,6 +20,8 @@
 # Required environment variables:
 #   PROXY_DB_PASSWORD       Password for proxy_app role
 #   COMPLIANCE_DB_PASSWORD  Password for compliance_checker_app role
+#   SCANNER_WORKER_DB_PASSWORD  Password for scanner_worker_app role
+#   BUILD_WORKER_DB_PASSWORD    Password for build_worker_app role
 #
 # Optional environment variables (psql connection defaults):
 #   PGHOST        (default: db)
@@ -36,6 +38,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 : "${PROXY_DB_PASSWORD:?PROXY_DB_PASSWORD environment variable is required}"
 : "${COMPLIANCE_DB_PASSWORD:?COMPLIANCE_DB_PASSWORD environment variable is required}"
+: "${SCANNER_WORKER_DB_PASSWORD:?SCANNER_WORKER_DB_PASSWORD environment variable is required}"
+: "${BUILD_WORKER_DB_PASSWORD:?BUILD_WORKER_DB_PASSWORD environment variable is required}"
 
 # ---------------------------------------------------------------------------
 # Connection defaults
@@ -79,6 +83,8 @@ check_role_exists() {
 
 check_role_exists "proxy_app"
 check_role_exists "compliance_checker_app"
+check_role_exists "scanner_worker_app"
+check_role_exists "build_worker_app"
 
 # ---------------------------------------------------------------------------
 # Set passwords via ALTER ROLE (passwords never written to disk or logged)
@@ -99,6 +105,16 @@ psql <<SQL
 ALTER ROLE compliance_checker_app PASSWORD '${COMPLIANCE_DB_PASSWORD}';
 SQL
 
+echo "[init-db-roles] Setting password for scanner_worker_app..."
+psql <<SQL
+ALTER ROLE scanner_worker_app PASSWORD '${SCANNER_WORKER_DB_PASSWORD}';
+SQL
+
+echo "[init-db-roles] Setting password for build_worker_app..."
+psql <<SQL
+ALTER ROLE build_worker_app PASSWORD '${BUILD_WORKER_DB_PASSWORD}';
+SQL
+
 # ---------------------------------------------------------------------------
 # Verify connectivity with each application role
 # ---------------------------------------------------------------------------
@@ -108,6 +124,14 @@ PGUSER="proxy_app" PGPASSWORD="${PROXY_DB_PASSWORD}" \
 
 echo "[init-db-roles] Verifying compliance_checker_app can connect..."
 PGUSER="compliance_checker_app" PGPASSWORD="${COMPLIANCE_DB_PASSWORD}" \
+    psql -c "SELECT current_user, current_database();" 1>/dev/null
+
+echo "[init-db-roles] Verifying scanner_worker_app can connect..."
+PGUSER="scanner_worker_app" PGPASSWORD="${SCANNER_WORKER_DB_PASSWORD}" \
+    psql -c "SELECT current_user, current_database();" 1>/dev/null
+
+echo "[init-db-roles] Verifying build_worker_app can connect..."
+PGUSER="build_worker_app" PGPASSWORD="${BUILD_WORKER_DB_PASSWORD}" \
     psql -c "SELECT current_user, current_database();" 1>/dev/null
 
 echo "[init-db-roles] Role passwords set and connectivity verified."

@@ -31,13 +31,17 @@
         "http://localhost:8000/api/v1/auth/oidc/callback",
         "http://localhost:8088/api/v1/auth/oidc/callback",
         "http://${LAB_HOST}:8000/api/v1/auth/oidc/callback",
-        "http://${LAB_HOST}:8088/api/v1/auth/oidc/callback"
+        "http://${LAB_HOST}:8088/api/v1/auth/oidc/callback",
+        "https://localhost:8443/api/v1/auth/oidc/callback",
+        "https://${LAB_HOST}:8443/api/v1/auth/oidc/callback"
       ],
       "webOrigins": [
         "http://localhost:8000",
         "http://localhost:8088",
         "http://${LAB_HOST}:8000",
-        "http://${LAB_HOST}:8088"
+        "http://${LAB_HOST}:8088",
+        "https://localhost:8443",
+        "https://${LAB_HOST}:8443"
       ],
       "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
@@ -113,6 +117,7 @@
       },
       "defaultClientScopes": [
         "openid",
+        "basic",
         "profile",
         "email",
         "roles"
@@ -172,13 +177,14 @@
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": true,
-      "serviceAccountsEnabled": false,
+      "serviceAccountsEnabled": true,
       "authorizationServicesEnabled": false,
       "attributes": {
         "access.token.lifespan": "3600"
       },
       "defaultClientScopes": [
         "openid",
+        "basic",
         "profile",
         "email",
         "roles"
@@ -217,6 +223,7 @@
       },
       "defaultClientScopes": [
         "openid",
+        "basic",
         "profile",
         "email",
         "roles"

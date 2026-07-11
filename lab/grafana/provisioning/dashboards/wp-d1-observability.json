@@ -1,0 +1,134 @@
+{
+  "id": null,
+  "uid": "wp-d1-observability",
+  "title": "CR-17 / WP-D1 — Platform Observability",
+  "tags": ["cr-17", "wp-d1"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 0,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Authorization decisions (allow vs deny)",
+      "description": "mcp_authz_decisions_total — INV-003/INV-004. A sustained rise in the deny rate is the MCPRisingDenyRate alert's own signal.",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum by (decision) (rate(mcp_authz_decisions_total[5m]))",
+          "legendFormat": "{{decision}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "OPA / Vault reachability",
+      "description": "mcp_opa_up / mcp_vault_up — 1=reachable on the most recent call, 0=unreachable. Backs MCPOPAUnreachable / MCPVaultUnreachable.",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "mcp_opa_up", "legendFormat": "OPA up", "refId": "A" },
+        { "datasource": "Prometheus", "expr": "mcp_vault_up", "legendFormat": "Vault up", "refId": "B" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Audit emission failures (INV-001)",
+      "description": "mcp_audit_emit_failures_total — any nonzero rate here means requests are being aborted with 500 rather than proceeding un-audited. Backs MCPAuditEmissionFailing.",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "increase(mcp_audit_emit_failures_total[5m])",
+          "legendFormat": "audit emit failures (5m)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Credential broker failures by error type",
+      "description": "mcp_credential_broker_failures_total — enrollment_required / credential_injection_failed / cross_type_principal_fallback_denied.",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum by (error_type) (rate(mcp_credential_broker_failures_total[5m]))",
+          "legendFormat": "{{error_type}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Scan queue depth by status",
+      "description": "mcp_scan_queue_depth — scan_jobs row count by queue status (CR-14). A rising 'queued' count backs MCPScanQueueBackingUp; nonzero 'dead_letter' backs MCPScannerDeadLetterJobs.",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "mcp_scan_queue_depth",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Quarantine backlog / Stale scans",
+      "description": "mcp_quarantine_backlog (tool_registry status='quarantined') and mcp_stale_scan_count (approved servers past RESCAN_INTERVAL_HOURS, SCAN_FRESHNESS_ENFORCED). Back MCPQuarantineBacklogNonZero / MCPStaleScans.",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "mcp_quarantine_backlog", "legendFormat": "quarantined", "refId": "A" },
+        { "datasource": "Prometheus", "expr": "mcp_stale_scan_count", "legendFormat": "stale scans", "refId": "B" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Scanner worker job outcomes",
+      "description": "mcp_scanner_worker_jobs_{claimed,completed,requeued,dead_letter}_total — the worker-side counterpart to the queue-depth gauges above.",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "rate(mcp_scanner_worker_jobs_claimed_total[5m])", "legendFormat": "claimed", "refId": "A" },
+        { "datasource": "Prometheus", "expr": "rate(mcp_scanner_worker_jobs_completed_total[5m])", "legendFormat": "completed", "refId": "B" },
+        { "datasource": "Prometheus", "expr": "rate(mcp_scanner_worker_jobs_requeued_total[5m])", "legendFormat": "requeued", "refId": "C" },
+        { "datasource": "Prometheus", "expr": "rate(mcp_scanner_worker_jobs_dead_letter_total[5m])", "legendFormat": "dead_letter", "refId": "D" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Submission funnel (audit log, last 6h)",
+      "description": "Log-derived (no Prometheus counter exists for submission lifecycle stages) — same {container=\"mcp-proxy\"} audit stream four-auth-trace.json already uses. Counts SUBMISSION_* / TOOL_STATUS_CHANGED audit events by event_type.",
+      "type": "timeseries",
+      "datasource": "Loki",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum by (event_type) (count_over_time({container=\"mcp-proxy\"} | json | event_type =~ \"SUBMISSION.*|TOOL_STATUS_CHANGED\" [1h]))",
+          "legendFormat": "{{event_type}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

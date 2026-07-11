@@ -9,10 +9,36 @@ import pytest
 
 from app.services.server_onboarding import (
     InvalidOnboardingConfig,
+    upstream_idp_type_for_mode,
     validate_mode_and_idp,
     validate_upstream_idp_config,
     validate_upstream_url_ssrf,
 )
+
+
+class TestUpstreamIdpTypeForMode:
+    """WP-A6 Finding 1: single source of truth mapping used by profile-driven
+    self-service registration to derive upstream_idp_type from a profile's
+    injection_mode, kept in sync with validate_mode_and_idp's own matrix."""
+
+    @pytest.mark.parametrize(
+        "mode,expected",
+        [
+            ("oauth_user_token", "gateway_idp"),
+            ("kc_token_exchange", "gateway_idp"),
+            ("entra_user_token", "entra"),
+            ("entra_client_credentials", "entra"),
+            ("external_oauth_client_credentials", "external_oauth"),
+            ("external_oauth_user_token", "external_oauth"),
+            ("basic_auth", None),
+            ("user", None),
+            ("service", None),
+            ("service_account", None),
+            ("none", None),
+        ],
+    )
+    def test_mapping_matches_validate_mode_and_idp(self, mode, expected):
+        assert upstream_idp_type_for_mode(mode) == expected
 
 
 class TestValidateModeAndIdP:

@@ -40,11 +40,13 @@ The chain is **master secret → per-identity KEK → AES-256-GCM with row-bindi
 
 ### 2.3 AES-256-GCM with row-binding AAD
 
-- Payloads MUST be sealed with AES-256-GCM using a fresh 96-bit nonce per row. *Reference: `approach_a.py`, `kms.py::envelope_encrypt`.*
+- Payloads MUST be sealed with AES-256-GCM using a fresh 96-bit nonce per row. *Reference: `approach_a.py`.*
 - The GCM **AAD MUST bind the ciphertext to its `credential_store` row context**: `"mcp-cred-v2" | user_sub | service | tool_id | owner_type`. Decryption MUST succeed only when all four context fields match the values used at encryption time. *Reference: `approach_a.py::_make_aad`.*
 - **Why:** row-binding AAD defeats credential-swap / blob-confusion attacks — an attacker who moves an encrypted blob to a different `(user_sub, service, tool_id, owner_type)` row cannot decrypt it, because the AAD no longer matches (FIND-010, INV-013).
 
-> **Two crypto helper families exist.** `approaches/approach_a.py` (`encrypt`/`decrypt`) is the salt+AAD row-bound format used by the live injection path (`service`/`user` modes, enrollment, admin upload). `kms.py` (`envelope_encrypt`/`envelope_decrypt`) is a simpler `nonce || ciphertext` format with **no per-blob salt and no AAD**, used only by `services/credential_storage.py` (`store_credential`/`retrieve_credential`), which enforces row-context equivalence in application code instead of via AAD. A re-implementer MAY unify these but MUST preserve row-context binding in at least one layer. *Discrepancy: two envelope formats coexist; `credential_storage.py` is reached by `entra_client_credentials` only.*
+> **Exactly ONE ciphertext codec exists**: `approaches/approach_a.py` (`encrypt`/`decrypt`), the salt+AAD row-bound format (`salt(32) || nonce(12) || ct+tag`). Every writer (admin upload, enrollment, oauth/oidc, portal) and every reader (`service`/`user`/`service_account` modes via `decrypt_credential`, `entra_client_credentials` via `services/credential_storage.py::retrieve_credential`) MUST use it. `credential_storage.py` additionally enforces row-context equality in application code before decrypting (fail-closed pre-check on top of the AAD). The former second format (`kms.py::envelope_encrypt/decrypt`, `nonce || ciphertext`, no salt/AAD) was deleted: it was write/read-incompatible with approach_a, so credentials stored by the admin path raised `InvalidTag` when the dispatcher retrieved them — every stored-credential injection failed closed. Do NOT reintroduce a second codec.
+>
+> **Write/read context tuple MUST match.** `admin_credentials.upload_credential` encrypts service-owned credentials with `(user_sub="__service__", service=tool.service_name or tool.name, tool_id=str(tool.tool_id), owner_type="service")` and links `tool_registry.credential_id` to the upserted row. The `entra_client_credentials` dispatcher path retrieves with the same tuple (`service_name` falling back to `name`, never a hardcoded literal).
 
 ---
 
@@ -62,7 +64,7 @@ The chain is **master secret → per-identity KEK → AES-256-GCM with row-bindi
 | `entra_client_credentials` | active | app-only Microsoft Graph token via Azure `client_credentials`; Entra secret read from Vault-backed `credential_store` via `credential_id`; token cached in Redis | missing `credential_id`/fields/token → raise |
 | `passthrough` | code-present, **not settable via admin API (roadmap)** | forward the client-supplied `X-Downstream-Authorization` header verbatim; intercepted at `invocation.py`, not here | reaching dispatcher returns `{}` (invocation layer forwards inbound header) |
 | `entra_user_token` | code-present, **not settable via admin API (roadmap)** | per-user delegated Graph token via broker Approach-A resolve (decrypt refresh → `M365Adapter.refresh` → re-store) | no `client_id` → raise (S-1); not enrolled → `CredentialEnrollmentRequiredError` |
-| `basic_auth` | **no handler (roadmap)** | storable credential type but no injection handler | selecting it → unknown-mode fail-closed |
+| `basic_auth` | active (CR-05) | RFC 7617 HTTP Basic. Stored secret MUST be structured JSON `{"username","secret"}` (NEVER a prebuilt header), written with the same unified Approach-A codec; per-user row (`owner_type='user'`, keyed by caller sub) wins over the shared `owner_type='service'` row; header value `Basic base64(username:secret)` is built at injection time; `inject_header` override respected, the `Basic` scheme is NOT overridable | no `service_name` → raise (CRITICAL-1 parity); no row → `ServiceCredentialMissingError`; malformed payload or colon-in-username → raise with NO payload excerpt (redaction invariant: neither `username:secret` nor its base64 may appear in logs/audit/errors) |
 
 The alias `oauth_user_token` MUST be normalized to `kc_token_exchange` at dispatch entry before enum parsing. *Reference: `dispatcher.py` lines ~166.*
 
@@ -120,8 +122,62 @@ Credentialed backends are onboarded as **self-registering adapters**, so adding 
 ### 5.1 Orphaned / unwired adapters (honest status)
 
 - The dispatcher's live injection modes **never call `broker.resolve(approach="B")`** — no `injection_mode` routes to `_resolve_b`. Therefore the **Approach-B adapters (`grafana`, `netbox`, `gitea`) are orphaned** on the live path; `service`/`user` modes read static blobs from `credential_store` via Approach-A crypto instead. *(roadmap to wire, matches README "Approach-B service adapters … are orphaned".)*
-- The Approach-A refresh path (`_resolve_a`) is reached **only** via `entra_user_token`, which is not settable via the admin API **(roadmap)**. So the Approach-A adapters (`m365`/`dex`/`bitbucket`) are exercised today by the **enrollment** flow (`oauth.py`) but their per-call refresh injection is roadmap-gated.
+- The Approach-A refresh path (`_resolve_a`) is reached **only** via `entra_user_token`, which is still not settable via the admin API **(roadmap)** — but the lab now exercises it end-to-end: the seeded `m365-graph-delegated` tool row (seeder SQL, injection_mode=`entra_user_token`, service_name=`m365`) drives `_resolve_a` → `M365Adapter.refresh()` per call. In the lab the adapter's endpoints are pointed at `lab-mock-idp` via the `ENTRA_TOKEN_URL`/`ENTRA_AUTH_URL` setting overrides (empty default = derive real `login.microsoftonline.com` URLs from `ENTRA_TENANT_ID`), and enrollment is seeded directly into `credential_store` (`seed.py::seed_m365_delegated_credentials`, deterministic `mock-refresh-<sub>` refresh tokens the mock IdP accepts statelessly).
 - `adapters/healthcheck.py` is a separate interface (server-approval reachability probe: `gitea`, `m365`), not a credential adapter.
+
+### 5.2 OAuth provider profile catalog + ServiceAdapter contract (WP-A6)
+
+See `docs/spec/08-finalization-findings-generic-oauth.md` Findings 1-3 for the product rationale. This
+layer sits ABOVE the per-issuer `oauth_provider_policy` enforcement table (§ below / WP-A2) — it does
+not replace it. A profile's issuer/scopes still validate against a matching `oauth_provider_policy` row
+at server-submission-approval time, unchanged.
+
+- **`oauth_provider_profile` table** (`V070`): an admin-curated, reviewer-approved catalog a
+  non-expert submitter picks from — `provider_type` one of `same_platform_idp` / `generic_oauth2` /
+  `entra` / `custom_oidc` / `jira_cloud` (the last reserved, not implemented — see below). Status
+  lifecycle `draft → approved | rejected`, gated by the same high-risk-scope-acknowledgement pattern
+  `oauth_policy.py` already uses (`app/services/oauth_provider_profile.py::approve_profile`).
+- **RFC 8414 / OIDC discovery** (`oauth_provider_profile.py::discover_metadata`): tries
+  `.well-known/oauth-authorization-server` then `.well-known/openid-configuration`; **fails soft to
+  `None`** (never raises) so a provider without published metadata can still be configured by manual
+  entry — this is a UX convenience, not a trust boundary, unlike every other fail-closed rule in this
+  document.
+- **Wizard mapping** (`oauth_provider_profile.py::recommend_provider_type`): a pure function mapping
+  the non-expert's plain-language answers (same IdP as platform? authz-code capable? per-user or
+  app-only? needs API key/basic instead?) to a concrete `provider_type`/`injection_mode`. The
+  `kc_token_exchange` implementation name is **never** exposed in `display_label` — the wizard-facing
+  string is always `"Same platform IdP"`.
+- **API**: `app/routers/oauth_provider_profiles.py` — `POST .../discover` (preview, no write),
+  `POST /api/v1/wizard/recommend-provider-type` (no admin gate — pure recommendation, no state
+  change), `GET|POST /api/v1/admin/oauth-provider-profiles`, `POST .../{id}/approve`,
+  `POST .../{id}/reject` (admin/platform_admin gated, mirrors `admin_prompts.py`).
+- **Same-IdP verify probe** (`app/services/same_idp_verify.py::run_same_idp_verify_probe`): a
+  **standalone** check (not yet wired into WP-B3's verify pipeline, which has landed only its schema
+  substrate as of this writing) that a deployed same-IdP MCP server itself rejects (a) a missing
+  token, (b) a wrong-audience token, (c) an expired token — sent directly to the upstream server URL,
+  bypassing the proxy, so it measures the upstream's OWN validation. Follow-up for whoever finishes
+  WP-B3: call this from the verify-phase worker and persist the result into
+  `server_registry.verification_report`.
+- **ServiceAdapter contract** (`app/credential_broker/adapters/service_adapter.py`): the interface a
+  service needing post-OAuth discovery (tenant/site/workspace resolution) implements —
+  `required_oauth_fields` / `default_scopes` / `validate_provider_config` /
+  `post_enrollment_discovery` / `select_resource` / `build_runtime_context` / `verify_access` /
+  `safe_probe_endpoint`. An adapter **never** stores refresh tokens or client secrets — those remain
+  exclusively in `credential_store`, managed by the broker; an adapter only receives an already-valid
+  access token and calls the resource API with it.
+  - **Reference implementation**: `GenericServiceAdapter`
+    (`app/credential_broker/adapters/generic_service_adapter.py`) — the "no extra discovery needed"
+    case (the common one: the OAuth access token alone is sufficient, no tenant/site resolution
+    step). Demonstrates the Finding 3 acceptance criterion that adding a plain external OAuth service
+    requires zero new Python module — only a new `oauth_provider_profile` row with
+    `service_adapter=NULL`.
+  - `server_registry.service_context` (`V070`, JSONB): the non-secret runtime context an adapter's
+    `build_runtime_context()` produces (e.g. resolved `api_base_url`, `resource_id`) — explicitly
+    separate from `credential_store`, which holds only encrypted secrets.
+  - **NOT built by WP-A6** (deliberately deprioritized per Finding 4/user direction "generic oidc, not
+    jira focused"): a `jira_cloud` ServiceAdapter resolving Atlassian's `cloudId` via the
+    accessible-resources endpoint. The `jira_cloud` `provider_type` enum value and `service_context`
+    shape are reserved so this adapter can slot in later without a schema change.
 
 ---
 
@@ -130,9 +186,9 @@ Credentialed backends are onboarded as **self-registering adapters**, so adding 
 *Reference: `routers/admin_credentials.py`, prefix `/admin/credentials`, all endpoints admin-gated.*
 
 - `GET /api` — list tools with `injection_mode` + `has_service_credential`.
-- `PUT /{tool_id}` — upload/rotate: encrypt secret with Approach-A `encrypt()` under the resolved identity, upsert into `credential_store` (`ON CONFLICT (tool_id, service) WHERE owner_type='service'`), emit `CREDENTIAL_UPLOADED` audit.
+- `PUT /{tool_id}` — upload/rotate: encrypt secret with Approach-A `encrypt()` under the resolved identity, upsert into `credential_store` (`ON CONFLICT (tool_id, service) WHERE owner_type='service'`), emit `CREDENTIAL_UPLOADED` audit. For `credential_type='basic_auth'` the body MUST also carry `username` (400 without it; 400 on RFC 7617-forbidden `:` in username) and the stored plaintext is the structured JSON `{"username","secret"}` the dispatcher expects — the audit detail carries neither `username` nor `secret`.
 - `DELETE /{tool_id}` — hard-delete credential row, emit `CREDENTIAL_REVOKED`.
-- `PUT /{tool_id}/injection-mode` — set mode. **Valid modes are only `none|service|user|service_account|oauth_user_token`.** *Discrepancy: `entra_client_credentials`, `passthrough`, `entra_user_token`, `basic_auth` are NOT settable via this endpoint — `entra_client_credentials` is "active" per the README but is configured via `server_registry`/seeder, not the admin injection-mode API. A re-implementer MUST NOT assume the admin API is the sole mode-setting surface.*
+- `PUT /{tool_id}/injection-mode` — set mode. **Valid modes are sourced from `services/auth_modes.py::all_mode_values()` (2026-07-06, WP-A5/CR-02 completion) — the FULL canonical set, including `passthrough`**, since this is the only admin write path for injection_mode and `passthrough`'s own status label (`admin_only`) means it must be reachable here even though it is never self-service-selectable (`submission.py`'s wizard uses the narrower `self_service_mode_values()` instead). `dispatcher.py::InjectionMode` is now a direct alias of `AuthMode` (`InjectionMode = AuthMode`), so this endpoint, the dispatcher, and every other call site (`server_registry.py`, `server_onboarding.py`, `portal.py`) read from one enum — no call site can drift behind what the dispatcher actually supports.
 
 Every mutation MUST emit a durable credential-lifecycle audit; audit failure MUST log at CRITICAL (does not raise, but is monitorable). *Reference: `_emit_credential_audit`.*
 
@@ -158,6 +214,6 @@ Every mutation MUST emit a durable credential-lifecycle audit; audit failure MUS
 
 1. `kms.py::get_master_secret` docstring says "base64-decoded from Vault value"; code is hex-first (`_decode_master_secret`).
 2. `entra_client_credentials` is documented "active/settable" but is **not** in the admin injection-mode endpoint's `valid_modes`; it is set via `server_registry`/seeder.
-3. Two envelope formats coexist (`approach_a` salt+AAD vs `kms` nonce-only); only `credential_storage.py` uses the latter (row-context checked in app code, not AAD).
+3. ~~Two envelope formats coexist~~ **Resolved:** `kms.py` envelope helpers deleted; `credential_storage.py` now uses `approach_a` (one codec platform-wide, see §2.3).
 4. Approach-B adapters (grafana/netbox/gitea) and `broker.resolve("B")` are unreachable from any live injection mode (orphaned) — matches README but not obvious from `factory.py`.
 5. `dispatcher.py::InjectionMode.OAUTH_USER_TOKEN` match-arm is unreachable (alias normalized before enum parse); kept as a belt-and-suspenders guard.

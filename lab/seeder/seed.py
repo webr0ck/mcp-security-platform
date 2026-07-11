@@ -23,8 +23,10 @@ Environment variables (all have safe defaults except DB_PASSWORD):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import secrets as secrets_module
 import time
 from pathlib import Path
 from typing import Optional
@@ -329,6 +331,7 @@ async def store_service_credential(
     service_name: str,
     tool_name: str,
     token: str,
+    credential_type: str = "api_key",
 ) -> None:
     """
     Encrypt `token` and upsert it into credential_store as a service-mode row.
@@ -357,15 +360,17 @@ async def store_service_credential(
         """
         INSERT INTO credential_store
             (user_sub, service, tool_id, owner_type, credential_type, encrypted_blob)
-        VALUES ('__service__', $1, $2::uuid, 'service', 'api_key', $3)
+        VALUES ('__service__', $1, $2::uuid, 'service', $4, $3)
         ON CONFLICT (tool_id, service) WHERE owner_type = 'service' AND tool_id IS NOT NULL
         DO UPDATE SET
             encrypted_blob = EXCLUDED.encrypted_blob,
+            credential_type = EXCLUDED.credential_type,
             updated_at = now()
         """,
         service_name,
         tool_id,
         blob,
+        credential_type,
     )
     log.info(
         "Service credential stored: tool=%s service=%s tool_id=%s",
@@ -721,8 +726,12 @@ async def seed_netbox_user_credentials(conn: asyncpg.Connection, master_hex: str
         return {"netbox_users": "FAILED (tool not found)"}
     tool_id = str(row["tool_id"])
 
-    # Get KC admin token to look up user subs
-    kc_user_subs: dict[str, str] = {}  # username -> kc_sub
+    # Get KC admin token to look up user identity keys. The proxy resolves
+    # client_id to the IdP-verified EMAIL when present (auth.py
+    # verified_oidc_identity), falling back to the raw sub — the credential
+    # lookup key must match that, NOT the KC UUID id (which never matches
+    # and made every per-user credential row unreachable).
+    kc_user_subs: dict[str, str] = {}  # username -> proxy identity key
     try:
         async with httpx.AsyncClient(timeout=10, base_url=KC_ADMIN_URL) as client:
             resp = await client.post(
@@ -737,7 +746,10 @@ async def seed_netbox_user_credentials(conn: asyncpg.Connection, master_hex: str
                 if users_resp.status_code == 200:
                     for u in users_resp.json():
                         if u["username"] in KC_EXPECTED_USERS:
-                            kc_user_subs[u["username"]] = u["id"]
+                            if u.get("email") and u.get("emailVerified"):
+                                kc_user_subs[u["username"]] = u["email"]
+                            else:
+                                kc_user_subs[u["username"]] = u["id"]
     except Exception as exc:
         log.warning("KC lookup failed for NetBox user seeding: %s", exc)
 
@@ -745,26 +757,58 @@ async def seed_netbox_user_credentials(conn: asyncpg.Connection, master_hex: str
     results = {}
     master_bytes = bytes.fromhex(master_hex)
 
+    nb_headers = {
+        "Authorization": f"Token {LAB_NETBOX_ADMIN_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    nb_user_ids: list[int] = []
     async with httpx.AsyncClient(timeout=15, base_url=LAB_NETBOX_URL) as nb_client:
         for username in KC_EXPECTED_USERS:
-            kc_sub = kc_user_subs.get(username, f"lab-user-{username}")
+            # lab users' KC emails are <name>@corp — keep the fallback aligned
+            kc_sub = kc_user_subs.get(username, f"{username}@corp")
 
-            # Create a NetBox API token for this user
-            nb_headers = {
-                "Authorization": f"Token {LAB_NETBOX_ADMIN_TOKEN}",
-                "Content-Type": "application/json",
-            }
             try:
-                create_resp = await nb_client.post(
-                    "/api/users/tokens/",
-                    headers=nb_headers,
-                    json={"description": f"lab-{username}-prd0002", "write_enabled": False},
+                # NetBox requires tokens to belong to a NetBox user: find or
+                # create a per-lab-user NetBox account first.
+                users_resp = await nb_client.get(
+                    "/api/users/users/", params={"username": username}, headers=nb_headers,
                 )
-                if create_resp.status_code not in (200, 201):
-                    log.warning("NetBox token creation for %s failed: %s", username, create_resp.status_code)
-                    results[f"netbox_{username}"] = f"FAILED ({create_resp.status_code})"
-                    continue
-                nb_token = create_resp.json().get("key", "")
+                users_resp.raise_for_status()
+                nb_users = users_resp.json().get("results", [])
+                if nb_users:
+                    nb_user_id = nb_users[0]["id"]
+                else:
+                    create_user_resp = await nb_client.post(
+                        "/api/users/users/",
+                        headers=nb_headers,
+                        # random password: account is API-token-only, never logs in
+                        json={"username": username, "password": secrets_module.token_urlsafe(24)},
+                    )
+                    create_user_resp.raise_for_status()
+                    nb_user_id = create_user_resp.json()["id"]
+
+                # Reuse an existing lab token for idempotent re-runs
+                tok_resp = await nb_client.get(
+                    "/api/users/tokens/",
+                    params={"user_id": nb_user_id, "description": f"lab-{username}-prd0002"},
+                    headers=nb_headers,
+                )
+                existing = tok_resp.json().get("results", []) if tok_resp.status_code == 200 else []
+                if existing and existing[0].get("key"):
+                    nb_token = existing[0]["key"]
+                else:
+                    create_resp = await nb_client.post(
+                        "/api/users/tokens/",
+                        headers=nb_headers,
+                        json={"user": nb_user_id,
+                              "description": f"lab-{username}-prd0002", "write_enabled": False},
+                    )
+                    if create_resp.status_code not in (200, 201):
+                        log.warning("NetBox token creation for %s failed: %s %s",
+                                    username, create_resp.status_code, create_resp.text)
+                        results[f"netbox_{username}"] = f"FAILED ({create_resp.status_code})"
+                        continue
+                    nb_token = create_resp.json().get("key", "")
             except Exception as exc:
                 log.warning("NetBox token creation for %s error: %s", username, exc)
                 results[f"netbox_{username}"] = f"ERROR ({exc})"
@@ -786,9 +830,122 @@ async def seed_netbox_user_credentials(conn: asyncpg.Connection, master_hex: str
                 kc_sub, tool_id, blob,
             )
             log.info("NetBox per-user token stored: user=%s kc_sub=%s", username, kc_sub)
+            nb_user_ids.append(nb_user_id)
             results[f"netbox_{username}"] = "OK"
 
+        # NetBox tokens carry the USER's permissions; a fresh user has none and
+        # every read 403s. Grant a shared read-only ObjectPermission over the
+        # object types the lab tools query. Idempotent by name.
+        if nb_user_ids:
+            perm_types = ["dcim.device", "dcim.site", "dcim.rack",
+                          "ipam.ipaddress", "ipam.prefix", "ipam.vlan",
+                          "tenancy.tenant", "virtualization.virtualmachine"]
+            try:
+                perm_resp = await nb_client.get(
+                    "/api/users/permissions/", params={"name": "lab-readonly-all"},
+                    headers=nb_headers,
+                )
+                perm_results = perm_resp.json().get("results", []) if perm_resp.status_code == 200 else []
+                payload = {"name": "lab-readonly-all", "enabled": True,
+                           "actions": ["view"], "object_types": perm_types,
+                           "users": nb_user_ids}
+                if perm_results:
+                    await nb_client.patch(
+                        f"/api/users/permissions/{perm_results[0]['id']}/",
+                        headers=nb_headers, json=payload,
+                    )
+                else:
+                    await nb_client.post("/api/users/permissions/", headers=nb_headers, json=payload)
+                results["netbox_readonly_perm"] = "OK"
+            except Exception as exc:
+                log.warning("NetBox read-only permission grant failed: %s", exc)
+                results["netbox_readonly_perm"] = f"ERROR ({exc})"
+
     return results
+
+
+async def seed_m365_delegated_credentials(conn: asyncpg.Connection, master_hex: str) -> dict:
+    """
+    Enroll lab users for delegated m365 access (entra_user_token mode) against
+    lab-mock-idp — PRD-0002 Case 1 mock flow, no real Entra tenant needed.
+
+    The broker resolves this credential via CredentialBroker._resolve_a:
+    SELECT ... WHERE user_sub=<proxy identity> AND service='m365', decrypt with
+    tool_id=None/owner_type='user', then M365Adapter.refresh(<refresh_token>)
+    against ENTRA_TOKEN_URL. In the lab that URL points at lab-mock-idp, which
+    accepts deterministic refresh tokens of the form 'mock-refresh-<sub>' for
+    any known mock user (see lab/mock-idp/server.py). So enrollment here is
+    just: store that deterministic refresh token, encrypted, per user.
+    """
+    results = {}
+    master_bytes = bytes.fromhex(master_hex)
+    for username in KC_EXPECTED_USERS:
+        identity = f"{username}@corp"  # KC verified email == proxy client_id
+        blob = _encrypt_credential(
+            f"mock-refresh-{identity}", identity, master_bytes,
+            service="m365", tool_id="", owner_type="user",  # tool_id None in broker AAD
+        )
+        await conn.execute(
+            """
+            INSERT INTO credential_store
+                (user_sub, service, tool_id, owner_type, credential_type, encrypted_blob)
+            VALUES ($1, 'm365', NULL, 'user', 'oauth2_refresh', $2)
+            ON CONFLICT (user_sub, service) WHERE owner_type = 'user'
+            DO UPDATE SET encrypted_blob = EXCLUDED.encrypted_blob, updated_at = now()
+            """,
+            identity, blob,
+        )
+        results[f"m365_delegated_{username}"] = "OK"
+    return results
+
+
+async def seed_m365_client_credentials(conn: asyncpg.Connection, master_hex: str) -> dict:
+    """
+    Provision the m365-graph tool's entra_client_credentials (app-only) service
+    credential — PRD-0002 Case 2 mock flow against lab-mock-idp.
+
+    The dispatcher's entra_client_credentials path looks the credential up by
+    tool_registry.credential_id and decrypts under the exact context tuple
+    (user_sub='__service__', service=<service_name>, tool_id=<m365-graph id>,
+    owner_type='service'). The mock IdP accepts any client_id + non-empty secret
+    for grant_type=client_credentials, and ENTRA_TOKEN_URL points the injector at
+    it, so this is just: store {tenant_id,client_id,client_secret} encrypted and
+    link credential_id on the tool row.
+    """
+    row = await conn.fetchrow(
+        "SELECT tool_id, COALESCE(service_name, name) AS svc FROM tool_registry "
+        "WHERE name='m365-graph' AND deleted_at IS NULL",
+    )
+    if not row:
+        log.info("m365-graph tool not found — skipping entra_client_credentials seeding")
+        return {"m365_client_credentials": "SKIPPED (tool not found)"}
+    tool_id, svc = str(row["tool_id"]), row["svc"]
+    master_bytes = bytes.fromhex(master_hex)
+    secret = json.dumps({
+        "tenant_id": os.environ.get("ENTRA_TENANT_ID", "e756f76f-bbde-4d68-903c-f8d8cda37d1a"),
+        "client_id": os.environ.get("AZURE_CLIENT_ID", "m365-lab-app"),
+        "client_secret": os.environ.get("AZURE_CLIENT_SECRET", "m365-lab-secret"),
+    })
+    blob = _encrypt_credential(
+        secret, "__service__", master_bytes,
+        service=svc, tool_id=tool_id, owner_type="service",
+    )
+    cred_id = await conn.fetchval(
+        """
+        INSERT INTO credential_store
+            (user_sub, service, tool_id, owner_type, credential_type, encrypted_blob)
+        VALUES ('__service__', $1, $2, 'service', 'entra_client_secret', $3)
+        ON CONFLICT (tool_id, service) WHERE owner_type = 'service' AND tool_id IS NOT NULL
+        DO UPDATE SET encrypted_blob = EXCLUDED.encrypted_blob, updated_at = now()
+        RETURNING id
+        """,
+        svc, tool_id, blob,
+    )
+    await conn.execute(
+        "UPDATE tool_registry SET credential_id=$1, entra_tenant_id=$2 WHERE tool_id=$3",
+        cred_id, json.loads(secret)["tenant_id"], row["tool_id"],
+    )
+    return {"m365_client_credentials": "OK"}
 
 
 async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
@@ -1022,6 +1179,16 @@ async def main() -> None:
         log.error("servers.sql seeding failed: %s", exc)
         results["servers_sql"] = f"FAILED: {exc}"
 
+    # 4c. WP-A3/Task-12: Dex-as-second-external-IdP server_registry + oauth_provider_policy
+    # (generic dynamic external_oauth_user_token path — see docs/spec/01-authentication.md §4.6)
+    log.info("Seeding Dex external-OAuth server_registry/oauth_provider_policy...")
+    try:
+        await run_sql_file(conn, SQL_DIR / "dex_external_oauth.sql")
+        results["dex_external_oauth_sql"] = "OK"
+    except Exception as exc:
+        log.error("dex_external_oauth.sql seeding failed: %s", exc)
+        results["dex_external_oauth_sql"] = f"FAILED: {exc}"
+
     # 5. Insert RBAC seed rows
     log.info("Seeding RBAC roles...")
     try:
@@ -1098,6 +1265,97 @@ async def main() -> None:
         nb_results = await seed_netbox_user_credentials(conn_nb, master_hex)
         await conn_nb.close()
         results.update(nb_results)
+
+    # 7d. Seed the lab-test KC client secret for echo-sa (service_account mode).
+    # dispatcher._inject_service_account_token looks the secret up in
+    # credential_store by (service=kc_client_id, tool_id) with owner_type='service'.
+    if master_hex and results.get("tools_sql") == "OK":
+        try:
+            conn_sa = await wait_for_postgres(max_wait=10)
+            await store_service_credential(
+                conn_sa, master_hex, "lab-test", "echo-sa",
+                os.environ.get("KC_LAB_TEST_SECRET", "lab-test-secret"),
+            )
+            await conn_sa.close()
+            results["echo_sa_cred_store"] = "OK"
+        except Exception as exc:
+            log.error("echo-sa KC client secret store failed: %s", exc)
+            results["echo_sa_cred_store"] = f"FAILED: {exc}"
+
+    # 7d2. Seed the shared RFC 7617 Basic credential for echo-basic (basic_auth
+    # mode, CR-05). Structured JSON {"username","secret"} — the dispatcher's
+    # _inject_basic_auth builds the "Basic <b64>" header at call time; the
+    # header is never stored.
+    if master_hex and results.get("tools_sql") == "OK":
+        try:
+            import json as _json
+            conn_ba = await wait_for_postgres(max_wait=10)
+            await store_service_credential(
+                conn_ba, master_hex, "lab-basic", "echo-basic",
+                _json.dumps({
+                    "username": os.environ.get("LAB_BASIC_USERNAME", "labuser"),
+                    "secret": os.environ.get("LAB_BASIC_SECRET", "lab-basic-secret"),
+                }),
+                credential_type="basic_auth",
+            )
+            await conn_ba.close()
+            results["echo_basic_cred_store"] = "OK"
+        except Exception as exc:
+            log.error("echo-basic basic_auth credential store failed: %s", exc)
+            results["echo_basic_cred_store"] = f"FAILED: {exc}"
+
+    # 7d3. WP-A3/Task-12: seed the Dex OAuth client_secret (mcp-dex-generic,
+    # registered in lab/dex/config.lab.yaml) as a service-owned credential for
+    # echo-dex-external. resolve_external_oauth_adapter() finds it via
+    # tool_registry.credential_id (NOT the (service, tool_id) lookup the other
+    # static adapters use) and reads it back through
+    # services/credential_storage.retrieve_credential, which always
+    # json.loads() the decrypted plaintext (unlike the raw-string convention
+    # store_service_credential's other callers, e.g. echo-sa, rely on for
+    # their own direct-decrypt() call sites) — must store a JSON object with
+    # a "client_secret" key, not a bare string.
+    if master_hex and results.get("tools_sql") == "OK" and results.get("dex_external_oauth_sql") == "OK":
+        try:
+            conn_dex = await wait_for_postgres(max_wait=10)
+            await store_service_credential(
+                conn_dex, master_hex, "dex-external", "echo-dex-external",
+                json.dumps({
+                    "client_secret": os.environ.get(
+                        "DEX_GENERIC_CLIENT_SECRET", "mcp-dex-generic-secret"
+                    ),
+                }),
+                credential_type="external_oauth_client_secret",
+            )
+            await conn_dex.execute(
+                """
+                UPDATE tool_registry t
+                SET credential_id = c.id, updated_at = now()
+                FROM credential_store c
+                WHERE t.name = 'echo-dex-external'
+                  AND t.deleted_at IS NULL
+                  AND c.service = 'dex-external'
+                  AND c.owner_type = 'service'
+                """
+            )
+            await conn_dex.close()
+            results["echo_dex_external_cred_store"] = "OK"
+        except Exception as exc:
+            log.error("echo-dex-external client_secret store failed: %s", exc)
+            results["echo_dex_external_cred_store"] = f"FAILED: {exc}"
+
+    # 7e. Seed per-user delegated m365 refresh tokens (entra_user_token mode,
+    # mock-idp lab flow — see seed_m365_delegated_credentials docstring).
+    if master_hex and results.get("tools_sql") == "OK":
+        conn_m365d = await wait_for_postgres(max_wait=10)
+        results.update(await seed_m365_delegated_credentials(conn_m365d, master_hex))
+        await conn_m365d.close()
+
+    # 7f. Provision m365-graph app-only credential (entra_client_credentials mode,
+    # mock-idp lab flow — see seed_m365_client_credentials docstring).
+    if master_hex and results.get("tools_sql") == "OK":
+        conn_m365c = await wait_for_postgres(max_wait=10)
+        results.update(await seed_m365_client_credentials(conn_m365c, master_hex))
+        await conn_m365c.close()
 
     # 8. Seed self-service MCP API key (Task 2.2b / Task 2.5)
     log.info("Seeding lab-self-service API key...")

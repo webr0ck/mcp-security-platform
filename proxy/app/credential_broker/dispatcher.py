@@ -6,6 +6,8 @@ Routes credential injection to the correct approach based on tool.injection_mode
   none                      — no-op; upstream called without injected credentials
   service                   — shared service credential (API key or client secret)
   user                      — per-user credential keyed by Keycloak sub
+  basic_auth                — RFC 7617 HTTP Basic; stored {"username","secret"} JSON
+                              (shared or per-user), header built at injection time
   service_account           — Keycloak client_credentials token for the tool's KC client
   kc_token_exchange         — RFC 8693 subject token exchange WITHIN the Keycloak realm only.
                               The user's KC access token is exchanged for an upstream-audience
@@ -48,12 +50,16 @@ from __future__ import annotations
 import json
 import logging
 import time
-from enum import Enum
 from typing import Any
 
 import jwt as _jwt
+from sqlalchemy import text
 from app.credential_broker.token_assert import assert_exchanged_token, ExchangedTokenError
 from app.credential_broker.keycloak_client import get_public_key_for_token
+# WP-A5 (CR-02 completion): InjectionMode is a direct alias of the canonical
+# AuthMode enum — see the note further below, right where the class used to
+# live, for why this is a behavior-preserving rename.
+from app.services.auth_modes import AuthMode as InjectionMode
 
 # S-6(b) / CR-03: proxy-side allowlist of audiences the KC realm may mint tokens
 # for via token exchange. Config-driven (KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES,
@@ -69,18 +75,13 @@ logger = logging.getLogger(__name__)
 _ENTRA_TOKEN_CACHE_MARGIN_SECONDS = 60
 
 
-class InjectionMode(str, Enum):
-    NONE = "none"
-    SERVICE = "service"
-    USER = "user"
-    SERVICE_ACCOUNT = "service_account"
-    # AUTH-F11 / AUTH-R4 (Task 3.5): kc_token_exchange is the canonical name.
-    # oauth_user_token is an alias kept for backwards compat with existing DB rows.
-    KC_TOKEN_EXCHANGE = "kc_token_exchange"
-    OAUTH_USER_TOKEN = "oauth_user_token"          # alias → KC_TOKEN_EXCHANGE
-    PASSTHROUGH = "passthrough"
-    ENTRA_CLIENT_CREDENTIALS = "entra_client_credentials"
-    ENTRA_USER_TOKEN = "entra_user_token"
+# WP-A5 (CR-02 completion): the InjectionMode enum used to be declared here
+# directly (`class InjectionMode(str, Enum): ...`). It is now imported from
+# services/auth_modes.py as InjectionMode = AuthMode (see the import at the
+# top of this file) — AuthMode's member names (SERVICE, USER, not
+# SERVICE_BEARER/USER_BEARER) were chosen to match exactly, so this is a
+# behavior-preserving rename: every `InjectionMode.X`/`InjectionMode(mode_str)`
+# reference below is unchanged.
 
 
 class CredentialInjectionError(RuntimeError):
@@ -89,6 +90,33 @@ class CredentialInjectionError(RuntimeError):
     Callers should treat this as a 424 / 500 and abort the upstream call —
     proceeding without credentials would silently bypass the enforcement boundary.
     """
+
+
+class CrossTypePrincipalFallbackDenied(CredentialInjectionError):
+    """
+    CR-10 (WP-A1): raised when the per-user credential dual-read misses on the
+    typed principal key and the bare-sub fallback row belongs to a DIFFERENT
+    principal type than the caller (e.g. an mTLS agent and an OIDC human that
+    happen to share a bare subject string). This is deliberately NEVER treated
+    as a match — it is caught in services/invocation.py's dispatch_credential_
+    injection except block and turned into a distinct audited deny
+    ("cross_type_principal_fallback_denied"), never a silent fallback success.
+
+    Wraps app.credential_broker.principal_resolution.CrossTypePrincipalMismatch
+    so callers only need to catch CredentialInjectionError.
+    """
+
+    def __init__(self, service: str, caller_type: str, row_type: str) -> None:
+        self.service = service
+        self.caller_type = caller_type
+        self.row_type = row_type
+        super().__init__(
+            f"Credential dual-read for service '{service}' refused: caller "
+            f"principal_type={caller_type!r} does not match the existing "
+            f"bare-sub row's principal_type={row_type!r}. Re-enrollment under "
+            "the typed principal is required; the bare-sub row will NEVER be "
+            "matched across principal types."
+        )
 
 
 class CredentialEnrollmentRequiredError(CredentialInjectionError):
@@ -133,6 +161,8 @@ async def dispatch_credential_injection(
     tool_record: dict[str, Any],
     client_id: str,
     user_kc_token: str | None = None,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
 ) -> dict[str, str]:
     """
     Returns HTTP headers dict to inject into the upstream call.
@@ -208,7 +238,13 @@ async def dispatch_credential_injection(
     # on service_name. With the submitter-controlled name fallback removed, an
     # unset service_name must NOT silently proceed — refuse rather than risk
     # resolving under an unintended/attacker-influenced key.
-    if mode in (InjectionMode.SERVICE, InjectionMode.USER, InjectionMode.ENTRA_USER_TOKEN) and not service_name:
+    if mode in (
+        InjectionMode.SERVICE,
+        InjectionMode.USER,
+        InjectionMode.BASIC_AUTH,
+        InjectionMode.ENTRA_USER_TOKEN,
+        InjectionMode.EXTERNAL_OAUTH_USER_TOKEN,
+    ) and not service_name:
         raise CredentialInjectionError(
             f"injection_mode='{mode.value}' requires an approval-set service_name; none configured "
             f"for tool {tool_id}. Fail-closed (CRITICAL-1) — the tool name is no longer a credential key."
@@ -233,6 +269,18 @@ async def dispatch_credential_injection(
                 service_name=service_name,
                 inject_header=inject_header,
                 inject_prefix=inject_prefix,
+                principal_id=principal_id,
+                principal_type=principal_type,
+            )
+
+        case InjectionMode.BASIC_AUTH:
+            return await _inject_basic_auth(
+                tool_id=tool_id,
+                user_sub=client_id,
+                service_name=service_name,
+                inject_header=inject_header,
+                principal_id=principal_id,
+                principal_type=principal_type,
             )
 
         case InjectionMode.SERVICE_ACCOUNT:
@@ -294,6 +342,32 @@ async def dispatch_credential_injection(
                 service_name=service_name,
                 inject_header=inject_header,
                 inject_prefix=inject_prefix,
+                principal_id=principal_id,
+                principal_type=principal_type,
+            )
+
+        case InjectionMode.EXTERNAL_OAUTH_CLIENT_CREDENTIALS:
+            return await _inject_external_oauth_client_credentials(
+                tool_record=tool_record,
+                inject_header=inject_header,
+                inject_prefix=inject_prefix,
+            )
+
+        case InjectionMode.EXTERNAL_OAUTH_USER_TOKEN:
+            # Same S-1 fail-closed rule as entra_user_token: a delegated tool
+            # MUST have a user identity, never fall back to app-only.
+            if not client_id:
+                raise CredentialInjectionError(
+                    f"external_oauth_user_token mode: no authenticated user sub for tool "
+                    f"{tool_record.get('tool_id')}; refusing to forward (S-1 fail-closed)"
+                )
+            return await _inject_external_oauth_user_token(
+                user_sub=client_id,
+                service_name=service_name,
+                inject_header=inject_header,
+                inject_prefix=inject_prefix,
+                principal_id=principal_id,
+                principal_type=principal_type,
             )
 
     raise CredentialInjectionError(
@@ -304,6 +378,49 @@ async def dispatch_credential_injection(
 # ---------------------------------------------------------------------------
 # Private injection helpers
 # ---------------------------------------------------------------------------
+
+async def _resolve_owner_key_or_none(
+    *,
+    principal_id: str | None,
+    principal_type: str | None,
+    bare_sub: str,
+    service: str,
+) -> str | None:
+    """
+    CR-10 (WP-A1): shared entry point for the typed-principal dual-read used
+    by every per-user credential_store lookup (USER, BASIC_AUTH per-user leg,
+    ENTRA_USER_TOKEN).
+
+    Returns the credential_store.user_sub value to decrypt/update under
+    (either the typed principal_id or, for a same-type legacy row, the bare
+    subject), or None if the caller is not enrolled under either key.
+
+    Raises app.credential_broker.principal_resolution.CrossTypePrincipalMismatch
+    if a bare-sub row exists but belongs to a different principal type —
+    callers must NOT swallow this; it must become an audited deny.
+
+    principal_id is None only for call sites that predate CR-10 typing (there
+    are none left in the production invoke_tool path — AuthMiddleware always
+    populates request.state.principal_id for an authenticated request). In
+    that case there is no typed key to try; behave exactly as pre-CR-10 code
+    did and use the bare subject directly, without an extra DB round trip.
+    """
+    if principal_id is None:
+        return bare_sub
+
+    from app.core.database import AsyncSessionLocal
+    from app.credential_broker.principal_resolution import resolve_credential_owner
+
+    async with AsyncSessionLocal() as session:
+        resolved = await resolve_credential_owner(
+            session,
+            principal_id=principal_id,
+            principal_type=principal_type,
+            bare_sub=bare_sub,
+            service=service,
+        )
+    return resolved.owner_key if resolved is not None else None
+
 
 async def _inject_service_credential(
     tool_id: str | None,
@@ -338,21 +455,51 @@ async def _inject_user_credential(
     service_name: str,
     inject_header: str,
     inject_prefix: str,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
 ) -> dict[str, str]:
-    """Decrypt the per-user credential from credential_store."""
+    """Decrypt the per-user credential from credential_store.
+
+    CR-10 (WP-A1): resolves the owner key via the typed-principal dual-read
+    (principal_id first, bare user_sub fallback gated to same-type) before
+    decrypting. A cross-type fallback raises CrossTypePrincipalFallbackDenied
+    (a CredentialInjectionError) instead of silently matching.
+    """
     from app.credential_broker.approaches.approach_a import decrypt_credential
+    from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
 
     try:
-        plaintext = await decrypt_credential(
-            user_sub=user_sub,
+        owner_key = await _resolve_owner_key_or_none(
+            principal_id=principal_id,
+            principal_type=principal_type,
+            bare_sub=user_sub,
             service=service_name,
-            tool_id=tool_id,
-            owner_type="user",
         )
-    except Exception as exc:
-        raise CredentialInjectionError(
-            f"User credential decryption raised for sub={user_sub} service={service_name}: {exc}"
-        ) from exc
+    except CrossTypePrincipalMismatch as _xtype_exc:
+        raise CrossTypePrincipalFallbackDenied(
+            service=service_name,
+            caller_type=_xtype_exc.caller_type,
+            row_type=_xtype_exc.row_type,
+        ) from _xtype_exc
+
+    if owner_key is None:
+        # Not enrolled under either key — fall through to the existing
+        # enrollment-required path below (decrypt_credential returns None too,
+        # but resolving here first avoids a second, redundant DB round trip
+        # when we already know no row exists).
+        plaintext = None
+    else:
+        try:
+            plaintext = await decrypt_credential(
+                user_sub=owner_key,
+                service=service_name,
+                tool_id=tool_id,
+                owner_type="user",
+            )
+        except Exception as exc:
+            raise CredentialInjectionError(
+                f"User credential decryption raised for sub={user_sub} service={service_name}: {exc}"
+            ) from exc
 
     if not plaintext:
         # Fail-closed with an ACTIONABLE enrollment link instead of a cryptic
@@ -367,6 +514,107 @@ async def _inject_user_credential(
         )
     token = plaintext.strip()
     return {inject_header: f"{inject_prefix} {token}".strip()}
+
+
+async def _inject_basic_auth(
+    tool_id: str | None,
+    user_sub: str | None,
+    service_name: str,
+    inject_header: str,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
+) -> dict[str, str]:
+    """
+    RFC 7617 HTTP Basic injection (CR-05).
+
+    The stored secret is structured JSON {"username": ..., "secret": ...}
+    (written by admin_credentials / credential_storage with the shared
+    approach_a codec) — NEVER a prebuilt header. The Authorization value is
+    assembled here, at injection time: "Basic " + base64(username:secret).
+
+    Resolution: a per-user row (owner_type='user', keyed by the caller's sub)
+    wins over the shared service row (owner_type='service'). Fail-closed when
+    neither exists. inject_prefix is intentionally ignored — RFC 7617 mandates
+    the "Basic" scheme; only the header NAME is overridable.
+
+    CR-10 (WP-A1): the per-user leg resolves through the typed-principal
+    dual-read (principal_id first, bare-sub fallback gated to same-type).
+
+    REDACTION: neither username:secret nor its base64 form may ever appear in
+    logs, audit rows, or exception messages raised from here.
+    """
+    import base64
+
+    from app.credential_broker.approaches.approach_a import decrypt_credential
+    from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
+
+    plaintext: str | None = None
+    try:
+        if user_sub:
+            try:
+                owner_key = await _resolve_owner_key_or_none(
+                    principal_id=principal_id,
+                    principal_type=principal_type,
+                    bare_sub=user_sub,
+                    service=service_name,
+                )
+            except CrossTypePrincipalMismatch as _xtype_exc:
+                raise CrossTypePrincipalFallbackDenied(
+                    service=service_name,
+                    caller_type=_xtype_exc.caller_type,
+                    row_type=_xtype_exc.row_type,
+                ) from _xtype_exc
+            if owner_key is not None:
+                plaintext = await decrypt_credential(
+                    user_sub=owner_key,
+                    service=service_name,
+                    tool_id=tool_id,
+                    owner_type="user",
+                )
+        if not plaintext:
+            plaintext = await decrypt_credential(
+                user_sub="__service__",
+                service=service_name,
+                tool_id=tool_id,
+                owner_type="service",
+            )
+    except CrossTypePrincipalFallbackDenied:
+        raise
+    except Exception as exc:
+        raise CredentialInjectionError(
+            f"basic_auth credential decryption raised for {service_name}/{tool_id}: "
+            f"{type(exc).__name__}"
+        ) from exc
+
+    if not plaintext:
+        raise ServiceCredentialMissingError(service=service_name, tool_id=tool_id)
+
+    try:
+        data = json.loads(plaintext)
+        username = data["username"]
+        secret = data["secret"]
+        if not isinstance(username, str) or not isinstance(secret, str) or not username:
+            raise KeyError("username/secret")
+    except Exception:
+        # Deliberately NO exception chaining and NO payload excerpt — the
+        # decrypted plaintext must never leak through an error message.
+        raise CredentialInjectionError(
+            f"basic_auth credential for service '{service_name}' is not the structured "
+            '{"username", "secret"} JSON payload; re-provision it (fail-closed).'
+        ) from None
+    finally:
+        plaintext = None
+
+    if ":" in username:
+        # RFC 7617 §2: the user-id must not contain a colon (it would be
+        # indistinguishable from the password separator).
+        raise CredentialInjectionError(
+            f"basic_auth credential for service '{service_name}' has a colon in the "
+            "username, which RFC 7617 forbids; re-provision it (fail-closed)."
+        )
+
+    b64 = base64.b64encode(f"{username}:{secret}".encode("utf-8")).decode("ascii")
+    return {inject_header: f"Basic {b64}"}
 
 
 async def _inject_service_account_token(
@@ -418,10 +666,29 @@ async def _inject_service_account_token(
             "refusing to forward unauthenticated request"
         )
 
+    sa_scope = tool_record.get("kc_token_audience") or "openid"
+
+    # WP-A2 (CR-13): scope-SET validation, independent of kc_token_exchange's
+    # audience-string allowlist below (see oauth_policy module docstring —
+    # collapsing these into one allowlist previously broke every
+    # service_account tool, including this one).
+    from app.services.oauth_policy import validate_service_account_scope, ServiceAccountScopeViolation
+    from app.core.config import get_settings as _get_sa_settings
+
+    try:
+        validate_service_account_scope(
+            sa_scope, allowed_scopes=_get_sa_settings().service_account_allowed_scopes_parsed
+        )
+    except ServiceAccountScopeViolation as exc:
+        raise CredentialInjectionError(
+            f"service_account mode: scope {sa_scope!r} rejected for tool "
+            f"{tool_record.get('tool_id')}: {exc}"
+        ) from exc
+
     token = await get_service_account_token(
         client_id=kc_client_id,
         client_secret=client_secret.strip(),
-        scope=tool_record.get("kc_token_audience") or "openid",
+        scope=sa_scope,
     )
 
     if not token:
@@ -471,7 +738,13 @@ async def _inject_kc_token_exchange(
         )
 
     # S-6(b) / CR-03: proxy-side audience allowlist, config-driven — see the
-    # module-level comment above _inject_kc_token_exchange's imports.
+    # module-level comment above _inject_kc_token_exchange's imports. This is
+    # the outer/bootstrap ceiling; the per-server enforced value is
+    # server_registry.approved_token_audience, which is never read here
+    # directly — WP-A2 instead enforces it at the point tool_registry.kc_token_audience
+    # is WRITTEN (tools.py discover-tools, sourced from approved_token_audience,
+    # never from the submitter-requested upstream_idp_config). By construction,
+    # `audience` here can only ever be a value a reviewer approved.
     from app.core.config import get_settings as _get_kc_settings
     _allowed_audiences = _get_kc_settings().kc_token_exchange_allowed_audiences_parsed
     if audience not in _allowed_audiences:
@@ -563,12 +836,16 @@ async def _inject_entra_client_credentials(
             "cannot retrieve credential from credential_store"
         )
 
-    # Step 3: Retrieve encrypted credential from credential_store
+    # Step 3: Retrieve encrypted credential from credential_store.
+    # Context tuple MUST match what admin_credentials.upload_credential wrote
+    # (user_sub="__service__", service=tool.service_name or tool.name, tool_id,
+    # owner_type="service") — the AAD binds decryption to these exact values.
+    cred_service = tool_record.get("service_name") or tool_record.get("name") or ""
     try:
         credential_dict = await retrieve_credential(
             credential_id=credential_id,
             user_sub="__service__",  # Service-owned credential
-            service="entra",
+            service=cred_service,
             tool_id=tool_record.get("tool_id"),
             owner_type="service",
             vault_client=vault_client,
@@ -620,8 +897,15 @@ async def _inject_entra_client_credentials(
             cache_exc,
         )
 
-    # Step 6: Exchange credentials for access token via Entra
-    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    # Step 6: Exchange credentials for access token via Entra.
+    # Honour the ENTRA_TOKEN_URL override (lab points this at the mock IdP); it
+    # defaults to the real per-tenant Microsoft endpoint when unset, so prod
+    # multi-tenant behaviour is unchanged. Parity with _inject_entra_user_token.
+    from app.core.config import get_settings as _get_entra_settings
+    token_url = (
+        _get_entra_settings().ENTRA_TOKEN_URL
+        or f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    )
     try:
         async with httpx.AsyncClient(timeout=10.0) as http_client:
             resp = await http_client.post(
@@ -679,6 +963,8 @@ async def _inject_entra_user_token(
     service_name: str,
     inject_header: str,
     inject_prefix: str,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
 ) -> dict[str, str]:
     """
     Inject a per-user DELEGATED Microsoft Graph token (acts AS the signed-in user).
@@ -689,12 +975,16 @@ async def _inject_entra_user_token(
       2. calls M365Adapter.refresh() to mint a fresh delegated access_token,
       3. re-stores the rotated refresh_token.
 
+    CR-10 (WP-A1): principal_id/principal_type are threaded into the broker's
+    dual-read (typed key first, bare-sub fallback gated to same-type).
+
     Fail-closed: if the caller has not enrolled, raise so the upstream call is
     aborted with an actionable "enroll first" message — never silently downgrade
     to app-only (which would broaden identity from the user to the application).
     """
     from app.services.invocation import broker_instance
     from app.credential_broker.broker import CredentialNotEnrolledError
+    from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
 
     if broker_instance is None:
         raise CredentialInjectionError(
@@ -709,7 +999,15 @@ async def _inject_entra_user_token(
             service=service_name,
             session_id=user_sub,
             approach="A",
+            principal_id=principal_id,
+            principal_type=principal_type,
         )
+    except CrossTypePrincipalMismatch as _xtype_exc:
+        raise CrossTypePrincipalFallbackDenied(
+            service=service_name,
+            caller_type=_xtype_exc.caller_type,
+            row_type=_xtype_exc.row_type,
+        ) from _xtype_exc
     except CredentialNotEnrolledError as exc:
         from app.core.config import get_settings
         base = get_settings().PROXY_BASE_URL.rstrip("/")
@@ -730,3 +1028,210 @@ async def _inject_entra_user_token(
         )
 
     return {inject_header: f"{inject_prefix} {result.token}".strip()}
+
+
+async def _inject_external_oauth_user_token(
+    user_sub: str,
+    service_name: str,
+    inject_header: str,
+    inject_prefix: str,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
+) -> dict[str, str]:
+    """
+    WP-A3 (CR-04 remainder): per-user delegated OAuth 2.0 token for a generic,
+    non-KC/non-Entra external IdP (e.g. a self-service-onboarded Atlassian
+    Jira Cloud OAuth app).
+
+    Identical broker.resolve(approach='A') path as _inject_entra_user_token —
+    the concrete adapter is resolved dynamically inside the broker
+    (adapters/dynamic_external_oauth.py, from server_registry.approved_upstream_idp_config)
+    rather than assumed to be Entra. Kept as its own function (not just an
+    alias) so error messages/log lines name the correct mode and this mode's
+    dispatcher case can evolve independently of entra_user_token's.
+
+    Fail-closed: identical semantics to _inject_entra_user_token — never
+    silently downgrade to app-only, never fall back to a different service's
+    adapter.
+    """
+    from app.services.invocation import broker_instance
+    from app.credential_broker.broker import CredentialNotEnrolledError
+    from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
+
+    if broker_instance is None:
+        raise CredentialInjectionError(
+            f"external_oauth_user_token: credential broker not initialized; cannot resolve "
+            f"delegated token for sub={user_sub} service={service_name}"
+        )
+
+    try:
+        result = await broker_instance.resolve(
+            user_sub=user_sub,
+            service=service_name,
+            session_id=user_sub,
+            approach="A",
+            principal_id=principal_id,
+            principal_type=principal_type,
+        )
+    except CrossTypePrincipalMismatch as _xtype_exc:
+        raise CrossTypePrincipalFallbackDenied(
+            service=service_name,
+            caller_type=_xtype_exc.caller_type,
+            row_type=_xtype_exc.row_type,
+        ) from _xtype_exc
+    except CredentialNotEnrolledError as exc:
+        from app.core.config import get_settings
+        base = get_settings().PROXY_BASE_URL.rstrip("/")
+        enrollment_url = f"{base}/auth/enroll/{service_name}"
+        raise CredentialEnrollmentRequiredError(
+            service=service_name,
+            enrollment_url=enrollment_url,
+        ) from exc
+    except Exception as exc:
+        raise CredentialInjectionError(
+            f"external_oauth_user_token resolve failed for sub={user_sub} service={service_name}: {exc}"
+        ) from exc
+
+    if not result or not result.token:
+        raise CredentialInjectionError(
+            f"external_oauth_user_token: broker returned no delegated token for sub={user_sub} "
+            f"service={service_name}; refusing to forward unauthenticated request"
+        )
+
+    return {inject_header: f"{inject_prefix} {result.token}".strip()}
+
+
+async def _inject_external_oauth_client_credentials(
+    tool_record: dict[str, Any],
+    inject_header: str,
+    inject_prefix: str,
+) -> dict[str, str]:
+    """
+    WP-A3 (CR-04 remainder): app-only OAuth 2.0 client_credentials grant
+    against a generic (non-Entra) token_endpoint, read from this server's
+    reviewer-APPROVED config (server_registry.approved_upstream_idp_config —
+    never the submitter-requested upstream_idp_config). Mirrors
+    _inject_entra_client_credentials's credential_store lookup shape, but
+    the token endpoint/scopes/client-auth-method are read from the server's
+    approved config rather than hardcoded to Microsoft's endpoints.
+
+    Fail-closed: missing credential_id, missing approved config, missing
+    required config fields, or a token-endpoint error all raise
+    CredentialInjectionError — never forward unauthenticated.
+    """
+    import httpx
+    from app.services.credential_storage import retrieve_credential
+    from app.services.invocation import broker_instance
+
+    tool_id = tool_record.get("tool_id")
+    server_id = tool_record.get("server_id")
+    credential_id = tool_record.get("credential_id")
+    if not credential_id:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: tool {tool_id} has no credential_id; "
+            "refusing to forward unauthenticated request"
+        )
+    if broker_instance is None:
+        raise CredentialInjectionError(
+            "external_oauth_client_credentials: credential broker not initialized; "
+            "cannot retrieve credential from vault-backed credential_store"
+        )
+
+    vault_client = broker_instance.vault_client
+    db_pool = broker_instance.db_pool
+    if not vault_client or not db_pool:
+        raise CredentialInjectionError(
+            "external_oauth_client_credentials: broker has no vault_client or db_pool; "
+            "cannot retrieve credential from credential_store"
+        )
+
+    cred_service = tool_record.get("service_name") or tool_record.get("name") or ""
+    try:
+        credential_dict = await retrieve_credential(
+            credential_id=credential_id,
+            user_sub="__service__",
+            service=cred_service,
+            tool_id=tool_id,
+            owner_type="service",
+            vault_client=vault_client,
+            db_pool=db_pool,
+        )
+    except KeyError:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: credential_id {credential_id} not found "
+            "in credential_store; refusing to forward unauthenticated request"
+        ) from None
+    except Exception as exc:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: credential_store retrieval failed for "
+            f"{credential_id}: {exc}"
+        ) from exc
+
+    client_id = credential_dict.get("client_id")
+    client_secret = credential_dict.get("client_secret")
+    if not client_id or not client_secret:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: credential {credential_id} missing "
+            "required fields (client_id, client_secret); refusing to forward "
+            "unauthenticated request"
+        )
+
+    # Approved config (issuer/tenant/scopes/token_endpoint) is server-level,
+    # not tool-level — one DB round trip per call, matching the pattern
+    # dispatcher.py already uses for upstream_allowlist_entry when it isn't
+    # pre-fetched onto tool_record.
+    if not server_id:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: tool {tool_id} has no server_id; "
+            "cannot resolve approved token_endpoint"
+        )
+    from app.core.database import AsyncSessionLocal as _ExtOAuthSessionLocal
+
+    async with _ExtOAuthSessionLocal() as _session:
+        _row = (
+            await _session.execute(
+                text(
+                    "SELECT approved_upstream_idp_config, approved_oauth_scopes "
+                    "FROM server_registry WHERE server_id = :sid AND deleted_at IS NULL"
+                ),
+                {"sid": server_id},
+            )
+        ).fetchone()
+    approved_config = (_row.approved_upstream_idp_config if _row else None) or {}
+    token_endpoint = approved_config.get("token_endpoint")
+    if not token_endpoint:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials: no approved token_endpoint for server "
+            f"{server_id}; reviewer must approve OAuth/IdP config before this mode can be used"
+        )
+    scopes = list((_row.approved_oauth_scopes if _row else None) or approved_config.get("scopes") or [])
+    client_auth_method = approved_config.get("client_auth_method") or "client_secret_post"
+
+    payload: dict[str, str] = {"grant_type": "client_credentials"}
+    if scopes:
+        payload["scope"] = " ".join(scopes)
+    request_kwargs: dict[str, Any] = {}
+    if client_auth_method == "client_secret_basic":
+        request_kwargs["auth"] = (client_id, client_secret)
+    else:
+        payload["client_id"] = client_id
+        payload["client_secret"] = client_secret
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            resp = await http_client.post(token_endpoint, data=payload, **request_kwargs)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        raise CredentialInjectionError(
+            f"external_oauth_client_credentials token fetch failed: {exc}"
+        ) from exc
+
+    access_token = data.get("access_token")
+    if not access_token:
+        raise CredentialInjectionError(
+            "external_oauth_client_credentials: no access_token in token endpoint "
+            "response; refusing to forward unauthenticated request"
+        )
+
+    return {inject_header: f"{inject_prefix} {access_token}".strip()}

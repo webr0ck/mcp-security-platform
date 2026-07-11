@@ -84,6 +84,36 @@ networks:
     driver: bridge
     internal: true
 
+  # CR-14 / WP-B1: pairwise scanner-worker<->db channel. scanner-worker
+  # connects as scanner_worker_app (INSERT-only on scan_raw_results,
+  # claim-columns-only on scan_jobs — see V063) and reaches nothing else on
+  # this network; it is NOT on internal-net, so it cannot reach opa/redis/
+  # ollama/proxy even if compromised by malicious repo content.
+  scanner-worker-db-net:
+    driver: bridge
+    internal: true
+
+  # CR-14 / WP-B1: scanner-worker egress channel. internal: true here (base
+  # topology default = no internet egress at all, fail-closed-by-default);
+  # the lab overlay (podman-compose.lab.yml) redefines this network with
+  # internal: false and attaches it to the same allowlisting egress-proxy
+  # pattern already used for lab-mcp-m365 (lab/egress-proxy/squid.conf),
+  # rather than inventing a new egress mechanism.
+  scanner-worker-egress-net:
+    driver: bridge
+    internal: true
+
+  # CR-17 / WP-D1: shared scrape channel. Prometheus, the proxy (/metrics),
+  # and scanner-worker (its own tiny prometheus_client HTTP server, since
+  # it's a bare poll loop, not an ASGI app) all join this one network — an
+  # exception to the "one pairwise net per backend" pattern used elsewhere,
+  # justified because this network carries ONLY read-only counter/gauge
+  # scrapes (no secrets, no control-plane traffic) in one direction
+  # (Prometheus -> targets).
+  metrics-net:
+    driver: bridge
+    internal: true
+
 volumes:
   postgres-data:
     driver: local
@@ -115,6 +145,9 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=4m,mode=0755"
+  # CR-17 / WP-D1: Prometheus TSDB storage.
+  prometheus-data:
+    driver: local
 
 services:
 
@@ -135,6 +168,11 @@ services:
       # binding privileged ports on the host.
       - "${GATEWAY_HTTP_PORT:-80}:80"
       - "${GATEWAY_HTTPS_PORT:-443}:443"
+      # GATEWAY_MTLS_PORT: lab-only dedicated mTLS listener (lab/nginx/conf.d/
+      # mcp-proxy-lab.conf), unused in production (gateway/nginx/conf.d/
+      # mcp-proxy.conf has no :8445 server block, so nothing binds it there —
+      # harmless unused port mapping, not a functional change in prod).
+      - "${GATEWAY_MTLS_PORT:-8445}:8445"
     volumes:
       - ./gateway/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./gateway/nginx/conf.d:/etc/nginx/conf.d:ro
@@ -241,6 +279,10 @@ services:
       # NOTE: mcps.yaml removed (Task 9) — servers now loaded from DB registry
       # PRD-0001 M3: trust envelope labeler certs (read-only — sidecar holds sub_ca.key)
       - labeler-data:/labeler:ro
+      # WP-D2 (CR-19): user/admin docs served read-only at /docs/* so portal
+      # screens can link straight to the markdown source — git is the source
+      # of truth, same bind-mount pattern as policies/rego above.
+      - ./docs:/app/docs:ro
     tmpfs:
       - /tmp:size=64m,mode=1777
     # Non-root user (UID 1001 defined in proxy/Dockerfile)
@@ -260,6 +302,7 @@ services:
       - proxy-ollama-net    # LLM risk scoring egress (pairwise)
       - proxy-redis-net     # rate/session/cache egress (pairwise)
       - proxy-db-net        # persistence egress (pairwise)
+      - metrics-net         # CR-17 / WP-D1: Prometheus scrapes GET /metrics here
     depends_on:
       db:
         condition: service_healthy
@@ -438,6 +481,7 @@ services:
     networks:
       - internal-net      # compliance-checker reaches db here; podman lab
       - proxy-db-net       # F-001: pairwise channel the proxy dials
+      - scanner-worker-db-net   # CR-14: pairwise channel scanner-worker dials
     # Not exposed to host — reachable from proxy (proxy-db-net) and
     # compliance-checker (internal-net) only
     expose:
@@ -783,8 +827,8 @@ services:
     # patterns, verifies hash integrity, writes report to PostgreSQL and MinIO.
     # See ARCHITECTURE.md §5.3 (Compliance Report Generation).
     build:
-      context: ./observability/compliance-checker
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: observability/compliance-checker/Dockerfile
     image: mcp-compliance-checker:latest
     container_name: mcp-compliance-checker
     <<: [*restart-always, *security-hardening]
@@ -824,6 +868,108 @@ services:
       - ENABLE_AUDIT_DELETE_AFTER_ARCHIVE=${ENABLE_AUDIT_DELETE_AFTER_ARCHIVE:-0}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     logging: *default-logging
+
+  # ============================================================
+  # CR-14 / WP-B1: Isolated scanner worker
+  # ============================================================
+  # Executes clone + scanner pipeline against UNTRUSTED, submitter-controlled
+  # repository content. Structurally cannot write a PASS verdict — see
+  # infra/db/migrations/V063__scanner_worker_queue.sql and
+  # scanner_worker/README.md for the execution/adjudication split. Holds NO
+  # proxy secret (no DB-admin creds, no Vault token, no gateway shared
+  # secret) — only its own narrow scanner_worker_app DB role and its own
+  # git clone token(s).
+  scanner-worker:
+    build:
+      context: .
+      dockerfile: scanner_worker/Dockerfile
+    image: mcp-scanner-worker:latest
+    container_name: mcp-scanner-worker
+    <<: [*restart-always, *security-hardening]
+    # Per-scanner timeouts are enforced in scan_engine.py (clone 120s,
+    # trufflehog 180s, pip-audit 120s, mcp_checker/semgrep 300s) — the "time"
+    # dimension of the CPU/mem/pids/time resource-limit requirement.
+    deploy:
+      resources:
+        limits:
+          memory: 1024m
+          cpus: "1.0"
+          pids: 256
+        reservations:
+          memory: 128m
+    tmpfs:
+      # Read-only root (security-hardening anchor) + writable scratch here
+      # only: repo checkouts (tempfile.mkdtemp under /tmp) and scanner
+      # scratch state (semgrep HOME, mcp_checker projects-dir). Wiped on
+      # every container restart; each job also rm -rf's its own checkout.
+      - /tmp:rw,nosuid,size=1024m
+    user: "1002:1002"
+    networks:
+      # DB: pairwise, scanner_worker_app role only (see V063 grants) — no
+      # opa/redis/ollama/proxy reachability even if this container is fully
+      # compromised by malicious repo content.
+      - scanner-worker-db-net
+      # Egress: git provider hosts + vuln-feed hosts ONLY, via the same
+      # allowlisting squid proxy pattern as lab-mcp-m365
+      # (lab/egress-proxy/squid.conf) — see podman-compose.lab.yml for the
+      # lab wiring (this network is internal:true / no egress by default;
+      # the lab overlay redefines it and attaches lab-egress-proxy).
+      - scanner-worker-egress-net
+      - metrics-net  # CR-17 / WP-D1: Prometheus scrapes :9100/metrics here
+    depends_on:
+      db:
+        condition: service_healthy
+    # No env_file — inject exactly what scan_engine.py/db.py/git_clone.py
+    # read. In particular: no GATEWAY_SHARED_SECRET, no VAULT_*, no
+    # PLATFORM_SECRETS_*, no other proxy credential.
+    environment:
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-mcp_security}
+      - SCANNER_WORKER_DB_USER=${SCANNER_WORKER_DB_USER:-scanner_worker_app}
+      - SCANNER_WORKER_DB_PASSWORD=${SCANNER_WORKER_DB_PASSWORD}
+      # Read-only, provider-scoped git clone token(s) — the worker's own
+      # narrow credential, distinct from proxy's platform_secrets store.
+      - GIT_CLONE_TOKEN_GITHUB=${GIT_CLONE_TOKEN_GITHUB:-}
+      - GIT_CLONE_TOKEN_BITBUCKET=${GIT_CLONE_TOKEN_BITBUCKET:-}
+      - HTTPS_PROXY=http://lab-egress-proxy:3128
+      - SCAN_WORKER_POLL_INTERVAL=${SCAN_WORKER_POLL_INTERVAL:-3}
+      - SCAN_WORKER_METRICS_PORT=9100
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    logging: *default-logging
+
+  # ============================================================
+  # CR-17 / WP-D1: Prometheus — scrapes proxy + scanner-worker /metrics,
+  # evaluates hard-invariant alert rules, fires into the existing
+  # Alertmanager (already deployed for the Loki-ruler security detections).
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: mcp-prometheus
+    <<: [*restart-always, *security-hardening]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - prometheus-data:/prometheus
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    networks:
+      - metrics-net       # scrapes proxy:8000 + scanner-worker:9100
+      - observability-net  # talks to alertmanager:9093; Grafana reads from here
+    expose:
+      - "9090"
+    user: "65534:65534"  # nobody, matches alertmanager's convention in this file
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   # ============================================================
   # PRD-0001 M3: Trust Envelope Labeler Renewal Sidecar

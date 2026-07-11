@@ -62,6 +62,9 @@ def _extract_devices(payload) -> list[dict]:
         for key in ("results", "devices"):
             if isinstance(payload.get(key), list):
                 return payload[key]
+            # netbox MCP server wraps the raw DRF page: {"devices": {"count":N,"results":[...]}}
+            if isinstance(payload.get(key), dict) and isinstance(payload[key].get("results"), list):
+                return payload[key]["results"]
         if "_raw_text" in payload:
             try:
                 return json.loads(payload["_raw_text"]).get("results", [])
@@ -75,6 +78,9 @@ def _extract_ips(payload) -> list[dict]:
         for key in ("results", "addresses", "ip_addresses"):
             if isinstance(payload.get(key), list):
                 return payload[key]
+            # netbox MCP server wraps the raw DRF page (see _extract_devices)
+            if isinstance(payload.get(key), dict) and isinstance(payload[key].get("results"), list):
+                return payload[key]["results"]
     return []
 
 
@@ -120,18 +126,14 @@ def test_grafana_search_dashboards_matches_direct_api(alice_token):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# M365 / Entra — documented broken (see test_at1_auth_matrix.py xfail reason)
+# M365 / Entra — app-only + delegated via lab mock IdP (see test_at1_auth_matrix.py)
 # ═════════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.xfail(reason="entra_client_credentials credential-store contract bug — see "
-                          "test_at1_auth_matrix.py::test_entra_client_credentials_m365_graph", strict=False)
 def test_m365_get_me_matches_direct_graph_call(alice_token):
     result = call_upstream_tool(alice_token, "m365-graph", "get_me", {})
     assert result is not None
 
 
-@pytest.mark.xfail(reason="entra_client_credentials credential-store contract bug — see "
-                          "test_at1_auth_matrix.py::test_entra_client_credentials_m365_graph", strict=False)
 def test_m365_list_emails(alice_token):
     """M365_USER/REQUIRE_DELEGATED are unset in .env.lab, so app-only list_emails
     may legitimately 400/403 (no mailbox context) even once credentials work —
@@ -144,8 +146,6 @@ def test_m365_list_emails(alice_token):
 # lab-tickets — create + list round trip (documented broken downstream)
 # ═════════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.xfail(reason="lab-mcp-lab-tickets downstream auth/DNS issue — see "
-                          "test_at1_auth_matrix.py::test_kc_token_exchange_lab_tickets", strict=False)
 def test_lab_tickets_create_then_list_round_trip(alice_token):
     created = call_upstream_tool(alice_token, "lab-tickets-query", "create_ticket",
                                  {"title": "AT2 round-trip", "description": "acceptance test"})

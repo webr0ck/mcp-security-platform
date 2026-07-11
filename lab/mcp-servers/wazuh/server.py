@@ -32,8 +32,6 @@ Security design:
     returns an error dict rather than raising so INV-001 audit path is preserved.
   - Sensitive fields (passwords, hashes) are stripped from all responses.
 """
-from __future__ import annotations
-
 import logging
 import os
 import re

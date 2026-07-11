@@ -1,4 +1,8 @@
 # TODO: pin @sha256:<digest> — run: docker pull python:3.12.11-slim && docker inspect --format='{{index .RepoDigests 0}}' python:3.12.11-slim
+#
+# Build context must be the PROJECT ROOT (not observability/compliance-checker/) so
+# the sibling observability/mcp-audit-logger package can be installed — same
+# convention as proxy/Dockerfile. See docker-compose.yml build.context for this service.
 FROM python:3.12.11-slim
 
 RUN groupadd --gid 1001 appgroup && \
@@ -17,7 +21,13 @@ RUN pip install --no-cache-dir \
     structlog==24.4.0 \
     httpx==0.27.0
 
-COPY --chown=appuser:appgroup . /app/
+# Install local mcp-audit-logger (not on PyPI) — checker.py's verify_hash_integrity()
+# imports mcp_audit_logger.hasher.canonical_audit_json as the single shared
+# canonicalizer (Task 0.2); without it, hash verification silently fails closed.
+COPY observability/mcp-audit-logger /tmp/mcp-audit-logger
+RUN pip install --no-cache-dir /tmp/mcp-audit-logger && rm -rf /tmp/mcp-audit-logger
+
+COPY --chown=appuser:appgroup observability/compliance-checker/ /app/
 
 USER appuser
 

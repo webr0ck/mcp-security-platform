@@ -36,6 +36,28 @@ if [ -n "${CLIENT_ID}" ] && [ -n "${KC_PROXY_CLIENT_SECRET:-}" ]; then
     echo "Updated mcp-proxy client secret."
 fi
 
+# Add the public :8443 hardened-ingress redirect URI/webOrigin for mcp-proxy.
+# realm-mcp.json only applies on Keycloak's first import; a lab whose Keycloak
+# was already provisioned before PROXY_BASE_URL was pointed at the :8443
+# gateway needs this pushed live, or browser OIDC login fails with
+# "Invalid parameter: redirect_uri" (found 2026-07-07: PROXY_BASE_URL=
+# https://${LAB_HOST}:8443 but the client only allowed :8000/:8088 over http).
+LAB_HOST="${LAB_HOST:-localhost}"
+if [ -n "${CLIENT_ID}" ]; then
+    curl -s -H "Authorization: Bearer ${TOKEN}" \
+        "${KC_URL}/admin/realms/${REALM}/clients/${CLIENT_ID}" \
+        | jq --arg host "${LAB_HOST}" '
+            .redirectUris += ["https://\($host):8443/api/v1/auth/oidc/callback", "https://localhost:8443/api/v1/auth/oidc/callback"] | .redirectUris |= unique
+            | .webOrigins += ["https://\($host):8443", "https://localhost:8443"] | .webOrigins |= unique
+          ' > /tmp/mcp-proxy-client-update.json
+    curl -s -X PUT -H "Authorization: Bearer ${TOKEN}" \
+        -H "Content-Type: application/json" \
+        "${KC_URL}/admin/realms/${REALM}/clients/${CLIENT_ID}" \
+        -d @/tmp/mcp-proxy-client-update.json
+    rm -f /tmp/mcp-proxy-client-update.json
+    echo "Ensured mcp-proxy client allows the :8443 gateway redirect URI/webOrigin."
+fi
+
 # Update grafana client secret
 GF_CLIENT_ID=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
     "${KC_URL}/admin/realms/${REALM}/clients?clientId=grafana" \

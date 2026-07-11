@@ -173,12 +173,25 @@ async def discover_jwks_uri() -> dict[str, Any]:
     Fetch the JWKS from Keycloak's well-known endpoint.
     Used by the auth middleware for JWT verification.
     """
-    oidc_config_url = f"{_issuer_url()}/.well-known/openid-configuration"
+    internal_base = _issuer_url()
+    oidc_config_url = f"{internal_base}/.well-known/openid-configuration"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             cfg_resp = await client.get(oidc_config_url)
             cfg_resp.raise_for_status()
             jwks_uri = cfg_resp.json()["jwks_uri"]
+            # KC_HOSTNAME_STRICT makes discovery always return the PUBLIC issuer
+            # URL for jwks_uri, regardless of which host the request came in
+            # on — following it as-is means this container-to-container call
+            # hairpins back out through the gateway's TLS cert, which this
+            # container has no reason to trust (mirrors app/middleware/auth.py
+            # ::_fetch_jwks's same rewrite; found 2026-07-11 when it silently
+            # swallowed a CERTIFICATE_VERIFY_FAILED into an empty keyset,
+            # surfacing as a confusing "No JWKS key matching kid" two frames
+            # downstream in get_public_key_for_token).
+            public_base = settings.OIDC_ISSUER_URL.rstrip("/")
+            if public_base and public_base != internal_base:
+                jwks_uri = jwks_uri.replace(public_base, internal_base)
             jwks_resp = await client.get(jwks_uri)
             jwks_resp.raise_for_status()
             return jwks_resp.json()

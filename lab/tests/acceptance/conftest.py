@@ -165,6 +165,43 @@ def invoke_upstream(token: str, server_tool_name: str, upstream_method: str, ups
     return {"status_code": r.status_code, "body": r.json() if r.text else {}}
 
 
+def invoke_upstream_loopback(token: str, server_tool_name: str, upstream_method: str,
+                             upstream_args: dict, timeout: int = 30) -> dict:
+    """Same as invoke_upstream but via the proxy container's own loopback
+    (see module docstring on SEC-05). Use when the payload itself trips the
+    gateway WAF for benign reasons — e.g. an upstream tool literally named
+    'whoami' matches the CRS Unix-RCE wordlist (rule 932260) and nginx 403s
+    before the proxy ever sees it. Every proxy-side gate (auth, entitlement,
+    OPA, credential injection, DNS-rebind) is still fully exercised."""
+    body = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "invoke_tool",
+                       "arguments": {"tool_name": server_tool_name, "method": upstream_method,
+                                     "arguments": upstream_args}}}
+    hdrs = (f"-H 'Authorization: Bearer {token}' -H 'Content-Type: application/json' "
+            f"-H 'Accept: application/json, text/event-stream'")
+    init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                       "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                                  "clientInfo": {"name": "acceptance-test", "version": "1.0"}}})
+    sid_cmd = (f"curl -s -D - -o /dev/null -X POST http://localhost:8000/mcp {hdrs} "
+               f"-d '{init}' | grep -i '^mcp-session-id' | tr -d '\\r' | cut -d' ' -f2")
+    sid_r = subprocess.run(["podman", "exec", PROXY_CONTAINER, "sh", "-c", sid_cmd],
+                           capture_output=True, text=True, timeout=timeout)
+    sid = sid_r.stdout.strip()
+    sid_hdr = f" -H 'MCP-Session-Id: {sid}'" if sid else ""
+    cmd = (f"curl -s -o /tmp/_at_loop_resp -w '%{{http_code}}' -X POST "
+           f"http://localhost:8000/mcp {hdrs}{sid_hdr} -d '{json.dumps(body)}'")
+    r = subprocess.run(["podman", "exec", PROXY_CONTAINER, "sh", "-c", cmd],
+                       capture_output=True, text=True, timeout=timeout)
+    status = int(r.stdout.strip() or "0")
+    body_r = subprocess.run(["podman", "exec", PROXY_CONTAINER, "cat", "/tmp/_at_loop_resp"],
+                            capture_output=True, text=True, timeout=timeout)
+    try:
+        parsed = json.loads(body_r.stdout) if body_r.stdout.strip() else {}
+    except json.JSONDecodeError:
+        parsed = {"_raw": body_r.stdout}
+    return {"status_code": status, "body": parsed}
+
+
 # Gate-chain failures that still come back as HTTP 200 (see
 # lab/tests/functional_test.py's _INVOKE_FAILURE_SENTINELS for the full
 # rationale/history) — a bare status/JSON-RPC-error check is blind to these.
@@ -180,20 +217,29 @@ _INVOKE_FAILURE_SENTINELS = (
     "unauthorized",
     "downstream authorization required",
     "credential_injection_failed",
+    # Enrollment prompts (dispatcher CredentialEnrollmentRequiredError) come back
+    # as a friendly HTTP-200 "log in first" message — that is still a failed
+    # invocation for acceptance purposes, never a pass.
+    "login required",
+    "isn't connected yet",
     "\"error\"",
 )
 
 
 def call_upstream_tool(token: str, server_tool_name: str, upstream_tool: str, upstream_args: dict,
-                       timeout: float = 30) -> dict:
+                       timeout: float = 30, loopback: bool = False) -> dict:
     """Invoke a named upstream tool (e.g. 'query_dashboards') with arguments
     and return its parsed text content dict. Asserts real end-to-end success —
     inspects the text content for gate-chain failure sentinels rather than
     trusting a bare HTTP 200 / absence of a top-level JSON-RPC error, both of
     which this platform's invoke_tool wrapper returns even when the call
-    failed deep in the credential/DNS-rebind/upstream chain."""
-    r = invoke_upstream(token, server_tool_name, "tools/call",
-                        {"name": upstream_tool, "arguments": upstream_args}, timeout)
+    failed deep in the credential/DNS-rebind/upstream chain.
+
+    loopback=True routes via the proxy container's loopback instead of the
+    gateway — see invoke_upstream_loopback for when that is legitimate."""
+    invoker = invoke_upstream_loopback if loopback else invoke_upstream
+    r = invoker(token, server_tool_name, "tools/call",
+                {"name": upstream_tool, "arguments": upstream_args}, timeout)
     assert r["status_code"] == 200, f"{server_tool_name}.{upstream_tool}: HTTP {r['status_code']} {r}"
     body = r["body"]
     assert "error" not in body, f"{server_tool_name}.{upstream_tool}: {body.get('error')}"

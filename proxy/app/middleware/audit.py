@@ -41,6 +41,8 @@ def _audit_500_response(request_id: str, error: str) -> JSONResponse:
         "INV-001 boundary: audit emission failure returning 500",
         extra={"request_id": request_id, "error": error},
     )
+    from app.services.metrics import record_audit_emit_failure
+    record_audit_emit_failure()
     return JSONResponse(
         status_code=500,
         content={

@@ -126,6 +126,64 @@ Reference implementation: `auth.py::_build_principal_id` (~L124). The `client_id
 key) and the typed `principal_id` are both attached to request state and both flow to the invocation
 pipeline (the entitlement/discovery gate keys on the typed principal).
 
+`_build_principal_id` also derives `principal_issuer` (the issuer/CA component — the OIDC issuer id,
+the mTLS CA id, or the literal `"apikey"`) and `principal_display_sub` (the bare `client_id`, kept
+purely for display/compat purposes). All four values are attached to `request.state`.
+
+### 2.1 Downstream propagation (CR-10)
+
+The invocation pipeline (`services/invocation.py::invoke_tool`, `forward_base_headers`) forwards
+four headers to every upstream MCP server, on top of the pre-existing `X-User-Sub`/`X-User-Role`:
+
+| Header | Value | Notes |
+|---|---|---|
+| `X-Principal-Id` | the typed `principal_id` | collision-proof — the only safe key for per-caller state |
+| `X-Principal-Type` | `human` \| `agent` | |
+| `X-Principal-Issuer` | issuer/CA id, or `"apikey"` | |
+| `X-Principal-Display-Sub` | the bare `client_id` | display-only, **never** an authorization key |
+| `X-User-Sub` | the bare `client_id` | **kept as a compatibility/display alias — MUST NOT be removed** |
+
+The typed headers are omitted (not sent as empty strings) when `principal_id`/`principal_type` are
+unset — e.g. for pre-CR-10 code paths that don't populate request.state. An upstream MCP server built
+against `mcphub_sdk` reads all of this via `identity()` (`sdk/mcphub-sdk/mcphub_sdk/context.py`),
+which exposes `principal_id`/`principal_type`/`principal_issuer` alongside the legacy `sub`/`role` —
+all `None` when the request predates CR-10 or bypassed the proxy. `identity()` requires
+`stateless_http=True` on the server's `FastMCP` instance (already the SDK default) so per-request
+ContextVars actually reach tool code — see
+[06-implementation-lessons.md](06-implementation-lessons.md) for the underlying gotcha.
+
+**Non-negotiable invariant:** a server-side integration that keys per-caller state (credentials,
+notes, rate limits, ...) off `X-User-Sub`/`sub` alone remains exposed to the exact collision this
+section exists to prevent — an OIDC human, an API-key caller, and an mTLS agent can share a bare
+subject string. New integrations **MUST** key off `X-Principal-Id`/`principal_id` instead.
+
+### 2.2 Typed-principal credential dual-read (CR-10)
+
+`credential_store` (per-user OAuth/API-key rows — `V006`/`V011`) is keyed by its `user_sub` column.
+Pre-CR-10, every row was written under the bare subject. Migrating every existing row to the typed
+form in one shot ("big-bang rewrite") was explicitly rejected — it risks breaking live enrollments
+mid-migration. Instead (`app/credential_broker/principal_resolution.py::resolve_credential_owner`,
+`V062`):
+
+1. **Typed lookup** (`user_sub == principal_id`) is tried first. This is the **only** key new
+   enrollments ever write under — see `routers/oauth.py::callback`.
+2. **Bare-sub fallback** (`user_sub == client_id`) is tried only on a typed miss, and only succeeds
+   if the row's `principal_type` column matches the caller's own `principal_type`. A row with
+   `principal_type IS NULL` (every pre-`V062` row) is treated as **inferred-legacy `human`** — safe,
+   since `credential_store` was, before CR-10, only ever populated by OIDC/session human enrollment
+   flows.
+3. A **mismatch is never a match.** It raises `CrossTypePrincipalMismatch`
+   (`app/credential_broker/dispatcher.py::CrossTypePrincipalFallbackDenied`, a
+   `CredentialInjectionError`), which `services/invocation.py`'s credential-dispatch exception
+   handler turns into an audited deny (`deny_reasons=["cross_type_principal_fallback_denied", ...]`)
+   — never a silent cross-type credential match.
+
+This dual-read is wired into the `user`, `basic_auth` (per-user leg), and `entra_user_token`
+injection modes (`credential_broker/dispatcher.py`, `credential_broker/broker.py::_resolve_a`).
+Backfilling every legacy row's `principal_type`, or renaming legacy `user_sub` values to the typed
+form, is an explicit **out-of-scope follow-up** (a later, separate re-enrollment/cleanup step), not
+part of this migration.
+
 ---
 
 ## 3. Zero-credential client connection flow
@@ -262,6 +320,226 @@ Reference implementation: `auth.py::_is_session_jti_revoked` (~L401), `_redis_jt
   (AUTH-002). Reference: `oidc_browser.py` ~L494–L508.
 - A `nonce` bound at `/login` **MUST** be validated at `/callback`; a missing stored nonce **MUST**
   be treated as reject, not skip. Reference: `oidc_browser.py` ~L515–L531.
+
+### 4.5 OAuth/IdP policy engine — requested vs approved config (CR-13, CR-03 fold-in)
+
+An onboarded server's OAuth/IdP configuration (`server_registry.upstream_idp_config`) is always
+**submitter-requested**, never directly enforced. A separate reviewer-approved copy governs what
+the runtime actually does:
+
+- `server_registry.approved_upstream_idp_config` / `approved_token_audience` /
+  `approved_oauth_scopes` **MUST** be populated only by the admin `/approve` endpoint, after
+  policy validation (below) passes. They are never writable by the submitter.
+- All dispatch-time code (credential injection, tool discovery) **MUST** read only the
+  approved-* values — never `upstream_idp_config` directly. Reference implementation:
+  `routers/tools.py::resolve_approved_kc_token_audience` (writes `tool_registry.kc_token_audience`
+  from `approved_token_audience` at discovery time, never from the requested config);
+  `credential_broker/dispatcher.py::_inject_kc_token_exchange` then reads only that
+  already-approved value.
+
+**Two independent validation dimensions** (deliberately not collapsed into one allowlist — a
+prior attempt to do so broke every existing `service_account` tool on its default `openid`
+scope; see `services/oauth_policy.py` module docstring):
+
+1. **Scope-set dimension** — `oauth_provider_policy` table: issuer(+tenant) →
+   `allowed_scopes`/`blocked_scopes`/`allowed_redirect_patterns`/`allowed_client_auth_methods`/
+   `max_risk`. Governs `entra_client_credentials`/`entra_user_token` (and, via
+   `SERVICE_ACCOUNT_ALLOWED_SCOPES`, `service_account`'s `scope` field — a **separate**
+   allowlist from #2 below, keyed on scope tokens, not an audience string).
+   - An issuer/tenant with **no matching policy row** **MUST** fail closed (unknown issuer).
+   - A requested scope **MUST** be a subset of `allowed_scopes` and **MUST NOT** appear in
+     `blocked_scopes`. An empty `allowed_scopes` list **MUST** be read as "nothing approved
+     yet", not "anything goes".
+   - High-risk scopes — `write`, `admin`, `mail`, `files`, `offline_access` (the canonical
+     set) — **MUST** additionally require the reviewer to set
+     `high_risk_scopes_approved=true` on the `/approve` request; a policy-subset pass alone
+     is insufficient. Recorded as `server_registry.high_risk_scopes_approved_by`/`_at`.
+   - Reference implementation: `services/oauth_policy.py::validate_requested_config`,
+     invoked from `routers/submission.py::_validate_oauth_policy_at_approval`.
+2. **Audience-string dimension** — `kc_token_exchange` (RFC 8693): a single opaque audience
+   string (e.g. `lab-tickets`), not a scope set. Two gates, both enforced: the per-server
+   `approved_token_audience` (DB, reviewer-set) **MUST** equal the requested audience, **and**
+   the audience **MUST** be within the platform-wide `KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES`
+   env allowlist (outer/bootstrap ceiling; CR-03's original config-driven fix, kept as
+   defense in depth). A server with no `approved_token_audience` recorded **MUST** fail
+   closed — kc_token_exchange cannot be used until a reviewer approves it under this model.
+
+Requested-vs-approved is surfaced to reviewers via `GET /api/v1/submissions/{id}`, which
+returns both `upstream_idp_config`/`upstream_idp_type` (requested) and
+`approved_upstream_idp_config`/`approved_token_audience`/`approved_oauth_scopes`/
+`oauth_policy_id`/`high_risk_scopes_approved_by`/`_at` (approved) side by side.
+
+**Migration note**: servers already `status='approved'` before this policy engine existed are
+grandfathered — their `approved_upstream_idp_config`/`approved_token_audience`/
+`approved_oauth_scopes` were backfilled from the then-existing `upstream_idp_config` at
+migration time (V065), since they already passed human review under the pre-existing model.
+Only approvals from V065 onward go through `oauth_provider_policy` validation.
+
+### 4.6 External IdP adapters — generic + Jira (CR-04 remainder, WP-A3)
+
+`kc_token_exchange` (same Keycloak realm) and `entra_*` (Microsoft-specific) do not cover a
+third case: a self-service-onboarded server whose upstream IdP is neither. Two injection modes
+close this gap, added to `InjectionMode`/`AuthMode`: `external_oauth_user_token` (per-user
+delegated OAuth 2.0, approach A) and `external_oauth_client_credentials` (app-only, approach B
+shape). Both are governed by §4.5's `oauth_provider_policy` at approval time exactly like
+`entra_*` — no special-casing needed, since the policy engine only looks at issuer/tenant/
+scopes/redirect_uri/client_auth_method, all present in `external_oauth`'s config shape.
+
+- **Static vs dynamic adapters.** `m365`/`dex`/`bitbucket`/`jira` (all in
+  `credential_broker/adapters/`) are statically registered from env vars — one platform-wide
+  instance per module, right for integrations the platform itself owns an app registration
+  for. A self-service-onboarded external OAuth server needs the OPPOSITE: one adapter instance
+  PER SERVER, parameterized from that server's own approved config. `GenericOAuthAdapter`
+  (`adapters/generic_oauth.py`) is that parameterized adapter (same
+  build_auth_url/exchange_code/refresh interface as every static one);
+  `adapters/dynamic_external_oauth.py::resolve_external_oauth_adapter` builds it per call from
+  `server_registry.approved_upstream_idp_config` (issuer, client_id, authorization_endpoint,
+  token_endpoint, scopes, redirect_uri, client_auth_method) — **never** the submitter-requested
+  `upstream_idp_config`, same non-negotiable as §4.5. The client_secret is a service-owned
+  `credential_store` row, resolved via `tool_registry.credential_id` the same way
+  `entra_client_credentials` resolves its own (no new admin write path needed).
+- **Resolution order.** `routers/oauth.py::_get_adapter` and `broker.py::_resolve_a` both try
+  the static registry first (backward compatible with existing m365/dex/bitbucket/jira
+  enrollments), then fall back to the dynamic per-server resolver. Any DB/Vault error during
+  dynamic resolution **MUST** be caught and treated as "no adapter" (→ 404 / "not enrolled")
+  — never a raw exception surfaced to the enrollment page or credential broker.
+- **`client_auth_method`.** Some external IdPs (Atlassian, some SaaS OAuth providers) require
+  `client_secret_basic` (HTTP Basic auth header) instead of the more common
+  `client_secret_post` (form body). `GenericOAuthAdapter` and
+  `_inject_external_oauth_client_credentials` both branch on
+  `approved_upstream_idp_config.client_auth_method` — validated at onboarding time
+  (`services/server_onboarding.py::validate_upstream_idp_config`) to be one of these two values.
+- **Enrollment status.** `GET /auth/status/{service}` reports `{"enrolled": bool,
+  "enrollment_url"}` for the AUTHENTICATED caller via the same typed-principal dual-read the
+  broker uses at resolve time (§2.2) — an existence-only check, never decrypts the credential.
+  Applies to every approach-A adapter (m365, dex, bitbucket, jira, entra_user_token,
+  external_oauth_user_token), not just the new mode.
+- **Jira (D2 fast-follow, droppable).** `credential_broker/adapters/jira.py` is a real, working
+  Atlassian Jira Cloud OAuth 2.0 3LO adapter, statically registered like m365/dex/bitbucket. It
+  handles the OAuth token lifecycle only — resolving a Jira Cloud site's `cloudId` (a separate
+  Atlassian API call required before any real Jira REST call) is left to the downstream Jira MCP
+  tool, not the platform. This is a documented limitation, not a silent gap.
+- **Live proof: Dex as a second, non-Entra external IdP (Task 12).** Before this, the generic/
+  dynamic path above had only mocked unit-test coverage
+  (`proxy/tests/unit/test_dispatcher_external_oauth.py`) — every "2 different IdPs" claim rested
+  on Entra (`entra_user_token`/`entra_client_credentials`) being the only *externally-hosted*
+  IdP actually exercised live. `lab/tests/acceptance/test_at1_dex_external_oauth.py` closes that
+  gap: it drives a REAL browser-shaped authorization_code+PKCE enrollment (GET
+  `/auth/enroll/dex-external` → POST `/auth/enroll/dex-external/consent` → Dex's real
+  `authorization_endpoint` → Dex's real local-password login form as alice@corp → Dex's real
+  303 back to `/auth/callback/dex-external` → the proxy's real code-exchange against Dex's real
+  `token_endpoint`), then invokes `echo-dex-external` end-to-end through the full gateway/OPA/
+  entitlement/dispatcher chain — the broker decrypts the stored refresh_token and calls
+  `GenericOAuthAdapter.refresh()` (a second live HTTP call to Dex) to mint the injected access
+  token. `server_registry.service_name='dex-external'` uses a SECOND Dex OAuth client
+  (`mcp-dex-generic`, `lab/dex/config.lab.yaml`) distinct from the legacy static `dex.py`
+  adapter's `mcp-proxy` client (`service='dex'`, the `lab-dex-cal`/`dex-calendar` `user`-mode
+  enrollment) — the two never share a credential_store row or OAuth client. Seed data:
+  `lab/seeder/sql/dex_external_oauth.sql` (`oauth_provider_policy` row for Dex's issuer +
+  the `server_registry`/entitlement rows) and `seed.py` step 7d3 (the service-owned
+  client_secret). `token_endpoint` must use the container-network hostname
+  (`http://lab-dex:5556/dex/token`, called proxy-side) while `authorization_endpoint` stays
+  host-mapped (`http://localhost:5556/dex/auth`, followed browser-side) — mirrors the existing
+  `DEX_ISSUER_URL`/`DEX_INTERNAL_ISSUER_URL` split for the legacy adapter.
+  - **Two real bugs surfaced and fixed by actually driving this flow** (both in
+    `routers/oauth.py`'s `/auth/callback/{service}` handler, which no prior test had exercised —
+    every other approach-A "enrollment" in this lab, including `entra_user_token`'s own m365
+    delegated credential, is pre-seeded directly into `credential_store` rather than driven
+    through this live endpoint):
+    1. The `INSERT ... ON CONFLICT (user_sub, service) DO UPDATE` had no arbiter to match: V011
+       dropped the plain `(user_sub, service)` unique constraint in favor of a PARTIAL unique
+       index scoped to `owner_type='user'` (`uq_credential_user_mode`), and the conflict target
+       must repeat that predicate. Fixed to `ON CONFLICT (user_sub, service) WHERE owner_type =
+       'user' DO UPDATE ...`.
+    2. The credential's `encrypt()` call at write time omitted `service`/`tool_id`/`owner_type`,
+       so it used `encrypt()`'s `service=""` default — while `broker.py::_resolve_a`'s matching
+       `decrypt()` call passes the real four-field AAD (`service=<service>, tool_id=None,
+       owner_type="user"`, per FIND-010's `_make_aad` contract). Every real enrollment's
+       refresh_token was therefore encrypted under an AAD that could never actually be
+       decrypted (`cryptography.exceptions.InvalidTag`) the first time the broker tried to
+       refresh it. Fixed by passing the matching `service=service, tool_id=None,
+       owner_type="user"` at the `encrypt()` call site.
+  - Both fixes are auth-mode-agnostic (the shared `/auth/callback` handler, not anything
+    Dex-specific) — every approach-A adapter's *actual* live enrollment (not pre-seeded) now
+    completes correctly, not just the new `external_oauth_user_token` path.
+  - **A third bug, cosmetic but real:** `routers/oauth.py::enroll()`'s `GET /auth/enroll/{service}`
+    reads `adapter.scopes` to render the consent page and to persist `credential_store.scopes`
+    (an audit-only column). `GenericOAuthAdapter` (like every static approach-A adapter — dex.py,
+    m365.py, bitbucket.py all follow the same private-`_scopes`-only convention) had no public
+    `scopes` accessor, so this always raised `AttributeError` and silently fell into the
+    `except AttributeError: requested_scopes = settings.entra_scopes_list` branch — every dynamic
+    external_oauth enrollment's consent page and stored `scopes` column showed Entra's
+    env-configured scope list instead of the adapter's real ones. Non-security-critical
+    (`build_auth_url`/`exchange_code`/`refresh` all use `self._scopes` correctly regardless of
+    what the consent page displayed — the actual OAuth request sent to Dex was always right), but
+    a real, live-only-discoverable UX/audit-data bug; no unit test renders a real consent page
+    against a real adapter instance. Fixed by adding a public `scopes` property to
+    `GenericOAuthAdapter` (`adapters/generic_oauth.py`) — the static adapters' equivalent gap is
+    out of scope for this fix (recorded, not silently expanded).
+
+### 4.7 Generic OAuth 2.0 substrate productization — provider profiles + service adapters (WP-A6)
+
+User-approved extension of §4.6 (`docs/spec/08-finalization-findings-generic-oauth.md`, Findings
+1–3; explicit scoping decision: **generic OIDC, not Jira-focused** — Jira `cloudId` resolution
+(Finding 4) and the apply/deploy/verify pipeline (Finding 5, being built separately as WP-B3) are
+both out of scope for this package).
+
+- **`oauth_provider_profile` catalog (V070, Finding 1).** Sits ABOVE `oauth_provider_policy`
+  (§4.5) — an admin-curated, reviewer-approved catalog a non-expert submitter picks from
+  ("Same platform IdP" / "Generic OAuth 2.0" / "Microsoft Entra" / "Custom OIDC"; `jira_cloud` is
+  a reserved `provider_type` value, not implemented). It does **not** replace `oauth_provider_policy`
+  — a profile's issuer still validates against a matching policy row (via
+  `oauth_policy.get_policy_for_issuer`, the same `UnknownIssuerError` class, not a parallel
+  mechanism) at profile-approval time in `services/oauth_provider_profile.py::approve_profile`,
+  and again independently at server-submission-approval time via the existing
+  `_validate_oauth_policy_at_approval` gate — unchanged. Profile approval is fail-closed the same
+  way §4.5 is: unknown issuer, un-acknowledged high-risk scope (`oauth_policy.HIGH_RISK_SCOPES`),
+  or an invalid state transition (`draft`/`pending_review` → `approved` only) all reject rather
+  than silently pass. `server_registry.oauth_provider_profile_id` records which profile (if any) a
+  server's submission was built from.
+- **RFC 8414 / OIDC discovery (Finding 1).** `oauth_provider_profile.discover_metadata` fetches
+  `.well-known/oauth-authorization-server` first, falling back to
+  `.well-known/openid-configuration` — a plain HTTPS GET + JSON parse, no new dependency. This is
+  a UX convenience, not a trust boundary: **any** failure (network error, 404, malformed/partial
+  document, a 200 response with no `token_endpoint`) returns `None` rather than raising, and the
+  caller (profile creation / onboarding wizard) falls back to manual endpoint entry. Discovered
+  `token_endpoint_auth_methods_supported`/`scopes_supported` only pre-fill the draft profile —
+  they are never themselves enforced (that stays `oauth_provider_policy`'s job).
+- **"Same platform IdP" non-expert path (Finding 2).** `oauth_provider_profile.recommend_provider_type`
+  is a pure wizard-answer → `(provider_type, injection_mode)` mapping; when the answer is
+  "same IdP as this platform", the recommendation's `provider_type` is `same_platform_idp` and its
+  `display_label` is the literal string **"Same platform IdP"** — the `kc_token_exchange`
+  implementation name is asserted (by unit test) to never appear in submitter-facing text. Under
+  the hood this still produces an ordinary `kc_token_exchange` submission (§4.2/§4.5) — no new
+  persistence or dispatch path, everything downstream of submission is unchanged.
+- **Same-IdP deploy verification probe (Finding 2).** `services/same_idp_verify.run_same_idp_verify_probe`
+  is a standalone, independently-testable check: given a running MCP server URL and its approved
+  audience, it sends three requests directly to that server (bypassing the proxy, so it measures
+  the *upstream's own* validation) — no `Authorization` header, a signed-but-wrong-audience token,
+  and a signed-but-expired token — and asserts all three are rejected (non-2xx, or an MCP
+  JSON-RPC `error` body). **WP-B3's verify pipeline does not exist yet** as of this writing; this
+  module is deliberately not wired into any verify endpoint. Whoever finishes WP-B3 should call
+  `run_same_idp_verify_probe()` from the verify-phase worker for the `kc_token_exchange` /
+  "same platform IdP" auth-mode branch and persist its result into whatever verification-report
+  structure that phase produces (see §4.6-adjacent `server_registry.verification_report`, V068).
+- **`ServiceAdapter` contract (Finding 3).** `credential_broker/adapters/service_adapter.py`
+  defines what OAuth alone cannot know about a specific upstream service — resource API base URL,
+  tenant/site/workspace id, post-enrollment discovery, a safe read-only probe endpoint, and the
+  non-secret runtime context handed to the deployed MCP server. A `ServiceAdapter` **never**
+  stores or returns a refresh token or client secret — those remain exclusively in
+  `credential_store`, managed by the broker; the adapter only ever receives a short-lived
+  `access_token` for the duration of one discovery/verify call. `server_registry.service_context`
+  (JSONB, V070) persists the non-secret result of `build_runtime_context()` — e.g.
+  `{"adapter": "generic", "api_base_url": "..."}` — explicitly separate from `credential_store`.
+  `GenericServiceAdapter` (`adapters/generic_service_adapter.py`) is the reference "no extra
+  discovery needed" implementation: most external OAuth services need nothing beyond a fixed
+  `api_base_url`, proving the contract holds for the common case before any service-specific
+  adapter (e.g. a future Jira Cloud `cloudId`-resolving one, Finding 4 — **not built by WP-A6**)
+  is layered on top.
+- **Router.** `routers/oauth_provider_profiles.py` exposes the catalog CRUD + approval endpoints
+  (`/api/v1/admin/oauth-provider-profiles*`, admin/platform_admin role required) plus the
+  self-service wizard mapping (`POST /api/v1/wizard/recommend-provider-type`, no admin role
+  required — pure recommendation, no state change, no secrets).
 
 ---
 

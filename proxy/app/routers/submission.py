@@ -31,12 +31,21 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, HttpUrl, field_validator
 from sqlalchemy import text
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.database import AsyncSessionLocal
 from app.services.admin_audit import emit_admin_config_event
 from app.services.scaffold_generator import generate_prompts, generate_scaffold
 from app.services import prompt_store
-from app.services.server_onboarding import InvalidOnboardingConfig, validate_upstream_url_ssrf
-from app.services.submission_scanner import GITHUB_CLONE_ACCOUNT, scan_submission
+from app.services.server_onboarding import (
+    InvalidOnboardingConfig,
+    validate_mode_and_idp,
+    validate_upstream_idp_config,
+    validate_upstream_url_ssrf,
+)
+from app.services.submission_scanner import GITHUB_CLONE_ACCOUNT
+from app.services import scan_queue
+from app.services.auth_modes import self_service_mode_values
 
 # R-2: cheap structural guard at submit time — well-formed https URL, no
 # embedded credentials, no whitespace/control chars. The authoritative
@@ -50,10 +59,16 @@ _SAFE_REPO_URL_RE = re.compile(
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Submissions"])
 
-_VALID_MODES = {
-    "none", "service", "user", "service_account", "oauth_user_token",
-    "entra_client_credentials", "entra_user_token", "kc_token_exchange", "passthrough",
-}
+# WP-A5 (CR-02 completion): sourced from the canonical AuthMode status
+# matrix (services/auth_modes.py) instead of a hand-maintained set — this
+# self-service submission wizard only ever offers "supported"-tier modes
+# (excludes admin_only passthrough and the deprecated oauth_user_token alias;
+# a self-service submitter choosing same-IdP token exchange must now name it
+# kc_token_exchange). Was a hardcoded set that had silently drifted behind
+# the canonical model: it included oauth_user_token/passthrough (neither
+# self-service-selectable) and omitted basic_auth (which is) — exactly the
+# drift-prone duplication CR-02 calls out.
+_VALID_MODES = self_service_mode_values()
 _VALID_CATEGORIES = {
     "pii", "financial", "health", "internal_docs", "source_code",
     "email_calendar", "infrastructure", "public",
@@ -97,9 +112,15 @@ def _require_submission_reviewer(request: Request) -> None:
         raise HTTPException(status_code=403, detail="reviewer role required")
 
 
-def _require_not_self_review(sub: dict[str, Any], reviewer: str) -> None:
+def _require_not_self_review(sub: dict[str, Any], reviewer: str, roles: list[str] | None = None) -> None:
     """Segregation of duties: a submitter may not approve/reject/request-changes
-    on their own submission, even if they hold a reviewer/admin role."""
+    on their own submission — UNLESS they hold admin/platform_admin. Plain
+    security_reviewer still cannot self-review. Explicit operator decision:
+    a hard four-eyes rule with no carve-out makes the review queue unusable
+    in small/lab deployments where admin is the only identity submitting and
+    reviewing (previously required a second reviewer account to exist at all)."""
+    if roles and any(r in {"admin", "platform_admin"} for r in roles):
+        return
     if sub.get("owner_sub") == reviewer:
         raise HTTPException(
             status_code=403,
@@ -168,6 +189,7 @@ class DraftUpdate(BaseModel):
     description: Optional[str] = None
     github_repo_url: Optional[str] = None
     injection_mode: Optional[str] = None
+    requested_upstream_url: Optional[str] = None
 
     @field_validator("github_repo_url")
     @classmethod
@@ -198,6 +220,17 @@ class DraftUpdate(BaseModel):
 
 class ReviewAction(BaseModel):
     notes: str = ""
+    # WP-A2 (CR-13 + CR-03 fold-in): explicit reviewer acknowledgement that
+    # high-risk scopes (write/admin/mail/files/offline_access) were reviewed
+    # and are intentionally approved. Approval-time validation rejects any
+    # submission requesting a high-risk scope unless this is true — a
+    # policy-subset pass alone is not sufficient for those scopes.
+    high_risk_scopes_approved: bool = False
+    # Optional reviewer override of the approved kc_token_exchange audience /
+    # scopes; when omitted, the requested upstream_idp_config values are used
+    # as-is (still subject to oauth_policy validation below).
+    approved_token_audience: Optional[str] = None
+    approved_token_scopes: Optional[list[str]] = None
 
 
 # ── Self-service endpoints ────────────────────────────────────────────────────
@@ -218,15 +251,16 @@ async def create_draft(body: DraftCreate, request: Request) -> JSONResponse:
         await session.execute(text("""
             INSERT INTO server_registry
                 (server_id, name, upstream_url, status, owner_sub, injection_mode,
-                 github_repo_url, submission_status, scan_status)
+                 github_repo_url, description, submission_status, scan_status)
             VALUES
                 (:sid, :name, '', 'pending', :owner, 'none',
-                 :repo_url, 'draft', 'pending')
+                 :repo_url, :description, 'draft', 'pending')
         """), {
             "sid": sid,
             "name": body.name,
             "owner": owner,
             "repo_url": body.github_repo_url,
+            "description": body.description,
         })
         await session.commit()
     return JSONResponse({"server_id": sid, "submission_status": "draft"}, status_code=201)
@@ -240,6 +274,36 @@ async def update_draft(server_id: str, body: DraftUpdate, request: Request) -> J
     if sub["submission_status"] not in ("draft", "changes_requested"):
         raise HTTPException(status_code=409, detail="submission is not in an editable state")
 
+    # WP-A5 (CR-02 completion): approval-time-style validator moved to
+    # draft/update time — this is the wizard's PATCH step, and previously
+    # nothing checked mode<->upstream_idp_type/config compatibility here at
+    # all (only the much-later oauth_policy approval gate did, and only for
+    # oauth-ish modes). A submitter could PATCH a genuinely contradictory
+    # combination (e.g. injection_mode='entra_user_token' with
+    # upstream_idp_type='gateway_idp') and only discover it was invalid at
+    # first invocation.
+    #
+    # Deliberately permissive on "not yet specified": the current wizard UI
+    # (portal.py's self-service flow) never sends upstream_idp_type at all —
+    # only injection_mode + upstream_idp_config. Only run the mode<->idp_type
+    # compatibility check when an upstream_idp_type IS actually present
+    # (either in this request or already stored) — this catches real
+    # contradictions (via direct API use, or a future wizard revision that
+    # does send it) without rejecting today's in-progress, idp_type-less
+    # drafts. Because this is a PARTIAL update across multiple wizard steps,
+    # the check uses the EFFECTIVE merged state (existing row + this patch),
+    # not just the fields present in this one request.
+    if body.injection_mode is not None or body.upstream_idp_type is not None or body.upstream_idp_config is not None:
+        effective_mode = body.injection_mode if body.injection_mode is not None else (sub.get("injection_mode") or "none")
+        effective_idp_type = body.upstream_idp_type if body.upstream_idp_type is not None else sub.get("upstream_idp_type")
+        effective_idp_config = body.upstream_idp_config if body.upstream_idp_config is not None else sub.get("upstream_idp_config")
+        if effective_idp_type:
+            try:
+                validate_mode_and_idp(effective_mode, effective_idp_type, effective_idp_config)
+                validate_upstream_idp_config(effective_idp_type, effective_idp_config)
+            except InvalidOnboardingConfig as exc:
+                raise HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": str(exc)}) from exc
+
     updates: dict[str, Any] = {"updated_at": "now()"}
     fields: list[str] = []
 
@@ -249,6 +313,8 @@ async def update_draft(server_id: str, body: DraftUpdate, request: Request) -> J
             updates[col] = val
 
     _set("github_repo_url", body.github_repo_url)
+    _set("description", body.description)
+    _set("requested_upstream_url", body.requested_upstream_url)
     _set("injection_mode", body.injection_mode)
     _set("upstream_idp_type", body.upstream_idp_type)
     _set("mode_override_reason", body.mode_override_reason)
@@ -290,6 +356,37 @@ async def submit_for_review(
     """Submit the draft for automated scan + security review."""
     owner = _client_id(request)
 
+    # A reviewer cannot approve a server they don't understand. Require the
+    # submitter to actually answer "what does this do" and "where will it
+    # run" before the submission can even enter the queue — description was
+    # previously collected by the wizard and silently dropped, so submissions
+    # with no description at all reached awaiting_review. requested_upstream_url
+    # used to be required only for repo-backed submissions (the no-code path
+    # has no server yet) — but that carve-out let a no-code submission reach
+    # the SAME awaiting_review queue as a real one with nothing but a free-text
+    # description, indistinguishable to a reviewer from an incomplete config.
+    # Both fields — and injection_mode, the auth *type* (never the secret
+    # itself) — are now required unconditionally: get_server_scaffold remains
+    # available with no submission at all for "I don't have code/a server yet",
+    # so this doesn't block that path, it just keeps it out of the review queue.
+    sub = await _get_submission(server_id, owner_sub=owner)
+    missing: list[str] = []
+    if not (sub.get("description") or "").strip():
+        missing.append("description")
+    if not (sub.get("requested_upstream_url") or "").strip():
+        missing.append("requested_upstream_url")
+    if not (sub.get("injection_mode") or "").strip():
+        missing.append("injection_mode")
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INCOMPLETE_SUBMISSION",
+                "message": f"Missing required field(s) before submitting for review: {', '.join(missing)}",
+                "missing_fields": missing,
+            },
+        )
+
     # M1 fix: atomic conditional update — no separate read-then-write.
     # If two concurrent requests race, only one wins the CAS; the other gets rowcount=0 → 409.
     async with AsyncSessionLocal() as session:
@@ -330,7 +427,11 @@ async def submit_for_review(
     new_status = row.submission_status
 
     if github_url:
-        background_tasks.add_task(scan_submission, server_id, github_url)
+        # CR-14: clone + scanner execution moved to the isolated scanner-worker
+        # service. The proxy only enqueues; scan_evaluator (proxy-side, never
+        # touches attacker-controlled repo content) applies policy once the
+        # worker writes a raw result.
+        background_tasks.add_task(scan_queue.enqueue_scan, server_id, github_url, "submission_scan")
 
     return JSONResponse({"server_id": server_id, "submission_status": new_status})
 
@@ -342,7 +443,8 @@ async def list_submissions(request: Request) -> JSONResponse:
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(text("""
             SELECT server_id, name, submission_status, scan_status,
-                   injection_mode, data_categories, github_repo_url, updated_at
+                   injection_mode, data_categories, github_repo_url, updated_at,
+                   description, requested_upstream_url, upstream_url, service_name
             FROM server_registry
             WHERE owner_sub = :owner AND deleted_at IS NULL
             ORDER BY updated_at DESC
@@ -365,8 +467,24 @@ async def get_submission(server_id: str, request: Request) -> JSONResponse:
         "injection_mode": safe.get("injection_mode"),
         "data_categories": list(safe.get("data_categories") or []),
         "github_repo_url": safe.get("github_repo_url"),
+        "description": safe.get("description"),
+        "requested_upstream_url": safe.get("requested_upstream_url"),
+        "upstream_url": safe.get("upstream_url") or None,
+        "service_name": safe.get("service_name"),
         "review_notes": safe.get("review_notes"),
         "github_clone_account": GITHUB_CLONE_ACCOUNT,
+        # WP-A2 (CR-13 + CR-03 fold-in): requested-vs-approved OAuth/IdP config
+        # surfacing. upstream_idp_config/upstream_idp_type are the
+        # submitter-REQUESTED values; the approved_* fields are reviewer-set
+        # (null until /approve runs the oauth_policy gate).
+        "upstream_idp_type": safe.get("upstream_idp_type"),
+        "upstream_idp_config": safe.get("upstream_idp_config"),
+        "approved_upstream_idp_config": safe.get("approved_upstream_idp_config"),
+        "approved_token_audience": safe.get("approved_token_audience"),
+        "approved_oauth_scopes": list(safe.get("approved_oauth_scopes") or []),
+        "oauth_policy_id": safe.get("oauth_policy_id"),
+        "high_risk_scopes_approved_by": safe.get("high_risk_scopes_approved_by"),
+        "high_risk_scopes_approved_at": safe.get("high_risk_scopes_approved_at"),
     })
 
 
@@ -415,7 +533,12 @@ async def download_scaffold(server_id: str, request: Request) -> StreamingRespon
     sub = await _get_submission(server_id, owner_sub=None if is_reviewer else caller)
     mode = sub.get("injection_mode") or "none"
     name = sub["name"]
-    files = generate_scaffold(name, mode)
+    from app.core.config import get_settings as _get_scaffold_settings
+    _issuer = _get_scaffold_settings().OIDC_ISSUER_URL
+    files = generate_scaffold(
+        name, mode, issuer=_issuer,
+        jwks_uri=f"{_issuer.rstrip('/')}/protocol/openid-connect/certs" if _issuer else "",
+    )
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -441,7 +564,9 @@ async def list_review_queue(request: Request) -> JSONResponse:
             SELECT server_id, name, owner_sub, submission_status, scan_status,
                    injection_mode, data_categories, has_write_ops,
                    github_repo_url, scan_report, review_notes,
-                   reviewed_by, reviewed_at, created_at, updated_at
+                   reviewed_by, reviewed_at, created_at, updated_at,
+                   upstream_url, service_name, upstream_idp_type, upstream_idp_config,
+                   description, requested_upstream_url
             FROM server_registry
             WHERE submission_status NOT IN ('draft')
               AND deleted_at IS NULL
@@ -456,21 +581,148 @@ async def list_review_queue(request: Request) -> JSONResponse:
     return JSONResponse({"submissions": [_json_safe(dict(r._mapping)) for r in rows]})
 
 
+_OAUTH_EXCHANGE_MODES = ("kc_token_exchange", "oauth_user_token")
+# WP-A3 (CR-04 remainder): external_oauth_* joins the same scope-set policy
+# gate as entra_* — issuer/tenant → allowed_scopes, same oauth_provider_policy
+# table, same high-risk-scope reviewer-ack requirement. No special-casing
+# needed here; validate_requested_config only looks at issuer/tenant/scopes/
+# redirect_uri/client_auth_method, all present in external_oauth's config shape.
+_OAUTH_ISSUER_MODES = (
+    "entra_client_credentials", "entra_user_token",
+    "external_oauth_client_credentials", "external_oauth_user_token",
+)
+
+
+def _parse_idp_config(raw: Any) -> dict | None:
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def _validate_oauth_policy_at_approval(
+    session: AsyncSession,
+    sub: dict[str, Any],
+    body: "ReviewAction",
+) -> dict[str, Any]:
+    """
+    WP-A2 (CR-13 + CR-03 fold-in): approval-time OAuth/IdP policy gate.
+
+    Returns a dict of columns to persist alongside submission_status:
+      approved_upstream_idp_config, approved_token_audience,
+      approved_token_scopes (persisted to the approved_oauth_scopes TEXT[]
+      column), oauth_policy_id, high_risk_scopes_approved_by,
+      high_risk_scopes_approved_at.
+
+    All values are None/empty when the submission has no OAuth/IdP config to
+    approve (service/user/service_account/basic_auth/none modes) — nothing to
+    validate, nothing changes for those submissions.
+
+    Raises HTTPException(422) — fail-closed — on any policy violation:
+    unknown issuer, overbroad/blocked scope, high-risk scope without explicit
+    ack, disallowed redirect/client-auth-method, or an unapproved
+    kc_token_exchange audience.
+    """
+    from app.services import oauth_policy
+
+    result: dict[str, Any] = {
+        "approved_upstream_idp_config": None,
+        "approved_token_audience": None,
+        "approved_token_scopes": [],
+        "oauth_policy_id": None,
+        # NOTE: this is a bool marker, not the reviewer identity — the caller
+        # (approve_submission) substitutes the actual reviewer sub only when
+        # this is truthy, so the reviewer identity is always read from the
+        # authenticated request, never from anything derived here.
+        "high_risk_scopes_approved_by": False,
+    }
+
+    effective_mode = sub.get("injection_mode") or sub.get("default_injection_mode") or "none"
+    requested_config = _parse_idp_config(sub.get("upstream_idp_config"))
+
+    if effective_mode in _OAUTH_EXCHANGE_MODES:
+        # Audience-STRING dimension (RFC 8693) — a completely different shape
+        # than the scope-set dimension below; see oauth_policy module docstring.
+        requested_audience = (requested_config or {}).get("audience") or body.approved_token_audience
+        if not requested_audience:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "OAUTH_POLICY_VIOLATION", "message": "kc_token_exchange mode requires an audience to approve"},
+            )
+        from app.core.config import get_settings as _get_kc_settings
+        env_allowed = _get_kc_settings().kc_token_exchange_allowed_audiences_parsed
+        if requested_audience not in env_allowed:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "OAUTH_POLICY_VIOLATION",
+                    "message": f"audience {requested_audience!r} not in platform KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES ceiling {sorted(env_allowed)}",
+                },
+            )
+        result["approved_upstream_idp_config"] = requested_config
+        result["approved_token_audience"] = body.approved_token_audience or requested_audience
+        return result
+
+    if effective_mode in _OAUTH_ISSUER_MODES:
+        # Scope-SET dimension — issuer/tenant-scoped oauth_provider_policy row.
+        if not requested_config:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "OAUTH_POLICY_VIOLATION", "message": f"{effective_mode} mode requires upstream_idp_config to approve"},
+            )
+        try:
+            validated = await oauth_policy.validate_requested_config(
+                session,
+                upstream_idp_config=requested_config,
+                high_risk_scopes_approved=body.high_risk_scopes_approved,
+            )
+        except oauth_policy.OAuthPolicyError as exc:
+            raise HTTPException(status_code=422, detail={"code": "OAUTH_POLICY_VIOLATION", "message": str(exc)}) from exc
+
+        result["approved_upstream_idp_config"] = requested_config
+        result["approved_token_scopes"] = (
+            body.approved_token_scopes if body.approved_token_scopes is not None else validated.approved_scopes
+        )
+        result["oauth_policy_id"] = validated.policy.id
+        result["high_risk_scopes_approved_by"] = bool(validated.high_risk_scopes)
+        return result
+
+    # Not an OAuth/IdP-governed mode: nothing to validate/approve.
+    return result
+
+
 @router.post("/api/v1/admin/submissions/{server_id}/approve")
 async def approve_submission(server_id: str, body: ReviewAction, request: Request) -> JSONResponse:
     """Approve submission — repo path moves to approved_pending_url (submitter still
     supplies the running URL); no-code path (F-15) has no URL to ever supply, so it
     goes straight to the terminal 'scaffold_ready' state instead — never
-    approved_pending_url, never "active"/"running" language."""
+    approved_pending_url, never "active"/"running" language.
+
+    WP-A2 (CR-13 + CR-03 fold-in): this is also the single reviewer gate where
+    requested OAuth/IdP config (server_registry.upstream_idp_config,
+    submitter-controlled) is validated against oauth_provider_policy and, if
+    it passes, copied into the approved_* columns that dispatch-time code
+    actually reads. A policy violation blocks approval entirely (422) — the
+    submission stays 'awaiting_review' until re-submitted with a compliant
+    config or a policy row is added by an admin.
+    """
     _require_submission_reviewer(request)
     reviewer = _client_id(request)
     sub = await _get_submission(server_id)
-    _require_not_self_review(sub, reviewer)
+    _require_not_self_review(sub, reviewer, list(getattr(request.state, "client_roles", []) or []))
     if sub["submission_status"] != "awaiting_review":
         raise HTTPException(status_code=409, detail="submission is not awaiting review")
     # A-06 fix: scan must have completed (or been genuinely not-applicable — no
     # repo to scan) before human approval. Blocks 'blocked', 'pending', 'scan_running'.
-    if sub.get("scan_status") not in ("passed", "not_applicable"):
+    # 'review_required' (CR-12/WP-B2: unknown-severity CVE, no npm lockfile, or a
+    # govulncheck module-load failure) is reviewable — a human may approve past it
+    # (optionally after adding a waiver) but it is never auto-approved like 'passed'.
+    if sub.get("scan_status") not in ("passed", "not_applicable", "review_required"):
         raise HTTPException(status_code=409, detail="cannot approve a scan-blocked submission")
 
     # R-10/F-15: no-code submissions (no repo) can never reach provide_running_url —
@@ -478,18 +730,42 @@ async def approve_submission(server_id: str, body: ReviewAction, request: Reques
     new_status = "approved_pending_url" if sub.get("github_repo_url") else "scaffold_ready"
 
     async with AsyncSessionLocal() as session:
+        oauth_approval = await _validate_oauth_policy_at_approval(session, sub, body)
+        high_risk_by = reviewer if oauth_approval.get("high_risk_scopes_approved_by") else None
         await session.execute(text("""
             UPDATE server_registry
             SET submission_status = :new_status,
                 review_notes = :notes,
                 reviewed_by = :reviewer,
                 reviewed_at = now(),
-                updated_at = now()
+                updated_at = now(),
+                approved_upstream_idp_config = CAST(:approved_idp_config AS jsonb),
+                approved_token_audience = :approved_token_audience,
+                approved_oauth_scopes = :approved_oauth_scopes,
+                oauth_policy_id = CAST(:oauth_policy_id AS uuid),
+                high_risk_scopes_approved_by = :high_risk_by,
+                high_risk_scopes_approved_at = CASE WHEN CAST(:high_risk_by AS TEXT) IS NOT NULL THEN now() ELSE high_risk_scopes_approved_at END
             WHERE server_id = :sid
-        """), {"notes": body.notes, "reviewer": reviewer, "sid": server_id, "new_status": new_status})
+        """), {
+            "notes": body.notes, "reviewer": reviewer, "sid": server_id, "new_status": new_status,
+            "approved_idp_config": json.dumps(oauth_approval["approved_upstream_idp_config"]) if oauth_approval["approved_upstream_idp_config"] is not None else None,
+            "approved_token_audience": oauth_approval["approved_token_audience"],
+            # approved_oauth_scopes is TEXT[] (pre-existing V014 column, now wired
+            # up) — a plain Python list binds directly, same pattern as
+            # data_categories elsewhere in this file.
+            "approved_oauth_scopes": oauth_approval["approved_token_scopes"] or [],
+            "oauth_policy_id": oauth_approval["oauth_policy_id"],
+            "high_risk_by": high_risk_by,
+        })
         await session.commit()
     await emit_admin_config_event(
-        reviewer, "submission_approve", server_id, {"notes": body.notes, "submission_status": new_status},
+        reviewer, "submission_approve", server_id,
+        {
+            "notes": body.notes,
+            "submission_status": new_status,
+            "oauth_policy_id": oauth_approval.get("oauth_policy_id"),
+            "high_risk_scopes_approved_by": high_risk_by,
+        },
     )
     return JSONResponse({"server_id": server_id, "submission_status": new_status})
 
@@ -499,7 +775,7 @@ async def reject_submission(server_id: str, body: ReviewAction, request: Request
     """Reject a submission permanently."""
     _require_submission_reviewer(request)
     reviewer = _client_id(request)
-    _require_not_self_review(await _get_submission(server_id), reviewer)
+    _require_not_self_review(await _get_submission(server_id), reviewer, list(getattr(request.state, "client_roles", []) or []))
     async with AsyncSessionLocal() as session:
         # M3 fix: state guard prevents corrupting active servers via reject API.
         result = await session.execute(text("""
@@ -527,7 +803,7 @@ async def request_changes(server_id: str, body: ReviewAction, request: Request) 
     """Return a submission to the submitter with change notes."""
     _require_submission_reviewer(request)
     reviewer = _client_id(request)
-    _require_not_self_review(await _get_submission(server_id), reviewer)
+    _require_not_self_review(await _get_submission(server_id), reviewer, list(getattr(request.state, "client_roles", []) or []))
     async with AsyncSessionLocal() as session:
         # M3 fix: state guard prevents request-changes on already-approved servers.
         result = await session.execute(text("""
@@ -597,16 +873,23 @@ async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
     # entitlement checks, and discover-tools all filter on status='approved'.
     # The §A human review (admin approve, reviewed_by=sub["reviewed_by"]) is
     # this lifecycle's equivalent of that gate, so provide-url is where the
-    # submission flow must set status='approved' — otherwise a submission
-    # that completes the whole documented §A/§B REST flow is still invisible
-    # to every downstream system and can never become tool-discoverable.
+    # submission flow must eventually set status='approved' — otherwise a
+    # submission that completes the whole documented §A/§B REST flow is
+    # still invisible to every downstream system and can never become
+    # tool-discoverable.
+    #
+    # H-01 fix (2026-07-11 audit): status='approved' is no longer set in
+    # THIS write — it is the actual entitlement/credential-issuance gate, so
+    # a server whose verification probes below fail must never have briefly
+    # been invocable. It stays at its current pre-approval value here and is
+    # only promoted in the success branch after run_verification_probes
+    # returns without raising.
     async with AsyncSessionLocal() as session:
         await session.execute(text("""
             UPDATE server_registry
             SET upstream_url = :url,
                 upstream_allowlist_entry = :allowlist_entry,
                 submission_status = 'active',
-                status = 'approved',
                 approved_at = now(),
                 approved_by = :approved_by,
                 updated_at = now()
@@ -616,34 +899,61 @@ async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
         await session.commit()
 
     # R-10: provisioning is synchronous (the submitter is waiting on this response) —
-    # discover the upstream's tools right now and register them quarantined
-    # (INV-005 unchanged: auto-provisioning is not an auto-quarantine-release).
+    # run the SAME verify-phase probes (healthcheck -> quarantined discovery ->
+    # invocation probe) the platform-managed /apply pipeline uses (CR-01 /
+    # WP-B3 phase 5 "provide-url parity" — exactly one verification code
+    # path, not two independently-maintained copies). Self-hosted has no
+    # build/deploy step of its own, so this call straight into the shared
+    # verify half after upstream_url is already set above.
     # FM: if the upstream is unreachable at this exact moment, the approval above
-    # already committed — a discovery failure here must not roll that back or
+    # already committed — a probe failure here must not roll that back or
     # fail this request; tools_provisioned=0 is reported and the existing manual
     # discover-tools admin route remains the retry path.
+    from app.services.deploy_verifier import VerificationFailedError, run_verification_probes
+
     tools_provisioned = 0
     tools_skipped: list[dict] = []
+    verification_report: dict | None = None
     try:
-        from app.routers.tools import _run_tool_discovery
-        async with AsyncSessionLocal() as disc_session:
-            disc_response = await _run_tool_discovery(
-                server_id, disc_session, actor_client_id=sub.get("reviewed_by") or owner,
-            )
-        if disc_response.status_code == 200:
-            _disc_body = json.loads(disc_response.body)
-            tools_provisioned = _disc_body.get("discovered", 0)
-            tools_skipped = _disc_body.get("skipped", [])
-        else:
-            logger.warning(
-                "R-10 auto-provisioning: discovery returned %s for server_id=%s",
-                disc_response.status_code, server_id,
-            )
-    except Exception as exc:
+        verification_report = await run_verification_probes(
+            server_id, upstream_url, actor_client_id=sub.get("reviewed_by") or owner,
+            require_approved=False,
+        )
+        tools_provisioned = verification_report.get("tools_discovered", 0)
+        tools_skipped = verification_report.get("tools_skipped", [])
+        # H-01 fix: only now — probes actually passed — promote status to
+        # the real entitlement/credential-issuance gate value.
+        async with AsyncSessionLocal() as approve_session:
+            await approve_session.execute(text(
+                "UPDATE server_registry SET status = 'approved', updated_at = now() WHERE server_id = :sid"
+            ), {"sid": server_id})
+            await approve_session.commit()
+    except VerificationFailedError as exc:
+        verification_report = exc.report
         logger.warning(
-            "R-10 auto-provisioning: discovery failed for server_id=%s (approval already committed): %s",
+            "provide-url verification probes failed for server_id=%s (approval already committed): %s",
             server_id, exc,
         )
+    except Exception as exc:
+        logger.warning(
+            "provide-url verification probes crashed for server_id=%s (approval already committed): %s",
+            server_id, exc,
+        )
+        verification_report = {"healthcheck": False, "tools_discovered": 0, "tools_skipped": [],
+                               "invocation_probe_ok": False, "contract_check": None, "error": str(exc)}
+
+    if verification_report is not None:
+        async with AsyncSessionLocal() as vr_session:
+            await vr_session.execute(text(
+                """
+                UPDATE server_registry
+                SET verification_report = CAST(:report AS jsonb),
+                    contract_version = 'v0.1',
+                    updated_at = now()
+                WHERE server_id = :sid
+                """
+            ), {"report": json.dumps(verification_report), "sid": server_id})
+            await vr_session.commit()
 
     next_msg = (
         f"{tools_provisioned} tool(s) discovered and registered quarantined; "
@@ -661,6 +971,97 @@ async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
         "tools_skipped": tools_skipped,
         "quarantined": True,
         "next": next_msg,
+    })
+
+
+# ---------------------------------------------------------------------------
+# POST /apply, GET /verification-report — CR-01 (WP-B3 phase 5): the
+# platform-managed build->deploy->verify entry point, for submitters who do
+# NOT want to self-host (the provide-url path above remains unchanged and is
+# the only route for self-hosted submitters — they never call /apply).
+# ---------------------------------------------------------------------------
+_APPLY_ELIGIBLE_STATUSES = ("scaffold_ready", "approved_pending_url")
+
+
+@router.post("/api/v1/submissions/{server_id}/apply")
+async def apply_submission(server_id: str, request: Request) -> JSONResponse:
+    """
+    Kick off the platform-managed build->deploy->verify pipeline for a
+    submission that has NOT been self-hosted. Only valid from
+    'scaffold_ready' or 'approved_pending_url' — the two states a
+    self-hosted submitter would otherwise call provide-url from instead.
+    Enqueues a build_requested job (claimed by build_worker, WP-B3 phase 2)
+    reusing the existing scan_jobs queue (no new job table), pinning
+    scan_jobs.expected_digest to this server's already-scanned+approved
+    commit (server_registry.scan_commit) — the TOCTOU guard build_engine.py
+    refuses to build past (PRD-8 sec 2).
+    """
+    owner = _client_id(request)
+    sub = await _get_submission(server_id, owner_sub=owner)
+
+    if sub["submission_status"] not in _APPLY_ELIGIBLE_STATUSES:
+        raise HTTPException(status_code=409, detail=(
+            f"submission_status is {sub['submission_status']!r}; /apply is only valid from "
+            f"{_APPLY_ELIGIBLE_STATUSES!r} — a self-hosted submission should call provide-url instead"
+        ))
+
+    github_url = sub.get("github_repo_url")
+    if not github_url:
+        raise HTTPException(status_code=422, detail=(
+            "submission has no github_repo_url — the platform-managed build pipeline "
+            "requires a repository to build; a no-code submission cannot use /apply"
+        ))
+
+    expected_digest = sub.get("scan_commit")
+    if not expected_digest:
+        raise HTTPException(status_code=422, detail=(
+            "submission has no recorded scan_commit yet — a scan must complete before "
+            "/apply can pin a build to a specific approved commit"
+        ))
+
+    job_id = await scan_queue.enqueue_scan(server_id, github_url, job_type="build_requested")
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(text(
+            """
+            UPDATE scan_jobs SET expected_digest = :digest WHERE job_id = :job_id
+            """
+        ), {"digest": expected_digest, "job_id": job_id})
+        await session.execute(text(
+            """
+            UPDATE server_registry
+            SET deployment_status = 'build_requested', updated_at = now()
+            WHERE server_id = :sid
+            """
+        ), {"sid": server_id})
+        await session.commit()
+
+    logger.info("apply_submission enqueued build_requested job_id=%s server_id=%s", job_id, server_id)
+    return JSONResponse({
+        "server_id": server_id,
+        "job_id": job_id,
+        "deployment_status": "build_requested",
+        "next": "Poll GET /api/v1/submissions/{server_id}/verification-report for pipeline progress.",
+    })
+
+
+@router.get("/api/v1/submissions/{server_id}/verification-report")
+async def get_verification_report(server_id: str, request: Request) -> JSONResponse:
+    """Plain read of server_registry.verification_report — 404 if the verify
+    phase has never run for this server (still building/deploying, or a
+    self-hosted submission that hasn't called provide-url yet)."""
+    owner = _client_id(request)
+    sub = await _get_submission(server_id, owner_sub=owner)
+    report = sub.get("verification_report")
+    if report is None:
+        raise HTTPException(status_code=404, detail=(
+            "no verification_report recorded yet for this server "
+            f"(deployment_status={sub.get('deployment_status')!r})"
+        ))
+    return JSONResponse({
+        "server_id": server_id,
+        "deployment_status": sub.get("deployment_status"),
+        "verification_report": report,
     })
 
 
@@ -686,7 +1087,12 @@ async def design_assist_scaffold(request: Request, mode: str = "none") -> JSONRe
     from app.services.scaffold_generator import generate_scaffold
     # L1 fix: coerce unknown mode values before reflection in the response.
     safe_mode = mode if mode in _VALID_MODES else "none"
-    files = generate_scaffold("my-mcp-server", safe_mode)
+    from app.core.config import get_settings as _get_scaffold_settings
+    _issuer = _get_scaffold_settings().OIDC_ISSUER_URL
+    files = generate_scaffold(
+        "my-mcp-server", safe_mode, issuer=_issuer,
+        jwks_uri=f"{_issuer.rstrip('/')}/protocol/openid-connect/certs" if _issuer else "",
+    )
     return JSONResponse({"injection_mode": safe_mode, "files": files})
 
 
@@ -760,7 +1166,8 @@ async def design_assist(request: Request, mode: Optional[str] = None) -> JSONRes
                     "question": "Is one token shared across all callers, or per-user?",
                     "options": {
                         "shared":   {"recommended_mode": "service_account"},
-                        "per_user": {"recommended_mode": "oauth_user_token"},
+                        # WP-A5: recommend the canonical name, not the deprecated alias.
+                        "per_user": {"recommended_mode": "kc_token_exchange"},
                     },
                 },
             ],

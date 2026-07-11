@@ -73,9 +73,13 @@ async def evaluate_policy(input_data: dict[str, Any]) -> dict[str, Any]:
             "OPA unreachable — failing closed per INV-004",
             extra={"opa_url": url, "error": str(exc)},
         )
+        from app.services.metrics import record_opa_reachable
+        record_opa_reachable(False)
         raise OPAUnavailableError(f"OPA unreachable: {exc}") from exc
     except Exception as exc:
         logger.error("Unexpected error contacting OPA", extra={"error": str(exc)})
+        from app.services.metrics import record_opa_reachable
+        record_opa_reachable(False)
         raise OPAUnavailableError(f"OPA contact failed: {exc}") from exc
 
     if response.status_code != 200:
@@ -83,6 +87,8 @@ async def evaluate_policy(input_data: dict[str, Any]) -> dict[str, Any]:
             "OPA returned non-200 — failing closed per INV-004",
             extra={"status_code": response.status_code, "body": response.text[:500]},
         )
+        from app.services.metrics import record_opa_reachable
+        record_opa_reachable(False)
         raise OPAUnavailableError(f"OPA HTTP {response.status_code}")
 
     try:
@@ -122,6 +128,10 @@ async def evaluate_policy(input_data: dict[str, Any]) -> dict[str, Any]:
             "opa_decision_id": opa_decision_id,
         },
     )
+
+    from app.services.metrics import record_authz_decision, record_opa_reachable
+    record_opa_reachable(True)
+    record_authz_decision(allow)
 
     return {"allow": allow, "reasons": reasons, "decision_id": opa_decision_id}
 

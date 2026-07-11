@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mcp-security-platform/reference/mcp-server-contract.schema.json",
+  "title": "MCP server compatibility contract — machine-testable subset (CR-06)",
+  "description": "Transcribes docs/reference/mcp-server-compatibility-contract.md sec 2 into schema form. Covers ONLY the shape of the 'initialize' and 'tools/list' JSON-RPC responses — every other part of the contract (identity headers, credential injection, error semantics) is not (yet) machine-testable and is out of scope for this schema. See contract_check.py for how this is used.",
+  "definitions": {
+    "initializeResult": {
+      "type": "object",
+      "required": ["protocolVersion", "serverInfo", "capabilities"],
+      "properties": {
+        "protocolVersion": {
+          "type": "string",
+          "description": "MCP protocol version string, e.g. '2024-11-05'."
+        },
+        "serverInfo": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": {"type": "string"},
+            "version": {"type": "string"}
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "description": "Server capability flags — shape is intentionally open (MCP defines an extensible set)."
+        }
+      }
+    },
+    "toolsListResult": {
+      "type": "object",
+      "required": ["tools"],
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string"},
+              "description": {"type": "string"},
+              "inputSchema": {
+                "type": "object",
+                "description": "A JSON Schema object describing the tool's call arguments — MCP does not further constrain its shape beyond 'must be an object'."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

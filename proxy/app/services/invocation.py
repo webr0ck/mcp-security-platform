@@ -210,6 +210,8 @@ async def invoke_tool(
     source_ip: str | None = None,
     session_jti: str | None = None,
     profile_uuid: str | None = None,
+    principal_issuer: str | None = None,
+    principal_display_sub: str | None = None,
 ) -> dict[str, Any]:
     """
     Execute the full tool invocation pipeline.
@@ -241,6 +243,13 @@ async def invoke_tool(
             set, profile lookup uses (profile_uuid, tool_name) instead of
             (client_id, tool_name). None = legacy mcp_profiles path (backward
             compatible).
+        principal_issuer: CR-10 (WP-A1) — the issuer/CA component of the typed
+            principal (OIDC issuer id, mTLS CA id, or "apikey"). Forwarded
+            downstream as X-Principal-Issuer.
+        principal_display_sub: CR-10 (WP-A1) — the bare, human-readable
+            subject (== client_id). Forwarded downstream as
+            X-Principal-Display-Sub / X-User-Sub. NEVER an authorization key
+            on its own — only principal_id is collision-proof.
 
     Returns:
         Dict matching the MCP JSON-RPC 2.0 response format with meta.audit_id.
@@ -349,6 +358,7 @@ async def invoke_tool(
                         is_testing=is_testing,
                         source_ip=source_ip,
                         principal_type=principal_type,
+            principal_id=principal_id,
                         roles=client_roles,
                         session_jti=session_jti,
                     )
@@ -381,6 +391,7 @@ async def invoke_tool(
                     is_testing=is_testing,
                     source_ip=source_ip,
                     principal_type=principal_type,
+            principal_id=principal_id,
                     roles=client_roles,
                     session_jti=session_jti,
                 )
@@ -413,6 +424,7 @@ async def invoke_tool(
             is_testing=is_testing,
             source_ip=source_ip,
             principal_type=principal_type,
+            principal_id=principal_id,
             roles=client_roles,
             session_jti=session_jti,
         )
@@ -463,6 +475,7 @@ async def invoke_tool(
                 is_testing=is_testing,
                 source_ip=source_ip,
                 principal_type=principal_type,
+            principal_id=principal_id,
                 roles=client_roles,
                 session_jti=session_jti,
                 tainted=_tainted,
@@ -481,7 +494,9 @@ async def invoke_tool(
     anomaly_score = 0.0
     if not is_testing:
         try:
-            anomaly_result = await detect_anomaly(client_id=client_id, tool_name=tool_name)
+            anomaly_result = await detect_anomaly(
+                client_id=client_id, tool_name=tool_name, method=json_rpc_request.get("method")
+            )
             anomaly_score = anomaly_result.anomaly_score
         except Exception as exc:
             # Anomaly detection is non-blocking — a failure here should not
@@ -611,6 +626,15 @@ async def invoke_tool(
         # Task 1.7: recent_calls for anomaly.rego structural rule evaluation
         # within the single combined authz OPA query (DET-F3).
         "recent_calls": recent_calls,
+        # CR-10 (WP-A1): typed principal, available to any .rego rule that wants
+        # to distinguish caller type/issuer (e.g. a future "agents may never..."
+        # rule) without re-deriving it from client_id. Additive-only input field —
+        # no existing rule references it, so no .rego edits/resign is required to
+        # ship this; a rule that wants to key off it is free-standing follow-up.
+        "principal": {
+            "id": principal_id,
+            "type": principal_type,
+        },
     }
 
     opa_result = await evaluate_policy(opa_input)
@@ -637,6 +661,7 @@ async def invoke_tool(
             is_testing=is_testing,
             source_ip=source_ip,
             principal_type=principal_type,
+            principal_id=principal_id,
             roles=client_roles,
             session_jti=session_jti,
         )
@@ -670,6 +695,7 @@ async def invoke_tool(
     from app.credential_broker.dispatcher import (
         CredentialInjectionError,
         CredentialEnrollmentRequiredError,
+        CrossTypePrincipalFallbackDenied,
     )
 
     extra_headers: dict[str, str] = {}
@@ -693,6 +719,10 @@ async def invoke_tool(
                 # 6.3: thread the caller's KC token for oauth_user_token (RFC 8693).
                 # None for non-OIDC callers → that mode fails closed downstream.
                 user_kc_token=user_kc_token,
+                # CR-10 (WP-A1): typed principal for the dual-read credential-owner
+                # lookup (typed key first, bare-sub fallback gated to same-type).
+                principal_id=principal_id,
+                principal_type=principal_type,
             )
         except CredentialInjectionError as _cred_exc:
             # INV-001: a credential refusal on the auth boundary (e.g. user not
@@ -704,12 +734,22 @@ async def invoke_tool(
             #
             # Task 4: distinguish "user not enrolled" from "broker down / secret
             # missing" so the audit trail (and TTFF metric) can tell them apart.
+            # CR-10 (WP-A1): distinguish a cross-type dual-read fallback denial —
+            # the caller HAS a bare-sub credential row, but it belongs to a
+            # different principal type. This must read distinctly from a plain
+            # "not enrolled" in the audit trail, since it is a security-relevant
+            # near-miss (the exact collision this package exists to prevent),
+            # not a routine onboarding gap.
             # INV-002: injection_mode is kept as the second element; no token value
             # is ever placed in deny_reasons.
-            if isinstance(_cred_exc, CredentialEnrollmentRequiredError):
+            if isinstance(_cred_exc, CrossTypePrincipalFallbackDenied):
+                _deny_primary = "cross_type_principal_fallback_denied"
+            elif isinstance(_cred_exc, CredentialEnrollmentRequiredError):
                 _deny_primary = "enrollment_required"
             else:
                 _deny_primary = "credential_injection_failed"
+            from app.services.metrics import record_credential_broker_failure
+            record_credential_broker_failure(_deny_primary)
             await _emit_audit_event(
                 tool_id=str(tool_id),
                 tool_name=tool_name,
@@ -724,6 +764,7 @@ async def invoke_tool(
                 is_testing=is_testing,
                 source_ip=source_ip,
                 principal_type=principal_type,
+            principal_id=principal_id,
                 roles=client_roles,
                 session_jti=session_jti,
             )
@@ -784,6 +825,7 @@ async def invoke_tool(
                 is_testing=is_testing,
                 source_ip=source_ip,
                 principal_type=principal_type,
+            principal_id=principal_id,
                 roles=client_roles,
                 session_jti=session_jti,
             )
@@ -821,6 +863,7 @@ async def invoke_tool(
             is_testing=is_testing,
             source_ip=source_ip,
             principal_type=principal_type,
+            principal_id=principal_id,
             roles=client_roles,
             session_jti=session_jti,
         )
@@ -874,8 +917,24 @@ async def invoke_tool(
     forward_base_headers = {
         **handshake_headers,
         **extra_headers,
+        # CR-10 (WP-A1): X-User-Sub is kept as a compatibility/display alias —
+        # never remove it. The typed principal headers below are the
+        # collision-proof identity; a downstream server that keys credentials
+        # or per-caller state off X-User-Sub alone remains exposed to the
+        # OIDC/API-key/mTLS-agent collision this package exists to fix, so new
+        # integrations should prefer X-Principal-Id.
         "X-User-Sub": client_id,
         "X-User-Role": primary_role,
+        **(
+            {
+                "X-Principal-Id": principal_id,
+                "X-Principal-Type": principal_type,
+                "X-Principal-Issuer": principal_issuer or "",
+                "X-Principal-Display-Sub": principal_display_sub or client_id,
+            }
+            if principal_id and principal_type
+            else {}
+        ),
     }
 
     # Build a PinnedIPTransport from the IP validated in Step 3c so that httpx
@@ -1093,6 +1152,7 @@ async def invoke_tool(
             is_testing=is_testing,
             source_ip=source_ip,
             principal_type=principal_type,
+            principal_id=principal_id,
             roles=client_roles,
             session_jti=session_jti,
         )
@@ -1334,6 +1394,7 @@ async def _emit_audit_event(
     roles: list[str] | None = None,
     session_jti: str | None = None,
     tainted: bool | None = None,
+    principal_id: str | None = None,
 ) -> str:
     """
     Emit a structured audit event via mcp-audit-logger.
@@ -1387,6 +1448,7 @@ async def _emit_audit_event(
             is_testing=is_testing,
             source_ip=source_ip,
             principal_type=principal_type,
+            principal_id=principal_id,
             roles=roles,
             session_jti=session_jti,
             tainted=tainted,
@@ -1420,7 +1482,7 @@ async def _emit_audit_event(
                             event_type, event_ts, event_ts_iso, platform_version,
                             original_outcome, hmac_signature, hmac_key_id,
                             source_ip, principal_type, caller_roles, session_jti,
-                            opa_decision_id
+                            opa_decision_id, principal_id
                         ) VALUES (
                             :event_id, :client_id, :tool_name, :tool_id,
                             :outcome, :latency_ms, :sha256_hash,
@@ -1429,7 +1491,7 @@ async def _emit_audit_event(
                             :original_outcome, :hmac_signature, :hmac_key_id,
                             CAST(:source_ip AS INET), :principal_type,
                             CAST(:caller_roles AS TEXT[]), :session_jti,
-                            :opa_decision_id
+                            :opa_decision_id, :principal_id
                         )
                         """
                     ),
@@ -1482,6 +1544,9 @@ async def _emit_audit_event(
                         # correlation between audit_events and the OPA decision log
                         # stream in Loki (job: mcp-opa-decisions).
                         "opa_decision_id": opa_decision_id,
+                        # CR-10 (WP-A1): typed principal id (advisory column; NULL for
+                        # pre-V062 rows and events emitted before this field existed).
+                        "principal_id": principal_id,
                     },
                 )
         except Exception as db_exc:
@@ -1509,6 +1574,7 @@ async def _emit_audit_event(
                     risk_level="unknown",  # not available here; rules use json.risk_level from filebeat
                     request_id=request_id,
                     principal_type=principal_type,
+            principal_id=principal_id,
                     deny_reasons=deny_reasons or [],
                 )
             except Exception:

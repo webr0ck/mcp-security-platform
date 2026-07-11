@@ -29,6 +29,15 @@ _sub: ContextVar[str] = ContextVar("mcphub_sub", default="anonymous")
 _role: ContextVar[str] = ContextVar("mcphub_role", default="agent")
 _auth: ContextVar[str] = ContextVar("mcphub_auth", default="")
 
+# CR-10 (WP-A1): typed principal fields, populated from the X-Principal-*
+# headers the proxy forwards alongside the legacy X-User-Sub. None for any
+# request that predates CR-10 or was not proxied — identity() callers must
+# treat None as "no typed principal available", not as a fourth principal
+# type. See proxy/app/services/invocation.py forward_base_headers.
+_principal_id: ContextVar[str | None] = ContextVar("mcphub_principal_id", default=None)
+_principal_type: ContextVar[str | None] = ContextVar("mcphub_principal_type", default=None)
+_principal_issuer: ContextVar[str | None] = ContextVar("mcphub_principal_issuer", default=None)
+
 # True iff the current request carried an X-User-Sub header (proxy fingerprint).
 # Used by credential() to enforce fail-closed env fallback (H2).
 _proxied: ContextVar[bool] = ContextVar("mcphub_proxied", default=False)
@@ -55,6 +64,19 @@ class Identity:
     sub: str = "anonymous"
     role: str = "agent"
 
+    # CR-10 (WP-A1): typed principal fields (from X-Principal-Id/-Type/-Issuer).
+    # None when the caller/proxy predates CR-10, or the request was un-proxied.
+    #
+    # principal_id is the collision-proof identity: an OIDC human, an API-key
+    # caller, and an mTLS agent that share the same `sub` above are guaranteed
+    # DISTINCT principal_id values. A tool that needs to key per-caller state
+    # (e.g. a notes/self-service store) should prefer principal_id over sub
+    # once available — sub alone is display-only and can collide across
+    # principal types (see docs/spec on X-User-Sub vs X-Principal-Id).
+    principal_id: str | None = None
+    principal_type: str | None = None
+    principal_issuer: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Public accessors
@@ -64,10 +86,17 @@ class Identity:
 def identity() -> Identity:
     """Return the proxy-injected caller identity for the current request.
 
-    Returns Identity(sub="anonymous", role="agent") for un-proxied requests.
+    Returns Identity(sub="anonymous", role="agent") for un-proxied requests,
+    with principal_id/principal_type/principal_issuer left as None.
     Thread/task-safe: backed by ContextVars reset per request in _ContextMiddleware.
     """
-    return Identity(sub=_sub.get(), role=_role.get())
+    return Identity(
+        sub=_sub.get(),
+        role=_role.get(),
+        principal_id=_principal_id.get(),
+        principal_type=_principal_type.get(),
+        principal_issuer=_principal_issuer.get(),
+    )
 
 
 def credential(env_var: str | None = None) -> str | None:
@@ -130,6 +159,12 @@ class _ContextMiddleware(BaseHTTPMiddleware):
         t_role = _role.set(request.headers.get("x-user-role", "agent"))
         t_auth = _auth.set(request.headers.get("authorization", ""))
         t_px = _proxied.set(sub is not None)
+        # CR-10 (WP-A1): typed principal headers are additive — absent on a
+        # pre-CR-10 proxy or a direct (un-proxied) call, in which case these
+        # ContextVars stay at their None default and identity() reflects that.
+        t_pid = _principal_id.set(request.headers.get("x-principal-id"))
+        t_ptype = _principal_type.set(request.headers.get("x-principal-type"))
+        t_piss = _principal_issuer.set(request.headers.get("x-principal-issuer"))
         try:
             return await call_next(request)
         finally:
@@ -137,3 +172,6 @@ class _ContextMiddleware(BaseHTTPMiddleware):
             _role.reset(t_role)
             _auth.reset(t_auth)
             _proxied.reset(t_px)
+            _principal_id.reset(t_pid)
+            _principal_type.reset(t_ptype)
+            _principal_issuer.reset(t_piss)

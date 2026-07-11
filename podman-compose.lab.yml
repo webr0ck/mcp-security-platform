@@ -62,21 +62,30 @@ services:
 
   # ── Keycloak IDP (replaces/augments Dex for full OAuth2 + PKCE + token exchange)
   lab-keycloak:
-    image: quay.io/keycloak/keycloak:24.0
+    # Bumped from 24.0 (2026-07-11): Codex (OAuth 2.1 client) rejects the
+    # authorization callback for missing the RFC 9207 `iss` response
+    # parameter, which KC only started sending starting in 26.x.
+    image: quay.io/keycloak/keycloak:26.0
     container_name: lab-keycloak
     command: ["start-dev", "--import-realm", "--features=token-exchange,admin-fine-grained-authz"]
     environment:
       KC_DB: dev-file
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-adminpassword}
-      # KC_HOSTNAME_STRICT=true: KC always uses the configured KC_HOSTNAME_URL for
-      # frontend URLs (login pages, discovery, tokens). Without this, KC 24 uses
+      # KC_HOSTNAME_STRICT=true: KC always uses the configured hostname for
+      # frontend URLs (login pages, discovery, tokens). Without this, KC uses
       # the request Host header as the issuer, which breaks cross-machine auth
       # (browser sees localhost:8082, not the LAN IP). Backchannel (server-to-server)
       # fetches from the proxy still work with strict=true.
       KC_HOSTNAME_STRICT: "true"
       KC_HTTP_ENABLED: "true"
       KC_PROXY: edge
+      # KC 26's "hostname:v2" provider (default since 26.0) replaced the KC 24
+      # KC_HOSTNAME_URL/KC_HOSTNAME_STRICT-only config with a single KC_HOSTNAME
+      # that takes the full external URL directly — KC 26 refuses to start
+      # ("hostname is not configured") without it, even with KC_HOSTNAME_URL set.
+      # KC_HOSTNAME_URL kept too: still read by v1-style tooling and doesn't hurt.
+      KC_HOSTNAME: "${LAB_GATEWAY_URL:-http://${LAB_HOST:-localhost}:8082}"
       # Tell KC its external frontend URL so all generated URLs use the LAN address.
       # ponytail: KC proxied through nginx at HTTPS — avoids SameSite cookie issues
       KC_HOSTNAME_URL: "${LAB_GATEWAY_URL:-http://${LAB_HOST:-localhost}:8082}"
@@ -303,7 +312,10 @@ services:
       - mcp-grafana-backend-net   # HIGH-2: dedicated MCP<->backend net (replaces shared lab-net)
       - mcp-grafana-net   # pairwise net with proxy only
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/mcp > /dev/null 2>&1 || exit 1"]
+      # The grafana/mcp-grafana image ships NO wget/curl (distroless-ish, only
+      # bash+coreutils), so the previous wget probe always exited 127 -> forever unhealthy.
+      # Use bash /dev/tcp to do a real HTTP GET and assert a 200 from /mcp.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000; printf 'GET /mcp HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3; head -c 15 <&3 | grep -q 200"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -360,10 +372,15 @@ services:
       lab-keycloak:
         condition: service_healthy
     networks:
-      # HIGH-2: dropped shared lab-net (no backend) — no MCP-to-MCP path
       - mcp-lab-tickets-net   # pairwise net with proxy only
+      # lab-net restored (was dropped by HIGH-2): this RS validates the exchanged
+      # KC JWT itself, so it MUST reach lab-keycloak for JWKS. A new pairwise net
+      # would renumber every 10.89.x subnet (see the networks note at file end).
+      - lab-net
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      # /mcp requires a valid exchanged JWT (401s an unauth'd initialize), so
+      # probe the unauthenticated /health liveness route instead.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\" 2>/dev/null"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -442,6 +459,28 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # CR-14 / WP-B1: scanner-worker needs lab-net to reach the AT3 test
+  # fixture git host (lab-gitea-tls / lab-mcp-gitea) — the same reason the
+  # proxy service itself is on lab-net (see its comment above). This is a
+  # LAB-ONLY relaxation: production (base docker-compose.yml alone) keeps
+  # scanner-worker off lab-net entirely, reachable only via
+  # scanner-worker-db-net + the allowlisted scanner-worker-egress-net.
+  scanner-worker:
+    networks:
+      - lab-net
+    environment:
+      # lab-gitea-tls is an internal AT3 test fixture standing in for an
+      # enterprise git host (git_providers row 'gitea-lab') — it must bypass
+      # the allowlisting egress proxy (which only knows real external hosts
+      # like github.com), same as lab-mcp-m365's NO_PROXY for its mock stubs.
+      # NOTE: the self-signed-cert TRUST override (GIT_SSL_CAINFO) is applied
+      # separately and TEMPORARILY by
+      # lab/tests/acceptance/fixtures/setup_gitea_fixtures.sh — same reason
+      # the proxy's own equivalent override isn't baked in here permanently
+      # (it would silently break every real-github.com clone for the rest of
+      # the lab's life). See that script + fixtures/compose.scanner-worker-git-ca-override.yml.
+      NO_PROXY: "lab-gitea-tls,lab-gitea,lab-mcp-gitea,localhost,127.0.0.1"
+
   # ── M365 MCP Server — softeria/ms-365-mcp-server via Graph app-only token ───
   # AZURE_CLIENT_SECRET removed (Task 2.5): credential is broker-injected via
   # credential_store (entra_client_credentials mode). Proxy injects it at call time.
@@ -511,6 +550,7 @@ services:
       - ./lab/egress-proxy/squid.conf:/etc/squid/squid.conf:ro
     networks:
       - mcp-egress-net  # connects to lab MCP servers needing egress
+      - scanner-worker-egress-net  # CR-14: connects scanner-worker needing egress
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -913,7 +953,7 @@ services:
       # every such call still carries the caller's real OAuth bearer token — this
       # only grants network-level ingress, not an authn bypass.
       - PROXY_INGRESS_ALLOWLIST_ENABLED=true
-      - PROXY_INGRESS_TRUSTED_HOSTS=gateway,lab-mcp-self-service
+      - PROXY_INGRESS_TRUSTED_HOSTS=gateway,lab-mcp-self-service,prometheus
       # Option B: derive the OIDC callback URL from the incoming request's Host
       # header so the proxy works from any IP (LAN, Tailscale, localhost) without
       # reconfiguring PROXY_BASE_URL. Safe here because all traffic is on trusted
@@ -1060,8 +1100,9 @@ services:
       - lab-net
       - mcp-m365-net   # reachable from lab-mcp-m365 when AZURE_MODE=mock
     restart: unless-stopped
-    profiles:
-      - mock
+    # No 'profiles: mock' gate: the lab always runs M365 in mock mode now
+    # (M365_GRAPH_BASE/M365_TOKEN_URL in .env.lab point here; entra_user_token
+    # delegated flow depends on this stub being up).
 
 # ── Named volumes ────────────────────────────────────────────────────────────
 volumes:
@@ -1157,6 +1198,13 @@ networks:
   mcp-egress-net:
     driver: bridge
     internal: false   # this net has internet access via lab-egress-proxy NAT
+  # CR-14 / WP-B1: egress path for scanner-worker to reach configured git
+  # provider hosts + vuln-feed hosts. Overrides docker-compose.yml's
+  # internal:true default — same allowlisting egress-proxy pattern as
+  # mcp-egress-net above, reusing lab-egress-proxy rather than a second squid.
+  scanner-worker-egress-net:
+    driver: bridge
+    internal: false   # internet access via lab-egress-proxy NAT, allowlisted
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
 # Override the base docker-compose.yml's step_ca_password secret to point at

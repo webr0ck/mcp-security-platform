@@ -3,6 +3,7 @@ package mcp.authz_test
 import rego.v1
 import data.mcp.authz.allow
 import data.mcp.authz.anomaly_threshold_exceeded
+import data.mcp.authz.deny
 
 # =============================================================================
 # Phase 2.1 — server_owner / manager role: OPA invoke rules
@@ -337,6 +338,52 @@ test_anomaly_lenient_cutoff if {
 
 test_anomaly_off_never_blocks if {
 	not anomaly_threshold_exceeded with input as {"anomaly_score": 0.95, "anomaly_cutoff": 2.0}
+}
+
+# R-4: `ping` is a liveness probe and must never be denied by the
+# rapid-invocation anomaly score, even while the same client is locked out
+# of every other tool. A same-shaped non-ping tool at the same score must
+# still be denied -- this is a targeted exemption, not a global relaxation.
+test_ping_exempt_from_anomaly_deny if {
+	not "anomaly_threshold_exceeded" in deny with input as {
+		"client_id": "alice@corp",
+		"client_roles": ["agent", "admin"],
+		"tool_id": "t-ping",
+		"tool_name": "ping",
+		"tool_status": "active",
+		"tool_risk_level": "low",
+		"tool_server_id": "",
+		"owned_server_ids": [],
+		"owner_max_risk_level": "critical",
+		"params": {},
+		"anomaly_score": 0.95,
+		"anomaly_cutoff": 0.85,
+		"is_testing": false,
+		"profile": {},
+		"tool_function_name": "",
+		"recent_calls": [],
+	}
+}
+
+test_non_ping_still_denied_by_anomaly if {
+	"anomaly_threshold_exceeded" in deny with input as {
+		"client_id": "alice@corp",
+		"client_roles": ["agent", "admin"],
+		"tool_id": "t-slow",
+		"tool_name": "slow_tool",
+		"tool_status": "active",
+		"tool_risk_level": "low",
+		"tool_server_id": "",
+		"owned_server_ids": [],
+		"owner_max_risk_level": "critical",
+		"params": {},
+		"anomaly_score": 0.95,
+		"anomaly_cutoff": 0.85,
+		"is_testing": false,
+		"profile": {},
+		"tool_function_name": "",
+		"recent_calls": [],
+	}
 }
 
 # =============================================================================

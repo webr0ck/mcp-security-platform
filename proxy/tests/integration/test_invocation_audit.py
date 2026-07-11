@@ -17,8 +17,12 @@ Test data requirements:
   - client 'test-agent-client' with role=agent, OPA grant for that tool
   - DB DSN accessible at localhost:5432
 
-NOTE: basic_auth is deliberately unsupported — the DB enum entry is retained
-but the dispatcher must raise CredentialInjectionError, never forward the call.
+NOTE: basic_auth is now a SUPPORTED mode (CR-05, _inject_basic_auth). This test
+still holds because the seeded fixture tool has NO provisioned credential /
+service_name: the dispatcher must raise CredentialInjectionError
+(ServiceCredentialMissingError / missing-service_name fail-closed), never
+forward the call unauthenticated — the INV-001 deny-audit invariant is
+mode-independent.
 """
 from __future__ import annotations
 

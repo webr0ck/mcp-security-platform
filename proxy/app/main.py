@@ -22,7 +22,8 @@ from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
 from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
-from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, admin_prompts, admin_llm, admin_git, portal, server_registry, catalog, lab_links, entitlements, profiles, submission
+from app.routers import metrics as metrics_router
+from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, admin_prompts, admin_llm, admin_git, portal, server_registry, catalog, lab_links, entitlements, profiles, submission, oauth_provider_profiles
 from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.log_filter import RedactingFilter
@@ -165,6 +166,24 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Rescan scheduler failed to start: %s", exc)
 
+    # Step 5.6 (CR-14 / WP-B1): start the scan evaluator loop — the trusted
+    # side that reads scan_raw_results (written by the isolated
+    # scanner-worker) and drives server_registry scan_status/submission_status.
+    from app.services import scan_evaluator as _scan_evaluator
+    try:
+        _scan_evaluator.start()
+    except Exception as exc:
+        logger.warning("Scan evaluator failed to start: %s", exc)
+
+    # Step 5.7 (CR-01 / WP-B3): start the build evaluator loop — the trusted
+    # side that reads build_results (written by the isolated build-worker)
+    # and drives server_registry.deployment_status for build_requested jobs.
+    from app.services import build_evaluator as _build_evaluator
+    try:
+        _build_evaluator.start()
+    except Exception as exc:
+        logger.warning("Build evaluator failed to start: %s", exc)
+
     # Step 6: Initialize trust envelope labeler (PRD-0001 M3) — fail-graceful
     if settings.TRUST_ENVELOPE_ENABLED:
         from app.services.trust_labeler import init_labeler as _init_labeler
@@ -189,6 +208,14 @@ async def lifespan(app: FastAPI):
     # Shutdown — stop rescan loop
     from app.services import rescan_scheduler as _rescan_svc
     await _rescan_svc.stop()
+
+    # Shutdown — stop scan evaluator loop (CR-14 / WP-B1)
+    from app.services import scan_evaluator as _scan_evaluator
+    await _scan_evaluator.stop()
+
+    # Shutdown — stop build evaluator loop (CR-01 / WP-B3)
+    from app.services import build_evaluator as _build_evaluator
+    await _build_evaluator.stop()
 
     # Shutdown — stop OPA data sync reconcile loop first
     if opa_data_sync is not None:
@@ -280,6 +307,7 @@ if os.environ.get("PROXY_INGRESS_ALLOWLIST_ENABLED", "").lower() in ("1", "true"
 # Health endpoints are at root level (no prefix).
 # ============================================================================
 app.include_router(health.router, tags=["Health"])
+app.include_router(metrics_router.router, tags=["Metrics"])  # CR-17 / WP-D1
 app.include_router(tools.router, prefix="/api/v1", tags=["Tools"])
 app.include_router(tools.servers_router, prefix="/api/v1", tags=["Tools"])
 app.include_router(policy.router, prefix="/api/v1", tags=["Policy"])
@@ -304,12 +332,22 @@ app.include_router(catalog.router)            # Principal-scoped server catalog 
 app.include_router(entitlements.router)       # Entitlement CRUD (Phase 2.2)
 app.include_router(profiles.router)           # Profile CRUD — self-service + admin (Task 4.2)
 app.include_router(submission.router)         # Self-service MCP server submission + review queue
+app.include_router(oauth_provider_profiles.router)  # OAuth provider profile catalog (WP-A6, Finding 1)
 app.include_router(lab_links.router)          # Lab convenience: / → portal, /netbox /grafana /keycloak
 
 # Static assets — served at /static/* (no auth required; public JS/CSS only)
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(_static_dir):
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+# WP-D2 (CR-19): user/admin docs served read-only at /docs/* (bind-mounted
+# from repo root docs/ — see docker-compose.yml's mcp-proxy volumes — with a
+# Dockerfile COPY fallback for non-compose builds) so portal screens can link
+# directly to the markdown source. No auth required — same posture as
+# /static; nothing here is sensitive.
+_docs_dir = os.path.join(os.path.dirname(__file__), "..", "docs")
+if os.path.isdir(_docs_dir):
+    app.mount("/docs", StaticFiles(directory=_docs_dir), name="docs")
 
 
 # ============================================================================

@@ -30,6 +30,26 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from app.services.auth_modes import AUTH_MODES
+
+
+def _injection_mode_filter_options() -> str:
+    """WP-A5 (CR-02 completion): the catalog filter's mode dropdown used to be
+    a hardcoded literal list that had drifted (included a nonexistent
+    'header' mode, omitted basic_auth/kc_token_exchange/entra_*/
+    external_oauth_*) — sourced from the canonical AUTH_MODES matrix instead,
+    labelled with each mode's human-facing label. Excludes the deprecated
+    oauth_user_token alias (kc_token_exchange covers the same filter intent)."""
+    from html import escape as _esc
+    from app.services.auth_modes import AuthMode
+
+    opts = ['<option value="">All injection modes</option>']
+    for mode, info in AUTH_MODES.items():
+        if mode is AuthMode.OAUTH_USER_TOKEN:
+            continue
+        opts.append(f'<option value="{_esc(mode.value)}">{_esc(info.label)}</option>')
+    return "\n        ".join(opts)
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/portal", tags=["Portal"])
 
@@ -104,16 +124,16 @@ _FONTS_LINK = (
 
 _CSS = """
   :root {
-    --bg:      #0f172a;
-    --surface: #1e293b;
-    --border:  #334155;
-    --text:    #e2e8f0;
-    --muted:   #94a3b8;
-    --primary: #38bdf8;
+    --bg:      #0a0c11;
+    --surface: #12161e;
+    --border:  rgba(255,255,255,0.07);
+    --text:    #e7eaf0;
+    --muted:   #8a93a4;
+    --primary: #4f9cf9;
     --primary-dark: #0284c7;
     --green:   #4ade80;
     --red:     #f87171;
-    --amber:   #fbbf24;
+    --amber:   #eab308;
     --cyan:    #67e8f9;
   }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -557,6 +577,10 @@ _CSS = """
     opacity: 0.55;
   }
   .adm-nav-dot.active { background: var(--adm-blue); opacity: 1; box-shadow: 0 0 8px rgba(79,156,249,0.7); }
+  .adm-nav-badge {
+    margin-left: auto; font: 700 10px var(--ff-sans); color: var(--adm-blue);
+    background: rgba(79,156,249,0.16); padding: 1px 7px; border-radius: 10px;
+  }
   .adm-user-panel {
     margin-top: auto; display: flex; align-items: center; gap: 10px;
     padding: 10px; border-radius: 10px;
@@ -608,6 +632,20 @@ _CSS = """
     content: ''; position: absolute; left: 0; right: 0; bottom: 0;
     height: 2px; background: var(--adm-blue); border-radius: 2px;
   }
+  .ss-tabs-bar {
+    display: flex; align-items: center; gap: 26px; margin: 4px 0 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .ss-home-tiles {
+    display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr));
+    gap: 14px; margin: 16px 0;
+  }
+  .ss-home-tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; cursor: pointer;
+  }
+  .ss-home-tile-val { font-size: 26px; font-weight: 800; }
+  .ss-home-tile-label { font-size: 12px; color: var(--muted); margin-top: 3px; }
   .adm-body {
     overflow-y: auto; padding: 18px 22px; display: block;
     height: calc(100vh - 56px); box-sizing: border-box;
@@ -634,6 +672,11 @@ _CSS = """
     background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
     color: #cbd0d7; font-size: 12px; font-weight: 600; padding: 7px 14px;
     border-radius: 8px; cursor: pointer; white-space: nowrap; font-family: var(--ff-sans);
+  }
+  .adm-migration-banner {
+    display: flex; align-items: flex-start; gap: 14px; padding: 13px 15px;
+    background: rgba(192,132,252,0.07); border: 1px solid rgba(192,132,252,0.22);
+    border-radius: 12px; margin: 0 22px 12px;
   }
 
   /* ---- Server registry toolbar ---- */
@@ -690,6 +733,30 @@ _CSS = """
   .srv-cell-url    { font: 400 12px var(--ff-mono); color: var(--adm-muted); }
   .srv-cell-owner  { font: 400 12px var(--ff-mono); color: var(--adm-muted); }
   .srv-cell-updated { font: 400 11px var(--ff-mono); color: var(--adm-dim); }
+
+  /* ---- Server registry card grid (matches MCP Console design's Registry view) ---- */
+  .srv-card-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px;
+  }
+  .srv-card {
+    background: var(--adm-surface); border: 1px solid var(--adm-border);
+    border-radius: 13px; padding: 16px; transition: border-color .15s;
+  }
+  .srv-card:hover { border-color: rgba(79,156,249,0.5); }
+  .srv-card.row-pending { border-color: rgba(251,191,36,0.35); }
+  .srv-card.row-quarantined { border-color: rgba(248,113,113,0.35); }
+  .srv-card-top {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px;
+  }
+  .srv-card-name {
+    font-weight: 700; font-size: 14px; font-family: var(--ff-mono); color: var(--adm-text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .srv-card-meta { font-size: 11.5px; color: var(--adm-muted); margin-bottom: 12px; font-family: var(--ff-mono); }
+  .srv-card-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+  .srv-card-updated { font: 400 11px var(--ff-mono); color: var(--adm-dim); margin-left: auto; }
+  .srv-card-actions { display: flex; justify-content: flex-end; }
+
   /* Console KPI tile (design §4): card + colored top accent bar */
   .kpi {
     position: relative; overflow: hidden; background: var(--adm-surface);
@@ -909,6 +976,21 @@ _CSS = """
 """
 
 _JS_COMMON = """
+  // Session expiry: htmx does not swap non-2xx responses by default, so an
+  // expired session silently no-ops every tab click (or, depending on the
+  // route's Accept-header branch, dumps a raw JSON error into the content
+  // pane) with no visible sign of what's wrong — the only working recovery
+  // was a full page reload (which sends a browser-navigation Accept header
+  // and correctly hits the login-redirect branch). Catch it at the network
+  // layer instead: any htmx request that comes back 401 means the session
+  // is gone, so send the user to login immediately rather than leaving a
+  // dead tab on screen.
+  document.body.addEventListener('htmx:responseError', function(evt) {
+    if (evt.detail && evt.detail.xhr && evt.detail.xhr.status === 401) {
+      window.location.href = '/api/v1/auth/oidc/login?redirect=' + encodeURIComponent(window.location.pathname);
+    }
+  });
+
   // XSS-safe text setter
   function esc(str) {
     const d = document.createElement('div');
@@ -967,7 +1049,7 @@ _TAB_MAP_PY = {
     "servers":     "MCP Servers",
     "credentials": "Credentials",
     "limits":      "Request Limits",
-    "dashboard":   "Dashboard",
+    "dashboard":   "Posture",
     "detections":  "Detections",
     "sbom":        "SBOM",
     "submissions": "Submissions",
@@ -978,6 +1060,27 @@ _TAB_MAP_PY = {
     "access":      "Access",
 }
 _VALID_TABS = frozenset(_TAB_MAP_PY)
+
+_ADMIN_GROUPS: list[dict] = [
+    {"id": "security", "label": "Security", "panels": ["dashboard", "detections"]},
+    {"id": "servers",  "label": "Servers",   "panels": ["servers", "submissions", "sbom", "credentials"]},
+    {"id": "access",   "label": "Access",    "panels": ["access", "limits"]},
+    {"id": "settings", "label": "Settings",  "panels": ["identity", "prompts", "llm", "git"]},
+    {"id": "profile",  "label": "Profile",   "panels": ["profile"]},
+]
+
+
+def _panel_group(tab: str) -> dict:
+    """Return the _ADMIN_GROUPS entry containing `tab`, defaulting to the
+    'servers' group for an unrecognized tab (matches the pre-existing
+    fallback behavior in portal_admin_tab).
+
+    NOTE: Currently unused — group resolution happens client-side in JS
+    (_admGroupFor / _ADM_GROUPS). Kept for any future server-side resolution need."""
+    for group in _ADMIN_GROUPS:
+        if tab in group["panels"]:
+            return group
+    return _ADMIN_GROUPS[1]  # "servers" group
 
 
 @router.get("", response_class=HTMLResponse)
@@ -993,7 +1096,7 @@ async def portal_shell(request: Request):
         tab = request.query_params.get("tab", "servers")
         if tab not in _VALID_TABS:
             tab = "servers"
-        return HTMLResponse(content=_build_admin_shell(cid, roles, initial_tab=tab))
+        return HTMLResponse(content=await _build_admin_shell(cid, roles, initial_tab=tab))
     return HTMLResponse(content=_build_agent_shell(cid, roles))
 
 
@@ -1006,7 +1109,7 @@ async def portal_admin_tab(tab: str, request: Request):
         raise HTTPException(status_code=403, detail="admin role required")
     if tab not in _VALID_TABS:
         tab = "servers"
-    return HTMLResponse(content=_build_admin_shell(_client_id(request), roles, initial_tab=tab))
+    return HTMLResponse(content=await _build_admin_shell(_client_id(request), roles, initial_tab=tab))
 
 
 def _aegis_logo_mark(size: int = 24, glow: bool = True) -> str:
@@ -1018,18 +1121,43 @@ def _aegis_logo_mark(size: int = 24, glow: bool = True) -> str:
     )
 
 
-def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> str:
+async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> str:
     """Full-page admin sidebar layout."""
     initials = "".join(w[0].upper() for w in cid.replace("-", " ").split()[:2]) or "?"
     display_name = cid
 
-    def _nav(label: str, tab: str, active: bool = False) -> str:
-        cls = "adm-nav-item active" if active else "adm-nav-item"
-        dot_cls = "adm-nav-dot active" if active else "adm-nav-dot"
+    try:
+        from sqlalchemy import text as _sidebar_text
+        from app.core.database import AsyncSessionLocal as _SidebarSession
+        async with _SidebarSession() as _sidebar_session:
+            _admin_awaiting_review_count = (await _sidebar_session.execute(_sidebar_text(
+                "SELECT count(*) FROM server_registry "
+                "WHERE submission_status = 'awaiting_review' AND deleted_at IS NULL"
+            ))).scalar()
+    except Exception:
+        _admin_awaiting_review_count = None
+
+    def _nav_group(group: dict, active_tab: str) -> str:
+        active_panel = active_tab if active_tab in group["panels"] else None
+        cls = "adm-nav-item active" if active_panel else "adm-nav-item"
+        dot_cls = "adm-nav-dot active" if active_panel else "adm-nav-dot"
+        # Clicking a group jumps to its first panel; loadAdminTab resolves
+        # the group/subtab bar from there (see Task 2).
+        first_panel = group["panels"][0]
+        badge_html = ""
+        # Badge is the awaiting-review count, NOT total registered servers —
+        # a fresh boot seeds servers already-approved (never through the
+        # review pipeline), so this is legitimately 0 while real servers
+        # exist. Hide at 0 like any other pending-count badge; showing
+        # "Servers 0" reads as "zero servers", not "zero pending reviews".
+        if group["id"] == "servers" and _admin_awaiting_review_count:
+            badge_html = f'<span class="adm-nav-badge" title="{_admin_awaiting_review_count} awaiting review">{_admin_awaiting_review_count}</span>'
         return (
-            f'<button class="{cls}" onclick="loadAdminTab(\'{esc_py(tab)}\')">'
-            f'<span class="{dot_cls}"></span>{esc_py(label)}</button>'
+            f'<button class="{cls}" onclick="loadAdminTab(\'{esc_py(first_panel)}\')">'
+            f'<span class="{dot_cls}"></span>{esc_py(group["label"])}{badge_html}</button>'
         )
+
+    nav_html = "".join(_nav_group(g, initial_tab) for g in _ADMIN_GROUPS)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1053,22 +1181,7 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
       </div>
     </div>
 
-    <div class="adm-nav-group">SECURITY</div>
-    {_nav("Dashboard",  "dashboard",  active=initial_tab == "dashboard")}
-    {_nav("Detections", "detections", active=initial_tab == "detections")}
-    {_nav("SBOM",       "sbom",       active=initial_tab == "sbom")}
-
-    <div class="adm-nav-group">ADMIN</div>
-    {_nav("Identity (OIDC)", "identity",    active=initial_tab == "identity")}
-    {_nav("MCP Servers",     "servers",     active=initial_tab == "servers")}
-    {_nav("Access",          "access",      active=initial_tab == "access")}
-    {_nav("Submissions",     "submissions", active=initial_tab == "submissions")}
-    {_nav("Wizard Prompts",  "prompts",     active=initial_tab == "prompts")}
-    {_nav("LLM Provider",    "llm",         active=initial_tab == "llm")}
-    {_nav("Git Providers",   "git",         active=initial_tab == "git")}
-    {_nav("Credentials",     "credentials", active=initial_tab == "credentials")}
-    {_nav("Request Limits",  "limits",      active=initial_tab == "limits")}
-    {_nav("Profile",         "profile",     active=initial_tab == "profile")}
+    {nav_html}
 
     <div class="adm-user-panel" onclick="loadAdminTab('profile')" style="cursor:pointer" title="View profile">
       <div class="adm-avatar">{esc_py(initials)}</div>
@@ -1084,7 +1197,7 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
     <!-- Topbar -->
     <div class="adm-topbar">
       <div class="adm-breadcrumb">
-        Admin <span class="adm-breadcrumb-sep">/</span>
+        MCP Console <span class="adm-breadcrumb-sep">/</span>
         <span class="adm-breadcrumb-page" id="adm-breadcrumb-page">{esc_py(_TAB_MAP_PY.get(initial_tab, initial_tab))}</span>
       </div>
       <a href="/portal/submit" style="display:inline-flex;align-items:center;gap:0.35rem;
@@ -1094,6 +1207,20 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
       </a>
     </div>
 
+    <div id="adm-migration-banner" class="adm-migration-banner" style="display:none">
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">The admin nav is now grouped into 5 sections</div>
+        <div style="font-size:12px;color:var(--adm-muted);display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:4px 16px">
+          <div>Dashboard (now Posture), Detections &rarr; <b>Security</b></div>
+          <div>MCP Servers, Submissions, SBOM, Credentials &rarr; <b>Servers</b></div>
+          <div>Access, Request Limits &rarr; <b>Access</b></div>
+          <div>Identity, Prompts, LLM, Git &rarr; <b>Settings</b></div>
+        </div>
+      </div>
+      <button onclick="_dismissMigrationBanner()" style="background:none;border:none;color:var(--adm-muted);cursor:pointer;font-size:16px;padding:4px 8px">&times;</button>
+    </div>
+
+    <div class="adm-tabs-bar" id="adm-tabs-bar"></div>
 
     <!-- Content -->
     <div class="adm-body" id="adm-content"
@@ -1111,41 +1238,54 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
     servers:     'MCP Servers',
     credentials: 'Credentials',
     limits:      'Request Limits',
-    dashboard:   'Dashboard',
+    dashboard:   'Posture',
     detections:  'Detections',
     sbom:        'SBOM',
     submissions: 'Submissions',
+    prompts:     'Wizard Prompts',
+    llm:         'LLM Provider',
+    git:         'Git Providers',
     profile:     'Profile',
     access:      'Access',
   }};
+  const _ADM_GROUPS = [
+    {{id:'security', label:'Security', panels:['dashboard','detections']}},
+    {{id:'servers',  label:'Servers',  panels:['servers','submissions','sbom','credentials']}},
+    {{id:'access',   label:'Access',   panels:['access','limits']}},
+    {{id:'settings', label:'Settings', panels:['identity','prompts','llm','git']}},
+    {{id:'profile',  label:'Profile',  panels:['profile']}},
+  ];
+  function _admGroupFor(name) {{
+    return _ADM_GROUPS.find(g => g.panels.includes(name)) || _ADM_GROUPS[1];
+  }}
+  function _renderTabsBar(group, activeName) {{
+    const bar = document.getElementById('adm-tabs-bar');
+    if (!bar) return;
+    if (group.panels.length <= 1) {{ bar.style.display = 'none'; bar.innerHTML = ''; return; }}
+    bar.style.display = 'flex';
+    bar.innerHTML = group.panels.map(p => {{
+      const active = p === activeName;
+      return '<button class="adm-tab' + (active ? ' active' : '') + '" ' +
+             'onclick="loadAdminTab(\\'' + p + '\\')">' + (_TAB_MAP[p] || p) + '</button>';
+    }}).join('');
+  }}
   function loadAdminTab(name, opts) {{
     opts = opts || {{}};
+    const group = _admGroupFor(name);
     // Update breadcrumb
     const bc = document.getElementById('adm-breadcrumb-page');
     if (bc) bc.textContent = _TAB_MAP[name] || name;
-    // Update sidebar active item
+    // Update sidebar active group
     document.querySelectorAll('.adm-nav-item').forEach(b => {{
-      const match = b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + name + "'");
+      const match = b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + group.panels[0] + "'");
       b.classList.toggle('active', match);
       const dot = b.querySelector('.adm-nav-dot');
       if (dot) dot.classList.toggle('active', match);
     }});
-    // Update top tab bar
-    document.querySelectorAll('#adm-tabs-bar .adm-tab').forEach(b => {{
-      const match = b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + name + "'");
-      b.classList.toggle('active', match);
-    }});
+    // Update subtab bar
+    _renderTabsBar(group, name);
     // Load fragment
     htmx.ajax('GET', '/portal/fragments/admin/' + name, {{target: '#adm-content', swap: 'innerHTML'}});
-    // Browser back/forward support: tab switches previously pushed no history
-    // entry at all, so Back skipped straight past the whole admin console to
-    // whatever page loaded before it. /portal/admin/{{tab}} is a real,
-    // server-rendered route for every tab (see portal_admin_tab), so pushing
-    // it here means Back/Forward can just do a normal reload at that URL and
-    // get the correct page every time — no fragile client-side state to keep
-    // in sync, no reliance on this htmx build's undocumented ajax() history
-    // options (tested empirically: passing pushUrl to htmx.ajax() here had no
-    // effect on this bundled htmx version).
     if (!opts.fromPopState) {{
       history.pushState({{admTab: name}}, '', '/portal/admin/' + name);
     }}
@@ -1155,6 +1295,18 @@ def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers") -> s
       location.reload();
     }}
   }});
+  _renderTabsBar(_admGroupFor('{esc_py(initial_tab)}'), '{esc_py(initial_tab)}');
+  (function() {{
+    if (!localStorage.getItem('adm_nav_regroup_seen')) {{
+      const b = document.getElementById('adm-migration-banner');
+      if (b) b.style.display = 'flex';
+    }}
+  }})();
+  function _dismissMigrationBanner() {{
+    localStorage.setItem('adm_nav_regroup_seen', '1');
+    const b = document.getElementById('adm-migration-banner');
+    if (b) b.style.display = 'none';
+  }}
   // Legacy alias used by existing admin sub-fragments
   function activateAdminTab(name) {{ loadAdminTab(name); }}
 </script>
@@ -1478,13 +1630,7 @@ async def fragment_catalog(request: Request):
         <option value="critical">Critical</option>
       </select>
       <select id="cat-mode" onchange="filterCatalog()">
-        <option value="">All injection modes</option>
-        <option value="none">None</option>
-        <option value="header">Header</option>
-        <option value="user">User</option>
-        <option value="service">Service</option>
-        <option value="service_account">Service Account</option>
-        <option value="oauth_user_token">OAuth User Token</option>
+        {_injection_mode_filter_options()}
       </select>
       <span style="font-size:0.8rem;color:var(--muted)">{len(tools)} tool{"s" if len(tools) != 1 else ""}</span>
     </div>
@@ -1698,6 +1844,17 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
       </div>
     </div>
 
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1.25rem 1.5rem;max-width:520px;margin-top:1rem">
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Certificate setup</div>
+      <p style="font-size:12px;color:var(--muted);margin:0.4rem 0 0.75rem">
+        TLS trust or client-certificate errors (e.g. Codex/Windows)? Get the gateway CA and
+        setup instructions.
+      </p>
+      <button class="btn-secondary btn-sm" hx-get="/portal/fragments/cert-setup" hx-target="#portal-body" hx-swap="innerHTML">
+        Certificate setup &#x2192;
+      </button>
+    </div>
+
     {mcp_profiles_html}
 
     <script>
@@ -1713,6 +1870,80 @@ async def fragment_profile(request: Request):
     """Agent-portal profile view."""
     _require_portal_access(request)
     return HTMLResponse(await _build_profile_fragment(request, back_target="/portal/fragments/my-access"))
+
+
+@router.get("/fragments/cert-setup", response_class=HTMLResponse)
+async def fragment_cert_setup(request: Request):
+    """Self-service TLS/mTLS certificate setup instructions (2026-07-11).
+
+    /api/v1/tools/ on the gateway's main listener no longer requires a
+    client certificate (OAuth/session auth is enough) — the only certs an
+    end user typically needs are the gateway's own CA, to trust its TLS
+    server certificate. Client-cert (agent) identity remains available on
+    the dedicated :8445 listener for callers that want it.
+    """
+    _require_portal_access(request)
+    host_no_port = request.url.hostname or "localhost"
+    http_ca_url = f"http://{host_no_port}/ca.crt"
+    return HTMLResponse(f"""
+    <div class="section-title">&#x1F510; Certificate setup</div>
+
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1.25rem 1.5rem;max-width:640px">
+      <div style="font-size:13px;font-weight:600">1. Trust the gateway's TLS certificate</div>
+      <p style="font-size:12px;color:var(--muted);margin:0.4rem 0 0.75rem">
+        If your client rejects the gateway's HTTPS certificate (e.g. a Windows/Codex TLS
+        handshake failure), download and trust this CA once — you don't need mkcert or any
+        client certificate to do this.
+      </p>
+      <a href="/ca.crt" download="mcp-lab-ca.crt" class="btn-primary btn-sm" style="text-decoration:none;display:inline-block">
+        &#x2B07; Download CA certificate
+      </a>
+      <div style="font-size:11px;color:var(--muted);margin-top:0.4rem">
+        Plain-HTTP link (fetches before TLS trust is established, e.g. from a fresh machine):
+        <code>{esc_py(http_ca_url)}</code>
+      </div>
+
+      <details style="margin-top:0.9rem">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--cyan)">Windows install instructions</summary>
+        <div style="font-size:12px;color:var(--muted);line-height:1.8;margin-top:0.5rem">
+          PowerShell (as Administrator):<br>
+          <code>Import-Certificate -FilePath .\\mcp-lab-ca.crt -CertStoreLocation Cert:\\LocalMachine\\Root</code><br>
+          or: double-click the downloaded file &rarr; <em>Install Certificate</em> &rarr;
+          <em>Local Machine</em> &rarr; <em>Place all certificates in the following store</em> &rarr;
+          <em>Trusted Root Certification Authorities</em>. Restart your MCP client (e.g. Codex)
+          afterwards so it picks up the updated trust store.
+        </div>
+      </details>
+      <details style="margin-top:0.5rem">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--cyan)">macOS install instructions</summary>
+        <div style="font-size:12px;color:var(--muted);line-height:1.8;margin-top:0.5rem">
+          <code>sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain mcp-lab-ca.crt</code>
+        </div>
+      </details>
+      <details style="margin-top:0.5rem">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--cyan)">Linux install instructions</summary>
+        <div style="font-size:12px;color:var(--muted);line-height:1.8;margin-top:0.5rem">
+          <code>sudo cp mcp-lab-ca.crt /usr/local/share/ca-certificates/mcp-lab-ca.crt && sudo update-ca-certificates</code>
+        </div>
+      </details>
+    </div>
+
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1.25rem 1.5rem;max-width:640px;margin-top:1rem">
+      <div style="font-size:13px;font-weight:600">2. Client (mTLS) certificates — usually not needed</div>
+      <p style="font-size:12px;color:var(--muted);margin:0.4rem 0">
+        You do <strong>not</strong> need a client certificate to sign in or call tools — OAuth
+        sign-in (this portal's login) is sufficient everywhere, including
+        <code>/api/v1/tools/</code>. A client certificate is only relevant if you're
+        registering a non-interactive <em>agent</em> identity on the dedicated mTLS listener.
+        That's issued via step-ca and isn't self-service yet — ask an admin, or see
+        <code>lab/tests/mtls_agent_identity.sh</code> for how one is minted today.
+      </p>
+    </div>
+
+    <div style="margin-top:1rem">
+      <button class="btn-secondary" hx-get="/portal/fragments/profile" hx-target="#portal-body" hx-swap="innerHTML">&#x2190; Back to profile</button>
+    </div>
+    """)
 
 
 @router.get("/fragments/admin/profile", response_class=HTMLResponse)
@@ -1918,7 +2149,9 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             # R-6: caller's own in-flight submissions (not yet active/rejected),
             # so "submitted successfully" isn't the last thing a submitter ever sees.
             mine_result = await session.execute(text("""
-                SELECT server_id, name, submission_status, scan_status, scan_report, updated_at
+                SELECT server_id, name, submission_status, scan_status, scan_report, updated_at,
+                       injection_mode, service_name, upstream_url, github_repo_url,
+                       requested_upstream_url
                 FROM server_registry
                 WHERE owner_sub = :cid
                   AND submission_status NOT IN ('draft')
@@ -2086,6 +2319,21 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             findings = sub.get("scan_report") or []
             n_block = sum(1 for f in findings if isinstance(f, dict) and f.get("block")) if isinstance(findings, list) else 0
             finding_note = f' · <span style="color:#fca5a5">{n_block} blocking finding{"s" if n_block != 1 else ""}</span>' if n_block else ""
+            _mode = sub.get("injection_mode") or "none"
+            _svc = sub.get("service_name")
+            _url = sub.get("upstream_url") or sub.get("requested_upstream_url")
+            _url_label = "backend" if sub.get("upstream_url") else "backend (requested)"
+            backend_bits = [f'auth: <span style="color:var(--text)">{esc_py(_mode)}</span>']
+            if _svc:
+                backend_bits.append(f'credential: <span style="color:var(--text)">{esc_py(_svc)}</span>')
+            if _url:
+                backend_bits.append(f'{_url_label}: <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(_url)}</span>')
+            _repo = sub.get("github_repo_url")
+            if _repo and str(_repo).startswith("https://"):
+                backend_bits.append(f'code: <a href="{esc_py(_repo)}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan)">{esc_py(_repo)}</a>')
+            backend_note = (
+                f'<div style="font-size:11px;color:var(--muted);margin-top:2px">{" · ".join(backend_bits)}</div>'
+            )
             scaffold_note = ""
             if st == "scaffold_ready":
                 _ssid = esc_py(str(sub.get("server_id") or ""))
@@ -2096,6 +2344,17 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
                     f'<a href="/api/v1/submissions/{_ssid}/scaffold" style="color:var(--cyan)">Download scaffold.zip</a>'
                     f'</div>'
                 )
+            provide_url_form = ""
+            if st == "approved_pending_url":
+                _psid = esc_py(str(sub.get("server_id") or ""))
+                provide_url_form = f"""
+                <div style="display:flex;gap:6px;margin-top:6px">
+                  <input id="provurl-{_psid}" type="url" placeholder="https://your-server.example.com/mcp"
+                         style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;
+                                color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
+                  <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.75rem"
+                          onclick="providePendingUrl('{_psid}')">Go live</button>
+                </div>"""
             rows_html.append(f"""
             <div style="padding:0.5rem 0;border-bottom:1px solid #1e293b">
               <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2105,7 +2364,9 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
                                border-radius:20px;padding:1px 8px;font-weight:600">{esc_py(label)}</span>{finding_note}
                 </span>
               </div>
+              {backend_note}
               {scaffold_note}
+              {provide_url_form}
             </div>""")
         my_submissions_html = f"""
         <details style="margin-bottom:1rem" open>
@@ -2113,7 +2374,24 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             My submissions <span class="count">{len(my_submissions)}</span>
           </summary>
           <div style="margin-top:0.25rem">{"".join(rows_html)}</div>
-        </details>"""
+        </details>
+        <script>
+        async function providePendingUrl(sid) {{
+          const input = document.getElementById('provurl-' + sid);
+          const url = (input.value || '').trim();
+          if (!url) {{ alert('Enter the URL your server is running at.'); return; }}
+          try {{
+            const r = await fetch('/api/v1/submissions/' + sid + '/provide-url', {{
+              method: 'POST', headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify({{upstream_url: url}}),
+            }});
+            const d = await r.json();
+            if (!r.ok) {{ alert(d.detail || 'Failed to go live'); return; }}
+            await htmx.ajax('GET', '/portal/fragments/my-access', {{target:'#portal-body', swap:'innerHTML'}});
+            ssShowTab('submit');
+          }} catch (e) {{ alert('Network error: ' + e); }}
+        }}
+        </script>"""
 
     # 5. MCP config snippet (compact, below cards)
     platform_host = os.environ.get("PLATFORM_HOST", "https://mcp.example.com")
@@ -2127,6 +2405,59 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
         }
     }
     mcp_json = json.dumps(mcp_config, indent=2)
+
+    home_html = f"""
+    <div class="srv-strip">
+      <div class="srv-strip-cnt">{len(granted_svcs)} servers</div>
+      <div class="srv-strip-div"></div>
+      <div class="srv-strip-item"><span class="dot-green"></span>{n_active} active</div>
+      <div class="srv-strip-item"><span class="dot-red"></span>{n_suspended} suspended</div>
+      <div class="srv-strip-item"><span class="dot-amber"></span>{n_awaiting} awaiting approval</div>
+    </div>
+    <div class="ss-home-tiles">
+      <div class="ss-home-tile" onclick="ssShowTab('catalog')">
+        <div class="ss-home-tile-val">{len(granted_svcs)}</div>
+        <div class="ss-home-tile-label">Servers you can use</div>
+      </div>
+      <div class="ss-home-tile" onclick="ssShowTab('submit')">
+        <div class="ss-home-tile-val" style="color:var(--amber)">{n_awaiting}</div>
+        <div class="ss-home-tile-label">Submissions in review</div>
+      </div>
+    </div>"""
+
+    catalog_html = f"""
+    <!-- Card grid -->
+    <div class="srv-card-grid">
+      {"".join(cards_html) if cards_html else '<div class="empty-state">No servers accessible for this identity.</div>'}
+    </div>
+
+    <!-- MCP Config snippet (collapsed by default) -->
+    <details style="margin-top:8px">
+      <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#9aa1ab;padding:8px 0;font-family:var(--ff-sans)">
+        MCP config snippet
+      </summary>
+      <div style="margin-top:8px">
+        <p style="font-size:12px;color:#5b626c;margin-bottom:8px">
+          Paste into <code style="font-family:var(--ff-mono);color:#7aa7ff">~/.mcp.json</code>.
+          {"Append <code style=\"font-family:var(--ff-mono)\">?key=YOUR_API_KEY</code> to pre-fill." if not api_key else "API key pre-filled."}
+        </p>
+        <div class="code-block" id="mcp-config-block">{esc_py(mcp_json)}</div>
+        <button class="btn-secondary btn-sm" style="margin-top:0.5rem" onclick="
+          navigator.clipboard.writeText(document.getElementById('mcp-config-block').textContent).then(()=>{{
+            this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',2000);
+          }})">Copy</button>
+      </div>
+    </details>"""
+
+    submit_html = f"""
+    {"" if is_auditor else '''<div style="display:flex;justify-content:flex-end;margin-bottom:1rem">
+      <a href="/portal/submit" style="display:inline-flex;align-items:center;gap:0.4rem;
+         background:var(--blue);color:#fff;border-radius:8px;padding:0.45rem 1rem;
+         font-size:13px;font-weight:600;text-decoration:none">
+        &#x2B; Submit MCP Server
+      </a>
+    </div>'''}
+    {my_submissions_html if my_submissions_html else '<div class="empty-state">No submissions yet.</div>'}"""
 
     return f"""
     <!-- Hero -->
@@ -2158,48 +2489,31 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
       </span>
     </div>
 
-    <!-- Summary strip -->
-    <div class="srv-strip">
-      <div class="srv-strip-cnt">{len(granted_svcs)} servers</div>
-      <div class="srv-strip-div"></div>
-      <div class="srv-strip-item"><span class="dot-green"></span>{n_active} active</div>
-      <div class="srv-strip-item"><span class="dot-red"></span>{n_suspended} suspended</div>
-      <div class="srv-strip-item"><span class="dot-amber"></span>{n_awaiting} awaiting approval</div>
+    <div class="ss-tabs-bar" id="ss-tabs-bar">
+      <button class="adm-tab active" onclick="ssShowTab('home')">Home</button>
+      <button class="adm-tab" onclick="ssShowTab('catalog')">Catalog</button>
+      <button class="adm-tab" onclick="ssShowTab('submit')">Submit</button>
+      <button class="adm-tab" onclick="ssShowTab('profile')">Profile</button>
     </div>
 
-    {my_submissions_html}
+    <div id="ss-panel-home" class="ss-panel">{home_html}</div>
+    <div id="ss-panel-catalog" class="ss-panel" style="display:none">{catalog_html}</div>
+    <div id="ss-panel-submit" class="ss-panel" style="display:none">{submit_html}</div>
+    <div id="ss-panel-profile" class="ss-panel" style="display:none"></div>
 
-    <!-- Submit server CTA (hidden for read-only auditor) -->
-    {"" if is_auditor else '''<div style="display:flex;justify-content:flex-end;margin-bottom:1rem">
-      <a href="/portal/submit" style="display:inline-flex;align-items:center;gap:0.4rem;
-         background:var(--blue);color:#fff;border-radius:8px;padding:0.45rem 1rem;
-         font-size:13px;font-weight:600;text-decoration:none">
-        &#x2B; Submit MCP Server
-      </a>
-    </div>'''}
-
-    <!-- Card grid -->
-    <div class="srv-card-grid">
-      {"".join(cards_html) if cards_html else '<div class="empty-state">No servers accessible for this identity.</div>'}
-    </div>
-
-    <!-- MCP Config snippet (collapsed by default) -->
-    <details style="margin-top:8px">
-      <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#9aa1ab;padding:8px 0;font-family:var(--ff-sans)">
-        MCP config snippet
-      </summary>
-      <div style="margin-top:8px">
-        <p style="font-size:12px;color:#5b626c;margin-bottom:8px">
-          Paste into <code style="font-family:var(--ff-mono);color:#7aa7ff">~/.mcp.json</code>.
-          {"Append <code style=\"font-family:var(--ff-mono)\">?key=YOUR_API_KEY</code> to pre-fill." if not api_key else "API key pre-filled."}
-        </p>
-        <div class="code-block" id="mcp-config-block">{esc_py(mcp_json)}</div>
-        <button class="btn-secondary btn-sm" style="margin-top:0.5rem" onclick="
-          navigator.clipboard.writeText(document.getElementById('mcp-config-block').textContent).then(()=>{{
-            this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',2000);
-          }})">Copy</button>
-      </div>
-    </details>
+    <script>
+    function ssShowTab(name) {{
+      document.querySelectorAll('.ss-panel').forEach(p => p.style.display = 'none');
+      document.querySelectorAll('#ss-tabs-bar .adm-tab').forEach(b => b.classList.remove('active'));
+      document.getElementById('ss-panel-' + name).style.display = 'block';
+      const idx = ['home','catalog','submit','profile'].indexOf(name);
+      document.querySelectorAll('#ss-tabs-bar .adm-tab')[idx].classList.add('active');
+      if (name === 'profile' && !document.getElementById('ss-panel-profile').dataset.loaded) {{
+        htmx.ajax('GET', '/portal/fragments/profile', {{target: '#ss-panel-profile', swap: 'innerHTML'}});
+        document.getElementById('ss-panel-profile').dataset.loaded = '1';
+      }}
+    }}
+    </script>
     """
 
 
@@ -2481,17 +2795,17 @@ async def fragment_admin_servers(request: Request):
             )
 
         rows_html.append(f"""
-        <div class="srv-tbl-row {row_cls}">
-          <div>
-            <div class="srv-cell-name">{esc_py(s.name or "")}</div>
-            <div class="srv-cell-alias">{esc_py(s.name or "")}</div>
+        <div class="srv-card {row_cls}">
+          <div class="srv-card-top">
+            <span class="srv-card-name">{esc_py(s.name or "")}</span>
+            <span class="pill {pill_cls}"><span class="pill-dot"></span>{pill_label}</span>
           </div>
-          <div class="srv-cell-url">{esc_py(s.upstream_url or "—")}</div>
-          <div><span class="pill {pill_cls}"><span class="pill-dot"></span>{pill_label}</span>{maint_badge}{public_badge}</div>
-          <div class="srv-cell-owner">{esc_py(s.owner_sub or "—")}</div>
-          <div><span class="mode-chip">{esc_py(mode_label)}</span></div>
-          <div class="srv-cell-updated">{esc_py(_fmt_time(s.updated_at))}</div>
-          {action_html}
+          <div class="srv-card-meta">{esc_py(s.upstream_url or "—")} &middot; owner: {esc_py(s.owner_sub or "—")}</div>
+          <div class="srv-card-badges">
+            <span class="mode-chip">{esc_py(mode_label)}</span>{maint_badge}{public_badge}
+            <span class="srv-card-updated">{esc_py(_fmt_time(s.updated_at))}</span>
+          </div>
+          <div class="srv-card-actions">{action_html}</div>
         </div>""")
 
     rows_block = "".join(rows_html) if rows_html else (
@@ -2517,12 +2831,8 @@ async def fragment_admin_servers(request: Request):
       </button>
     </div>
 
-    <!-- Table -->
-    <div class="srv-tbl">
-      <div class="srv-tbl-head">
-        <div>SERVER</div><div>UPSTREAM URL</div><div>STATUS</div>
-        <div>OWNER</div><div>INJECTION</div><div>UPDATED</div><div></div>
-      </div>
+    <!-- Card grid -->
+    <div class="srv-card-grid">
       {rows_block}
     </div>
 
@@ -2530,7 +2840,7 @@ async def fragment_admin_servers(request: Request):
     function filterSrv(btn, status) {{
       document.querySelectorAll('#srv-seg .srv-seg-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      document.querySelectorAll('.srv-tbl-row').forEach(r => {{
+      document.querySelectorAll('.srv-card').forEach(r => {{
         if (!status) {{ r.style.display=''; return; }}
         const hasStatus = r.classList.contains('row-' + status) ||
           (!r.classList.contains('row-pending') && !r.classList.contains('row-quarantined') && status === 'approved');
@@ -5006,7 +5316,8 @@ async def fragment_admin_submissions(request: Request):
                 SELECT server_id, name, owner_sub, submission_status, scan_status,
                        injection_mode, data_categories, has_write_ops,
                        github_repo_url, scan_report, review_notes, updated_at,
-                       upstream_idp_config, sbom_components,
+                       upstream_idp_config, sbom_components, service_name, upstream_url,
+                       description, requested_upstream_url,
                        (sbom_cyclonedx IS NOT NULL) AS has_cyclonedx
                 FROM server_registry
                 WHERE submission_status NOT IN ('draft')
@@ -5150,6 +5461,12 @@ async def fragment_admin_submissions(request: Request):
 
         review_action = ""
         if st == "awaiting_review":
+            approve_note = (
+                '<div style="margin-top:0.5rem;font-size:11.5px;color:var(--muted)">'
+                '&#x2139; No repository — Approve issues a starter scaffold only. Nothing goes live; '
+                'the submitter must build it and resubmit with a repo to actually go live.</div>'
+                if not r.github_repo_url else ""
+            )
             review_action = f"""
             <div style="display:flex;gap:0.5rem;margin-top:0.75rem;align-items:center">
               <textarea id="notes-{esc_py(sid)}" placeholder="Review notes (optional)"
@@ -5163,7 +5480,8 @@ async def fragment_admin_submissions(request: Request):
                 <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:12px;padding:0.3rem 0.75rem"
                         onclick="reviewAction('{esc_py(sid)}','reject')">Reject</button>
               </div>
-            </div>"""
+            </div>
+            {approve_note}"""
 
         github_link = ""
         if r.github_repo_url:
@@ -5250,8 +5568,11 @@ async def fragment_admin_submissions(request: Request):
             <span style="background:{color}22;color:{color};border:1px solid {color}44;
                          border-radius:20px;padding:2px 10px;font-size:12px;font-weight:600">{esc_py(label)}</span>
           </div>
+          {f'<div style="margin-top:0.4rem;font-size:13px;color:var(--text)">{esc_py(r.description)}</div>' if r.description else '<div style="margin-top:0.4rem;font-size:12px;color:#fca5a5">&#x26A0; No description provided — ask the submitter what this server does before approving.</div>'}
           <div style="margin-top:0.5rem;display:flex;gap:1rem;flex-wrap:wrap;font-size:12px;color:var(--muted)">
             <span>Mode: <span style="color:var(--text)">{esc_py(r.injection_mode or '—')}</span></span>
+            {f'<span>Credential: <span style="color:var(--text)">{esc_py(r.service_name)}</span></span>' if r.service_name else ''}
+            {f'<span>Backend (live): <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(r.upstream_url)}</span></span>' if r.upstream_url else (f'<span>Backend (requested): <span style="color:var(--text);font-family:var(--ff-mono)">{esc_py(r.requested_upstream_url)}</span></span>' if r.requested_upstream_url else ('<span style="color:var(--muted)">Backend URL: n/a (no repo yet)</span>' if not r.github_repo_url else '<span style="color:#fbbf24">&#x26A0; Backend URL: not stated — check the description before approving</span>'))}
             <span>Write ops: <span style="color:var(--text)">{'Yes' if r.has_write_ops else 'No'}</span></span>
           </div>
           {f'<div style="margin-top:0.4rem">{cats_html}</div>' if cats_html else ''}
@@ -5284,7 +5605,11 @@ async def fragment_admin_submissions(request: Request):
     )
     return HTMLResponse(f"""
     <div class="section-title">&#x1F4E5; Submissions <span class="count">{count_badge}</span>
-      <button class="btn-secondary" style="margin-left:auto;font-size:12px"
+      <a href="/docs/admin/submission-review.md" target="_blank" rel="noopener"
+         style="margin-left:auto;font-size:12px;color:var(--blue);text-decoration:none;align-self:center">
+        Reviewer guide &#x2197;
+      </a>
+      <button class="btn-secondary" style="font-size:12px"
               hx-get="/portal/fragments/admin/submissions" hx-target="#adm-content" hx-swap="innerHTML">
         &#x21BB; Refresh
       </button>
@@ -5650,6 +5975,12 @@ async def submit_wizard_page(request: Request):
       <a href="/portal" style="color:var(--muted);font-size:13px;text-decoration:none">&#x2190; Portal</a>
       <span style="color:#334155">/</span>
       <span style="font-weight:700">Submit MCP Server</span>
+      <a href="/docs/user/self-service-onboarding.md" target="_blank" rel="noopener"
+         style="margin-left:auto;color:var(--blue);font-size:12px;text-decoration:none">Walkthrough docs &#x2197;</a>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin:-1rem 0 1.5rem">
+      Not sure which auth mode to pick? See the
+      <a href="/docs/user/auth-mode-decision-guide.md" target="_blank" rel="noopener" style="color:var(--blue)">auth-mode decision guide</a>.
     </div>
 
     <div class="wiz-steps" id="wiz-steps">
@@ -5668,7 +5999,7 @@ async def submit_wizard_page(request: Request):
 <script>
 // Wizard state — accumulated across steps, submitted in one shot
 const _wiz = {{
-  name: '', description: '', github_repo_url: null,
+  name: '', description: '', github_repo_url: null, requested_upstream_url: null,
   injection_mode: null, upstream_idp_type: null, upstream_idp_config: {{}},
   mode_override_reason: null,
   data_categories: [], has_write_ops: false,
@@ -5696,8 +6027,8 @@ function showStep1() {{
       <label class="wiz-label">Server name (slug, e.g. <code style="color:var(--cyan)">my-analytics</code>)</label>
       <input id="s1-name" class="wiz-input" placeholder="my-mcp-server" value="${{_wiz.name}}">
 
-      <label class="wiz-label" style="margin-top:1rem">Short description</label>
-      <input id="s1-desc" class="wiz-input" placeholder="What does this server do?" value="${{_wiz.description}}">
+      <label class="wiz-label" style="margin-top:1rem">Short description <span style="color:#f87171">*</span></label>
+      <input id="s1-desc" class="wiz-input" placeholder="What does this server do? (required — the reviewer approves based on this)" value="${{_wiz.description}}">
 
       <label class="wiz-label" style="margin-top:1rem">GitHub repository URL</label>
       <input id="s1-repo" class="wiz-input" placeholder="https://github.com/your-org/your-repo"
@@ -5708,8 +6039,17 @@ function showStep1() {{
         Grant this account <strong>read access</strong> to your repository before submitting.
       </div>
 
+      <label class="wiz-label" style="margin-top:1rem">Backend URL (where does/will this run?) <span style="color:#f87171">*</span></label>
+      <input id="s1-backend-url" class="wiz-input" placeholder="https://your-server.example.com/mcp"
+             value="${{_wiz.requested_upstream_url || ''}}">
+      <div style="font-size:11px;color:var(--muted);margin-top:0.35rem">
+        Always required — a reviewer cannot approve a server they can't locate. Informational only at
+        this stage (not validated yet); you'll confirm the live, verified URL after approval.
+        No backend at all yet? Don't submit — call get_server_scaffold instead, no review needed for that.
+      </div>
+
       <label style="display:flex;align-items:center;gap:0.5rem;margin-top:1rem;font-size:13px;cursor:pointer">
-        <input type="checkbox" id="s1-nocode" onchange="toggleNoCode(this)"> I don&rsquo;t have code yet
+        <input type="checkbox" id="s1-nocode" onchange="toggleNoCode(this)"> I don&rsquo;t have a repo yet (backend already running elsewhere)
       </label>
 
       <div style="margin-top:1.5rem;display:flex;justify-content:flex-end">
@@ -5734,14 +6074,20 @@ function submitStep1() {{
   const name = document.getElementById('s1-name').value.trim().toLowerCase();
   const desc = document.getElementById('s1-desc').value.trim();
   const repo = document.getElementById('s1-repo').value.trim();
+  const backendUrl = document.getElementById('s1-backend-url').value.trim();
   const nocode = document.getElementById('s1-nocode')?.checked;
   if (!name) {{ alert('Server name is required'); return; }}
   if (!/^[a-z0-9][a-z0-9\\-]{{1,62}}$/.test(name)) {{
     alert('Name must be 2-63 chars, lowercase letters, numbers, and hyphens only'); return;
   }}
+  if (!desc) {{ alert('Description is required — the reviewer approves your server based on this.'); return; }}
+  if (!backendUrl) {{
+    alert('Backend URL is required — a reviewer cannot approve a server they can\\'t locate. No backend yet? Use "Get scaffold" from the self-service tools instead of this wizard.'); return;
+  }}
   _wiz.name = name;
   _wiz.description = desc;
   _wiz.github_repo_url = (nocode || !repo) ? null : repo;
+  _wiz.requested_upstream_url = backendUrl;
   showStep2();
 }}
 
@@ -6162,6 +6508,8 @@ function showStep4() {{
             <td style="font-weight:600">${{_wiz.name}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Repository</td>
             <td>${{repoLine}}</td></tr>
+        <tr><td style="color:var(--muted);padding:0.35rem 0">Backend URL</td>
+            <td>${{_wiz.requested_upstream_url}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Auth mode</td>
             <td style="font-weight:600">${{modeLabel}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Data categories</td>
@@ -6182,7 +6530,7 @@ function showStep4() {{
       <div style="margin-top:1.5rem;display:flex;justify-content:space-between;align-items:center">
         <button class="btn-secondary" onclick="showStep3()">&#x2190; Back</button>
         <button class="btn-primary" id="submit-btn" onclick="doSubmit()">
-          ${{_wiz.github_repo_url ? 'Submit for review &#x2192;' : 'Get scaffold &#x2193;'}}
+          Submit for review &#x2192;
         </button>
       </div>
     </div>`;
@@ -6216,6 +6564,7 @@ async function doSubmit() {{
         data_categories: _wiz.data_categories,
         has_write_ops: _wiz.has_write_ops,
         description: _wiz.description,
+        requested_upstream_url: _wiz.requested_upstream_url,
       }}),
     }});
 
@@ -6277,9 +6626,11 @@ async function showResult(status) {{
   document.getElementById('wiz-body').innerHTML = `
     <div class="wiz-card">
       <div style="font-size:36px;margin-bottom:0.5rem;text-align:center">&#x1F4E6;</div>
-      <div style="font-size:20px;font-weight:700;margin-bottom:0.25rem;text-align:center">Scaffold ready</div>
+      <div style="font-size:20px;font-weight:700;margin-bottom:0.25rem;text-align:center">Submitted for review — scaffold ready</div>
       <div style="font-size:13px;color:var(--muted);text-align:center;margin-bottom:1.5rem">
-        Answer the design questions below, then download your starter code.
+        This design just entered the security review queue. Download the scaffold below and start
+        building while the reviewer looks at it — approval issues starter code only, nothing goes live
+        until you resubmit with a real repository.
       </div>
 
       <div style="font-size:13px;font-weight:600;margin-bottom:0.75rem;color:var(--muted)">

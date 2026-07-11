@@ -841,6 +841,155 @@ async def update_tool(
 
 
 # ---------------------------------------------------------------------------
+# POST /tools/{tool_id}/release — CR-07 (WP-B3) remainder: dedicated,
+# evidence-gated quarantine release.
+# ---------------------------------------------------------------------------
+@router.post("/{tool_id}/release")
+async def release_tool(
+    tool_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """
+    Release a quarantined tool — the CR-07 remainder the generic PATCH
+    endpoint's inline evidence gate (parent server approved + scan passed)
+    was written to anticipate. Unlike PATCH status='active', this endpoint:
+      - requires a reviewer role (admin/platform_admin/security_reviewer),
+        not just admin;
+      - runs a live invocation probe against the upstream (an MCP
+        `initialize` handshake, same SSRF/DNS-rebind-safe pinned-IP path
+        `discover_tools` already uses) — a tool that fails to respond is
+        NEVER released, regardless of scan/approval state;
+      - records `released_by`/`released_at`/`release_notes` (immutable
+        attribution distinct from a generic status-change actor);
+      - emits a dedicated `TOOL_RELEASED` audit event instead of the generic
+        `TOOL_STATUS_CHANGED` one, so an auditor can find every deliberate
+        quarantine release without pattern-matching status transitions.
+
+    Deploy success (WP-B3 phases 2-4, not yet built) never auto-releases —
+    this endpoint is the only path from quarantined -> active for a
+    platform-deployed OR self-hosted tool alike.
+    """
+    import logging as _logging
+
+    import httpx
+    from sqlalchemy import text as _text
+
+    from app.core.config import settings
+
+    _logger = _logging.getLogger(__name__)
+
+    roles: list[str] = getattr(request.state, "client_roles", []) or []
+    client_id: str = getattr(request.state, "client_id", "unknown")
+    if not any(r in {"admin", "platform_admin", "security_reviewer"} for r in roles):
+        raise HTTPException(403, {"code": "FORBIDDEN", "message": "Requires a reviewer role."})
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    release_notes = (body or {}).get("notes") or ""
+
+    row = (await db.execute(_text(
+        """
+        SELECT t.tool_id, t.name, t.status, t.upstream_url, t.server_id,
+               s.status AS server_status, s.scan_status AS server_scan_status,
+               s.upstream_allowlist_entry
+        FROM tool_registry t
+        LEFT JOIN server_registry s ON s.server_id = t.server_id
+        WHERE t.tool_id = :tool_id AND t.deleted_at IS NULL
+        """
+    ), {"tool_id": str(tool_id)})).mappings().first()
+    if row is None:
+        raise HTTPException(404, {"code": "NOT_FOUND", "message": f"Tool '{tool_id}' not found."})
+
+    if row["status"] != "quarantined":
+        raise HTTPException(409, {
+            "code": "NOT_QUARANTINED",
+            "message": f"Tool status is {row['status']!r}, not 'quarantined' — nothing to release.",
+        })
+
+    # Same evidence gate as PATCH's inline release check (CR-07): a bare
+    # reviewer role is not enough — the parent server must be approved and
+    # its supply-chain scan must have passed (or been genuinely not
+    # applicable). A 'review_required' scan (CR-12) is deliberately NOT
+    # sufficient here either — that state exists precisely so a human looks
+    # again, and "looking again" for THIS tool means clearing it through this
+    # endpoint only once the underlying scan concern is resolved upstream.
+    if row["server_id"] and row["server_status"] != "approved":
+        raise HTTPException(422, {"code": "RELEASE_DENIED", "message": "Cannot release: parent server is not approved."})
+    if row["server_id"] and row["server_scan_status"] not in ("passed", "not_applicable"):
+        raise HTTPException(422, {
+            "code": "RELEASE_DENIED",
+            "message": f"Cannot release: parent server scan_status={row['server_scan_status']!r}, not passed.",
+        })
+
+    # Final invocation probe (PRD-8 §4) — a quarantine release must never be
+    # granted on paperwork alone; the upstream must actually answer. Reuses
+    # the exact SSRF-validate + DNS-rebind-revalidate + pinned-IP-connect path
+    # discover_tools already uses, so this probe carries the same
+    # TOCTOU/SSRF guarantees as every other outbound call this platform makes.
+    upstream_url = row["upstream_url"]
+    try:
+        validate_server_url(upstream_url, allow_http_localhost=(settings.ENVIRONMENT == "development"))
+        pinned_ips = await revalidate_upstream_ip_at_invoke(
+            upstream_url=upstream_url,
+            registered_allowlist_entry=row["upstream_allowlist_entry"],
+        )
+        from urllib.parse import urlparse as _urlparse
+        hostname = _urlparse(upstream_url).hostname or ""
+        transport = PinnedIPTransport(pinned_ips[0], hostname) if (pinned_ips and hostname) else None
+        async with httpx.AsyncClient(transport=transport) as client:
+            probe_resp = await client.post(
+                upstream_url,
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                              "clientInfo": {"name": "mcp-security-platform-release-probe", "version": "1.0.0"}},
+                },
+                headers={"Accept": "application/json, text/event-stream"},
+                timeout=10,
+            )
+            probe_resp.raise_for_status()
+    except (SSRFError, UpstreamRevalidationError) as exc:
+        raise HTTPException(422, {"code": "RELEASE_DENIED", "message": f"Invocation probe rejected upstream: {exc}"})
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, {"code": "UPSTREAM_UNREACHABLE", "message": f"Invocation probe failed — tool not released: {exc}"})
+
+    try:
+        await db.execute(_text(
+            """
+            UPDATE tool_registry
+            SET status = 'active', released_by = :released_by, released_at = now(),
+                release_notes = :notes, updated_at = now()
+            WHERE tool_id = :tool_id
+            """
+        ), {"released_by": client_id, "notes": release_notes, "tool_id": str(tool_id)})
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        _logger.error("release_tool DB write failed — rolled back: %s", exc, extra={"tool_id": str(tool_id)})
+        raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Release failed."})
+
+    try:
+        from mcp_audit_logger import AuditEvent, AuditEventType, MCPAuditLogger
+        audit_logger = MCPAuditLogger()
+        event = AuditEvent(
+            event_type=AuditEventType.TOOL_RELEASED,
+            client_id=client_id,
+            request_id=getattr(request.state, "request_id", ""),
+        )
+        audit_logger.emit_admin_event(event, extra_fields={
+            "tool_id": str(tool_id), "tool_name": row["name"],
+            "released_by": client_id, "release_notes": release_notes,
+        })
+    except Exception as exc:
+        _logger.error("release_tool audit emit failed", extra={"error": str(exc)})
+
+    return await get_tool(tool_id, request, db)
+
+
+# ---------------------------------------------------------------------------
 # DELETE /tools/{tool_id}
 # ---------------------------------------------------------------------------
 @router.delete("/{tool_id}", status_code=204, response_class=Response)
@@ -1436,6 +1585,10 @@ async def invoke_tool(
             # 6.2: typed principal for the discovery==invoke entitlement gate.
             principal_id=getattr(request.state, "principal_id", None),
             principal_type=getattr(request.state, "principal_type", None),
+            # CR-10 (WP-A1): typed principal issuer/display-sub, forwarded
+            # downstream as X-Principal-Issuer / X-Principal-Display-Sub.
+            principal_issuer=getattr(request.state, "principal_issuer", None),
+            principal_display_sub=getattr(request.state, "principal_display_sub", None),
             # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
             user_kc_token=getattr(request.state, "user_kc_token", None),
             # Task 1.2: "who" enrichment fields for the audit trail.
@@ -1708,10 +1861,35 @@ def resolve_kc_token_audience(injection_mode: str | None, upstream_idp_config) -
     return (cfg or {}).get("audience")
 
 
+def resolve_approved_kc_token_audience(
+    injection_mode: str | None, approved_token_audience: str | None
+) -> str | None:
+    """
+    WP-A2 (CR-13 + CR-03 fold-in): unlike resolve_kc_token_audience() above
+    (which reads the SUBMITTER-REQUESTED upstream_idp_config.audience — kept
+    only for its existing call sites/tests, never used for the live discovery
+    wiring below anymore), this reads the REVIEWER-APPROVED
+    server_registry.approved_token_audience column, set only by the admin
+    /approve endpoint after oauth_policy validation
+    (app.services.oauth_policy). Discovery time is where
+    tool_registry.kc_token_audience is written, so sourcing it from
+    approved_token_audience here — instead of the requested config — is the
+    wiring point that guarantees the runtime dispatcher
+    (credential_broker/dispatcher.py) can never see anything but a
+    reviewer-approved audience for kc_token_exchange/oauth_user_token mode.
+    """
+    mode = injection_mode or "none"
+    if mode not in ("kc_token_exchange", "oauth_user_token"):
+        return None
+    return approved_token_audience or None
+
+
 async def _run_tool_discovery(
     server_id: str,
     db: AsyncSession,
     actor_client_id: str,
+    *,
+    require_approved: bool = True,
 ) -> JSONResponse:
     """
     Discover tools from an approved upstream MCP server.
@@ -1724,6 +1902,14 @@ async def _run_tool_discovery(
     there is the submitter, not an admin — the admin already approved the
     submission; this call does not re-check admin role, callers are
     responsible for their own authorization).
+
+    require_approved (H-01, 2026-07-11 audit): keyword-only, defaults to True
+    (unchanged behavior). The verify-time callers in deploy_verifier.py pass
+    False because they now intentionally run discovery BEFORE promoting
+    server_registry.status to 'approved' — status is the actual entitlement/
+    credential-issuance gate, so it must only flip after probes succeed, not
+    before. Never exposed as a request parameter on the HTTP route below —
+    only internal service code can set it False.
 
     Per Task 13 specification:
     1. Verify server exists and status='approved' (404 if not)
@@ -1753,7 +1939,8 @@ async def _run_tool_discovery(
             text(
                 """
                 SELECT server_id, upstream_url, service_name, status, upstream_allowlist_entry,
-                       sbom_components, github_repo_url, injection_mode, upstream_idp_config
+                       sbom_components, github_repo_url, injection_mode, upstream_idp_config,
+                       approved_token_audience
                 FROM server_registry
                 WHERE server_id = :server_id AND deleted_at IS NULL
                 LIMIT 1
@@ -1769,7 +1956,7 @@ async def _run_tool_discovery(
     if server_row is None:
         raise HTTPException(404, {"code": "NOT_FOUND", "message": f"Server '{server_id}' not found."})
 
-    if server_row.status != "approved":
+    if require_approved and server_row.status != "approved":
         raise HTTPException(
             403,
             {
@@ -1780,14 +1967,16 @@ async def _run_tool_discovery(
 
     upstream_url = server_row.upstream_url
 
-    # F-14 fix: carry the server's injection_mode onto each discovered tool, and —
-    # for kc_token_exchange mode — resolve kc_token_audience from the wizard's
-    # upstream_idp_config.audience. This is the wiring that was previously
-    # entirely missing: the wizard wrote server_registry.upstream_idp_config but
-    # nothing ever copied it onto tool_registry.kc_token_audience, the column the
-    # runtime dispatcher actually reads (credential_broker/dispatcher.py).
+    # F-14 fix (superseded by WP-A2/CR-13+CR-03): carry the server's
+    # injection_mode onto each discovered tool, and — for kc_token_exchange
+    # mode — resolve kc_token_audience from the REVIEWER-APPROVED
+    # approved_token_audience column (never the submitter-requested
+    # upstream_idp_config directly — that was the exact CR-13/CR-03 gap: an
+    # unreviewed submitter value flowing straight to the runtime dispatcher).
     _server_injection_mode = server_row.injection_mode or "none"
-    _kc_audience = resolve_kc_token_audience(_server_injection_mode, server_row.upstream_idp_config)
+    _kc_audience = resolve_approved_kc_token_audience(
+        _server_injection_mode, server_row.approved_token_audience
+    )
 
     # N3 fix: SSRF re-validation at call time (closes DNS-rebind window).
     # Step 2a: Static SSRF allowlist check.

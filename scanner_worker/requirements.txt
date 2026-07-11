@@ -1,0 +1,8 @@
+# scanner-worker (CR-14 / WP-B1) — minimal, unprivileged execution environment.
+# Deliberately independent of proxy/pyproject.toml: this process must never
+# import proxy application code (which would drag in DB-admin/Vault/gateway
+# secret handling paths) — see scanner_worker/README.md.
+asyncpg==0.30.0
+pip-audit==2.7.3
+PyYAML==6.0.2
+prometheus-client==0.21.1

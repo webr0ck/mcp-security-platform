@@ -424,6 +424,15 @@ async def oidc_callback(
     if not token_endpoint:
         return JSONResponse(status_code=503, content={"error": "oidc_discovery_failed"})
 
+    # Discovery always advertises the external (browser-facing) issuer URL, even
+    # though _discover() itself fetched the document over the internal network.
+    # Replace external with internal here so this server-to-server call goes
+    # directly to Keycloak over the container network instead of hairpinning
+    # back out through nginx's external TLS listener (whose cert the proxy
+    # container does not trust) — mirrors the internal->external rewrite for
+    # auth_endpoint above.
+    token_endpoint = token_endpoint.replace(_issuer_url_external(), _issuer_url_internal())
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -881,9 +890,11 @@ async def token_refresh(
             content={"error": "session_revoked_relogin_required"},
         )
 
-    # Exchange refresh token at KC
+    # Exchange refresh token at KC (use internal URL — see R-1 fix in oidc_callback
+    # above: discovery advertises the external issuer URL for token_endpoint too).
     discovery = await _discover()
     token_endpoint = discovery.get("token_endpoint", "")
+    token_endpoint = token_endpoint.replace(_issuer_url_external(), _issuer_url_internal())
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(

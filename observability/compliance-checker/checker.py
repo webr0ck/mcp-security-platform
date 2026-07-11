@@ -37,6 +37,7 @@ from uuid import uuid4
 
 import httpx
 from datetime import date
+from urllib.parse import urlparse
 from uuid import UUID
 
 # Task 0.2: import the single shared canonicalizer from the audit-logger library.
@@ -91,8 +92,37 @@ MINIO_RETENTION_DAYS = int(os.getenv("MINIO_RETENTION_DAYS", "90"))
 # Archival cutoff: audit_events rows older than this many days are archived.
 AUDIT_ARCHIVAL_CUTOFF_DAYS = int(os.getenv("AUDIT_ARCHIVAL_CUTOFF_DAYS", "90"))
 COMPLIANCE_SAMPLE_SIZE = int(os.getenv("COMPLIANCE_SAMPLE_SIZE", "1000"))
-COMPLIANCE_ALERT_WEBHOOK = os.getenv(
-    "COMPLIANCE_ALERT_WEBHOOK", "http://alertmanager:9093/api/v2/alerts"
+
+
+def _normalize_webhook_url(raw: str, default: str) -> str:
+    """
+    Normalize COMPLIANCE_ALERT_WEBHOOK into a usable absolute http(s) URL.
+
+    docker-compose.yml injects this var as `${COMPLIANCE_ALERT_WEBHOOK:-}` — when
+    unset on the host, that resolves to an empty string that IS present in the
+    container environment. os.getenv()'s default only applies when the key is
+    absent entirely, so an empty-but-set value silently wins over `default`
+    and reaches httpx as "", which raises "Request URL is missing an
+    'http://' or 'https://' protocol." at alert-send time. Collapsing falsy
+    values to `default` here, plus defaulting a bare host:port to http://,
+    means a bad value fails loudly at import time instead.
+    """
+    url = raw or default
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        url = f"http://{url}"
+        parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise RuntimeError(
+            f"COMPLIANCE_ALERT_WEBHOOK is not a usable http(s) URL: {raw!r} "
+            "(expected e.g. http://alertmanager:9093/api/v2/alerts)"
+        )
+    return url
+
+
+COMPLIANCE_ALERT_WEBHOOK = _normalize_webhook_url(
+    os.getenv("COMPLIANCE_ALERT_WEBHOOK", ""),
+    "http://alertmanager:9093/api/v2/alerts",
 )
 
 # ---------------------------------------------------------------------------

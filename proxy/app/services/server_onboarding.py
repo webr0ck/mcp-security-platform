@@ -29,6 +29,7 @@ import socket
 from urllib.parse import urlparse
 
 from app.services.ssrf import _is_blocked_ip
+from app.services.auth_modes import all_mode_values
 
 logger = logging.getLogger(__name__)
 
@@ -65,26 +66,30 @@ def validate_mode_and_idp(
         InvalidOnboardingConfig: if incompatible combination
     """
     # Validate injection_mode is known
-    valid_modes = {
-        "none",
-        "service",
-        "user",
-        "service_account",
-        "oauth_user_token",
-        "entra_client_credentials",
-        "entra_user_token",
-    }
+    # WP-A5 (CR-02 completion): sourced from the canonical AuthMode enum
+    # (services/auth_modes.py::all_mode_values) instead of a hand-maintained
+    # set. This function is called from server_registry.py's admin-ish
+    # create_server path, whose own ServerRegister/ServerCreate Pydantic
+    # models already accept basic_auth/passthrough — the old hardcoded set
+    # here did NOT, so a request with mode='basic_auth' would pass pydantic
+    # validation and then be rejected here as "unknown injection_mode": the
+    # exact cross-call-site drift CR-02 exists to eliminate.
+    valid_modes = all_mode_values()
     if injection_mode not in valid_modes:
         raise InvalidOnboardingConfig(
             f"unknown injection_mode '{injection_mode}'; "
             f"must be one of {valid_modes}"
         )
 
-    # oauth_user_token requires gateway_idp
-    if injection_mode == "oauth_user_token":
+    # kc_token_exchange (canonical name) / oauth_user_token (deprecated alias)
+    # both require gateway_idp. WP-A5: previously only the alias name was
+    # checked here — a real gap now that kc_token_exchange is the name
+    # submitters are steered toward (see submission.py's design-assist
+    # recommendation).
+    if injection_mode in ("oauth_user_token", "kc_token_exchange"):
         if upstream_idp_type != "gateway_idp":
             raise InvalidOnboardingConfig(
-                f"injection_mode='oauth_user_token' requires "
+                f"injection_mode='{injection_mode}' requires "
                 f"upstream_idp_type='gateway_idp', got '{upstream_idp_type}'"
             )
 
@@ -114,7 +119,42 @@ def validate_mode_and_idp(
                 "with issuer and client_id"
             )
 
+    # WP-A3 (CR-04 remainder): generic external OAuth requires upstream_idp_type=
+    # 'external_oauth' + config with issuer/client_id (validate_upstream_idp_config
+    # below) plus authorization_endpoint/token_endpoint (checked at WP-A2's
+    # approval-time oauth_policy gate, not here — this is structural-shape only).
+    elif injection_mode in ("external_oauth_client_credentials", "external_oauth_user_token"):
+        if upstream_idp_type != "external_oauth":
+            raise InvalidOnboardingConfig(
+                f"injection_mode='{injection_mode}' requires "
+                f"upstream_idp_type='external_oauth', got '{upstream_idp_type}'"
+            )
+        if not upstream_idp_config:
+            raise InvalidOnboardingConfig(
+                f"injection_mode='{injection_mode}' requires upstream_idp_config "
+                "with issuer, client_id, authorization_endpoint, token_endpoint"
+            )
+
     # user, service_account, service, none: no IdP type requirement
+
+
+_UPSTREAM_IDP_TYPE_BY_MODE: dict[str, str] = {
+    "oauth_user_token": "gateway_idp",
+    "kc_token_exchange": "gateway_idp",
+    "entra_user_token": "entra",
+    "entra_client_credentials": "entra",
+    "external_oauth_client_credentials": "external_oauth",
+    "external_oauth_user_token": "external_oauth",
+}
+
+
+def upstream_idp_type_for_mode(injection_mode: str) -> str | None:
+    """The upstream_idp_type validate_mode_and_idp requires for a given
+    injection_mode, or None for modes with no IdP-type requirement (user,
+    service, service_account, basic_auth, none). Single source of truth so
+    profile-driven registration (WP-A6 Finding 1) derives the same mapping
+    validate_mode_and_idp enforces, instead of re-guessing it."""
+    return _UPSTREAM_IDP_TYPE_BY_MODE.get(injection_mode)
 
 
 # ============================================================================
@@ -192,6 +232,32 @@ def validate_upstream_idp_config(
             if not isinstance(scope, str):
                 raise InvalidOnboardingConfig(
                     f"upstream_idp_config['scopes'] must contain only strings, found {type(scope).__name__}"
+                )
+
+    # WP-A3 (CR-04 remainder): a generic external_oauth config has no
+    # hardcoded endpoints to fall back to (unlike Entra, whose endpoints are
+    # derived from tenant_id) — authorization_endpoint/token_endpoint MUST be
+    # present and well-formed, or the dispatcher has nowhere to send the
+    # authorization_code/client_credentials request.
+    if upstream_idp_type == "external_oauth":
+        for field in ("authorization_endpoint", "token_endpoint"):
+            value = upstream_idp_config.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise InvalidOnboardingConfig(
+                    f"upstream_idp_config['{field}'] is required for upstream_idp_type="
+                    f"'external_oauth' and must be a non-empty string"
+                )
+            parsed_endpoint = urlparse(value)
+            if not parsed_endpoint.scheme or not parsed_endpoint.netloc:
+                raise InvalidOnboardingConfig(
+                    f"upstream_idp_config['{field}'] must be a valid URI, got '{value}'"
+                )
+        if "client_auth_method" in upstream_idp_config:
+            method = upstream_idp_config["client_auth_method"]
+            if method not in ("client_secret_post", "client_secret_basic"):
+                raise InvalidOnboardingConfig(
+                    "upstream_idp_config['client_auth_method'] must be 'client_secret_post' "
+                    f"or 'client_secret_basic', got {method!r}"
                 )
 
 

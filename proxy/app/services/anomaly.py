@@ -107,15 +107,24 @@ def _score_window(window: list[str]) -> tuple[float, str | None, str | None]:
     return round(score, 4), pattern, description
 
 
-async def detect(client_id: str, tool_name: str) -> AnomalyDetectionResult:
+async def detect(client_id: str, tool_name: str, method: str | None = None) -> AnomalyDetectionResult:
     """
     Push the current tool invocation into the Redis sliding window and score it.
 
     If score >= ANOMALY_ALERT_THRESHOLD, creates an AnomalyAlert in PostgreSQL
     (write-behind, async — failure is logged but doesn't block the invocation path).
 
+    R-4: a JSON-RPC "tools/list" call is discovery only (no side effects on the
+    upstream) and must not count toward the rapid-successive-invocations window —
+    a normal discovery sweep (or the R-2 sub-tool-name resolution helper, which
+    itself issues a tools/list per registry tool) would otherwise inflate the
+    window and trip Pattern 3 for callers who never actually invoked anything.
+
     Returns AnomalyDetectionResult with the current score.
     """
+    if method == "tools/list":
+        return AnomalyDetectionResult(anomaly_score=0.0, alert_triggered=False)
+
     try:
         window = await push_anomaly_invocation(client_id, tool_name)
     except Exception as exc:

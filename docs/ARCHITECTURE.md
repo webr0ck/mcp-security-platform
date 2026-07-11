@@ -86,6 +86,45 @@ Three enforcement layers sit in front of network-isolated backends.
 Backend MCP servers are **not** on this diagram's trust plane: they sit behind the proxy with no
 inbound route to it (see §4).
 
+**mTLS listener split (lab only, 2026-07-08).** `ssl_verify_client optional` is a TLS-handshake-time,
+listener-wide setting — nginx cannot scope it to a location, so the single `:8443` listener sent an
+optional client-certificate request on *every* connection, including `/mcp` traffic that never goes
+near `/api/v1/tools/`. Windows Schannel-based MCP clients (observed: Codex) fail that handshake with
+`SEC_E_ILLEGAL_MESSAGE` (`0x80090326`) before the request layer ever sees it — curl and OIDC/OAuth
+flows are unaffected, which is why this only surfaced for one client. The lab config
+(`lab/nginx/conf.d/mcp-proxy-lab.conf`) now runs two listeners: `:8443` with `ssl_verify_client off`
+for all public/OAuth/MCP traffic, and a dedicated `:8445` (`GATEWAY_MTLS_PORT`) that keeps
+`ssl_verify_client optional` and serves `/api/v1/tools/` only. **Production
+(`gateway/nginx/conf.d/mcp-proxy.conf`) still has the single-listener design and has not been split**
+— any Windows-Schannel MCP client hitting a production deployment's `:443` would hit the same failure.
+Tracked as an open item, not yet fixed (production nginx changes need their own sign-off).
+
+**`/api/v1/tools/` no longer requires a client cert on `:8443` (lab, 2026-07-11).** The path used
+to hard-401 at nginx on `:8443` for every request regardless of credential, forcing any caller —
+including OAuth-authenticated shell/CLI clients that structurally cannot present a client cert
+(they're not the same client as the browser/TLS layer) — onto the `:8445` mTLS listener. It now
+forwards like any other API path; the app's existing auth chain (session JWT / OIDC bearer / API
+key) and RBAC (`admin`/`platform_admin`/`agent`/`user` are all already permitted on this route,
+see `app/middleware/rbac.py`) gate it instead, so a no-cert **and** no-session request still 401s —
+fail-closed is preserved, just enforced one layer up. Cert-based agent identity (`X-Client-Cert-CN`)
+remains available only via the dedicated `:8445` listener, unchanged. Production's single-listener
+`:443` config already only *optionally* requests a client cert per §2's INV-009 row below, so this
+same OAuth-fallback behavior was already true there.
+
+**OIDC token exchange hairpinned through the external TLS listener (lab, 2026-07-11 — PRD-0008
+R-1).** Keycloak's discovery document advertises the **external** issuer URL
+(`https://<LAB_HOST>:8443/...`) for every endpoint, including `token_endpoint`, regardless of
+whether the document itself was fetched internally — `KC_HOSTNAME` fixes the advertised URLs
+platform-wide. `oidc_browser.py`'s `/login` redirect already rewrote `auth_endpoint`
+internal→external before sending the browser there; the server-to-server token exchange
+(`oidc_callback`, and identically `token_refresh`) had no equivalent external→internal rewrite, so
+the proxy container POSTed to its own external address and hairpinned back through nginx's TLS
+listener — whose `mcp-step-ca`-issued cert the proxy's default trust store does not carry, so every
+login failed closed with a 502 (`token_exchange_failed`). Fixed by rewriting `token_endpoint`
+external→internal (mirroring the existing `auth_endpoint` rewrite) before both POSTs, so the
+exchange goes directly to `lab-keycloak:8080` over the container network. No TLS trust or hairpin
+question to solve — just don't hairpin.
+
 ---
 
 ## 3. Service catalogue
@@ -157,6 +196,18 @@ mTLS / OIDC session / API key
   → response
 ```
 
+**Single-tool-per-server registry wrappers didn't resolve to a real upstream tool name (lab,
+2026-07-11 — PRD-0008 R-2).** The MCP path's direct `tools/call` dispatch (`_route_to_registry` in
+`routers/mcp_server.py`) forwarded `tool_registry.name` (e.g. `"gitea-repos"`) verbatim as the
+outgoing `params.name` — but the upstream MCP server's real per-function tool names are different
+(e.g. `list_repos`, `get_repo`, ...), and no column stored the mapping, so every such wrapper bounced
+"Unknown tool: gitea-repos". Fixed reactively rather than by an always-resolve-first rewrite (which
+would have re-triggered discovery for already-correctly-routed individually-registered tools too):
+on that specific upstream error signature, `_resolve_upstream_subtool_name` issues a `tools/list`
+through the *same* `invoke_tool()` pipeline (identical entitlement/OPA/credential-injection
+enforcement as any real call — this is not an authorization bypass) and retries once with the
+resolved name, caching the result per `tool_id` for 300s.
+
 ### 5.2 Credential enrollment (zero raw credentials to the client)
 
 ```
@@ -182,16 +233,56 @@ Triggered by `invoke_tool()` when a tool's `injection_mode != none`. Crypto, per
 - **AES-256-GCM** decryption with **AAD row-binding** `(user_sub, service, tool_id, owner_type)` —
   prevents credential-swap attacks; KEK bytearray is zeroed after use.
 - **Injection modes** (`dispatcher.py`): `service`, `user`, `service_account`, `kc_token_exchange`
-  (alias `oauth_user_token`, RFC 8693), `entra_client_credentials` active; `passthrough` /
-  `entra_user_token` exist in code but aren't settable via the admin API **(roadmap)**. An unknown
-  mode **fails closed**.
-  `kc_token_exchange`'s proxy-side audience allowlist (Codex review CR-03, partially fixed) is
-  `KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES` (comma-separated env setting, default `lab-tickets`) —
-  previously a hardcoded Python-literal frozenset, which meant onboarding any new same-IdP
-  audience required a code change and redeploy. Still deliberately config/env-driven, not
-  DB-driven, so a malicious/buggy `server_registry` row cannot widen the mint. **Open**: no
-  per-server `approved_token_audience`/`approved_token_scopes` columns, no requested-vs-approved
-  reviewer UI, no full exchanged-token actor/delegation claim verification.
+  (alias `oauth_user_token`, RFC 8693), `entra_client_credentials`, `entra_user_token`,
+  `external_oauth_client_credentials`, `external_oauth_user_token` active; `passthrough`
+  exists in code but isn't settable via the admin API **(roadmap)**. An unknown mode **fails
+  closed**.
+  `kc_token_exchange`'s proxy-side audience allowlist (Codex review CR-03) is now two-layered
+  (WP-A2, `services/oauth_policy.py`): the **enforced per-server value** is
+  `server_registry.approved_token_audience`, set only by the admin `/approve` endpoint (never by
+  the submitter); `KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES` (comma-separated env setting, default
+  `lab-tickets`) remains as an outer/bootstrap ceiling — both must agree for a token exchange to
+  proceed. `tool_registry.kc_token_audience` (the value the dispatcher actually reads) is written
+  at tool-discovery time exclusively from `approved_token_audience`, never from the
+  submitter-requested `upstream_idp_config`, so the runtime dispatch path structurally cannot see
+  an unreviewed audience. Requested-vs-approved is surfaced via
+  `GET /api/v1/submissions/{id}` (`upstream_idp_config` vs `approved_upstream_idp_config` /
+  `approved_token_audience` / `approved_oauth_scopes`). **Open**: full exchanged-token
+  actor/delegation claim verification remains **(roadmap)**.
+- **OAuth/IdP policy engine (Codex review CR-13, WP-A2)**: `oauth_provider_policy` table
+  (issuer+tenant → allowed/blocked scopes, redirect patterns, client-auth methods, risk ceiling)
+  governs the scope-shaped dimension for `entra_client_credentials`/`entra_user_token` at
+  approval time (`services/oauth_policy.validate_requested_config`); an unknown issuer or a
+  scope outside the matching policy row's `allowed_scopes` (or explicitly `blocked_scopes`)
+  fails closed (422) at `/approve`. High-risk scopes (`write`, `admin`, `mail`, `files`,
+  `offline_access`) additionally require the reviewer to set `high_risk_scopes_approved=true`
+  in the same request — recorded as `server_registry.high_risk_scopes_approved_by`/`_at`.
+  `service_account` mode's `scope` field (e.g. `openid`) is validated by a **separate**
+  scope-set allowlist (`SERVICE_ACCOUNT_ALLOWED_SCOPES`, default `openid,profile,email`) —
+  deliberately not the `kc_token_exchange` audience allowlist above; an earlier attempt to
+  reuse one mechanism for both was tried and rejected because it broke every existing
+  service_account tool (lab-gitea, lab-grafana-mcp, lab-wazuh) on their default `openid` scope.
+- **External IdP adapters, generic + Jira (Codex review CR-04 remainder, WP-A3)**:
+  `credential_broker/adapters/generic_oauth.py::GenericOAuthAdapter` is a parameterized (not
+  statically env-configured) approach-A adapter — onboarding a new external OAuth server (any
+  IdP that isn't Keycloak or Entra) needs zero new Python module or env var, just a submission +
+  reviewer approval. `adapters/dynamic_external_oauth.py::resolve_external_oauth_adapter` builds
+  one per server at enrollment/refresh time from that server's `approved_upstream_idp_config`
+  (never the requested `upstream_idp_config`) plus an admin-provisioned client_secret
+  (`credential_store`, resolved the same way `entra_client_credentials` resolves its own —
+  `tool_registry.credential_id`, no new admin endpoint). `routers/oauth.py::_get_adapter` and
+  `broker.py::_resolve_a` both try the static registry first (m365/dex/bitbucket/jira, unchanged),
+  then fall back to this dynamic resolver — fail-closed to `None`/"not enrolled" on any DB/Vault
+  error, never a raw exception. New dispatcher branches
+  `_inject_external_oauth_user_token`/`_inject_external_oauth_client_credentials` mirror the
+  Entra ones exactly in shape, cleanly separated from `kc_token_exchange`. `GET
+  /auth/status/{service}` is a new enrollment-status endpoint (existence-only check via the
+  typed-principal dual-read, never decrypts) — applies to every approach-A adapter, not just the
+  new mode. `credential_broker/adapters/jira.py` is the named D2 fast-follow: Atlassian Jira Cloud
+  OAuth 2.0 3LO, statically registered like m365/dex/bitbucket (env vars
+  `JIRA_OAUTH_CLIENT_ID`/`_SECRET`/`_REDIRECT_URI`/`_SCOPES`); a real Jira API call additionally
+  needs a `cloudId` resolved via a separate Atlassian endpoint, which this adapter does NOT do —
+  documented limitation, not silently dropped (see the adapter's module docstring).
 - Resolved token is injected as `Authorization: Bearer …` and **never logged** (redacted).
 
 ### 5.4 Tool-manifest audit (registration time only)
@@ -231,8 +322,20 @@ migration `V054`.*
 
 ### 5.5 Submission scan pipeline (self-service onboarding)
 
-A self-service submission carrying a GitHub repo URL is statically scanned **before** it enters the
-human review queue (`services/submission_scanner.py`, background task). Four scanners run:
+**2026-07 update (CR-14/WP-B1, CR-12/WP-B2): scanning moved out of the proxy process.** The
+paragraphs below describing an in-proxy `services/submission_scanner.py` background task are
+historical — that code path is now dead (unreferenced, kept only for its module docstring). The
+live pipeline is a Postgres-backed job queue (`scan_jobs`, migration `V063`) consumed by a
+separate, unprivileged `scanner-worker` service (`scanner_worker/`) that holds **no** proxy
+secrets, DB-admin credentials, Vault token, or gateway shared secret — only its own narrow
+`scanner_worker_app` DB role (INSERT-only on `scan_raw_results`, UPDATE limited to its own
+claim/heartbeat columns on `scan_jobs`). This is a deliberate **execution/adjudication split**: the
+worker clones the repo and runs every scanner below, emitting RAW findings only — it structurally
+cannot write `scan_status`/`block`/any verdict. A trusted **evaluator** inside the proxy
+(`services/scan_evaluator.py`, never touches attacker-controlled repo content — only the
+structured JSON the worker already produced) reads `scan_raw_results` and drives
+`server_registry.scan_status`/`submission_status`. A dead-lettered job (worker crashed before
+producing a result) fails closed to `scan_status='error'`, never `passed`. Four scanners run:
 
 The repo is cloned from a configured **git provider** (PRD-0005 R-2). GitHub and corporate
 **Bitbucket** (Data Center `/scm/<proj>/<repo>.git` + `/<proj>/repos/<repo>`, and Cloud
@@ -246,8 +349,15 @@ hardening (https-only, option-injection `--` guard, shallow, tmpfs, read-only to
 *Reference: `services/git_providers.py`, `routers/admin_git.py`, migration `V055`.*
 
 - **trufflehog** — verified secrets only (`--only-verified`); a live-confirmed secret blocks.
-- **pip-audit** — Python-dependency CVEs; blocks at `critical`. No-ops on non-pip repos (recorded as
-  an informational note, not a false "ran").
+- **pip-audit** — Python-dependency CVEs, alongside **OSV-Scanner** (broad multi-ecosystem),
+  **npm audit** (Node, lockfile-only, never `npm install`), and **govulncheck** (Go reachability) —
+  CR-12/WP-B2. All four are RAW-finding scanners; policy (`services/dependency_policy.py`)
+  alias-collapses findings across scanners and applies a severity threshold, never inferred from
+  fix-version presence. A `review_required` verdict (distinct from `blocked`/`error`/`passed`) is
+  forced — never a silent pass — for unknown-severity CVEs, a Node project with no lockfile, or a
+  Go module that fails to load under govulncheck (a submitter could otherwise break their own
+  `go.mod` to downgrade coverage and slip through). Reviewer-authorized, exact-match, expiring
+  waivers (`scan_waivers` table) can clear a finding; waived findings stay visible, never deleted.
 - **custom regex rules** — `scan-config.yaml` patterns (hardcoded IPs, credential logging, `eval`);
   advisory by default.
 - **mcp_checker** — the vendored MCP-specific static engine (`proxy/vendor/mcp_checker/`, sourced
@@ -262,17 +372,33 @@ that cannot run fails **closed** (`scan_status='error'`, never `passed`). **The 
 only** — a `passed` scan moves the submission to `awaiting_review`; it does not approve it. Human
 review (§6.5 `security_reviewer`, with self-review forbidden) remains the authoritative gate.
 
-**Post-approval state machine + deploy model (be honest — validation CRITICAL-2).** Approval does
-**NOT** build or launch a container. The platform automates *intake → scan → human review*; it does
-**not** automate "running isolated container behind the gateway." The submitter **self-hosts** the
-server on their own infrastructure and hands the URL back. The state machine:
-`awaiting_review` → **approve** (`submission.py::approve_submission`) → `approved_pending_url`
-(repo-backed) or `scaffold_ready` (no-code) — *DB fields only, nothing is deployed* → submitter runs
-the server, then `POST /api/v1/submissions/{id}/provide-url` (SSRF-validated) → discovery runs
-**synchronously** (`await _run_tool_discovery`, tools registered **quarantined**, INV-005) → `active`.
-No podman/docker/systemd/ansible/compose call exists in the approval path. **Auto-deploy into a
-per-server isolated network with the gateway as sole ingress is (roadmap)** — do not describe the
-current flow as "submit git URL → running isolated container, zero manual steps."
+**Post-approval state machine + deploy model — updated 2026-07 (CR-01/WP-B3).** Two paths now
+exist side by side, sharing one verification implementation. **Self-hosted (original path,
+unchanged):** `awaiting_review` → **approve** → `approved_pending_url`/`scaffold_ready` (DB fields
+only) → submitter runs the server themselves → `POST .../provide-url` (SSRF-validated) → discovery
+(quarantined, INV-005) → `active`. **Platform-managed (new, CR-01):** `POST
+/api/v1/submissions/{id}/apply` pins the exact scanned+approved commit/content digest (never a
+re-clone of branch HEAD — a submitter moving HEAD between approval and build must not swap in
+unscanned code) and enqueues a `build_requested` job on the same `scan_jobs` queue WP-B1 built.
+An **unprivileged build worker** (`build_worker/`, mirrors `scanner_worker/`'s isolation: no proxy
+secrets, no container socket) builds the artifact, which passes back through the CR-12 scan layer;
+a trusted **build evaluator** (`services/build_evaluator.py`) drives `deployment_status`
+(`build_requested→building→built→deploy_requested→deploying→deployed→verify_requested→
+verifying→verified→failed`, `infra/db/migrations/V068`). A separate, narrowly-scoped **launcher**
+(`services/deploy_launcher.py`) is the *only* code path that shells out to `podman run` — it
+re-reads `deployment_status='built'` fresh (never trusts a cached value) before launching, on a
+per-server isolated network with the same hardening flags (`--read-only`, `no-new-privileges`,
+resource limits) as every other lab MCP server. This permanently separates the SEC-05-trusted
+components from the socket-capable one (resolves CR-18's "no env is both" contradiction
+architecturally, not just by documenting it). **Verify is ONE shared code path for both flows**
+(`services/deploy_verifier.py::run_verification_probes` — healthcheck → quarantined discovery →
+invocation probe → CR-06 machine-testable contract check → `verification_report` write); deploy/
+build success never auto-releases tools, release still requires the explicit evidence-gated
+`POST /api/v1/tools/{id}/release` (CR-07). **Known limitation, not hidden:** no real `buildah`/
+`kaniko` binary or container registry exists in the dev/lab sandbox this was built against — the
+image-build step is a named, tested stub with a concrete upgrade path (mirror
+`scanner_worker/Dockerfile`'s binary-install pattern); every other part of the pipeline (queue,
+digest pinning, evaluator, launcher hardening, verify, contract check, API) is real and tested.
 
 **End-to-end acceptance (PRD-0005 R-4)**: `lab/tests/submission_lifecycle_e2e.sh` drives the whole
 lifecycle over the real gateway — submit (alice) → automated scan (mcp_checker findings + both SBOMs)
@@ -330,6 +456,22 @@ leaves the declared-dep inventory as the fallback) and display-only — never a 
   public. Admin toggle: `POST /api/v1/admin/servers/{id}/public` (409 on a write-op server), audited.
   *Follow-on: thread `reason='public_server'` into the invoke audit event (today it is on the
   discovery/catalog response + an INFO log).*
+- **Anomaly heuristic scoped too coarsely, `ping` unconditionally exempted (lab, 2026-07-11 —
+  PRD-0008 R-3/R-4)**: the anomaly scorer's "rapid invocations" pattern counted total calls in a 5-min
+  Redis sliding window with no distinction between `tools/list` (discovery, no side effects) and
+  `tools/call`, and no per-tool distinction — a 9-call parallel discovery sweep tripped
+  `anomaly_threshold_exceeded` and denied every subsequent tool-registry call for the rest of the
+  session, including liveness checks, because every retried/polling call itself re-entered the same
+  window before OPA was even evaluated (self-sustaining, no observed recovery). What looked like a
+  separate entitlement bug on `self-service-mcp`/`plan_mcp_server`/`check_submission_status` (denied
+  despite `enabled_for_your_profile: true`) turned out to be this same anomaly deny, not a distinct
+  rule — verified via direct OPA eval that all three produce `allow:true` under the caller's real
+  role/grant state once `anomaly_score` is not elevated. Fixed in `authz.rego`: `ping` (a pure
+  liveness probe with no data-access or side effects) is now unconditionally exempt from the
+  `anomaly_threshold_exceeded` deny — still subject to every other deny rule (quarantine, entitlement,
+  grants, risk ceiling). The underlying scorer (`proxy/app/services/anomaly.py` — not distinguishing
+  `tools/list` from `tools/call` in the window count) is **not yet fixed**; tracked as an open
+  follow-on, not a roadmap item to lose track of.
 
 ### 6.5 RBAC roles
 
@@ -431,6 +573,79 @@ an "overridden" badge. Mutations flow through the HMAC-signed admin audit chain.
 - Events flow stdout → Promtail → Loki → Grafana; Alertmanager for alerting; MinIO for archival
   (Object-Lock **GOVERNANCE** retention — note: not tamper-proof WORM, see ROADMAP).
 - A daily `compliance-checker` samples the audit trail for integrity.
+- **2026-07 (CR-17/WP-D1): `/metrics`** (Prometheus format, `prometheus_client`) is exposed on the
+  proxy, `scanner-worker`, and `build-worker` — authz allow/deny decisions, OPA/Vault reachability,
+  credential-broker failures, audit-emit failures, scan-queue depth by status, dead-letter count,
+  quarantine backlog, stale-scan count. A Prometheus instance (`observability/prometheus/`) scrapes
+  all three over a dedicated read-only `metrics-net`; alert rules fire on hard invariants (OPA/Vault
+  unreachable, audit-emit failure, scanner dead-letter, stale scans, rising deny rate) with
+  thresholds explicitly labeled `initial_default: "true"` (no production reference environment
+  exists yet to calibrate against — see D4 in the platform-finalisation PRD). Grafana dashboard
+  `wp-d1-observability` (provisioned, `lab/grafana/provisioning/dashboards/`) covers the submission
+  funnel, scan queue, quarantine backlog, invocation denies, and credential failures. A synthetic
+  end-to-end probe (`lab/scripts/synthetic_probe.py`, `make -f Makefile.lab lab-probe`) runs
+  login → low-risk invoke → audit-emission check. 9 runbooks live under `docs/runbooks/` (Vault
+  init/unseal, OPA bundle signing, Keycloak client setup, git provider setup, private CIDR
+  allowlisting, scanner failure, quarantine release, audit restore, incident triage), each verified
+  against the live lab, not written from memory.
+- **Stale DB gauges from a bind-parameter type mismatch (lab, 2026-07-11 — PRD-0008 R-8)**:
+  `services/metrics.py::refresh_db_gauges` built its rescan-staleness interval with
+  `(:hours || ' hours')::interval`, a string-concat that forces asyncpg to expect a `str` bind for
+  `:hours` even though `settings.RESCAN_INTERVAL_HOURS` is an `int` — every scrape logged
+  `asyncpg.exceptions.DataError` and left `mcp_stale_scan_count` etc. stale rather than updating.
+  Fixed with `make_interval(hours => :hours)`, which takes the int directly.
+- **`lab-mcp-grafana` unhealthy (no wget/curl in the image), and Promtail's catch-all job was
+  blocking ALL Loki ingestion (lab, 2026-07-11 — PRD-0008 R-6/R-9)**: two independent observability
+  bugs. (1) `podman-compose.lab.yml`'s `lab-mcp-grafana` healthcheck ran `wget -qO- http://localhost:8000/mcp`,
+  but the `grafana/mcp-grafana:0.14.0` image ships neither `wget` nor `curl` — the probe exited 127
+  every time, the container sat permanently `unhealthy`, and the proxy never registered its tools
+  (`grafana-query` → "tool not found"), even though the MCP server itself was serving fine. Fixed by
+  replacing the probe with a bash `/dev/tcp` HTTP GET that asserts a `200` response, no external
+  binary required. (2) Promtail's `lab-other` catch-all job used relabel `action: drop` to exclude
+  the per-service-labeled containers from double-scraping — but `docker_sd` keeps tailing dropped
+  targets and ships them with **zero labels**, and Loki 400s an entire batch (all-or-nothing) the
+  instant it contains even one label-less stream. That meant `promtail_sent_entries_total` was
+  **flat at zero** — no log ingestion was reaching Loki at all, for any container, which is the real
+  reason the five Loki-backed Grafana alert rules (`mcp-opa-unavailable`, `mcp-high-latency`,
+  `mcp-high-deny-rate`, `mcp-compliance-failed`, `mcp-critical-tool-registered`) were stuck `NoData` —
+  not a labeling gap on one stream, a total ingestion outage. Fixed by moving the exclusion from a
+  relabel-stage drop (pre-label, produces empty streams) to a `pipeline_stages` `match`+`drop` on
+  the log **entries** (post-relabel, so excluded containers' logs are dropped with their labels
+  intact rather than shipped label-less) — verified `sent_entries` climbing from 0 to ~58k with real
+  per-container line counts in Loki afterward. **Residual, deliberately not changed**: the five
+  alert rules still read `NoData` in a quiet lab — each is a rare-event
+  `count_over_time(...) > N` query with `noDataState: NoData` explicitly set
+  (`observability/.../mcp-alerts.yml`), and `count_over_time` legitimately returns empty (not `0`)
+  when the event hasn't occurred in-window. The Loki datasource itself is proven healthy (all five
+  now query real data over HTTP 200); making them show "Normal" while quiet instead of "NoData"
+  would need `or vector(0)` added to each query — that's an alert-rule authoring choice, not a
+  data-pipeline bug, and is intentionally left to whoever owns alert-rule design.
+- **`compliance-checker` couldn't verify its own audit-hash integrity, and its alert webhook was
+  unreachable (lab, 2026-07-11 — PRD-0008 R-7)**: two independent bugs in the same container. (1)
+  `docker-compose.yml` built it with `context: ./observability/compliance-checker`, so its Dockerfile
+  could never `COPY` the sibling `observability/mcp-audit-logger` package (outside the build
+  context) that `checker.py`'s `verify_hash_integrity()` imports as the shared canonicalizer — fixed
+  by building from the repo root instead (`context: .`), matching the `proxy` service's own pattern,
+  and installing `mcp-audit-logger` into the image the same way. (2) `COMPLIANCE_ALERT_WEBHOOK` is
+  injected as `${COMPLIANCE_ALERT_WEBHOOK:-}`; when unset in `.env.lab` this resolves to an
+  **empty-but-present** env var, and `os.getenv(key, default)` only falls back to `default` when the
+  key is *absent* — so the checker used `""` as the webhook URL and httpx rejected it at alert-send
+  time. Fixed with a `_normalize_webhook_url()` validated at import time (collapses empty values to
+  the documented default, adds a scheme to a bare `host:port`, raises loudly if still unusable) —
+  fails at startup now, not silently when a real compliance failure needs to alert.
+- **Lab tool-registry hygiene (2026-07-11 — PRD-0008 R-5 / Appendix)**: `lab-mcp-wazuh` crash-looped
+  on every restart (`TypeError: issubclass() arg 1 must be a class`) because `server.py` carried
+  `from __future__ import annotations` (PEP 563 — stringifies annotations at runtime), which the
+  pinned `mcp==1.9.4` SDK doesn't resolve before doing `issubclass(param.annotation, Context)` at
+  tool-registration time; removed the import (it was the only one of 11 lab MCP servers using it —
+  confirmed an outlier, not a pattern others depend on). Its healthcheck also 404'd after the crash
+  fix (`POST /mcp` 307-redirects to `/mcp/`, and `urllib.request` doesn't auto-follow 307/308 on
+  POST) — fixed by adding the trailing slash in `compose.wazuh.yml`. Separately, `echo` and three
+  `echo-superseded-*` `tool_registry` rows pointed at acceptance-test fixture containers
+  (`at3`/`at4-clean-mcp-fixture`) that aren't part of the standing lab stack — leftover state from
+  test runs whose teardown never cleaned up the registry, causing SSRF-blocked DNS failures on every
+  call. Soft-deleted (`status='deprecated'`, `deleted_at`, audited) rather than standing up throwaway
+  fixture containers, since the naming (`echo-superseded-<uuid>`) is clearly ephemeral-test in origin.
 
 ---
 
@@ -449,16 +664,32 @@ Headline properties and how they're met:
 | Tamper-evident trail | synchronous SHA-256 audit; HMAC-signed in production |
 
 **Known residual items** (tracked openly): MinIO GOVERNANCE ≠ MFA-WORM; the `X-Client-Cert-CN` trust
-is IP-gated defense-in-depth; the anomaly detector is an advisory heuristic, not a learned model;
-per-server network isolation and per-tool rate limiting are **(roadmap)**.
+is IP-gated defense-in-depth; the anomaly detector is an advisory heuristic, not a learned model, and
+(per §6's R-4 note) its rapid-invocation window still doesn't distinguish `tools/list` discovery from
+`tools/call` invocation — `ping` is exempted at the OPA layer but the scorer itself isn't fixed yet;
+per-tool rate limiting is **(roadmap)**. Per-server network isolation for the platform-managed
+deploy path now exists (CR-01/WP-B3's `deploy_launcher.py`, one isolated network per launched
+server) — the self-hosted `provide-url` path still relies on the submitter's own infrastructure
+isolation, unchanged.
 
 ---
 
 ## 9. Status & roadmap
 
 Current per-control status is the [README Enforced-vs-Roadmap table](../README.md#enforced-today-vs-roadmap).
-Notable **(roadmap)** items: SPDX SBOM, outbound Jira, Helm/K8s, learned anomaly baseline,
-server-owner onboarding wizard, per-server network isolation.
+Notable **(roadmap)** items: SPDX SBOM, outbound Jira, Helm/K8s (compose remains the only
+supported production deployment target — D3), learned anomaly baseline, Jira Cloud `cloudId`
+resolution (adapter exists, per-D2 fast-follow), real `buildah`/registry integration for the
+CR-01 build pipeline (stubbed with a named upgrade path, see §5.5), per-tool rate limiting.
+2026-07's platform-finalisation program closed CR-01 through CR-19 (see
+`Codex_review/Claude_status.md`) — the server-owner onboarding wizard and per-server network
+isolation items previously listed here are done, not roadmap.
+`docs/prd/PRD-0008-gateway-functional-sweep-bugfixes.md` (2026-07-11) closed a full-gateway
+functional sweep's R-1 through R-9 plus its Appendix (OIDC token exchange, tool-wrapper dispatch,
+anomaly scoring, `lab-mcp-wazuh`, `lab-mcp-grafana`, Promtail/Loki ingestion, `compliance-checker`,
+metrics gauges, stale fixture cleanup — each cross-referenced at its section above). All nine items
+are fixed and verified live as of this update; see the PRD for the one deliberately-left-open item
+(alert-rule `NoData`-vs-`vector(0)` design, noted in §7 above).
 
 > Keep this document matched to code. If you change a control, update this doc and the README table
 > in the same change — a claim without backing code is treated as a bug.
@@ -481,7 +712,7 @@ ones are gated by `make security-check`; the rest are enforced by design and rev
 | INV-006 | Every registered tool has an HMAC-signed SBOM; no `active` status without a valid signature. Releasing from `quarantined` (Codex review CR-07) additionally requires the parent `server_registry` row to be `status='approved'` with `scan_status` passed — a bare admin cannot release a tool whose server is still pending or whose scan failed/blocked, closing the "generic PATCH bypasses release evidence" gap. **Open**: no dedicated `POST .../release` endpoint, `released_by`/`released_at` columns, or distinct `TOOL_RELEASED` audit event yet — this is enforced inline in the existing PATCH path (`routers/tools.py::update_tool`). | `services/sbom.py`, `routers/tools.py::update_tool`, DB constraint |
 | INV-007 | Audit archive bucket has Object-Lock (≥GOVERNANCE, 90d); no app/API/Make path may delete it | `compliance-checker/checker.py`, `setup-minio.sh` |
 | INV-008 | No secret value in any git-tracked file (`.env.example` placeholders only) | trufflehog in CI / `make security-check` |
-| INV-009 | `/tools/{id}/invoke` requires mTLS cert or API key or OIDC JWT; unauthenticated ⇒ 401 before app logic | gateway `ssl_verify_client` + auth middleware |
+| INV-009 | `/tools/{id}/invoke` requires mTLS cert or API key or OIDC JWT; unauthenticated ⇒ 401 before app logic. Lab: `:8443` forwards to the app (no cert requested there) and the app's auth chain gates it; the dedicated `:8445` listener (see §2 mTLS listener split note) is the only path that still enforces a client cert at the gateway. Production: still one listener, `ssl_verify_client optional` scoped by the `$ssl_client_verify` check inside the location block — same "cert OR app-layer auth" behavior. | gateway `ssl_verify_client` + auth middleware |
 | INV-010 | mTLS client certs have ≤24h TTL | step-ca provisioner config |
 | INV-011 | Only the `proxy_app` DB role may write registry/audit/credential tables; only `compliance_checker` writes `compliance_reports` | PostgreSQL grants (`V003`/`V009`) |
 | INV-012 | Signed OPA bundles in staging/production (HS256 `--verification-key`); **signed is the default**. No tier's OPA command may carry `--scope=write` — `opa build` (the repo's only signing tool) cannot embed a `scope` claim, so it always produces `scope=None` and OPA rejects the flag with "scope mismatch" (crashloop). `docker-compose.yml` had already dropped the flag; `compose.engine.yml` had drifted and still carried it (Codex review CR-15, fixed) — check any new compose tier's OPA command against this before adding it. | `docker-compose.yml`, `compose.engine.yml`, `check_signed_default.sh` |

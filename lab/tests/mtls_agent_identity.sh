@@ -12,6 +12,10 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BASE="${BASE:-https://100.119.138.35:8443}"
+# :8443's ssl_verify_client is 'off' (an optional client-cert request during
+# the TLS handshake broke Windows Schannel-based MCP clients) — the actual
+# mTLS-required /api/v1/tools/ path now lives on its own listener instead.
+MTLS_BASE="${MTLS_BASE:-https://100.119.138.35:8445}"
 CERTS="$ROOT/lab/nginx/lab-certs"
 SECRETS="$ROOT/lab/nginx/secrets"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -24,8 +28,14 @@ echo "== R-2 mTLS agent-identity setup + smoke =="
 
 # --- setup (idempotent) ---
 mkdir -p "$CERTS" "$SECRETS"
-podman exec mcp-step-ca cat /home/step/certs/root_ca.crt > "$CERTS/step-ca-root.crt"
-[ -s "$CERTS/step-ca-root.crt" ] && ok "step-ca root CA extracted" || { bad "CA extract"; exit 1; }
+# nginx's ssl_client_certificate needs the FULL chain, not just the root —
+# step ca certificate issues agent certs signed by the intermediate CA, and
+# nginx (unlike a browser) won't fetch/complete an intermediate on its own.
+# Root-only here previously chain-verified as: intermediate-signed leaf ->
+# untrusted intermediate -> 400 "The SSL certificate error" for every
+# freshly minted agent cert.
+podman exec mcp-step-ca cat /home/step/certs/intermediate_ca.crt /home/step/certs/root_ca.crt > "$CERTS/step-ca-root.crt"
+[ -s "$CERTS/step-ca-root.crt" ] && ok "step-ca root+intermediate CA chain extracted" || { bad "CA extract"; exit 1; }
 
 SECRET=$(grep -E '^GATEWAY_SHARED_SECRET=' "$ROOT/.env.lab" | cut -d= -f2)
 printf 'proxy_set_header X-Gateway-Secret "%s";\n' "$SECRET" > "$SECRETS/gateway-secret.conf"
@@ -46,14 +56,20 @@ podman exec mcp-gateway nginx -t >/dev/null 2>&1 && ok "gateway nginx config val
 code=$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/v1/auth/oidc/login?redirect=%2Fportal")
 chk "$code" "307" "OIDC login redirect unbroken (no cert)"
 
-# 2. /api/v1/tools/ WITHOUT a client cert -> 401 at the gateway
+# 2. /api/v1/tools/ WITHOUT a client cert -> 401 (both listeners, different
+#    layers: :8443 now forwards to the app and gets 401 from AuthMiddleware
+#    since no session/bearer is presented either; :8445 still 401s at nginx
+#    for lacking a cert).
 code=$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/v1/tools/list")
-chk "$code" "401" "no-cert /api/v1/tools/ rejected by gateway"
+chk "$code" "401" "no-cert, no-session /api/v1/tools/ rejected on :8443 (app-layer now)"
+code=$(curl -sk -o /dev/null -w '%{http_code}' "$MTLS_BASE/api/v1/tools/list")
+chk "$code" "401" "no-cert /api/v1/tools/ rejected by the :8445 mTLS gateway"
 
-# 3. /api/v1/tools/ WITH the agent cert -> cert accepted; proxy resolves the
-#    agent principal and denies via entitlement (fail-closed) => 403, not 401.
-code=$(curl -sk --cert "$WORK/agent.crt" --key "$WORK/agent.key" -o /dev/null -w '%{http_code}' "$BASE/api/v1/tools/list")
-chk "$code" "403" "agent-cert accepted; unentitled agent fail-closed denied"
+# 3. /api/v1/tools/ WITH the agent cert, on the dedicated mTLS listener ->
+#    cert accepted; proxy resolves the agent principal and denies via
+#    entitlement (fail-closed) => 403, not 401.
+code=$(curl -sk --cert "$WORK/agent.crt" --key "$WORK/agent.key" -o /dev/null -w '%{http_code}' "$MTLS_BASE/api/v1/tools/list")
+chk "$code" "403" "agent-cert accepted on :8445; unentitled agent fail-closed denied"
 
 # 4. the proxy actually logged the agent principal (client_id=agent-lab-01).
 #    The audit event is emitted just after the response; poll briefly.

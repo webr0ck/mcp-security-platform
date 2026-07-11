@@ -165,12 +165,13 @@ class Settings(BaseSettings):
     # SCAN_MAX_AGE_HOURS: how old last_rescanned_at may be before a server is
     # considered stale.  Default 168 h (7 days).
     # SCAN_FRESHNESS_ENFORCED: when True, a stale or never-rescanned server
-    # blocks calls at invocation time.  Default False (warn-only) so existing
-    # labs keep working until the rescan loop has run at least once.
+    # blocks calls at invocation time.  Default True (fail closed) — the
+    # rescan loop is proven and all lab servers carry a fresh
+    # last_rescanned_at (PRD-2 / CR-11 remainder, 2026-07-06).
     # RESCAN_INTERVAL_HOURS: how often the background loop re-checks all
     # approved servers.  Default 24 h.
     SCAN_MAX_AGE_HOURS: int = 168
-    SCAN_FRESHNESS_ENFORCED: bool = False
+    SCAN_FRESHNESS_ENFORCED: bool = True
     RESCAN_INTERVAL_HOURS: int = 24
 
     # CR-08: POST /api/v1/servers (self-service direct registration) skips the
@@ -252,6 +253,20 @@ class Settings(BaseSettings):
     @property
     def kc_token_exchange_allowed_audiences_parsed(self) -> frozenset[str]:
         return frozenset(a.strip() for a in self.KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES.split(",") if a.strip())
+
+    # WP-A2 (CR-13): scope-SET allowlist for service_account mode's `scope`
+    # field (e.g. "openid"). Deliberately SEPARATE from
+    # KC_TOKEN_EXCHANGE_ALLOWED_AUDIENCES above — service_account's scope is a
+    # different validation shape (a set of OIDC scope strings) than
+    # kc_token_exchange's audience (a single opaque string). Defaults to the
+    # standard OIDC scopes every existing lab service_account tool already
+    # uses (lab-gitea, lab-grafana-mcp, lab-wazuh), so unset behavior is
+    # unchanged. Comma-separated.
+    SERVICE_ACCOUNT_ALLOWED_SCOPES: str = "openid,profile,email"
+
+    @property
+    def service_account_allowed_scopes_parsed(self) -> frozenset[str]:
+        return frozenset(s.strip() for s in self.SERVICE_ACCOUNT_ALLOWED_SCOPES.split(",") if s.strip())
 
     # =========================================================================
     # MinIO / S3
@@ -370,6 +385,12 @@ class Settings(BaseSettings):
     ENTRA_TENANT_ID: str = ""
     ENTRA_REDIRECT_URI: str = "https://localhost/auth/callback/m365"
     ENTRA_SCOPES: str = "Mail.Read Calendars.Read"
+    # Optional explicit endpoint overrides. Empty (default) = derive the real
+    # login.microsoftonline.com URLs from ENTRA_TENANT_ID. The lab points these
+    # at lab-mock-idp so entra_user_token works without a real Entra tenant
+    # (PRD-0002 Case 1 mock flow).
+    ENTRA_TOKEN_URL: str = ""
+    ENTRA_AUTH_URL: str = ""
 
     @property
     def entra_scopes_list(self) -> list[str]:
@@ -377,11 +398,11 @@ class Settings(BaseSettings):
 
     @property
     def entra_token_url(self) -> str:
-        return f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/token"
+        return self.ENTRA_TOKEN_URL or f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/token"
 
     @property
     def entra_auth_url(self) -> str:
-        return f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/authorize"
+        return self.ENTRA_AUTH_URL or f"https://login.microsoftonline.com/{self.ENTRA_TENANT_ID}/oauth2/v2.0/authorize"
 
     # =========================================================================
     # Credential Broker — Bitbucket
@@ -396,6 +417,24 @@ class Settings(BaseSettings):
     @property
     def bitbucket_scopes_list(self) -> list[str]:
         return self.BITBUCKET_SCOPES.split()
+
+    # =========================================================================
+    # Credential Broker — Jira (WP-A3 / CR-04 fast-follow, D2 droppable)
+    #
+    # Distinct from JIRA_API_TOKEN et al. above — those are for the platform's
+    # OWN outbound Jira notifications (filing security tickets from CR-13's
+    # oauth_policy findings etc., basic-auth API-token style). These are for
+    # the per-user OAuth 2.0 3LO adapter (credential_broker/adapters/jira.py)
+    # that lets an onboarded Jira MCP tool act AS the signed-in user.
+    # =========================================================================
+    JIRA_OAUTH_CLIENT_ID: str = ""
+    JIRA_OAUTH_CLIENT_SECRET: str = ""
+    JIRA_OAUTH_REDIRECT_URI: str = "https://localhost/auth/callback/jira"
+    JIRA_OAUTH_SCOPES: str = "read:jira-work write:jira-work offline_access"
+
+    @property
+    def jira_oauth_scopes_list(self) -> list[str]:
+        return self.JIRA_OAUTH_SCOPES.split()
 
     # =========================================================================
     # Credential Broker — Grafana

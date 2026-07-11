@@ -135,6 +135,7 @@ async def server_metadata():
         "response_types_supported": ["code"],
         "grant_types_supported": [
             "authorization_code",
+            "refresh_token",
             "urn:ietf:params:oauth:grant-type:device_code",
         ],
         "code_challenge_methods_supported": ["S256"],
@@ -579,6 +580,10 @@ def _mint_token(sub: str, client_id: str, scope: str) -> dict[str, Any]:
         "token_type": "Bearer",
         "expires_in": TOKEN_TTL,
         "scope": scope,
+        # Deterministic refresh token: stateless (survives restarts) so the lab
+        # seeder can pre-enroll credential_store rows without a browser flow.
+        # See the refresh_token grant handler in token() below.
+        "refresh_token": f"mock-refresh-{sub}",
     }
 
 
@@ -626,6 +631,22 @@ async def token(request: Request):
             "expires_in": TOKEN_TTL,
             "scope": scope,
         })
+
+    # ── Refresh Token Grant (RFC 6749 §6) — delegated M365 mock (entra_user_token) ─
+    # Stateless by design: any token of the form "mock-refresh-<sub>" for a known
+    # mock user is accepted, so restarts don't orphan seeded credentials. The
+    # proxy's M365Adapter.refresh() hits this when ENTRA_TOKEN_URL points here.
+    if grant_type == "refresh_token":
+        refresh_token = str(form.get("refresh_token", ""))
+        prefix = "mock-refresh-"
+        sub = refresh_token[len(prefix):] if refresh_token.startswith(prefix) else ""
+        if sub not in USERS:
+            return JSONResponse(
+                {"error": "invalid_grant", "error_description": "unknown refresh_token"},
+                status_code=400,
+            )
+        logger.info("refresh_token grant: sub=%s client=%s", sub, client_id)
+        return JSONResponse(_mint_token(sub, client_id, str(form.get("scope", "openid profile email"))))
 
     if grant_type != "authorization_code":
         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)

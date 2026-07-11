@@ -110,6 +110,18 @@ deny contains "risk_level_exceeds_threshold" if {
 deny contains "anomaly_threshold_exceeded" if {
     anomaly_threshold_exceeded
     not input.is_testing
+    not is_liveness_probe
+}
+
+# R-4 fix: `ping` is a liveness/health-check tool, not a data-access or
+# state-changing tool. It must stay observable even while a client is under
+# an anomaly lockout from OTHER tool calls (otherwise there is no way to
+# tell the gateway itself is still up), and denying it can never be the
+# right response to a *different* tool's anomaly score. This is an
+# unconditional exemption from the anomaly-score gate only -- ping is still
+# subject to every other deny rule above (quarantine, entitlement, grants).
+is_liveness_probe if {
+    input.tool_name == "ping"
 }
 
 deny contains "suspicious_parameter_pattern" if {

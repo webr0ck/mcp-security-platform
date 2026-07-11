@@ -57,12 +57,15 @@ from app.services.server_onboarding import (
     InvalidOnboardingConfig,
     UpstreamRevalidationError,
     revalidate_upstream_ip_at_invoke,
+    upstream_idp_type_for_mode,
     validate_mode_and_idp,
     validate_upstream_url_ssrf,
     validate_upstream_idp_config,
 )
+from app.services import oauth_provider_profile as oauth_provider_profile_svc
 from app.services.ssrf import SSRFError, validate_server_url
 from app.credential_broker.adapters.healthcheck import get_healthcheck, HealthcheckFailed
+from app.services.auth_modes import all_mode_values
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -165,19 +168,10 @@ class ServerCreate(BaseModel):
     @field_validator("injection_mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        # AUTH-R6 (Task 3.4): passthrough and entra_user_token are now exposed.
-        # kc_token_exchange is the canonical name for the former oauth_user_token.
-        valid = {
-            "none",
-            "service",
-            "user",
-            "service_account",
-            "kc_token_exchange",
-            "oauth_user_token",   # accepted alias; normalised to kc_token_exchange in dispatcher
-            "passthrough",
-            "entra_user_token",
-            "entra_client_credentials",
-        }
+        # WP-A5 (CR-02 completion): sourced from the canonical AuthMode enum
+        # instead of a hand-maintained set (was missing basic_auth and both
+        # external_oauth_* modes — real drift, not just theoretical).
+        valid = all_mode_values()
         if v not in valid:
             raise ValueError(f"injection_mode must be one of {sorted(valid)}")
         return v
@@ -210,6 +204,7 @@ class ServerRegister(BaseModel):
     upstream_idp_type: Optional[str] = None
     upstream_idp_config: Optional[dict] = None
     adapter_name: Optional[str] = None
+    oauth_provider_profile_id: Optional[str] = None
 
     @field_validator("service_name")
     @classmethod
@@ -221,20 +216,11 @@ class ServerRegister(BaseModel):
     @field_validator("injection_mode")
     @classmethod
     def validate_mode(cls, v: str) -> str:
-        # AUTH-R6 (Task 3.4): passthrough and entra_user_token are now exposed.
-        # kc_token_exchange is the canonical name; oauth_user_token is accepted alias.
+        # WP-A5 (CR-02 completion): sourced from the canonical AuthMode enum
+        # instead of a hand-maintained set (was missing basic_auth and both
+        # external_oauth_* modes — real drift, not just theoretical).
         _ENTRA_MODES = {"entra_user_token", "entra_client_credentials"}
-        valid = {
-            "none",
-            "service",
-            "user",
-            "service_account",
-            "kc_token_exchange",
-            "oauth_user_token",   # accepted alias; normalised to kc_token_exchange in dispatcher
-            "passthrough",
-            "entra_user_token",
-            "entra_client_credentials",
-        }
+        valid = all_mode_values()
         if v not in valid:
             raise ValueError(f"injection_mode must be one of {sorted(valid)}")
         # Entra modes require AZURE_TENANT_ID (surfaced as ENTRA_TENANT_ID in settings).
@@ -286,7 +272,7 @@ async def list_servers(request: Request):
         rows = await db.execute(
             text(
                 "SELECT server_id, name, upstream_url, status, owner_sub, "
-                "injection_mode, created_at, approved_at "
+                "injection_mode, service_name, created_at, approved_at "
                 "FROM server_registry WHERE deleted_at IS NULL ORDER BY created_at DESC"
             )
         )
@@ -705,7 +691,8 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     async with AsyncSessionLocal() as db:
         url_row = await db.execute(
             text(
-                "SELECT upstream_url, owner_sub, adapter_name, upstream_allowlist_entry "
+                "SELECT upstream_url, owner_sub, adapter_name, upstream_allowlist_entry, "
+                "       injection_mode, upstream_idp_config "
                 "FROM server_registry "
                 "WHERE server_id = :id AND deleted_at IS NULL"
             ),
@@ -744,6 +731,20 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
 
     owner_sub = url_record[1]
     adapter_name = url_record[2]
+    _reg_upstream_idp_config = url_record[5]  # already jsonb -> dict, or None
+
+    # WP-A6 Finding 1: this D3 dual-control path (unlike submission.py's
+    # /admin/submissions/{id}/approve) has no separate reviewer-adjustment
+    # step for OAuth scopes/audience — the platform_admin approving here IS
+    # the review, so the requested upstream_idp_config is copied through
+    # verbatim into the approved_* columns dispatch actually reads
+    # (dynamic_external_oauth.py resolves only from approved_upstream_idp_config,
+    # never the submitter-controlled upstream_idp_config). Previously this
+    # path approved status='approved' without ever populating those columns,
+    # so self-service-registered OAuth servers had no approved config at all.
+    _approved_upstream_idp_config = _reg_upstream_idp_config
+    _approved_token_audience = (_reg_upstream_idp_config or {}).get("audience")
+    _approved_oauth_scopes = (_reg_upstream_idp_config or {}).get("scopes") or []
 
     # Task 6: Adapter healthcheck at approval
     # Verify the upstream server is reachable before marking as approved.
@@ -791,11 +792,19 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
                 "UPDATE server_registry "
                 "SET status = 'approved', mode_locked_at_approval = TRUE, "
                 "    approved_at = now(), approved_by = :approver, url_allowlist_checked = TRUE, "
-                "    consent_jti = :consent_jti "
+                "    consent_jti = :consent_jti, "
+                "    approved_upstream_idp_config = CAST(:approved_idp_config AS jsonb), "
+                "    approved_token_audience = :approved_token_audience, "
+                "    approved_oauth_scopes = :approved_oauth_scopes "
                 "WHERE server_id = :id AND deleted_at IS NULL AND status = 'pending' "
                 "RETURNING server_id"
             ),
-            {"id": server_id, "approver": approver, "consent_jti": consent_payload.jti},
+            {
+                "id": server_id, "approver": approver, "consent_jti": consent_payload.jti,
+                "approved_idp_config": json.dumps(_approved_upstream_idp_config) if _approved_upstream_idp_config is not None else None,
+                "approved_token_audience": _approved_token_audience,
+                "approved_oauth_scopes": _approved_oauth_scopes,
+            },
         )
         # A-07: append-only audit record so approval history survives future UPDATEs.
         await db.execute(
@@ -864,22 +873,80 @@ async def register_server_self_service(body: ServerRegister, request: Request):
     client_id = getattr(request.state, "client_id", "unknown")
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
+    # WP-A6 Finding 1: a selected, reviewer-approved oauth_provider_profile
+    # is authoritative for injection_mode/upstream_idp_type/issuer+endpoints/
+    # scopes/audience — a non-expert submitter picks the profile instead of
+    # hand-authoring raw OAuth JSON. Only the profile-unowned pieces
+    # (client_id, and scopes narrower than the profile default) still come
+    # from the request body.
+    injection_mode = body.injection_mode
+    upstream_idp_type = body.upstream_idp_type
+    upstream_idp_config = body.upstream_idp_config
+    if body.oauth_provider_profile_id:
+        async with AsyncSessionLocal() as db:
+            try:
+                profile = await oauth_provider_profile_svc.get_profile(db, body.oauth_provider_profile_id)
+            except oauth_provider_profile_svc.ProfileNotFoundError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if profile.status != "approved":
+            raise HTTPException(
+                status_code=400,
+                detail=f"oauth_provider_profile {profile.id!r} is not approved (status={profile.status!r})",
+            )
+        injection_mode = profile.injection_mode
+        upstream_idp_type = upstream_idp_type_for_mode(injection_mode)
+
+        requested_scopes = (body.upstream_idp_config or {}).get("scopes")
+        if requested_scopes is not None:
+            blocked = sorted(set(requested_scopes) & set(profile.blocked_scopes))
+            if blocked:
+                raise HTTPException(status_code=400, detail=f"scope(s) {blocked} are blocked by this oauth_provider_profile")
+            allowed_ceiling = set(profile.allowed_scopes) or set(profile.default_scopes)
+            overbroad = sorted(set(requested_scopes) - allowed_ceiling)
+            if overbroad:
+                raise HTTPException(status_code=400, detail=f"scope(s) {overbroad} exceed this oauth_provider_profile's allowed scopes")
+            effective_scopes = requested_scopes
+        else:
+            effective_scopes = profile.default_scopes
+
+        if upstream_idp_type is not None:
+            upstream_idp_config = {
+                **(body.upstream_idp_config or {}),
+                "issuer": profile.issuer,
+                "authorization_endpoint": profile.authorization_endpoint,
+                "token_endpoint": profile.token_endpoint,
+                "scopes": effective_scopes,
+            }
+            # A generic_oauth2/custom_oidc/entra profile still needs a
+            # per-server client_id (and, out of band, a client_secret in
+            # credential_store) — that's not profile-owned, since one
+            # provider profile can back many servers with distinct app
+            # registrations. Fail closed rather than register a server whose
+            # dispatcher has no client to authenticate as.
+            if not upstream_idp_config.get("client_id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="upstream_idp_config.client_id is required when registering against an oauth_provider_profile",
+                )
+        else:
+            upstream_idp_config = None
+
     # Validation 1: Injection mode ↔ IdP type compatibility
     try:
         validate_mode_and_idp(
-            injection_mode=body.injection_mode,
-            upstream_idp_type=body.upstream_idp_type,
-            upstream_idp_config=body.upstream_idp_config,
+            injection_mode=injection_mode,
+            upstream_idp_type=upstream_idp_type,
+            upstream_idp_config=upstream_idp_config,
         )
     except InvalidOnboardingConfig as exc:
         raise HTTPException(status_code=400, detail=f"Invalid mode/IdP config: {exc}") from exc
 
     # Validation 2: IdP configuration structure
-    if body.upstream_idp_type:
+    if upstream_idp_type:
         try:
             validate_upstream_idp_config(
-                upstream_idp_type=body.upstream_idp_type,
-                upstream_idp_config=body.upstream_idp_config,
+                upstream_idp_type=upstream_idp_type,
+                upstream_idp_config=upstream_idp_config,
             )
         except InvalidOnboardingConfig as exc:
             raise HTTPException(status_code=400, detail=f"Invalid IdP config: {exc}") from exc
@@ -917,11 +984,11 @@ async def register_server_self_service(body: ServerRegister, request: Request):
                 INSERT INTO server_registry (
                     server_id, service_name, upstream_url, injection_mode,
                     upstream_idp_type, upstream_idp_config, adapter_name,
-                    owner_sub, status, upstream_allowlist_entry
+                    owner_sub, status, upstream_allowlist_entry, oauth_provider_profile_id
                 ) VALUES (
                     :server_id, :service_name, :upstream_url, CAST(:injection_mode AS injection_mode_enum),
                     :upstream_idp_type, CAST(:upstream_idp_config AS jsonb), :adapter_name,
-                    :owner_sub, 'pending', :upstream_allowlist_entry
+                    :owner_sub, 'pending', :upstream_allowlist_entry, CAST(:oauth_provider_profile_id AS uuid)
                 )
                 RETURNING server_id, service_name, status, created_at
                 """
@@ -930,12 +997,13 @@ async def register_server_self_service(body: ServerRegister, request: Request):
                 "server_id": server_id,
                 "service_name": body.service_name,
                 "upstream_url": body.upstream_url,
-                "injection_mode": body.injection_mode,
-                "upstream_idp_type": body.upstream_idp_type,
-                "upstream_idp_config": json.dumps(body.upstream_idp_config) if body.upstream_idp_config is not None else None,
+                "injection_mode": injection_mode,
+                "upstream_idp_type": upstream_idp_type,
+                "upstream_idp_config": json.dumps(upstream_idp_config) if upstream_idp_config is not None else None,
                 "adapter_name": body.adapter_name,
                 "owner_sub": client_id,
                 "upstream_allowlist_entry": upstream_allowlist_entry,
+                "oauth_provider_profile_id": body.oauth_provider_profile_id,
             },
         )
         await db.commit()
@@ -944,7 +1012,7 @@ async def register_server_self_service(body: ServerRegister, request: Request):
     logger.info(
         "server_registered_pending server_id=%s service_name=%s "
         "owner_sub=%s injection_mode=%s",
-        server_id, body.service_name, client_id, body.injection_mode,
+        server_id, body.service_name, client_id, injection_mode,
     )
 
     return JSONResponse(
