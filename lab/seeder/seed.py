@@ -663,6 +663,137 @@ async def create_netbox_token() -> Optional[str]:
         return token_key
 
 
+async def seed_netbox_devices(netbox_token: str, conn: asyncpg.Connection) -> dict:
+    """
+    Register every real (non-test-fixture) approved lab MCP server as a NetBox
+    device with an assigned IP, so NetBox carries actual demo inventory instead
+    of an empty DCIM. Idempotent: get-or-create at every step, safe to re-run.
+
+    This closes a real gap: AT2's NetBox tests (test_netbox_list_devices_matches_direct_api,
+    test_netbox_list_ip_addresses_matches_direct_api) skip whenever NetBox has zero
+    devices/IPs seeded — every lab-reset left NetBox's DCIM empty, so those two tests
+    have never actually run since the lab existed. Feeding real device/IP records here
+    un-skips them as a side effect, not their primary purpose.
+
+    Prerequisites created (idempotent, minimal DCIM object graph NetBox requires
+    before a Device can exist): one Manufacturer, one DeviceType, one Site, one
+    DeviceRole — all named "mcp-lab"/"MCP Server" and reused across runs.
+
+    Returns a dict of step -> outcome string for the seeder summary.
+    """
+    if not netbox_token:
+        return {"netbox_devices": "SKIPPED (no netbox_token)"}
+
+    headers = {
+        "Authorization": f"Token {netbox_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    results: dict[str, str] = {}
+
+    async def _get_or_create(client: httpx.AsyncClient, list_path: str, match: dict, create_body: dict) -> Optional[dict]:
+        """GET list_path filtered by match; if exactly one result, return it. Else POST create_body."""
+        resp = await client.get(list_path, params=match, headers=headers)
+        if resp.status_code == 200 and resp.json().get("count", 0) >= 1:
+            return resp.json()["results"][0]
+        resp = await client.post(list_path, json=create_body, headers=headers)
+        if resp.status_code not in (200, 201):
+            log.error("NetBox get_or_create failed for %s: %s %s", list_path, resp.status_code, resp.text)
+            return None
+        return resp.json()
+
+    async with httpx.AsyncClient(timeout=15, base_url=LAB_NETBOX_URL) as client:
+        try:
+            manufacturer = await _get_or_create(
+                client, "/api/dcim/manufacturers/", {"slug": "mcp-lab"},
+                {"name": "MCP Lab", "slug": "mcp-lab"},
+            )
+            if not manufacturer:
+                return {"netbox_devices": "FAILED (manufacturer)"}
+
+            device_type = await _get_or_create(
+                client, "/api/dcim/device-types/", {"slug": "mcp-server-container"},
+                {"manufacturer": manufacturer["id"], "model": "MCP Server (container)", "slug": "mcp-server-container"},
+            )
+            if not device_type:
+                return {"netbox_devices": "FAILED (device_type)"}
+
+            site = await _get_or_create(
+                client, "/api/dcim/sites/", {"slug": "mcp-lab"},
+                {"name": "MCP Lab", "slug": "mcp-lab", "status": "active"},
+            )
+            if not site:
+                return {"netbox_devices": "FAILED (site)"}
+
+            device_role = await _get_or_create(
+                client, "/api/dcim/device-roles/", {"slug": "mcp-server"},
+                {"name": "MCP Server", "slug": "mcp-server", "color": "2196f3"},
+            )
+            if not device_role:
+                return {"netbox_devices": "FAILED (device_role)"}
+
+            results["netbox_dcim_prereqs"] = "OK"
+
+            # Real, non-test-fixture, currently-approved lab servers only —
+            # excludes at3-*/at4-*/selftest*/directtest* acceptance-test cruft.
+            rows = await conn.fetch(
+                "SELECT name, upstream_url FROM server_registry "
+                "WHERE deleted_at IS NULL AND status='approved' AND name LIKE 'lab-%' "
+                "ORDER BY name"
+            )
+
+            devices_created = 0
+            ips_created = 0
+            for i, row in enumerate(rows):
+                name = row["name"]
+                device = await _get_or_create(
+                    client, "/api/dcim/devices/", {"name": name},
+                    {
+                        "name": name,
+                        "device_type": device_type["id"],
+                        "role": device_role["id"],
+                        "site": site["id"],
+                        "status": "active",
+                        "comments": f"MCP server registered in server_registry — upstream: {row['upstream_url']}",
+                    },
+                )
+                if not device:
+                    continue
+                devices_created += 1
+
+                # Synthetic-but-real IP inside NetBox's own IPAM — deterministic per
+                # server (index-based /32 in the 172.31.0.0/16 documentation range,
+                # RFC 5737-adjacent but NOT the lab's real 10.89.0.0/16 podman subnet,
+                # so this can never collide with or imply control over real addresses).
+                addr = f"172.31.{(i // 254) + 1}.{(i % 254) + 1}/32"
+                ip = await _get_or_create(
+                    client, "/api/ipam/ip-addresses/", {"address": addr},
+                    {"address": addr, "status": "active", "description": f"{name} (mcp-lab)"},
+                )
+                if ip:
+                    ips_created += 1
+                    # Assign the IP to the device (best-effort; device needs an
+                    # interface first — create one if it doesn't have one yet).
+                    iface = await _get_or_create(
+                        client, "/api/dcim/interfaces/", {"device_id": device["id"], "name": "mcp0"},
+                        {"device": device["id"], "name": "mcp0", "type": "virtual"},
+                    )
+                    if iface:
+                        await client.patch(
+                            f"/api/ipam/ip-addresses/{ip['id']}/",
+                            json={"assigned_object_type": "dcim.interface", "assigned_object_id": iface["id"]},
+                            headers=headers,
+                        )
+
+            results["netbox_devices"] = f"OK ({devices_created} devices, {ips_created} IPs)"
+            log.info("NetBox device seeding: %d devices, %d IPs", devices_created, ips_created)
+        except httpx.TransportError as exc:
+            log.error("Cannot reach NetBox at %s: %s", LAB_NETBOX_URL, exc)
+            results["netbox_devices"] = f"FAILED: {exc}"
+
+    return results
+
+
 async def create_gitea_token() -> Optional[str]:
     """Create or retrieve a Gitea API token for the admin user."""
     token_name = "mcp-lab"
@@ -1285,6 +1416,11 @@ async def main() -> None:
     if netbox_token:
         _write_env_var(ENV_LAB_PATH, "NETBOX_TOKEN", netbox_token)
         results["netbox_env"] = "OK (written to .env.lab)"
+
+        log.info("Seeding NetBox devices/IPs for every real lab MCP server...")
+        conn_nbdev = await wait_for_postgres(max_wait=10)
+        results.update(await seed_netbox_devices(netbox_token, conn_nbdev))
+        await conn_nbdev.close()
 
     # 7b. Seed M365 client secret into credential_store (Task 2.5)
     if master_hex and results.get("tools_sql") == "OK":
