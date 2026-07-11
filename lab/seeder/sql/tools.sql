@@ -453,3 +453,26 @@ ON CONFLICT (name, version) DO UPDATE SET
     inject_header       = EXCLUDED.inject_header,
     inject_prefix       = EXCLUDED.inject_prefix,
     updated_at          = NOW();
+
+-- ── Catfacts MCP — real, no-auth, live third-party upstream (T5) ──────────────
+-- injection_mode='none': no credential to inject; catfact.ninja needs no auth
+-- at all. X-User-Sub still flows via forward_base_headers like every other
+-- 'none' server, but the upstream itself ignores it.
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode, inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'catfacts-live', '1.0.0',
+    'Real live no-auth third-party demo API (catfact.ninja): random cat facts + cat breed data.',
+    '{"type":"object","properties":{"tool_name":{"type":"string","enum":["get_fact","get_breeds"]},"arguments":{"type":"object"}},"required":["tool_name"],"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-catfacts:8000/mcp',
+    'active', 'low', 5, '["Read-only calls to a public, unauthenticated third-party API","No secrets or PII involved"]'::jsonb,
+    'lab-seeder', null, 'B', 'none', null, null
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url   = EXCLUDED.upstream_url,
+    injection_mode = EXCLUDED.injection_mode,
+    updated_at     = NOW();

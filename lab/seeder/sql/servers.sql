@@ -32,7 +32,9 @@ FROM (VALUES
     ('lab-rag',          'http://lab-rag-assistant:8000/mcp',     'none',                     false),
     ('lab-self-service', 'http://lab-mcp-self-service:8000/mcp',  'none',                     false),
     ('lab-netbox-mcp',   'http://mcp-netbox:8000/mcp',            'user',                     true),
-    ('lab-wazuh',        'http://lab-mcp-wazuh:8000/mcp',         'service',                  true)
+    ('lab-wazuh',        'http://lab-mcp-wazuh:8000/mcp',         'service',                  true),
+    -- T5: real, no-auth, live third-party upstream (catfact.ninja) via lab-egress-proxy.
+    ('lab-catfacts',     'http://lab-mcp-catfacts:8000/mcp',      'none',                     false)
 ) AS v(name, upstream_url, imode, platform_creds)
 ON CONFLICT (name) DO UPDATE
     SET status                   = 'approved',
