@@ -668,6 +668,36 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # ── Fetch MCP — vendored adaptation of the official MCP reference "fetch"
+  # server (modelcontextprotocol/servers, src/fetch, commit a72e93e — see
+  # lab/mcp-servers/fetch/server.py docstring). T3: proves onboarding of a
+  # real upstream open-source MCP server, not another hand-built lab fixture.
+  # Same egress-only pattern as catfacts: real external HTTP calls, no auth.
+  lab-mcp-fetch:
+    <<: *mcp-hardening
+    build:
+      context: ./lab/mcp-servers/fetch
+    image: lab-mcp-fetch:lab
+    container_name: lab-mcp-fetch
+    ports:
+      - "127.0.0.1:8111:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      SERVER_NAME: "fetch-mcp"
+      HTTPS_PROXY: "http://lab-egress-proxy:3128"
+      NO_PROXY: "lab-mcp-fetch,localhost,127.0.0.1"
+    networks:
+      - mcp-fetch-net      # pairwise net with proxy only
+      - mcp-egress-net     # egress-only path to lab-egress-proxy -> example.com
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status == 200 else 1)\" 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
   # ── Notes MCP — per-user isolated notes (approach A credential injection) ───
   # Task 2.2b: removed from proxy-redis-net + REDIS_PASSWORD env.
   # Notes uses its own private Redis sidecar (lab-notes-redis) on notes-private-net.
@@ -1050,6 +1080,7 @@ services:
       - mcp-rag-assistant-net
       - mcp-echo-net
       - mcp-catfacts-net
+      - mcp-fetch-net
       - mcp-notes-net
       - mcp-self-service-net
       - mcp-search-net
@@ -1241,6 +1272,9 @@ networks:
     driver: bridge
     internal: true
   mcp-catfacts-net:
+    driver: bridge
+    internal: true
+  mcp-fetch-net:
     driver: bridge
     internal: true
   mcp-notes-net:

@@ -476,3 +476,27 @@ ON CONFLICT (name, version) DO UPDATE SET
     upstream_url   = EXCLUDED.upstream_url,
     injection_mode = EXCLUDED.injection_mode,
     updated_at     = NOW();
+
+-- ── Fetch MCP — vendored upstream MCP reference "fetch" server (T3) ───────────
+-- modelcontextprotocol/servers, src/fetch, commit a72e93e5030241a8f717604765170b8c9f4da728.
+-- injection_mode='none': no credential to inject; the demo target (example.com)
+-- needs no auth. Proves the platform can onboard REAL upstream MCP-server code,
+-- not just hand-built lab fixtures.
+INSERT INTO tool_registry (
+    tool_id, name, version, description, schema, upstream_url,
+    status, risk_level, risk_score, risk_reasons,
+    registered_by, service_name, credential_approach, injection_mode, inject_header, inject_prefix
+) VALUES
+(
+    gen_random_uuid(),
+    'fetch-url', '1.0.0',
+    'Vendored adaptation of the official MCP reference fetch server: fetches a URL and returns simplified markdown (or raw content), honoring robots.txt.',
+    '{"type":"object","properties":{"url":{"type":"string"},"max_length":{"type":"integer"},"start_index":{"type":"integer"},"raw":{"type":"boolean"},"ignore_robots_txt":{"type":"boolean"}},"required":["url"],"additionalProperties":false}'::jsonb,
+    'http://lab-mcp-fetch:8000/mcp',
+    'active', 'low', 5, '["Outbound HTTP GET to an allowlisted domain via lab-egress-proxy only","No secrets or PII involved","robots.txt honored by default"]'::jsonb,
+    'lab-seeder', null, 'B', 'none', null, null
+)
+ON CONFLICT (name, version) DO UPDATE SET
+    upstream_url   = EXCLUDED.upstream_url,
+    injection_mode = EXCLUDED.injection_mode,
+    updated_at     = NOW();

@@ -1,0 +1,6 @@
+# Deps for the vendored upstream fetch-server logic (see server.py docstring
+# for source repo/commit). mcp/uvicorn/httpx/starlette already come from
+# mcphub-sdk:base.
+readabilipy==0.3.0
+markdownify==0.13.1
+protego==0.3.1

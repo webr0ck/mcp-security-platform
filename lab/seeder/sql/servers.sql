@@ -34,7 +34,10 @@ FROM (VALUES
     ('lab-netbox-mcp',   'http://mcp-netbox:8000/mcp',            'user',                     true),
     ('lab-wazuh',        'http://lab-mcp-wazuh:8000/mcp',         'service',                  true),
     -- T5: real, no-auth, live third-party upstream (catfact.ninja) via lab-egress-proxy.
-    ('lab-catfacts',     'http://lab-mcp-catfacts:8000/mcp',      'none',                     false)
+    ('lab-catfacts',     'http://lab-mcp-catfacts:8000/mcp',      'none',                     false),
+    -- T3: vendored upstream MCP reference "fetch" server (modelcontextprotocol/servers,
+    -- src/fetch, commit a72e93e), egress to a real external URL (example.com) via lab-egress-proxy.
+    ('lab-fetch',        'http://lab-mcp-fetch:8000/mcp',         'none',                     false)
 ) AS v(name, upstream_url, imode, platform_creds)
 ON CONFLICT (name) DO UPDATE
     SET status                   = 'approved',
