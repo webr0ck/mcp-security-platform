@@ -78,9 +78,11 @@ _ctx_caller_sub: contextvars.ContextVar[str] = contextvars.ContextVar(
 _ctx_caller_role: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_ctx_caller_role", default="agent"
 )
-# OAuth bearer token forwarded by the proxy (passthrough injection_mode).
-# Present when the user authenticated via OAuth PKCE. Used for submission API
-# calls so the proxy resolves the real caller identity (not the service account).
+# Raw Authorization header as received by this server (kept for completeness /
+# future passthrough tools). NOT used for submission API owner attribution —
+# passthrough only forwards a client-supplied X-Downstream-Authorization
+# header, which normal MCP clients never send, so this is empty in practice.
+# See _oauth_headers() for how owner attribution actually works (X-On-Behalf-Of).
 _ctx_user_token: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_ctx_user_token", default=""
 )
@@ -127,23 +129,36 @@ def _auth_headers() -> dict[str, str]:
 
 
 def _oauth_headers() -> dict[str, str]:
-    """Return auth headers for submission API calls using the caller's OAuth token.
+    """Return auth headers for submission API calls, attributed to the real caller.
 
-    In passthrough mode the proxy forwards the user's bearer token as the
-    Authorization header to this server. We re-use it when calling back to
-    the proxy submission API so the proxy resolves the *real* user identity
-    (not the service account) for owner_sub attribution.
+    T2 trust-bridge fix: this server always authenticates to the submission
+    API with its OWN service credential (SELF_SERVICE_API_KEY) — passthrough
+    injection_mode does NOT forward the caller's session token here (it only
+    forwards a client-supplied X-Downstream-Authorization header; see
+    docs/spec/02-credential-broker.md §3.2), so _ctx_user_token is normally
+    empty and a prior version of this function silently fell back to the
+    service key with no way for the proxy to learn the real user — every
+    submission was attributed to "lab-self-service".
 
-    Falls back to the service API key if no user token is present (e.g. when
-    called directly in tests without a user session).
+    Fix: attach X-On-Behalf-Of: <caller sub>. The proxy's submissions router
+    only honours this header from a caller holding the dedicated
+    `submission_service` role (granted to lab-self-service only, see
+    lab/seeder/seed.py) — the real caller's sub is trustworthy here because
+    it came from X-User-Sub, which the proxy itself injected into this
+    server's request (the proxy is the trust anchor for identity, this
+    server is not — see module docstring). Omitted when there's no resolved
+    caller (e.g. called directly in tests without a session) so the
+    submission API falls back to attributing to the service account.
     """
-    user_token = _ctx_user_token.get()
-    token = user_token if user_token else f"Bearer {SELF_SERVICE_API_KEY}"
-    return {
-        "Authorization": token,
+    headers = {
+        "Authorization": f"Bearer {SELF_SERVICE_API_KEY}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    caller_sub = _ctx_caller_sub.get()
+    if caller_sub and caller_sub != "anonymous":
+        headers["X-On-Behalf-Of"] = caller_sub
+    return headers
 
 
 async def _proxy_get(path: str) -> dict:

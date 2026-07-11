@@ -26,6 +26,8 @@ from app.routers.submission import DraftUpdate, update_draft
 def _mock_request(client_id="alice@corp"):
     req = MagicMock()
     req.state.client_id = client_id
+    req.state.client_roles = []
+    req.headers = {}  # no X-On-Behalf-Of — caller acts as itself (T2)
     return req
 
 

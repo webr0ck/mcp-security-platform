@@ -1026,7 +1026,12 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
         # reads/writes (caller_id='lab-self-service' != principal, so the
         # profiles router needs a role grant — scoped narrowly to avoid blanket
         # admin. See proxy/app/routers/profiles.py:_PROFILE_SERVICE_ROLES).
-        for role in ("agent", "profile_service"):
+        # 'submission_service' is the identical pattern for the submissions
+        # router's owner_sub attribution (T2 trust-bridge fix) — lets
+        # lab-self-service present X-On-Behalf-Of: <real user sub> so
+        # submit_mcp_server attributes ownership to the real caller instead
+        # of the service account. See routers/submission.py:_ON_BEHALF_OF_ROLES.
+        for role in ("agent", "profile_service", "submission_service"):
             # role_assignments is append-only (V050): no unique constraint on
             # (client_id, role) to ON CONFLICT against — the latest event row
             # per key determines current state. Only insert a fresh grant if
@@ -1047,7 +1052,7 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
                 """,
                 role,
             )
-        log.info("lab-self-service API key seeded (client_id=lab-self-service roles=agent,admin)")
+        log.info("lab-self-service API key seeded (client_id=lab-self-service roles=agent,profile_service,submission_service)")
         return raw_key
     except Exception as exc:
         log.error("lab-self-service API key seeding failed: %s", exc)

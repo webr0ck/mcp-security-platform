@@ -21,6 +21,8 @@ def _fake_request(client_id: str = "submitter-1") -> Request:
     req = MagicMock(spec=Request)
     req.state = MagicMock()
     req.state.client_id = client_id
+    req.state.client_roles = []
+    req.headers = {}  # no X-On-Behalf-Of — caller acts as itself (T2)
     return req
 
 

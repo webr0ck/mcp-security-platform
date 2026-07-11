@@ -98,6 +98,51 @@ def _client_id(request: Request) -> str:
     return cid
 
 
+# T2 trust-bridge fix: lab-mcp-self-service authenticates to this API with its
+# OWN service credential (client_id="lab-self-service", an api_key auth_method
+# — see seed.py::seed_self_service_api_key) — it does NOT, and per
+# docs/spec/02-credential-broker.md §3.2 MUST NOT, receive a forwarded copy of
+# the real caller's session token (passthrough only forwards a client-supplied
+# X-Downstream-Authorization header nobody sends; it is not a session-token
+# relay). Previously the router had no way to learn the real submitting user,
+# so every self-service submission was attributed to the service account.
+#
+# Fix: the submissions endpoints accept an explicit X-On-Behalf-Of: <sub>
+# header, but ONLY from a caller that (a) authenticated itself first via the
+# platform's normal HMAC-hashed API-key/OIDC/mTLS resolution in
+# middleware/auth.py, AND (b) holds the dedicated `submission_service` role —
+# a small, DB-backed allowlist granted only to lab-self-service (seed.py),
+# mirroring the identical cross-principal delegation already used by
+# routers/profiles.py (_assert_may_write / profile_service role) for the same
+# "proxy is the trust anchor, self-service server is not" problem. This is
+# NOT a blanket passthrough: a caller without the role that sends the header
+# is rejected outright (fails closed) rather than silently falling back to
+# its own identity, so a spoofed header can never be mistaken for a no-op.
+_ON_BEHALF_OF_ROLES = frozenset({"submission_service"})
+
+
+def _effective_owner(request: Request) -> str:
+    """Resolve the owner_sub for a self-service submission action.
+
+    Normally the owner is the authenticated caller. A trusted service
+    principal (see module docstring above) may act on behalf of a real user
+    by presenting X-On-Behalf-Of: <sub>. Any other caller sending that header
+    is rejected (fail closed) rather than ignored, so spoofing attempts are
+    observable and testable.
+    """
+    caller = _client_id(request)
+    on_behalf_of = request.headers.get("x-on-behalf-of", "").strip()
+    if not on_behalf_of:
+        return caller
+    roles = list(getattr(request.state, "client_roles", []) or [])
+    if not any(r in _ON_BEHALF_OF_ROLES for r in roles):
+        raise HTTPException(
+            status_code=403,
+            detail="X-On-Behalf-Of requires the submission_service role",
+        )
+    return on_behalf_of
+
+
 def _require_admin(request: Request) -> None:
     roles = list(getattr(request.state, "client_roles", []) or [])
     if not any(r in {"admin", "platform_admin"} for r in roles):
@@ -238,7 +283,7 @@ class ReviewAction(BaseModel):
 @router.post("/api/v1/submissions", status_code=201)
 async def create_draft(body: DraftCreate, request: Request) -> JSONResponse:
     """Create a draft submission (wizard step 1)."""
-    owner = _client_id(request)
+    owner = _effective_owner(request)
     sid = str(uuid.uuid4())
     async with AsyncSessionLocal() as session:
         # Check for name collision by this owner
@@ -269,7 +314,7 @@ async def create_draft(body: DraftCreate, request: Request) -> JSONResponse:
 @router.patch("/api/v1/submissions/{server_id}")
 async def update_draft(server_id: str, body: DraftUpdate, request: Request) -> JSONResponse:
     """Update wizard data (steps 2-3). Only allowed in draft or changes_requested state."""
-    owner = _client_id(request)
+    owner = _effective_owner(request)
     sub = await _get_submission(server_id, owner_sub=owner)
     if sub["submission_status"] not in ("draft", "changes_requested"):
         raise HTTPException(status_code=409, detail="submission is not in an editable state")
@@ -354,7 +399,7 @@ async def submit_for_review(
     server_id: str, request: Request, background_tasks: BackgroundTasks
 ) -> JSONResponse:
     """Submit the draft for automated scan + security review."""
-    owner = _client_id(request)
+    owner = _effective_owner(request)
 
     # A reviewer cannot approve a server they don't understand. Require the
     # submitter to actually answer "what does this do" and "where will it
@@ -439,7 +484,7 @@ async def submit_for_review(
 @router.get("/api/v1/submissions")
 async def list_submissions(request: Request) -> JSONResponse:
     """List the caller's own submissions."""
-    owner = _client_id(request)
+    owner = _effective_owner(request)
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(text("""
             SELECT server_id, name, submission_status, scan_status,
@@ -455,7 +500,7 @@ async def list_submissions(request: Request) -> JSONResponse:
 @router.get("/api/v1/submissions/{server_id}")
 async def get_submission(server_id: str, request: Request) -> JSONResponse:
     """Get submission status and scan report."""
-    owner = _client_id(request)
+    owner = _effective_owner(request)
     sub = await _get_submission(server_id, owner_sub=owner)
     safe = _json_safe(dict(sub))
     return JSONResponse({
@@ -511,7 +556,7 @@ async def download_sbom(server_id: str, request: Request) -> JSONResponse:
 @router.get("/api/v1/submissions/{server_id}/prompts")
 async def get_design_prompts(server_id: str, request: Request) -> JSONResponse:
     """Return design prompts for the no-code path — questions to answer before writing the server."""
-    owner = _client_id(request)
+    owner = _effective_owner(request)
     sub = await _get_submission(server_id, owner_sub=owner)
     mode = sub.get("injection_mode") or "none"
     prompts = await prompt_store.prompts_for_mode(mode)
@@ -527,7 +572,7 @@ async def download_scaffold(server_id: str, request: Request) -> StreamingRespon
     what a no-code submitter will receive as part of reviewing the submission
     (the admin review UI links here); owner-only access made that 404.
     """
-    caller = _client_id(request)
+    caller = _effective_owner(request)
     caller_roles = list(getattr(request.state, "client_roles", []) or [])
     is_reviewer = any(r in {"admin", "platform_admin"} for r in caller_roles)
     sub = await _get_submission(server_id, owner_sub=None if is_reviewer else caller)
@@ -829,7 +874,7 @@ async def request_changes(server_id: str, body: ReviewAction, request: Request) 
 @router.post("/api/v1/submissions/{server_id}/provide-url")
 async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
     """Submitter provides the running server URL after approval."""
-    owner = _client_id(request)
+    owner = _effective_owner(request)
     body = await request.json()
     upstream_url = body.get("upstream_url", "").strip()
     if not upstream_url:
@@ -996,7 +1041,7 @@ async def apply_submission(server_id: str, request: Request) -> JSONResponse:
     commit (server_registry.scan_commit) — the TOCTOU guard build_engine.py
     refuses to build past (PRD-8 sec 2).
     """
-    owner = _client_id(request)
+    owner = _effective_owner(request)
     sub = await _get_submission(server_id, owner_sub=owner)
 
     if sub["submission_status"] not in _APPLY_ELIGIBLE_STATUSES:
@@ -1050,7 +1095,7 @@ async def get_verification_report(server_id: str, request: Request) -> JSONRespo
     """Plain read of server_registry.verification_report — 404 if the verify
     phase has never run for this server (still building/deploying, or a
     self-hosted submission that hasn't called provide-url yet)."""
-    owner = _client_id(request)
+    owner = _effective_owner(request)
     sub = await _get_submission(server_id, owner_sub=owner)
     report = sub.get("verification_report")
     if report is None:

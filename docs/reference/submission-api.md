@@ -7,6 +7,11 @@ authoritative schema for every field.
 
 ## Self-service submission
 
+"owner" below is normally the authenticated caller's `client_id`. A caller holding the
+`submission_service` role (granted only to `lab-self-service`, see `lab/seeder/seed.py`) may act
+on behalf of a real user by sending `X-On-Behalf-Of: <sub>` — any other caller sending that header
+gets a 403, not a silent fallback. See `docs/ARCHITECTURE.md` §5.5 "On-behalf-of trust bridge".
+
 | Method | Path | Role required | See |
 |---|---|---|---|
 | POST | `/api/v1/submissions` | any authenticated principal | [../user/self-service-onboarding.md](../user/self-service-onboarding.md) |

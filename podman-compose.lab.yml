@@ -956,8 +956,12 @@ services:
       # so MCP backends can't dial the proxy back over their per-backend network.
       # lab-mcp-self-service is a deliberate exception: it lives on the pairwise
       # mcp-self-service-net specifically to call back into /api/v1/design-assist
-      # and /api/v1/submissions (see lab/mcp-servers/self-service/server.py), and
-      # every such call still carries the caller's real OAuth bearer token — this
+      # and /api/v1/submissions (see lab/mcp-servers/self-service/server.py). It
+      # authenticates those calls with its OWN service API key (client_id
+      # lab-self-service) — NOT a forwarded copy of the caller's OAuth token
+      # (passthrough never forwards that; see docs/spec/02-credential-broker.md
+      # §3.2) — and attributes real-user ownership via the role-gated
+      # X-On-Behalf-Of trust bridge (T2, ARCHITECTURE.md §5.5). This allowlist
       # only grants network-level ingress, not an authn bypass.
       - PROXY_INGRESS_ALLOWLIST_ENABLED=true
       - PROXY_INGRESS_TRUSTED_HOSTS=gateway,lab-mcp-self-service,prometheus
