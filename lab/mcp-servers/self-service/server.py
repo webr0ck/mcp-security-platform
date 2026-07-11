@@ -534,6 +534,10 @@ async def submit_mcp_server(
     has_write_ops: bool,
     upstream_url: str,
     github_repo_url: Optional[str] = None,
+    upstream_idp_type: Optional[str] = None,
+    upstream_idp_issuer: Optional[str] = None,
+    upstream_idp_client_id: Optional[str] = None,
+    upstream_idp_scopes: Optional[list] = None,
 ) -> dict:
     """
     Create and submit an MCP server for security review.
@@ -570,6 +574,21 @@ async def submit_mcp_server(
                       You still confirm the live URL after approval
                       (check_submission_status will tell you when).
         github_repo_url: https://github.com/<owner>/<repo> — leave None if no code yet.
+        upstream_idp_type: Required for OAuth-family injection_mode values (currently
+                           entra_client_credentials, entra_user_token, oauth_user_token) —
+                           e.g. 'entra'. Approval is blocked with OAUTH_POLICY_VIOLATION
+                           without this and upstream_idp_issuer/upstream_idp_client_id set,
+                           and this cannot be added later once submitted (the submission
+                           becomes non-editable after scan/submit) — get it right up front.
+        upstream_idp_issuer: The IdP's issuer URL, e.g.
+                             'https://login.microsoftonline.com/<tenant>/v2.0' for Entra.
+                             Required alongside upstream_idp_type for OAuth modes.
+        upstream_idp_client_id: The OAuth client_id this server authenticates as at the
+                                upstream IdP. Required alongside upstream_idp_type for
+                                OAuth modes. Never the client secret — that is uploaded
+                                separately after approval, same as any other credential.
+        upstream_idp_scopes: Optional list of OAuth scopes to request, e.g.
+                             ['https://graph.microsoft.com/.default'] for Entra app-only.
 
     Returns: {server_id, submission_status, next_steps}
     """
@@ -582,6 +601,14 @@ async def submit_mcp_server(
     if not upstream_url or not upstream_url.strip():
         return {"error": "upstream_url_required",
                 "detail": "upstream_url is required — where does/will this server run? No code yet? Call get_server_scaffold instead; it needs no submission."}
+    _OAUTH_MODES = {"entra_client_credentials", "entra_user_token", "oauth_user_token"}
+    if injection_mode in _OAUTH_MODES and not (upstream_idp_type and upstream_idp_issuer and upstream_idp_client_id):
+        return {"error": "upstream_idp_config_required",
+                "detail": f"injection_mode={injection_mode!r} requires upstream_idp_type, "
+                          "upstream_idp_issuer, and upstream_idp_client_id — approval is "
+                          "blocked without them (OAUTH_POLICY_VIOLATION), and this cannot be "
+                          "added after submission (the submission becomes non-editable once "
+                          "scanned/submitted). Provide all three now."}
 
     caller_sub = _ctx_caller_sub.get()
     base = f"{PROXY_BASE_URL}/api/v1/submissions"
@@ -600,13 +627,23 @@ async def submit_mcp_server(
     sid = draft["server_id"]
 
     # 2. Patch with design data
+    patch_body = {
+        "injection_mode": injection_mode,
+        "data_categories": data_categories,
+        "has_write_ops": has_write_ops,
+        "requested_upstream_url": upstream_url,
+    }
+    if upstream_idp_type:
+        patch_body["upstream_idp_type"] = upstream_idp_type
+        patch_body["upstream_idp_config"] = {
+            "issuer": upstream_idp_issuer,
+            "client_id": upstream_idp_client_id,
+            **({"scopes": upstream_idp_scopes} if upstream_idp_scopes else {}),
+        }
     async with httpx.AsyncClient(timeout=10) as client:
-        await client.patch(f"{base}/{sid}", headers=hdrs, content=json.dumps({
-            "injection_mode": injection_mode,
-            "data_categories": data_categories,
-            "has_write_ops": has_write_ops,
-            "requested_upstream_url": upstream_url,
-        }))
+        patch_resp = await client.patch(f"{base}/{sid}", headers=hdrs, content=json.dumps(patch_body))
+    if patch_resp.status_code >= 400:
+        return {"error": "patch_failed", "server_id": sid, "detail": patch_resp.text[:300]}
 
     # 3. Submit
     async with httpx.AsyncClient(timeout=10) as client:
