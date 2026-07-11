@@ -1,0 +1,9 @@
+# Labeler leaf-renewal sidecar. `cryptography` is baked in at build time
+# (not `pip install` at container start) so the sidecar has no runtime
+# egress dependency — it previously needed pypi reachability on
+# observability-net every restart, which this lab's egress policy doesn't
+# guarantee (T1).
+FROM python:3.12-slim
+RUN pip install --no-cache-dir cryptography
+COPY renew-labeler-leaf.py /scripts/renew-labeler-leaf.py
+CMD ["python3", "/scripts/renew-labeler-leaf.py"]

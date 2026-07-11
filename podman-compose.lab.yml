@@ -838,6 +838,18 @@ services:
   # ── step-ca: secret handled via top-level secrets block (file: ./lab/step-ca-password) ──
   # No volume-bind override needed; podman-compose resolves it via secrets:.
 
+  # ── labeler-renewal (T3): docker-compose.yml's base definition pip-installs
+  # `cryptography` at container start on observability-net, which has no pypi
+  # egress in this lab — crash-loops. infra/pki/Dockerfile.labeler-renewal
+  # bakes the dependency in at build time instead. Distinct image tag (not
+  # python:3.12-slim) so the local build doesn't clobber that shared base tag.
+  labeler-renewal:
+    image: mcp-labeler-renewal:lab
+    build:
+      context: ./infra/pki
+      dockerfile: Dockerfile.labeler-renewal
+    command: ["python3", "/scripts/renew-labeler-leaf.py"]
+
   # ── Vault — LAB ONLY: switch to dev mode (in-memory, well-known root token).
   # The base compose runs Vault with a file storage backend that requires
   # init+unseal. For lab smoke tests we want a one-command bring-up, so the
