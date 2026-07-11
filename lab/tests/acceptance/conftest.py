@@ -61,6 +61,37 @@ _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
 
+# ── Per-call HTTP request/response log (QA acceptance standard req. 4) ───────
+# Every live HTTP call any test makes — through invoke_upstream,
+# invoke_upstream_loopback, call_upstream_tool, or container_curl_json — is
+# logged here: method, URL, status, a bounded response snippet. Secrets
+# redacted before logging, never written raw.
+http_logger = logging.getLogger("acceptance.http")
+_http_log_path = RESULTS_DIR / "http.log"
+_http_handler = logging.FileHandler(_http_log_path)
+_http_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+http_logger.addHandler(_http_handler)
+http_logger.setLevel(logging.INFO)
+http_logger.propagate = False
+
+_REDACT_KEYS = ("authorization", "bearer", "token", "secret", "password", "api_key", "apikey", "x-gateway-secret")
+
+
+def _redact(text: str) -> str:
+    """Redact Authorization/Bearer/secret-looking values in headers-ish or
+    body text before it ever touches the log file."""
+    import re
+    text = re.sub(r"(?i)(bearer)\s+[^\s'\"]+", r"\1 [REDACTED]", text)
+    for key in _REDACT_KEYS:
+        text = re.sub(rf"(?i)([\"']?{key}[\"']?\s*[:=]\s*[\"']?)[^\s'\",}}]+", r"\1[REDACTED]", text)
+    return text
+
+
+def log_http_call(method: str, url: str, status: int, body: Any) -> None:
+    snippet = body if isinstance(body, str) else json.dumps(body, default=str)
+    snippet = _redact(snippet)[:500]
+    http_logger.info("%s %s -> %s | %s", method, _redact(url), status, snippet)
+
 
 def _env_lab(key: str, default: str = "") -> str:
     """Read a single value out of .env.lab without ever echoing it anywhere."""
@@ -92,6 +123,7 @@ def proxy_exec_json(path: str, token: str | None = None, timeout: int = 20) -> t
         body = json.loads(body_r.stdout) if body_r.stdout.strip() else {}
     except json.JSONDecodeError:
         body = {"_raw": body_r.stdout}
+    log_http_call("GET", f"http://localhost:8000{path}", status, body)
     return status, body
 
 
@@ -129,6 +161,7 @@ def container_curl_json(container: str, url: str, headers: dict | None = None,
         body = json.loads(body_r.stdout) if body_r.stdout.strip() else {}
     except json.JSONDecodeError:
         body = {"_raw": body_r.stdout}
+    log_http_call("GET", url, status, body)
     return status, body
 
 
@@ -162,7 +195,9 @@ def invoke_upstream(token: str, server_tool_name: str, upstream_method: str, ups
               "params": {"name": "invoke_tool",
                          "arguments": {"tool_name": server_tool_name, "method": upstream_method,
                                       "arguments": upstream_args}}})
-    return {"status_code": r.status_code, "body": r.json() if r.text else {}}
+    body = r.json() if r.text else {}
+    log_http_call("POST", f"{BASE_URL}/mcp", r.status_code, body)
+    return {"status_code": r.status_code, "body": body}
 
 
 def invoke_upstream_loopback(token: str, server_tool_name: str, upstream_method: str,
@@ -199,6 +234,7 @@ def invoke_upstream_loopback(token: str, server_tool_name: str, upstream_method:
         parsed = json.loads(body_r.stdout) if body_r.stdout.strip() else {}
     except json.JSONDecodeError:
         parsed = {"_raw": body_r.stdout}
+    log_http_call("POST", "http://localhost:8000/mcp (loopback)", status, parsed)
     return {"status_code": status, "body": parsed}
 
 
