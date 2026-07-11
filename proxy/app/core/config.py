@@ -158,6 +158,12 @@ class Settings(BaseSettings):
 
     # Trust envelope observer (W4.2) — passive verification log; never blocks
     TRUST_OBSERVER_ENABLED: bool = False
+    # Trust envelope enforcement: when True (and TRUST_OBSERVER_ENABLED is True),
+    # a rejected verdict on the direct tools/call dispatch path (reason in
+    # signature_invalid/no_envelope/chain_validation_failed) fails the call
+    # instead of only logging. Default False — advisory-only stays the lab
+    # baseline until explicitly opted in.
+    TRUST_ENVELOPE_ENFORCE: bool = False
 
     # =========================================================================
     # Supply-chain re-scan freshness (Stage 3)

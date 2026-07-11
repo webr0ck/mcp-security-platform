@@ -979,13 +979,25 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
     if _gs().TRUST_OBSERVER_ENABLED:
         from app.services.trust_observer import observe_result as _observe
         from app.services.trust_verifier import get_verifier as _get_verifier
-        _observe(
+        _verdict = _observe(
             _result_payload,
             verifier=_get_verifier(),
             tool_name=name,
             server_id=_server_id,
             result_id=request_id,
         )
+        # TRUST_ENVELOPE_ENFORCE (opt-in, default off): promote a subset of
+        # fail-closed verifier reasons from advisory-log to a real deny. Scoped
+        # to the reasons that indicate the envelope itself is untrustworthy
+        # (forged/absent/broken chain), not transient/config reasons.
+        if _gs().TRUST_ENVELOPE_ENFORCE and not _verdict.accepted and (_verdict.reason or "").startswith(
+            ("signature_invalid", "no_envelope", "chain_validation_failed")
+        ):
+            return _err(
+                req_id, -32603,
+                "Tool result rejected: trust envelope verification failed",
+                data={"reason": _verdict.reason},
+            )
     return _ok(req_id, _result_payload)
 
 
@@ -1615,6 +1627,22 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
                 trust_tier=4,
                 sensitivity_label="low",
             )
+            # T1(b): close the invoke_tool observation blind spot — this wrapper
+            # signs an envelope like the direct-dispatch path (~line 979) but
+            # never observed it. Advisory-only here (no enforcement branch):
+            # invoke_tool's own downstream pipeline already applies its own
+            # entitlement/quarantine/policy gates before reaching this point.
+            from app.core.config import get_settings as _gs2
+            if _gs2().TRUST_OBSERVER_ENABLED:
+                from app.services.trust_observer import observe_result as _observe2
+                from app.services.trust_verifier import get_verifier as _get_verifier2
+                _observe2(
+                    _platform_payload,
+                    verifier=_get_verifier2(),
+                    tool_name=name,
+                    server_id="__platform__",
+                    result_id=_effective_request_id,
+                )
             return _ok(req_id, _platform_payload)
         except AuditEmissionError:
             # INV-001 (SR-2): an audit-emission failure on the meta-tool ALLOW
