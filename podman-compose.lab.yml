@@ -62,21 +62,30 @@ services:
 
   # ── Keycloak IDP (replaces/augments Dex for full OAuth2 + PKCE + token exchange)
   lab-keycloak:
-    image: quay.io/keycloak/keycloak:24.0
+    # Bumped from 24.0 (2026-07-11): Codex (OAuth 2.1 client) rejects the
+    # authorization callback for missing the RFC 9207 `iss` response
+    # parameter, which KC only started sending starting in 26.x.
+    image: quay.io/keycloak/keycloak:26.0
     container_name: lab-keycloak
     command: ["start-dev", "--import-realm", "--features=token-exchange,admin-fine-grained-authz"]
     environment:
       KC_DB: dev-file
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-adminpassword}
-      # KC_HOSTNAME_STRICT=true: KC always uses the configured KC_HOSTNAME_URL for
-      # frontend URLs (login pages, discovery, tokens). Without this, KC 24 uses
+      # KC_HOSTNAME_STRICT=true: KC always uses the configured hostname for
+      # frontend URLs (login pages, discovery, tokens). Without this, KC uses
       # the request Host header as the issuer, which breaks cross-machine auth
       # (browser sees localhost:8082, not the LAN IP). Backchannel (server-to-server)
       # fetches from the proxy still work with strict=true.
       KC_HOSTNAME_STRICT: "true"
       KC_HTTP_ENABLED: "true"
       KC_PROXY: edge
+      # KC 26's "hostname:v2" provider (default since 26.0) replaced the KC 24
+      # KC_HOSTNAME_URL/KC_HOSTNAME_STRICT-only config with a single KC_HOSTNAME
+      # that takes the full external URL directly — KC 26 refuses to start
+      # ("hostname is not configured") without it, even with KC_HOSTNAME_URL set.
+      # KC_HOSTNAME_URL kept too: still read by v1-style tooling and doesn't hurt.
+      KC_HOSTNAME: "${LAB_GATEWAY_URL:-http://${LAB_HOST:-localhost}:8082}"
       # Tell KC its external frontend URL so all generated URLs use the LAN address.
       # ponytail: KC proxied through nginx at HTTPS — avoids SameSite cookie issues
       KC_HOSTNAME_URL: "${LAB_GATEWAY_URL:-http://${LAB_HOST:-localhost}:8082}"
@@ -303,7 +312,10 @@ services:
       - mcp-grafana-backend-net   # HIGH-2: dedicated MCP<->backend net (replaces shared lab-net)
       - mcp-grafana-net   # pairwise net with proxy only
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/mcp > /dev/null 2>&1 || exit 1"]
+      # The grafana/mcp-grafana image ships NO wget/curl (distroless-ish, only
+      # bash+coreutils), so the previous wget probe always exited 127 -> forever unhealthy.
+      # Use bash /dev/tcp to do a real HTTP GET and assert a 200 from /mcp.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000; printf 'GET /mcp HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3; head -c 15 <&3 | grep -q 200"]
       interval: 15s
       timeout: 5s
       retries: 5

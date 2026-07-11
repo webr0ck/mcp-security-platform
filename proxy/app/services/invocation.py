@@ -494,7 +494,9 @@ async def invoke_tool(
     anomaly_score = 0.0
     if not is_testing:
         try:
-            anomaly_result = await detect_anomaly(client_id=client_id, tool_name=tool_name)
+            anomaly_result = await detect_anomaly(
+                client_id=client_id, tool_name=tool_name, method=json_rpc_request.get("method")
+            )
             anomaly_score = anomaly_result.anomaly_score
         except Exception as exc:
             # Anomaly detection is non-blocking — a failure here should not

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -214,6 +214,7 @@ class _FakeResult:
 
 
 _PROFILE_DEFAULTS = {
+    "injection_mode": None,
     "issuer": None, "authorization_endpoint": None, "token_endpoint": None,
     "jwks_uri": None, "metadata_url": None, "default_scopes": [], "allowed_scopes": [],
     "blocked_scopes": [], "allowed_redirect_patterns": [], "allowed_client_auth_methods": [],
@@ -239,6 +240,7 @@ class _FakeProfileSession:
             row["slug"] = params["slug"]
             row["display_name"] = params["display_name"]
             row["provider_type"] = params["provider_type"]
+            row["injection_mode"] = params.get("injection_mode")
             row["issuer"] = params.get("issuer")
             row["authorization_endpoint"] = params.get("authz_ep")
             row["token_endpoint"] = params.get("token_ep")
@@ -282,7 +284,7 @@ class _FakeProfileSession:
 async def test_create_draft_profile_starts_as_draft():
     session = _FakeProfileSession()
     profile = await svc.create_draft_profile(
-        session, slug="acme-oauth", display_name="Acme OAuth", provider_type="generic_oauth2",
+        session, slug="acme-oauth", display_name="Acme OAuth", provider_type="generic_oauth2", injection_mode="external_oauth_user_token",
         created_by="alice@corp",
     )
     assert profile.status == "draft"
@@ -290,10 +292,37 @@ async def test_create_draft_profile_starts_as_draft():
 
 
 @pytest.mark.asyncio
-async def test_approve_profile_happy_path():
+async def test_create_draft_profile_rejects_unknown_service_adapter():
+    """M-02 (2026-07-11 audit): get_service_adapter's runtime fallback
+    silently treats an unknown slug as 'generic' so enrollment is never
+    blocked — but that means a typo'd service_adapter would silently lose
+    service-specific discovery/verification with no error anywhere. Reject
+    at profile-creation (write) time instead."""
+    session = _FakeProfileSession()
+    with pytest.raises(ValueError, match="service_adapter"):
+        await svc.create_draft_profile(
+            session, slug="acme-oauth", display_name="Acme OAuth", provider_type="generic_oauth2",
+            injection_mode="external_oauth_user_token", created_by="alice@corp",
+            service_adapter="acme-typo",
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_draft_profile_accepts_known_service_adapter():
     session = _FakeProfileSession()
     profile = await svc.create_draft_profile(
         session, slug="acme-oauth", display_name="Acme OAuth", provider_type="generic_oauth2",
+        injection_mode="external_oauth_user_token", created_by="alice@corp",
+        service_adapter="generic",
+    )
+    assert profile.service_adapter == "generic"
+
+
+@pytest.mark.asyncio
+async def test_approve_profile_happy_path():
+    session = _FakeProfileSession()
+    profile = await svc.create_draft_profile(
+        session, slug="acme-oauth", display_name="Acme OAuth", provider_type="generic_oauth2", injection_mode="external_oauth_user_token",
         created_by="alice@corp",
     )
     approved = await svc.approve_profile(session, profile.id, reviewer="admin@corp")
@@ -308,7 +337,7 @@ async def test_approve_profile_requires_high_risk_ack():
     mirrors oauth_policy.py's HighRiskScopeApprovalRequiredError posture."""
     session = _FakeProfileSession()
     profile = await svc.create_draft_profile(
-        session, slug="acme-write", display_name="Acme (write access)", provider_type="generic_oauth2",
+        session, slug="acme-write", display_name="Acme (write access)", provider_type="generic_oauth2", injection_mode="external_oauth_user_token",
         created_by="alice@corp", default_scopes=["read", "write"],
     )
     with pytest.raises(svc.HighRiskScopeAckRequiredError) as exc_info:
@@ -325,7 +354,7 @@ async def test_approve_profile_requires_high_risk_ack():
 async def test_approve_profile_rejects_invalid_state_transition():
     session = _FakeProfileSession()
     profile = await svc.create_draft_profile(
-        session, slug="acme-oauth2", display_name="Acme OAuth 2", provider_type="generic_oauth2",
+        session, slug="acme-oauth2", display_name="Acme OAuth 2", provider_type="generic_oauth2", injection_mode="external_oauth_user_token",
         created_by="alice@corp",
     )
     await svc.approve_profile(session, profile.id, reviewer="admin@corp")
@@ -337,7 +366,7 @@ async def test_approve_profile_rejects_invalid_state_transition():
 async def test_reject_profile():
     session = _FakeProfileSession()
     profile = await svc.create_draft_profile(
-        session, slug="acme-oauth3", display_name="Acme OAuth 3", provider_type="generic_oauth2",
+        session, slug="acme-oauth3", display_name="Acme OAuth 3", provider_type="generic_oauth2", injection_mode="external_oauth_user_token",
         created_by="alice@corp",
     )
     rejected = await svc.reject_profile(session, profile.id, reviewer="admin@corp", reason="unapproved issuer")
@@ -360,7 +389,7 @@ async def test_get_profile_not_found_raises():
 async def test_create_draft_profile_persists_allowed_and_blocked_scopes():
     session = _FakeProfileSession()
     profile = await svc.create_draft_profile(
-        session, slug="acme-scoped", display_name="Acme Scoped", provider_type="generic_oauth2",
+        session, slug="acme-scoped", display_name="Acme Scoped", provider_type="generic_oauth2", injection_mode="external_oauth_user_token",
         created_by="alice@corp",
         default_scopes=["openid"], allowed_scopes=["openid", "profile", "email"],
         blocked_scopes=["admin"],
@@ -377,7 +406,7 @@ async def test_create_draft_profile_rejects_scope_in_both_allowed_and_blocked():
     session = _FakeProfileSession()
     with pytest.raises(ValueError, match="Mail.Read"):
         await svc.create_draft_profile(
-            session, slug="acme-conflict", display_name="Acme Conflict", provider_type="generic_oauth2",
+            session, slug="acme-conflict", display_name="Acme Conflict", provider_type="generic_oauth2", injection_mode="external_oauth_user_token",
             created_by="alice@corp",
             allowed_scopes=["openid", "Mail.Read"], blocked_scopes=["Mail.Read"],
         )
@@ -391,7 +420,7 @@ async def test_approve_profile_requires_high_risk_ack_for_allowed_scopes_too():
     session = _FakeProfileSession()
     profile = await svc.create_draft_profile(
         session, slug="acme-allowed-write", display_name="Acme (allowed write)",
-        provider_type="generic_oauth2", created_by="alice@corp",
+        provider_type="generic_oauth2", injection_mode="external_oauth_user_token", created_by="alice@corp",
         default_scopes=["openid"], allowed_scopes=["openid", "write"],
     )
     with pytest.raises(svc.HighRiskScopeAckRequiredError) as exc_info:
@@ -402,3 +431,38 @@ async def test_approve_profile_requires_high_risk_ack_for_allowed_scopes_too():
         session, profile.id, reviewer="admin@corp", high_risk_scopes_approved=True
     )
     assert approved.status == "approved"
+
+
+# ---------------------------------------------------------------------------
+# WP-A6 Finding 6: approve_profile syncs oauth_provider_policy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_approve_profile_syncs_oauth_provider_policy_when_issuer_set():
+    session = _FakeProfileSession()
+    profile = await svc.create_draft_profile(
+        session, slug="acme-synced", display_name="Acme Synced",
+        provider_type="generic_oauth2", injection_mode="external_oauth_user_token",
+        created_by="alice@corp", default_scopes=["openid"],
+        metadata=svc.DiscoveredMetadata(issuer="https://idp.example"),
+    )
+    with patch("app.services.oauth_policy.sync_policy_from_provider_profile", new=AsyncMock()) as mock_sync:
+        await svc.approve_profile(session, profile.id, reviewer="admin@corp")
+    mock_sync.assert_awaited_once()
+    _, kwargs = mock_sync.await_args
+    assert kwargs["issuer"] == "https://idp.example"
+    assert kwargs["created_by"] == "admin@corp"
+
+
+@pytest.mark.asyncio
+async def test_approve_profile_skips_policy_sync_when_no_issuer():
+    session = _FakeProfileSession()
+    profile = await svc.create_draft_profile(
+        session, slug="acme-no-issuer", display_name="Acme No Issuer",
+        provider_type="generic_oauth2", injection_mode="external_oauth_user_token",
+        created_by="alice@corp",
+    )
+    with patch("app.services.oauth_policy.sync_policy_from_provider_profile", new=AsyncMock()) as mock_sync:
+        await svc.approve_profile(session, profile.id, reviewer="admin@corp")
+    mock_sync.assert_not_awaited()

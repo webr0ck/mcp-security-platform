@@ -1844,6 +1844,17 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
       </div>
     </div>
 
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1.25rem 1.5rem;max-width:520px;margin-top:1rem">
+      <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Certificate setup</div>
+      <p style="font-size:12px;color:var(--muted);margin:0.4rem 0 0.75rem">
+        TLS trust or client-certificate errors (e.g. Codex/Windows)? Get the gateway CA and
+        setup instructions.
+      </p>
+      <button class="btn-secondary btn-sm" hx-get="/portal/fragments/cert-setup" hx-target="#portal-body" hx-swap="innerHTML">
+        Certificate setup &#x2192;
+      </button>
+    </div>
+
     {mcp_profiles_html}
 
     <script>
@@ -1859,6 +1870,80 @@ async def fragment_profile(request: Request):
     """Agent-portal profile view."""
     _require_portal_access(request)
     return HTMLResponse(await _build_profile_fragment(request, back_target="/portal/fragments/my-access"))
+
+
+@router.get("/fragments/cert-setup", response_class=HTMLResponse)
+async def fragment_cert_setup(request: Request):
+    """Self-service TLS/mTLS certificate setup instructions (2026-07-11).
+
+    /api/v1/tools/ on the gateway's main listener no longer requires a
+    client certificate (OAuth/session auth is enough) — the only certs an
+    end user typically needs are the gateway's own CA, to trust its TLS
+    server certificate. Client-cert (agent) identity remains available on
+    the dedicated :8445 listener for callers that want it.
+    """
+    _require_portal_access(request)
+    host_no_port = request.url.hostname or "localhost"
+    http_ca_url = f"http://{host_no_port}/ca.crt"
+    return HTMLResponse(f"""
+    <div class="section-title">&#x1F510; Certificate setup</div>
+
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1.25rem 1.5rem;max-width:640px">
+      <div style="font-size:13px;font-weight:600">1. Trust the gateway's TLS certificate</div>
+      <p style="font-size:12px;color:var(--muted);margin:0.4rem 0 0.75rem">
+        If your client rejects the gateway's HTTPS certificate (e.g. a Windows/Codex TLS
+        handshake failure), download and trust this CA once — you don't need mkcert or any
+        client certificate to do this.
+      </p>
+      <a href="/ca.crt" download="mcp-lab-ca.crt" class="btn-primary btn-sm" style="text-decoration:none;display:inline-block">
+        &#x2B07; Download CA certificate
+      </a>
+      <div style="font-size:11px;color:var(--muted);margin-top:0.4rem">
+        Plain-HTTP link (fetches before TLS trust is established, e.g. from a fresh machine):
+        <code>{esc_py(http_ca_url)}</code>
+      </div>
+
+      <details style="margin-top:0.9rem">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--cyan)">Windows install instructions</summary>
+        <div style="font-size:12px;color:var(--muted);line-height:1.8;margin-top:0.5rem">
+          PowerShell (as Administrator):<br>
+          <code>Import-Certificate -FilePath .\\mcp-lab-ca.crt -CertStoreLocation Cert:\\LocalMachine\\Root</code><br>
+          or: double-click the downloaded file &rarr; <em>Install Certificate</em> &rarr;
+          <em>Local Machine</em> &rarr; <em>Place all certificates in the following store</em> &rarr;
+          <em>Trusted Root Certification Authorities</em>. Restart your MCP client (e.g. Codex)
+          afterwards so it picks up the updated trust store.
+        </div>
+      </details>
+      <details style="margin-top:0.5rem">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--cyan)">macOS install instructions</summary>
+        <div style="font-size:12px;color:var(--muted);line-height:1.8;margin-top:0.5rem">
+          <code>sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain mcp-lab-ca.crt</code>
+        </div>
+      </details>
+      <details style="margin-top:0.5rem">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--cyan)">Linux install instructions</summary>
+        <div style="font-size:12px;color:var(--muted);line-height:1.8;margin-top:0.5rem">
+          <code>sudo cp mcp-lab-ca.crt /usr/local/share/ca-certificates/mcp-lab-ca.crt && sudo update-ca-certificates</code>
+        </div>
+      </details>
+    </div>
+
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:1.25rem 1.5rem;max-width:640px;margin-top:1rem">
+      <div style="font-size:13px;font-weight:600">2. Client (mTLS) certificates — usually not needed</div>
+      <p style="font-size:12px;color:var(--muted);margin:0.4rem 0">
+        You do <strong>not</strong> need a client certificate to sign in or call tools — OAuth
+        sign-in (this portal's login) is sufficient everywhere, including
+        <code>/api/v1/tools/</code>. A client certificate is only relevant if you're
+        registering a non-interactive <em>agent</em> identity on the dedicated mTLS listener.
+        That's issued via step-ca and isn't self-service yet — ask an admin, or see
+        <code>lab/tests/mtls_agent_identity.sh</code> for how one is minted today.
+      </p>
+    </div>
+
+    <div style="margin-top:1rem">
+      <button class="btn-secondary" hx-get="/portal/fragments/profile" hx-target="#portal-body" hx-swap="innerHTML">&#x2190; Back to profile</button>
+    </div>
+    """)
 
 
 @router.get("/fragments/admin/profile", response_class=HTMLResponse)

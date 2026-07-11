@@ -101,6 +101,20 @@ function DetailCard({ sub }: { sub: Submission }) {
         <dt>Updated</dt><dd>{sub.updated_at ? new Date(sub.updated_at).toLocaleString() : '—'}</dd>
       </dl>
 
+      <h3 className="review__section-title">Backend &amp; credentials</h3>
+      <dl className="review__dl">
+        <dt>Upstream URL</dt>
+        <dd>{sub.upstream_url ? <code>{sub.upstream_url}</code> : 'Not provided yet — set after approval via provide-url'}</dd>
+        {sub.service_name && <><dt>Credential / service name</dt><dd><code>{sub.service_name}</code></dd></>}
+        {sub.upstream_idp_type && <><dt>Upstream identity provider</dt><dd>{sub.upstream_idp_type}</dd></>}
+        {sub.upstream_idp_config && (
+          <>
+            <dt>Requested IdP config</dt>
+            <dd><pre className="review__idp-config">{JSON.stringify(sub.upstream_idp_config, null, 2)}</pre></dd>
+          </>
+        )}
+      </dl>
+
       {sub.description && (
         <>
           <h3 className="review__section-title">Description</h3>

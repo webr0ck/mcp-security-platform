@@ -191,6 +191,97 @@ async def get_policy_for_issuer(
     )
 
 
+async def sync_policy_from_provider_profile(
+    session: AsyncSession,
+    *,
+    issuer: str,
+    allowed_scopes: list[str],
+    blocked_scopes: list[str],
+    allowed_redirect_patterns: list[str],
+    allowed_client_auth_methods: list[str],
+    token_audience_or_resource: str | None,
+    created_by: str,
+    tenant: str | None = None,
+) -> None:
+    """
+    WP-A6 Finding 6: an approved oauth_provider_profile (the wizard-facing
+    catalog) previously had no automatic effect on oauth_provider_policy (the
+    issuer-scoped enforcement row _validate_oauth_policy_at_approval actually
+    checks against) — an admin had to separately hand-author a matching
+    policy row, or a real submission against this issuer would fail closed
+    with UnknownIssuerError even though the profile itself was approved.
+
+    Upserts by (issuer, tenant) — the same unique index oauth_provider_policy
+    already enforces. Never narrows an existing row's allowed_scopes/
+    allowed_redirect_patterns/allowed_client_auth_methods (a profile
+    approval must not silently tighten a policy other submissions already
+    rely on) — only widens the allow-lists and merges blocked_scopes/
+    allowed_token_audiences.
+    """
+    if not issuer:
+        return  # profile has no issuer (e.g. a not-yet-discovered draft) — nothing to sync
+
+    audiences = [token_audience_or_resource] if token_audience_or_resource else []
+    await session.execute(
+        text(
+            """
+            INSERT INTO oauth_provider_policy (
+                issuer, tenant, allowed_scopes, blocked_scopes,
+                allowed_redirect_patterns, allowed_client_auth_methods,
+                allowed_token_audiences, created_by
+            ) VALUES (
+                :issuer, :tenant, CAST(:allowed_scopes AS jsonb), CAST(:blocked_scopes AS jsonb),
+                CAST(:allowed_redirect_patterns AS jsonb), CAST(:allowed_client_auth_methods AS jsonb),
+                CAST(:allowed_token_audiences AS jsonb), :created_by
+            )
+            ON CONFLICT (issuer, COALESCE(tenant, ''))
+            DO UPDATE SET
+                allowed_scopes = (
+                    SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(
+                        oauth_provider_policy.allowed_scopes || CAST(:allowed_scopes AS jsonb)
+                    ) AS v
+                ),
+                blocked_scopes = (
+                    SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(
+                        oauth_provider_policy.blocked_scopes || CAST(:blocked_scopes AS jsonb)
+                    ) AS v
+                ),
+                allowed_redirect_patterns = (
+                    SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(
+                        oauth_provider_policy.allowed_redirect_patterns || CAST(:allowed_redirect_patterns AS jsonb)
+                    ) AS v
+                ),
+                allowed_client_auth_methods = (
+                    SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(
+                        oauth_provider_policy.allowed_client_auth_methods || CAST(:allowed_client_auth_methods AS jsonb)
+                    ) AS v
+                ),
+                allowed_token_audiences = (
+                    SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(
+                        oauth_provider_policy.allowed_token_audiences || CAST(:allowed_token_audiences AS jsonb)
+                    ) AS v
+                ),
+                updated_at = now()
+            """
+        ),
+        {
+            "issuer": issuer,
+            "tenant": tenant,
+            "allowed_scopes": _json_dumps(allowed_scopes),
+            "blocked_scopes": _json_dumps(blocked_scopes),
+            "allowed_redirect_patterns": _json_dumps(allowed_redirect_patterns),
+            "allowed_client_auth_methods": _json_dumps(allowed_client_auth_methods),
+            "allowed_token_audiences": _json_dumps(audiences),
+            "created_by": created_by,
+        },
+    )
+
+
+def _json_dumps(value: list[str]) -> str:
+    import json
+    return json.dumps(value)
+
+
 def _split_high_risk(requested_scopes: list[str]) -> list[str]:
     return sorted(set(requested_scopes) & HIGH_RISK_SCOPES)
 

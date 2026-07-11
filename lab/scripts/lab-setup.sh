@@ -55,6 +55,21 @@ fi
 
 log_ok "Prerequisites satisfied"
 
+# ── Step 1b: mkcert root CA for end-user distribution ────────────────────────
+# lab-certs/server.crt (the leaf cert nginx serves) is generated manually per
+# lab/nginx/lab-certs/README.md — this step just also copies the mkcert ROOT
+# CA alongside it so the gateway can serve it at /ca.crt for end users on a
+# different machine (e.g. Windows/Codex) to trust, without them needing
+# mkcert installed themselves. Skips cleanly if mkcert isn't installed or no
+# leaf cert has been generated yet.
+if command -v mkcert >/dev/null 2>&1 && [[ -f "${PROJECT_ROOT}/lab/nginx/lab-certs/server.crt" ]]; then
+    MKCERT_CAROOT="$(mkcert -CAROOT)"
+    if [[ -f "${MKCERT_CAROOT}/rootCA.pem" ]]; then
+        cp "${MKCERT_CAROOT}/rootCA.pem" "${PROJECT_ROOT}/lab/nginx/lab-certs/mkcert-rootCA.pem"
+        log_ok "mkcert root CA copied for /ca.crt distribution"
+    fi
+fi
+
 # ── Step 2: Environment file ─────────────────────────────────────────────────
 log "Step 2: Validating .env.lab"
 
@@ -387,14 +402,17 @@ ${LAB_COMPOSE} run --rm lab-seeder 2>&1 | tee -a "${LOG_FILE}" || {
 
 log_ok "Seeder complete"
 
-# The seeder writes fresh tokens (GRAFANA_SERVICE_ACCOUNT_TOKEN, GITEA_ADMIN_TOKEN)
-# to .env.lab, but lab-mcp-grafana/lab-mcp-gitea's own Go/CLI clients read a
-# STATIC token from their own container env at process start — a per-request
-# broker-injected header isn't enough for these two (unlike netbox-query, which
-# has no static token and needs no recreate). `restart` reuses the existing
-# container's already-baked env; only recreating picks up the new .env.lab
-# value (same drift this file's own GITEA_ADMIN_TOKEN/self-service comment warns
-# about above).
+# The seeder writes fresh tokens (GRAFANA_SERVICE_ACCOUNT_TOKEN, GITEA_ADMIN_TOKEN,
+# SELF_SERVICE_API_KEY) to .env.lab, but lab-mcp-grafana/lab-mcp-gitea/lab-mcp-self-service
+# each read a STATIC credential from their own container env at process start — a
+# per-request broker-injected header isn't enough for these three (unlike netbox-query,
+# which has no static token and needs no recreate). `restart` reuses the existing
+# container's already-baked env; only recreating picks up the new .env.lab value.
+# lab-mcp-self-service missing from this list was the root cause of the
+# 2026-07-07 remote-check findings (get_server_scaffold -> scaffold_unavailable,
+# submit_mcp_server -> create_failed/unauthenticated): its baked SELF_SERVICE_API_KEY
+# no longer matched the DB row the seeder had just (re)written, so every callback
+# to /api/v1/design-assist/scaffold and /api/v1/submissions 401'd.
 # Re-source .env.lab: compose variable substitution (${GRAFANA_SERVICE_ACCOUNT_TOKEN}
 # in podman-compose.lab.yml) prefers THIS PROCESS's already-exported env var over
 # --env-file's current file content. Step 2 exported the pre-seeder value; without
@@ -405,8 +423,8 @@ set -a
 source "${ENV_LAB}"
 set +a
 
-log "  Recreating lab-mcp-grafana, lab-mcp-gitea with refreshed tokens..."
-${LAB_COMPOSE} up -d --force-recreate --no-deps lab-mcp-grafana lab-mcp-gitea 2>&1 | tee -a "${LOG_FILE}"
+log "  Recreating lab-mcp-grafana, lab-mcp-gitea, lab-mcp-self-service with refreshed tokens..."
+${LAB_COMPOSE} up -d --force-recreate --no-deps lab-mcp-grafana lab-mcp-gitea lab-mcp-self-service 2>&1 | tee -a "${LOG_FILE}"
 log_ok "MCP servers recreated with refreshed credentials"
 
 # ── Step 11: Smoke tests ──────────────────────────────────────────────────────

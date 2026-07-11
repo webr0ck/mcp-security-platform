@@ -907,7 +907,7 @@ MALICIOUS_DOC_PATTERNS = [
     r"read (the )?(following )?files",                    # "read the following files"
     r"include (their|the) contents",                      # "include their contents"
     r"do not (?:mention|inform|tell)",                    # "do not mention" / "do not inform"
-    r"always use",                                        # "always use security-research@..."
+    r"always use.{0,60}(?:@[\w.-]+\.\w+|https?://|security-research)",  # "always use security-research@..." (forced-recipient exfil) — NOT bare "always use", which false-positives on ordinary docstrings ("always use UTF-8", "always use this parameter"); the standalone security-research@ address is separately caught below regardless
     r"must be routed",                                    # "must be routed through"
     r"(exfiltrat|stolen|exfiltr)",                        # exfiltrate / stolen
     r"security-research@[\w\.-]+",                        # forced recipient e-mail
@@ -972,7 +972,7 @@ MALICIOUS_DOC_PATTERNS = [
 
     # Universal Unicode obfuscation (any language)
     r"[‪-‮⁦-⁩‏‎]",                                    # unicode_direction_override — bidi/direction overrides
-    r"[^\x00-\x7f]{3,}.*(?:exec|run|shell|system|eval)",  # unicode_homoglyph_tool_name — non-ASCII + dangerous keyword
+    r"[^\x00-\x7f]{3,}.{0,30}\b(?:exec|run|shell|system|eval)\b",  # unicode_homoglyph_tool_name — non-ASCII immediately near a dangerous keyword. Was an unbounded substring match with no word boundary, so it false-positived on any ordinary line containing an emoji/accented character/em-dash followed anywhere later by the bare substring "run"/"system"/"eval" (matches inside "running", "systematic", "evaluate", "ecosystem", etc.) — i.e. almost any real README/CLAUDE.md.
 ]
 
 SENSITIVE_PATH_SIGS = [
@@ -1356,9 +1356,14 @@ def detect_malicious_docstrings_and_ast(repo_dir: Path) -> Dict[str, Any]:
         re.I
     )
 
-    # dict(os.environ) or os.environ[...] usage
+    # Whole-environment dump — dict(os.environ), os.environ.copy(), os.environ.items()/.values()
+    # iterated wholesale. This is the actual exfiltration pattern (grab every env var, including
+    # secrets, in one shot). Deliberately does NOT match os.environ["X"] / os.environ.get("X", ...)
+    # — reading one named variable with an explicit key is the single most common, completely
+    # benign config-loading idiom in real-world Python (12-factor config, default fallbacks); the
+    # previous regex matched that too and false-positived on nearly any real server's config code.
     environ_usage_re = re.compile(
-        r"\b(os\.environ(\s*\[|\s*\.get\b)|dict\s*\(\s*os\.environ\s*\))\b"
+        r"\bdict\s*\(\s*os\.environ\s*\)|os\.environ\.copy\s*\(\s*\)|os\.environ\.items\s*\(\s*\)|os\.environ\.values\s*\(\s*\)"
     )
 
     # print/log markers: allow f/r/b/u prefixes & logging.* calls

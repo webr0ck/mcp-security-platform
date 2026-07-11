@@ -268,3 +268,43 @@ class TestServiceAccountScope:
 
     def test_custom_allowed_scopes_override(self):
         validate_service_account_scope("custom-scope", allowed_scopes=frozenset({"custom-scope"}))
+
+
+# ---------------------------------------------------------------------------
+# WP-A6 Finding 6: sync_policy_from_provider_profile
+# ---------------------------------------------------------------------------
+
+
+class TestSyncPolicyFromProviderProfile:
+    @pytest.mark.asyncio
+    async def test_noop_when_profile_has_no_issuer(self):
+        from app.services.oauth_policy import sync_policy_from_provider_profile
+        session = MagicMock()
+        session.execute = AsyncMock()
+        await sync_policy_from_provider_profile(
+            session, issuer="", allowed_scopes=[], blocked_scopes=[],
+            allowed_redirect_patterns=[], allowed_client_auth_methods=[],
+            token_audience_or_resource=None, created_by="admin@corp",
+        )
+        session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upserts_policy_row_for_issuer(self):
+        from app.services.oauth_policy import sync_policy_from_provider_profile
+        session = MagicMock()
+        session.execute = AsyncMock()
+        await sync_policy_from_provider_profile(
+            session, issuer="https://idp.example", allowed_scopes=["openid", "profile"],
+            blocked_scopes=["admin"], allowed_redirect_patterns=["https://portal.example.com/*"],
+            allowed_client_auth_methods=["client_secret_post"],
+            token_audience_or_resource="mcp-gateway", created_by="admin@corp",
+        )
+        session.execute.assert_awaited_once()
+        stmt, params = session.execute.await_args.args
+        assert "INSERT INTO oauth_provider_policy" in str(stmt)
+        assert "ON CONFLICT" in str(stmt)
+        assert params["issuer"] == "https://idp.example"
+        assert params["created_by"] == "admin@corp"
+        import json
+        assert json.loads(params["allowed_scopes"]) == ["openid", "profile"]
+        assert json.loads(params["allowed_token_audiences"]) == ["mcp-gateway"]

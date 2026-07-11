@@ -699,12 +699,111 @@ def _absolute_enrollment_url(request: Request, exc: Any) -> str:
         return getattr(exc, "enrollment_url", "") or f"/auth/enroll/{getattr(exc, 'service', '')}"
 
 
+async def _invoke_registry_tool(
+    tool_record: dict,
+    json_rpc_request: dict,
+    client_id: str,
+    client_roles: list[str],
+    request: Request,
+    request_id: str,
+) -> dict:
+    """Shared invoke_tool() wiring for the direct tools/call dispatch path.
+
+    Used both by _route_to_registry's actual dispatch and by
+    _resolve_upstream_subtool_name's tools/list discovery call (R-2), so the
+    two callers can't drift on which request.state fields get threaded through.
+    """
+    from app.services import invocation as inv_svc
+
+    async with _INVOKE_SEMAPHORE:
+        return await inv_svc.invoke_tool(
+            tool_record=tool_record,
+            json_rpc_request=json_rpc_request,
+            client_id=client_id,
+            client_roles=client_roles,
+            is_testing=False,
+            request_id=request_id,
+            # Case-3 (3b): downstream-IDP token rides a dedicated header so the
+            # gateway's own Authorization (Keycloak) stays free for its authz.
+            inbound_auth=request.headers.get("x-downstream-authorization"),
+            # 6.2: typed principal for the discovery==invoke entitlement gate.
+            principal_id=getattr(request.state, "principal_id", None),
+            principal_type=getattr(request.state, "principal_type", None),
+            # CR-10 (WP-A1): typed principal issuer/display-sub, forwarded
+            # downstream as X-Principal-Issuer / X-Principal-Display-Sub.
+            principal_issuer=getattr(request.state, "principal_issuer", None),
+            principal_display_sub=getattr(request.state, "principal_display_sub", None),
+            # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
+            user_kc_token=getattr(request.state, "user_kc_token", None),
+            # P1-F1: thread who-fields so MCP-path audit rows are non-NULL
+            # (mirrors the REST path pattern in routers/tools.py ~1241-1245).
+            source_ip=(
+                request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                or (request.client.host if request.client else None)
+            ),
+            session_jti=getattr(request.state, "session_jti", None),
+            # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
+            profile_uuid=getattr(request.state, "profile_uuid", None),
+        )
+
+
+# R-2 fix: single-tool-per-server wrappers (e.g. "gitea-repos") register the
+# *server's* name in tool_registry.name, but the upstream MCP server's real
+# tools/call target is a different, per-function name (e.g. "list_repos") —
+# forwarding tool_registry.name verbatim as params.name always bounced with
+# "Unknown tool: <server name>". Cache of resolved primary upstream tool name
+# per tool_id, populated lazily on the first such bounce; TTL keeps it correct
+# if the upstream server's tool list changes without a proxy restart.
+_WRAPPER_SUBTOOL_CACHE_TTL_SECONDS = 300
+_wrapper_subtool_cache: dict[str, tuple[float, str]] = {}
+
+
+async def _resolve_upstream_subtool_name(
+    tool_record: dict,
+    client_id: str,
+    client_roles: list[str],
+    request: Request,
+    request_id: str,
+) -> str | None:
+    """Discover the upstream server's real primary tool name via tools/list.
+
+    Reuses the same invoke_tool() pipeline (entitlement/OPA/credential
+    injection) as the actual dispatch, so this does not bypass authorization —
+    it is the same tools/list a well-behaved caller would have made before
+    tools/call.
+    """
+    import time
+
+    tool_id = str(tool_record.get("tool_id") or tool_record.get("name"))
+    cached = _wrapper_subtool_cache.get(tool_id)
+    if cached and (time.monotonic() - cached[0]) < _WRAPPER_SUBTOOL_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        discovery = await _invoke_registry_tool(
+            tool_record,
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            client_id, client_roles, request, request_id,
+        )
+    except Exception as exc:
+        logger.warning("Upstream tools/list resolution failed for %s: %s", tool_record.get("name"), exc)
+        return None
+
+    tools = discovery.get("result", {}).get("tools", []) if isinstance(discovery, dict) else []
+    if not tools:
+        return None
+    subtool_name = tools[0].get("name")
+    if not subtool_name:
+        return None
+    _wrapper_subtool_cache[tool_id] = (time.monotonic(), subtool_name)
+    return subtool_name
+
+
 async def _route_to_registry(name: str, args: dict, request: Request, req_id: Any) -> dict:
     """Route a direct tools/call for a registry tool through the full security pipeline."""
     from uuid import uuid4
     from sqlalchemy import text
     from app.core.database import AsyncSessionLocal
-    from app.services import invocation as inv_svc
 
     client_id = getattr(request.state, "client_id", "unknown")
     client_roles = getattr(request.state, "client_roles", [])
@@ -736,36 +835,9 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
     }
 
     try:
-        async with _INVOKE_SEMAPHORE:
-            upstream = await inv_svc.invoke_tool(
-                tool_record=tool_record,
-                json_rpc_request=json_rpc_request,
-                client_id=client_id,
-                client_roles=client_roles,
-                is_testing=False,
-                request_id=request_id,
-                # Case-3 (3b): downstream-IDP token rides a dedicated header so the
-                # gateway's own Authorization (Keycloak) stays free for its authz.
-                inbound_auth=request.headers.get("x-downstream-authorization"),
-                # 6.2: typed principal for the discovery==invoke entitlement gate.
-                principal_id=getattr(request.state, "principal_id", None),
-                principal_type=getattr(request.state, "principal_type", None),
-                # CR-10 (WP-A1): typed principal issuer/display-sub, forwarded
-                # downstream as X-Principal-Issuer / X-Principal-Display-Sub.
-                principal_issuer=getattr(request.state, "principal_issuer", None),
-                principal_display_sub=getattr(request.state, "principal_display_sub", None),
-                # 6.3: caller KC token for oauth_user_token (RFC 8693) on-behalf-of.
-                user_kc_token=getattr(request.state, "user_kc_token", None),
-                # P1-F1: thread who-fields so MCP-path audit rows are non-NULL
-                # (mirrors the REST path pattern in routers/tools.py ~1241-1245).
-                source_ip=(
-                    request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-                    or (request.client.host if request.client else None)
-                ),
-                session_jti=getattr(request.state, "session_jti", None),
-                # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
-                profile_uuid=getattr(request.state, "profile_uuid", None),
-            )
+        upstream = await _invoke_registry_tool(
+            tool_record, json_rpc_request, client_id, client_roles, request, request_id
+        )
     except Exception as exc:
         from app.services.entitlement import NotEntitledError
         if isinstance(exc, NotEntitledError):
@@ -848,10 +920,43 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
 
     if "error" in upstream:
         err = upstream["error"]
-        # Preserve `data` — it carries the downstream auth challenge
-        # (www_authenticate / resource metadata) for Case-3 passthrough.
-        return _err(req_id, err.get("code", -32603), err.get("message", "Upstream error"),
-                    data=err.get("data"))
+        # R-2: single-tool-per-server wrappers forwarded tool_registry.name
+        # (e.g. "gitea-repos") as params.name, which the upstream server
+        # doesn't recognize as one of its own tools (real names are e.g.
+        # "list_repos"). On that specific bounce, resolve the upstream's real
+        # primary tool name and retry once before surfacing a deny.
+        if "unknown tool" in str(err.get("message", "")).lower():
+            resolved_name = await _resolve_upstream_subtool_name(
+                tool_record, client_id, client_roles, request, request_id
+            )
+            if resolved_name and resolved_name != name:
+                retry_request = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": resolved_name, "arguments": args},
+                }
+                try:
+                    upstream = await _invoke_registry_tool(
+                        tool_record, retry_request, client_id, client_roles, request, request_id
+                    )
+                except Exception as retry_exc:
+                    logger.exception("Registry tool retry invocation error for %s -> %s", name, resolved_name)
+                    return _err(req_id, -32603, f"Tool invocation failed: {retry_exc}")
+                if "error" in upstream:
+                    err = upstream["error"]
+                    return _err(req_id, err.get("code", -32603), err.get("message", "Upstream error"),
+                                data=err.get("data"))
+            else:
+                # Preserve `data` — it carries the downstream auth challenge
+                # (www_authenticate / resource metadata) for Case-3 passthrough.
+                return _err(req_id, err.get("code", -32603), err.get("message", "Upstream error"),
+                            data=err.get("data"))
+        else:
+            # Preserve `data` — it carries the downstream auth challenge
+            # (www_authenticate / resource metadata) for Case-3 passthrough.
+            return _err(req_id, err.get("code", -32603), err.get("message", "Upstream error"),
+                        data=err.get("data"))
 
     content = upstream.get("result", {}).get("content", [])
     if not content:

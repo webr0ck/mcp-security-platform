@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import AsyncClient, ASGITransport
 
+from app.credential_broker.registry import ServerConfig
+
 
 class _FakeRedis:
     def __init__(self, store: dict | None = None) -> None:
@@ -203,6 +205,275 @@ async def test_enroll_falls_back_to_hardcoded_adapter_when_registry_unavailable(
     # Should fall back to hardcoded adapter and render consent page
     assert resp.status_code == 200
     assert "text/html" in resp.headers.get("content-type", "")
+
+
+def _fake_db_engine(server_registry_row: tuple | None, credential_store_row: tuple | None = None):
+    """Fake app.core.database.engine whose .connect().execute(...).fetchone()
+    returns `server_registry_row` for the (approved_upstream_idp_config,
+    approved_oauth_scopes, upstream_idp_type) lookup and `credential_store_row`
+    for the stored-scopes diff lookup — oauth.py::enroll issues both as
+    separate queries against the same engine."""
+    async def _execute(stmt, *_a, **_kw):
+        result = MagicMock()
+        if "FROM server_registry" in str(stmt):
+            result.fetchone = MagicMock(return_value=server_registry_row)
+        else:
+            result.fetchone = MagicMock(return_value=credential_store_row)
+        return result
+
+    conn = MagicMock()
+    conn.execute = AsyncMock(side_effect=_execute)
+
+    class _ConnCM:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *a):
+            return False
+
+    engine_mock = MagicMock()
+    engine_mock.connect = MagicMock(return_value=_ConnCM())
+    return engine_mock
+
+
+@pytest.mark.unit
+async def test_enroll_fails_closed_when_oauth_config_not_yet_approved():
+    """
+    WP-A6 Finding 2: a server with a submitted (upstream_idp_type set) but
+    not-yet-reviewer-approved OAuth config must 409, never silently fall back
+    to rendering a consent page from the unapproved requested config.
+    """
+    fake_redis = _FakeRedis()
+    redis_pool_mock = MagicMock()
+    redis_pool_mock.client = fake_redis
+
+    mock_registry = MagicMock()
+    mock_registry.get_config = MagicMock(
+        return_value=ServerConfig(
+            server_id="11111111-1111-1111-1111-111111111111",
+            service_name="acme", upstream_url="https://acme.example",
+            injection_mode="external_oauth_user_token", status="approved",
+        )
+    )
+    # approved_upstream_idp_config NULL, but upstream_idp_type IS set —
+    # a request was submitted, just never approved.
+    engine_mock = _fake_db_engine((None, None, "external_oauth"))
+
+    with patch("app.services.invocation.registry_instance", mock_registry), \
+         patch("app.core.redis_client.redis_pool", redis_pool_mock), \
+         patch("app.core.database.engine", engine_mock):
+        async with _client() as c:
+            resp = await c.get(
+                "/auth/enroll/acme",
+                headers={"X-Client-Cert-CN": "alice@corp"},
+                follow_redirects=False,
+            )
+
+    assert resp.status_code == 409
+    assert "approved" in resp.json()["detail"].lower()
+
+
+@pytest.mark.unit
+async def test_enroll_uses_approved_scopes_not_requested():
+    """
+    WP-A6 Finding 2: when approved_oauth_scopes differs from what the
+    submitter originally requested in upstream_idp_config, the consent page
+    must render the approved set, not the requested one.
+    """
+    fake_redis = _FakeRedis()
+    redis_pool_mock = MagicMock()
+    redis_pool_mock.client = fake_redis
+
+    mock_registry = MagicMock()
+    mock_registry.get_config = MagicMock(
+        return_value=ServerConfig(
+            server_id="22222222-2222-2222-2222-222222222222",
+            service_name="acme2", upstream_url="https://acme2.example",
+            injection_mode="external_oauth_user_token", status="approved",
+        )
+    )
+    approved_config = {
+        "issuer": "https://idp.example", "client_id": "abc123",
+        "scopes": ["read", "write", "admin"],  # requested — must NOT be shown
+    }
+    engine_mock = _fake_db_engine((approved_config, ["read"], "external_oauth"))
+
+    with patch("app.services.invocation.registry_instance", mock_registry), \
+         patch("app.core.redis_client.redis_pool", redis_pool_mock), \
+         patch("app.core.database.engine", engine_mock):
+        async with _client() as c:
+            resp = await c.get(
+                "/auth/enroll/acme2",
+                headers={"X-Client-Cert-CN": "alice@corp"},
+                follow_redirects=False,
+            )
+
+    assert resp.status_code == 200
+    assert "write" not in resp.text
+    assert "admin" not in resp.text
+    assert "read" in resp.text
+
+
+@pytest.mark.unit
+async def test_post_enrollment_discovery_persists_service_context(monkeypatch):
+    """WP-A6 Finding 3: after a successful OAuth callback, a server backed by
+    a profile with a service_adapter gets its ServiceAdapter's
+    build_runtime_context() result persisted to server_registry.service_context."""
+    from app.routers import oauth as oauth_router
+
+    captured_update = {}
+
+    class _FakeConn:
+        async def execute(self, stmt, params=None):
+            result = MagicMock()
+            result.fetchone = MagicMock(return_value=(
+                "11111111-1111-1111-1111-111111111111",
+                {"issuer": "https://idp.example", "client_id": "abc", "api_base_url": "https://api.acme.example"},
+                None,  # service_adapter slug -> resolves to GenericServiceAdapter
+                "external_oauth_client_credentials",  # app-level injection_mode — eligible for discovery
+            ))
+            return result
+
+    class _FakeConnCM:
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeDB:
+        async def execute(self, stmt, params=None):
+            captured_update.update(params or {})
+
+        async def commit(self):
+            pass
+
+    class _FakeDBCM:
+        async def __aenter__(self):
+            return _FakeDB()
+
+        async def __aexit__(self, *a):
+            return False
+
+    engine_mock = MagicMock()
+    engine_mock.connect = MagicMock(return_value=_FakeConnCM())
+
+    with patch("app.core.database.engine", engine_mock), \
+         patch("app.core.database.AsyncSessionLocal", lambda: _FakeDBCM()):
+        await oauth_router._run_post_enrollment_discovery(service="acme", access_token="tok-123")
+
+    assert captured_update["sid"] == "11111111-1111-1111-1111-111111111111"
+    ctx = json.loads(captured_update["ctx"])
+    assert ctx["adapter"] == "generic"
+    assert ctx["api_base_url"] == "https://api.acme.example"
+
+
+@pytest.mark.unit
+async def test_post_enrollment_discovery_skips_per_user_injection_mode():
+    """C-02 (2026-07-11 audit): server_registry.service_context is a single,
+    server-wide column with no principal dimension. Per-user injection modes
+    must never write it, or the last user to enroll silently overwrites the
+    resource context for every other user and the deployed container."""
+    from app.routers import oauth as oauth_router
+
+    captured_update = {}
+
+    class _FakeConn:
+        async def execute(self, stmt, params=None):
+            result = MagicMock()
+            result.fetchone = MagicMock(return_value=(
+                "11111111-1111-1111-1111-111111111111",
+                {"api_base_url": "https://api.acme.example"},
+                None,
+                "external_oauth_user_token",  # per-user mode — must be skipped
+            ))
+            return result
+
+    class _FakeConnCM:
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeDB:
+        async def execute(self, stmt, params=None):
+            captured_update.update(params or {})
+
+        async def commit(self):
+            pass
+
+    class _FakeDBCM:
+        async def __aenter__(self):
+            return _FakeDB()
+
+        async def __aexit__(self, *a):
+            return False
+
+    engine_mock = MagicMock()
+    engine_mock.connect = MagicMock(return_value=_FakeConnCM())
+
+    with patch("app.core.database.engine", engine_mock), \
+         patch("app.core.database.AsyncSessionLocal", lambda: _FakeDBCM()):
+        await oauth_router._run_post_enrollment_discovery(service="acme", access_token="tok-123")
+
+    assert captured_update == {}  # no UPDATE ever executed
+
+
+@pytest.mark.unit
+async def test_post_enrollment_discovery_never_reads_submitter_controlled_config():
+    """C-01 (2026-07-11 audit): must select approved_upstream_idp_config, never
+    the submitter-controlled upstream_idp_config — and must fail closed
+    (skip discovery) rather than discover against unapproved config."""
+    from app.routers import oauth as oauth_router
+
+    captured_sql = {}
+    captured_update = {}
+
+    class _FakeConn:
+        async def execute(self, stmt, params=None):
+            captured_sql["text"] = str(stmt)
+            result = MagicMock()
+            # approved_upstream_idp_config is NULL — not yet approved
+            result.fetchone = MagicMock(return_value=(
+                "11111111-1111-1111-1111-111111111111",
+                None,
+                None,
+                "external_oauth_client_credentials",
+            ))
+            return result
+
+    class _FakeConnCM:
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeDB:
+        async def execute(self, stmt, params=None):
+            captured_update.update(params or {})
+
+        async def commit(self):
+            pass
+
+    class _FakeDBCM:
+        async def __aenter__(self):
+            return _FakeDB()
+
+        async def __aexit__(self, *a):
+            return False
+
+    engine_mock = MagicMock()
+    engine_mock.connect = MagicMock(return_value=_FakeConnCM())
+
+    with patch("app.core.database.engine", engine_mock), \
+         patch("app.core.database.AsyncSessionLocal", lambda: _FakeDBCM()):
+        await oauth_router._run_post_enrollment_discovery(service="acme", access_token="tok-123")
+
+    assert "sr.approved_upstream_idp_config" in captured_sql["text"]
+    assert "sr.upstream_idp_config" not in captured_sql["text"]  # never the submitter-controlled column
+    assert captured_update == {}  # NULL approved config -> never discovers, never writes
 
 
 @pytest.mark.unit

@@ -7,6 +7,82 @@ streams to the submitter.
 """
 from __future__ import annotations
 
+_JWT_VALIDATOR_TEMPLATE = '''\
+"""
+jwt_validator.py — same-platform-IdP (kc_token_exchange) token validation.
+
+WP-A6 Finding 5: mcphub_sdk's PlatformMCPServer trusts the X-User-Sub header
+on the assumption that only the platform proxy can reach this server
+(network isolation). That is real defense but not the only layer this
+finding asks for — the platform's own same_idp_verify probe
+(same_idp_verify.run_same_idp_verify_probe, wired into deploy verification)
+talks to THIS server's URL directly, bypassing the proxy, specifically to
+prove the server itself rejects a missing/wrong-audience/expired token. This
+module is what makes that probe pass: validate_token() independently checks
+issuer, audience, expiry, and signature against the platform's real JWKS —
+never trust X-User-Sub alone for anything security-relevant.
+
+Configure via environment variables:
+  KC_ISSUER    — the platform's Keycloak realm issuer URL (pre-filled below).
+  KC_JWKS_URI  — the realm's JWKS endpoint (pre-filled below).
+  KC_AUDIENCE  — REQUIRED. The audience your platform admin approved for
+                 THIS server (server_registry.approved_token_audience). Ask
+                 your platform admin for this value after your server is
+                 reviewed — there is no safe default.
+"""
+from __future__ import annotations
+
+import os
+
+import jwt
+from jwt import PyJWKClient
+
+KC_ISSUER = os.environ.get("KC_ISSUER", "{issuer}")
+KC_JWKS_URI = os.environ.get("KC_JWKS_URI", "{jwks_uri}")
+KC_AUDIENCE = os.environ.get("KC_AUDIENCE", "")
+_CLOCK_SKEW_SECONDS = 60
+
+_jwks_client = PyJWKClient(KC_JWKS_URI) if KC_JWKS_URI else None
+
+
+class TokenValidationError(Exception):
+    """Raised by validate_token() for any invalid/missing/expired/wrong-audience token."""
+
+
+def validate_token(raw_token: str | None) -> dict:
+    """
+    Validates issuer, audience, expiry, and signature. Raises
+    TokenValidationError (never returns a "maybe valid" result) if any check
+    fails — callers must treat this as fail-closed and reject the request.
+
+    Returns the decoded claims dict on success.
+    """
+    if not raw_token:
+        raise TokenValidationError("no token provided")
+    if not KC_AUDIENCE:
+        raise TokenValidationError(
+            "KC_AUDIENCE is not configured — ask your platform admin for the "
+            "audience approved for this server before accepting any token"
+        )
+    if _jwks_client is None:
+        raise TokenValidationError("KC_JWKS_URI is not configured")
+
+    try:
+        signing_key = _jwks_client.get_signing_key_from_jwt(raw_token)
+        claims = jwt.decode(
+            raw_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            issuer=KC_ISSUER,
+            audience=KC_AUDIENCE,
+            leeway=_CLOCK_SKEW_SECONDS,
+            options={{"require": ["exp", "iss", "aud"]}},
+        )
+    except jwt.PyJWTError as exc:
+        raise TokenValidationError(f"token rejected: {{exc}}") from exc
+    return claims
+'''
+
 _SERVER_TEMPLATES: dict[str, str] = {
     "kc_token_exchange": '''\
 """
@@ -14,16 +90,38 @@ _SERVER_TEMPLATES: dict[str, str] = {
 
 The platform broker exchanges the caller's session token for a short-lived
 service-specific token before forwarding the request.  No credential is stored
-at rest.  Your server validates the token from X-Authorization.
+at rest.  A middleware validates the token from X-Authorization on EVERY
+request (jwt_validator.py) — never trust X-User-Sub alone; see that module's
+docstring. Validation runs at the middleware layer, not just inside
+example_tool, so a second custom @srv.tool() you add cannot accidentally
+skip it (M-01, 2026-07-11 audit).
 """
+from __future__ import annotations
 from mcphub_sdk import PlatformMCPServer, identity, credential
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+
+from jwt_validator import TokenValidationError, validate_token
 
 srv = PlatformMCPServer("{name}", require_proxy=True)
+
+class _TokenValidationMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.url.path == "/health":
+            return await call_next(request)
+        token = request.headers.get("x-authorization")
+        try:
+            validate_token(token)  # issuer/audience/expiry/signature — fail closed
+        except TokenValidationError as exc:
+            return JSONResponse({{"error": f"unauthorized: {{exc}}"}}, status_code=401)
+        return await call_next(request)
+
+srv.app.add_middleware(_TokenValidationMiddleware)
 
 @srv.tool()
 async def example_tool(query: str) -> dict:
     who = identity()           # sub + role injected by the proxy
-    token = credential()       # exchanged token — do NOT log
+    token = credential()       # exchanged token, already validated above — do NOT log
     # TODO: use token to call your upstream service
     return {{"result": "...", "caller": who.sub}}
 
@@ -328,10 +426,20 @@ def generate_prompts(injection_mode: str) -> list[dict]:
     return _PROMPTS[mode] + _SHARED_PROMPTS
 
 
-def generate_scaffold(server_name: str, injection_mode: str) -> dict[str, str]:
+def generate_scaffold(
+    server_name: str, injection_mode: str, *, issuer: str = "", jwks_uri: str = "",
+) -> dict[str, str]:
     """
     Returns {filename: content} for the scaffold zip.
     Falls back to 'none' template if mode is unknown.
+
+    issuer/jwks_uri: WP-A6 Finding 5 — for injection_mode='kc_token_exchange'
+    only, pre-fills the generated jwt_validator.py with the platform's real
+    Keycloak issuer/JWKS endpoint (settings.OIDC_ISSUER_URL and its
+    /protocol/openid-connect/certs JWKS path). The approved audience is
+    deliberately NOT pre-filled — it is only decided at admin approval time
+    (server_registry.approved_token_audience), so the generated module reads
+    it from the KC_AUDIENCE env var with no default.
     """
     # validation LOW: an unrecognised injection_mode was silently downgraded to
     # 'none' (no credential injection) — a dev could ship a scaffold with no auth
@@ -358,10 +466,16 @@ def generate_scaffold(server_name: str, injection_mode: str) -> dict[str, str]:
         readme = (f"> ⚠️ **Requested mode `{requested}` was not recognised — scaffolded as `none` "
                   f"(no credential injection).** Regenerate with a valid mode if that's not intended.\n\n"
                   + readme)
+    requirements = _REQUIREMENTS
     files = {
         "server.py": server_code,
-        "requirements.txt": _REQUIREMENTS,
+        "requirements.txt": requirements,
         "Dockerfile": _DOCKERFILE,
         "README.md": readme,
     }
+    if mode == "kc_token_exchange":
+        files["jwt_validator.py"] = _JWT_VALIDATOR_TEMPLATE.format(
+            issuer=issuer, jwks_uri=jwks_uri,
+        )
+        files["requirements.txt"] = requirements + "pyjwt[crypto]>=2.8.0\n"
     return files

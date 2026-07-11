@@ -827,8 +827,8 @@ services:
     # patterns, verifies hash integrity, writes report to PostgreSQL and MinIO.
     # See ARCHITECTURE.md §5.3 (Compliance Report Generation).
     build:
-      context: ./observability/compliance-checker
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: observability/compliance-checker/Dockerfile
     image: mcp-compliance-checker:latest
     container_name: mcp-compliance-checker
     <<: [*restart-always, *security-hardening]

@@ -26,6 +26,7 @@ export interface MCPServer {
   status: ServerStatus
   owner_sub: string
   injection_mode: string
+  service_name: string | null
   created_at: string
   approved_at: string | null
 }

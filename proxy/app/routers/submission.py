@@ -112,9 +112,15 @@ def _require_submission_reviewer(request: Request) -> None:
         raise HTTPException(status_code=403, detail="reviewer role required")
 
 
-def _require_not_self_review(sub: dict[str, Any], reviewer: str) -> None:
+def _require_not_self_review(sub: dict[str, Any], reviewer: str, roles: list[str] | None = None) -> None:
     """Segregation of duties: a submitter may not approve/reject/request-changes
-    on their own submission, even if they hold a reviewer/admin role."""
+    on their own submission — UNLESS they hold admin/platform_admin. Plain
+    security_reviewer still cannot self-review. Explicit operator decision:
+    a hard four-eyes rule with no carve-out makes the review queue unusable
+    in small/lab deployments where admin is the only identity submitting and
+    reviewing (previously required a second reviewer account to exist at all)."""
+    if roles and any(r in {"admin", "platform_admin"} for r in roles):
+        return
     if sub.get("owner_sub") == reviewer:
         raise HTTPException(
             status_code=403,
@@ -708,7 +714,7 @@ async def approve_submission(server_id: str, body: ReviewAction, request: Reques
     _require_submission_reviewer(request)
     reviewer = _client_id(request)
     sub = await _get_submission(server_id)
-    _require_not_self_review(sub, reviewer)
+    _require_not_self_review(sub, reviewer, list(getattr(request.state, "client_roles", []) or []))
     if sub["submission_status"] != "awaiting_review":
         raise HTTPException(status_code=409, detail="submission is not awaiting review")
     # A-06 fix: scan must have completed (or been genuinely not-applicable — no
@@ -769,7 +775,7 @@ async def reject_submission(server_id: str, body: ReviewAction, request: Request
     """Reject a submission permanently."""
     _require_submission_reviewer(request)
     reviewer = _client_id(request)
-    _require_not_self_review(await _get_submission(server_id), reviewer)
+    _require_not_self_review(await _get_submission(server_id), reviewer, list(getattr(request.state, "client_roles", []) or []))
     async with AsyncSessionLocal() as session:
         # M3 fix: state guard prevents corrupting active servers via reject API.
         result = await session.execute(text("""
@@ -797,7 +803,7 @@ async def request_changes(server_id: str, body: ReviewAction, request: Request) 
     """Return a submission to the submitter with change notes."""
     _require_submission_reviewer(request)
     reviewer = _client_id(request)
-    _require_not_self_review(await _get_submission(server_id), reviewer)
+    _require_not_self_review(await _get_submission(server_id), reviewer, list(getattr(request.state, "client_roles", []) or []))
     async with AsyncSessionLocal() as session:
         # M3 fix: state guard prevents request-changes on already-approved servers.
         result = await session.execute(text("""
@@ -867,16 +873,23 @@ async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
     # entitlement checks, and discover-tools all filter on status='approved'.
     # The §A human review (admin approve, reviewed_by=sub["reviewed_by"]) is
     # this lifecycle's equivalent of that gate, so provide-url is where the
-    # submission flow must set status='approved' — otherwise a submission
-    # that completes the whole documented §A/§B REST flow is still invisible
-    # to every downstream system and can never become tool-discoverable.
+    # submission flow must eventually set status='approved' — otherwise a
+    # submission that completes the whole documented §A/§B REST flow is
+    # still invisible to every downstream system and can never become
+    # tool-discoverable.
+    #
+    # H-01 fix (2026-07-11 audit): status='approved' is no longer set in
+    # THIS write — it is the actual entitlement/credential-issuance gate, so
+    # a server whose verification probes below fail must never have briefly
+    # been invocable. It stays at its current pre-approval value here and is
+    # only promoted in the success branch after run_verification_probes
+    # returns without raising.
     async with AsyncSessionLocal() as session:
         await session.execute(text("""
             UPDATE server_registry
             SET upstream_url = :url,
                 upstream_allowlist_entry = :allowlist_entry,
                 submission_status = 'active',
-                status = 'approved',
                 approved_at = now(),
                 approved_by = :approved_by,
                 updated_at = now()
@@ -904,9 +917,17 @@ async def provide_running_url(server_id: str, request: Request) -> JSONResponse:
     try:
         verification_report = await run_verification_probes(
             server_id, upstream_url, actor_client_id=sub.get("reviewed_by") or owner,
+            require_approved=False,
         )
         tools_provisioned = verification_report.get("tools_discovered", 0)
         tools_skipped = verification_report.get("tools_skipped", [])
+        # H-01 fix: only now — probes actually passed — promote status to
+        # the real entitlement/credential-issuance gate value.
+        async with AsyncSessionLocal() as approve_session:
+            await approve_session.execute(text(
+                "UPDATE server_registry SET status = 'approved', updated_at = now() WHERE server_id = :sid"
+            ), {"sid": server_id})
+            await approve_session.commit()
     except VerificationFailedError as exc:
         verification_report = exc.report
         logger.warning(

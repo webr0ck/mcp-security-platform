@@ -143,7 +143,7 @@ async def refresh_db_gauges() -> None:
                 SELECT COUNT(*) FROM server_registry
                 WHERE status = 'approved' AND deleted_at IS NULL
                   AND (last_rescanned_at IS NULL
-                       OR last_rescanned_at < now() - (:hours || ' hours')::interval)
+                       OR last_rescanned_at < now() - make_interval(hours => :hours))
                 """
             ), {"hours": settings.RESCAN_INTERVAL_HOURS})).scalar()
             stale_scan_count.set(stale or 0)

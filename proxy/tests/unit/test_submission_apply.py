@@ -100,6 +100,64 @@ async def test_apply_enqueues_build_job(monkeypatch):
     assert digest_params[0]["job_id"] == "job-1"
 
 
+def _fake_json_request(body: dict, client_id: str = "submitter-1") -> Request:
+    req = _fake_request(client_id)
+    req.json = AsyncMock(return_value=body)
+    return req
+
+
+@pytest.mark.asyncio
+async def test_provide_url_defers_status_approved_until_probes_succeed(monkeypatch):
+    """H-01 (2026-07-11 audit): status='approved' is the real entitlement/
+    credential-issuance gate. It must not be set in the same UPDATE as
+    upstream_url — only after run_verification_probes succeeds."""
+    sub = {"server_id": "s-1", "submission_status": "approved_pending_url", "reviewed_by": "admin-1"}
+    session = _FakeSession()
+
+    fake_report = {"healthcheck": True, "tools_discovered": 1, "tools_skipped": [],
+                    "invocation_probe_ok": True, "contract_check": None}
+
+    with patch.object(submission, "_get_submission", new=AsyncMock(return_value=sub)), \
+         patch.object(submission, "validate_upstream_url_ssrf", new=AsyncMock(return_value=None)), \
+         patch.object(submission, "AsyncSessionLocal", lambda: _FakeSessionCtx(session)), \
+         patch("app.services.deploy_verifier.run_verification_probes",
+               new=AsyncMock(return_value=fake_report)) as probes:
+        await submission.provide_running_url(
+            "s-1", _fake_json_request({"upstream_url": "https://example.com/mcp"}, client_id="submitter-1"),
+        )
+
+    assert probes.await_args.kwargs.get("require_approved") is False
+    pre_probe_sql = [sql for sql, p in session.executed if p and p.get("url") == "https://example.com/mcp"]
+    assert pre_probe_sql and "status = 'approved'" not in pre_probe_sql[0]
+    all_sql = " | ".join(sql for sql, _ in session.executed)
+    assert "status = 'approved'" in all_sql  # set somewhere, just not in the pre-probe write
+
+
+@pytest.mark.asyncio
+async def test_provide_url_never_approves_when_probes_fail(monkeypatch):
+    """H-01: a probe failure must leave status unpromoted entirely."""
+    sub = {"server_id": "s-1", "submission_status": "approved_pending_url", "reviewed_by": "admin-1"}
+    session = _FakeSession()
+
+    from app.services.deploy_verifier import VerificationFailedError
+
+    async def _failing_probes(*a, **kw):
+        raise VerificationFailedError("boom", {"healthcheck": False, "tools_discovered": 0,
+                                                "tools_skipped": [], "invocation_probe_ok": False,
+                                                "contract_check": None})
+
+    with patch.object(submission, "_get_submission", new=AsyncMock(return_value=sub)), \
+         patch.object(submission, "validate_upstream_url_ssrf", new=AsyncMock(return_value=None)), \
+         patch.object(submission, "AsyncSessionLocal", lambda: _FakeSessionCtx(session)), \
+         patch("app.services.deploy_verifier.run_verification_probes", new=_failing_probes):
+        await submission.provide_running_url(
+            "s-1", _fake_json_request({"upstream_url": "https://example.com/mcp"}, client_id="submitter-1"),
+        )
+
+    all_sql = " | ".join(sql for sql, _ in session.executed)
+    assert "status = 'approved'" not in all_sql
+
+
 @pytest.mark.asyncio
 async def test_verification_report_404_when_absent():
     sub = {"server_id": "s-1", "verification_report": None, "deployment_status": "building"}

@@ -216,6 +216,27 @@ def _mcp_checker_hits(details: dict) -> list[dict]:
                     "detail": v.get("type", ""),
                     "message": f"{v.get('type','violation')}: tool {v.get('tool','?')}"
                                f"{' param ' + v['parameter'] if v.get('parameter') else ''}"})
+    # attack-pattern / doc-ast style: hits -> [{file, type, line, match/snippet/...}]
+    # (malicious_doc_ast, windows/linux/macos_attack_patterns, network_exposure,
+    # ssrf_patterns, memory_poisoning, oauth_abuse, crypto_stealer, ide_config_scan,
+    # obfuscation_scan all share this shape). Previously unhandled — any FAIL from
+    # these checks silently fell through to the blank-message fallback below,
+    # discarding the actual file/line/evidence a reviewer needs. Kept in sync with
+    # the identical fix in proxy/app/services/submission_scanner.py::_mcp_checker_hits
+    # — this package intentionally duplicates that function rather than importing
+    # proxy/app (see scanner_worker/Dockerfile: "never proxy application code").
+    for h in details.get("hits", []) or []:
+        kind = h.get("type", "finding")
+        evidence = (
+            h.get("match") or h.get("snippet") or h.get("path_literal")
+            or h.get("chain") or ""
+        )
+        out.append({
+            "file": h.get("file", ""),
+            "line": h.get("line", 0),
+            "detail": evidence,
+            "message": f"{kind}: {evidence}" if evidence else kind,
+        })
     if not out:
         out.append({"file": "", "line": 0, "detail": "", "message": ""})
     return out

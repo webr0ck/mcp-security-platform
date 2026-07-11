@@ -99,12 +99,22 @@ def clean_mcp_upstream():
 
 def _create_draft(token: str, name: str, repo_url: str) -> str:
     r = httpx.post(f"{BASE_URL}/api/v1/submissions", headers=_auth_headers(token),
-                   json={"name": name, "github_repo_url": repo_url}, verify=False, timeout=60)
+                   json={"name": name, "github_repo_url": repo_url,
+                         "description": f"{name} acceptance test fixture"},
+                   verify=False, timeout=60)
     assert r.status_code == 201, f"draft create failed: {r.status_code} {r.text}"
     return r.json()["server_id"]
 
 
-def _submit(token: str, server_id: str) -> None:
+def _submit(token: str, server_id: str, requested_upstream_url: str = "http://at3-placeholder:8000/mcp") -> None:
+    # description + requested_upstream_url are required before submit (V075) —
+    # description is set at draft-create time above, requested_upstream_url
+    # needs its own PATCH since POST /api/v1/submissions doesn't accept it.
+    patch = httpx.patch(f"{BASE_URL}/api/v1/submissions/{server_id}",
+                         headers=_auth_headers(token),
+                         json={"requested_upstream_url": requested_upstream_url},
+                         verify=False, timeout=60)
+    assert patch.status_code == 200, f"patch requested_upstream_url failed: {patch.status_code} {patch.text}"
     r = httpx.post(f"{BASE_URL}/api/v1/submissions/{server_id}/submit",
                    headers=_auth_headers(token), json={}, verify=False, timeout=60)
     assert r.status_code == 200, f"submit failed: {r.status_code} {r.text}"
@@ -173,7 +183,7 @@ def test_malicious_submission_blocked_and_unapprovable(alice_token, carol_token)
 def test_clean_submission_full_chain_to_invoke(alice_token, carol_token, clean_mcp_upstream):
     name = f"at3-clean-{uuid.uuid4().hex[:8]}"
     server_id = _create_draft(alice_token, name, CLEAN_URL)
-    _submit(alice_token, server_id)
+    _submit(alice_token, server_id, requested_upstream_url=clean_mcp_upstream)
 
     scan_status, submission_status = _poll_scan(server_id)
     assert scan_status == "passed", f"expected scan_status=passed, got {scan_status!r}"

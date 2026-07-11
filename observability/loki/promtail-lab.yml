@@ -206,15 +206,24 @@ scrape_configs:
       - host: unix:///var/run/docker.sock
         refresh_interval: 10s
     relabel_configs:
-      - source_labels: [__meta_docker_container_name]
-        regex: /(mcp-loki|mcp-promtail)
-        action: drop
-      - source_labels: [__meta_docker_container_name]
-        regex: /(mcp-proxy|mcp-gateway|lab-keycloak|mcp-opa|mcp-vault|lab-gitea|lab-netbox|mcp-compliance-checker)
-        action: drop
+      # NOTE: do NOT use relabel `action: drop` to exclude containers here.
+      # promtail docker_sd keeps tailing dropped targets with EMPTY labels,
+      # which Loki rejects ("at least one label pair is required per stream"),
+      # 400-ing the whole batch and blocking ALL ingestion. Instead we label
+      # every discovered container and drop the per-service duplicates as log
+      # ENTRIES in a pipeline match+drop stage below (post-relabel, no empty streams).
       - source_labels: [__meta_docker_container_name]
         regex: /(.+)
         target_label: container
         replacement: "$1"
       - target_label: job
         replacement: lab
+    pipeline_stages:
+      # Containers below have their own dedicated scrape jobs (with richer
+      # labels/pipelines). Drop their entries here so they are not double-shipped
+      # under job=lab (which would double-count in container-scoped alert queries).
+      # mcp-loki/mcp-promtail are excluded to avoid a self-scrape feedback loop.
+      - match:
+          selector: '{container=~"mcp-proxy|mcp-gateway|lab-keycloak|mcp-opa|mcp-vault|lab-gitea|lab-netbox|mcp-compliance-checker|mcp-loki|mcp-promtail"}'
+          action: drop
+          drop_counter_reason: excluded_has_dedicated_job

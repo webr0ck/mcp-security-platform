@@ -8,7 +8,7 @@ LAB_COMPOSE = podman-compose --env-file .env.lab \
   -f podman-compose.lab.yml \
   -f compose.wazuh.yml
 
-.PHONY: lab-setup lab-up lab-down lab-reset lab-rebuild lab-init lab-test lab-smoke \
+.PHONY: lab-setup lab-up lab-down lab-reset lab-rebuild lab-recreate lab-init lab-test lab-smoke \
         lab-logs lab-dex-logs lab-ps lab-entra-check lab-vault-init \
         lab-proxy-shell lab-netbox-shell smoke-four lab-acceptance lab-probe wazuh-up wazuh-dashboard-up incidents help
 
@@ -40,6 +40,11 @@ lab-rebuild:
 	$(LAB_COMPOSE) build proxy lab-mcp-grafana mcp-netbox lab-mcp-m365 lab-seeder
 	$(LAB_COMPOSE) up -d --no-deps proxy lab-mcp-grafana mcp-netbox lab-mcp-m365
 	$(LAB_COMPOSE) run --rm lab-seeder
+
+## lab-recreate     Safely recreate ONE service (image/config bump): make -f Makefile.lab lab-recreate SERVICE=lab-keycloak [PULL=1]
+lab-recreate:
+	@test -n "$(SERVICE)" || (echo "Usage: make -f Makefile.lab lab-recreate SERVICE=<compose-service-name> [PULL=1]" && exit 1)
+	bash lab/scripts/lab-recreate.sh $(SERVICE) $(if $(PULL),--pull,)
 
 ## lab-init         Initialise Vault, replay missing migrations, then run the seeder container
 lab-init:

@@ -262,6 +262,7 @@ class ProfileRow:
     slug: str
     display_name: str
     provider_type: str
+    injection_mode: str | None
     issuer: str | None
     authorization_endpoint: str | None
     token_endpoint: str | None
@@ -289,6 +290,7 @@ def _row_to_profile(m: Any) -> ProfileRow:
         slug=m["slug"],
         display_name=m["display_name"],
         provider_type=m["provider_type"],
+        injection_mode=m["injection_mode"],
         issuer=m["issuer"],
         authorization_endpoint=m["authorization_endpoint"],
         token_endpoint=m["token_endpoint"],
@@ -312,7 +314,7 @@ def _row_to_profile(m: Any) -> ProfileRow:
 
 
 _SELECT_COLUMNS = """
-    id, slug, display_name, provider_type, issuer, authorization_endpoint,
+    id, slug, display_name, provider_type, injection_mode, issuer, authorization_endpoint,
     token_endpoint, jwks_uri, metadata_url, default_scopes, allowed_scopes,
     blocked_scopes, allowed_redirect_patterns, allowed_client_auth_methods,
     token_audience_or_resource, supports_pkce, supports_refresh_token,
@@ -327,6 +329,7 @@ async def create_draft_profile(
     slug: str,
     display_name: str,
     provider_type: str,
+    injection_mode: str,
     created_by: str,
     metadata: DiscoveredMetadata | None = None,
     default_scopes: list[str] | None = None,
@@ -351,6 +354,21 @@ async def create_draft_profile(
     if provider_type not in PROVIDER_TYPES:
         raise ValueError(f"unknown provider_type: {provider_type!r}")
 
+    from app.services.auth_modes import all_mode_values
+    if injection_mode not in all_mode_values():
+        raise ValueError(f"unknown injection_mode: {injection_mode!r}")
+
+    # M-02 fix (2026-07-11 audit): get_service_adapter's runtime fallback is
+    # deliberately permissive (unknown slug -> GenericServiceAdapter, so
+    # enrollment is never blocked) — but that means a typo'd service_adapter
+    # here would silently lose service-specific discovery/verification with
+    # no error anywhere. Reject unknown non-null slugs at the write path
+    # instead, same pattern as provider_type/injection_mode above.
+    if service_adapter is not None:
+        from app.credential_broker.adapters.service_adapter_registry import _SERVICE_ADAPTERS
+        if service_adapter not in _SERVICE_ADAPTERS:
+            raise ValueError(f"unknown service_adapter: {service_adapter!r}")
+
     default_scopes = default_scopes or []
     allowed_scopes = allowed_scopes or []
     blocked_scopes = blocked_scopes or []
@@ -367,13 +385,13 @@ async def create_draft_profile(
             text(
                 f"""
                 INSERT INTO oauth_provider_profile (
-                    slug, display_name, provider_type, issuer,
+                    slug, display_name, provider_type, injection_mode, issuer,
                     authorization_endpoint, token_endpoint, jwks_uri, metadata_url,
                     default_scopes, allowed_scopes, blocked_scopes,
                     token_audience_or_resource, service_adapter,
                     supports_client_credentials, created_by, status
                 ) VALUES (
-                    :slug, :display_name, :provider_type, :issuer,
+                    :slug, :display_name, :provider_type, :injection_mode, :issuer,
                     :authz_ep, :token_ep, :jwks_uri, :metadata_url,
                     CAST(:default_scopes AS jsonb), CAST(:allowed_scopes AS jsonb),
                     CAST(:blocked_scopes AS jsonb),
@@ -387,6 +405,7 @@ async def create_draft_profile(
                 "slug": slug,
                 "display_name": display_name,
                 "provider_type": provider_type,
+                "injection_mode": injection_mode,
                 "issuer": metadata.issuer if metadata else None,
                 "authz_ep": metadata.authorization_endpoint if metadata else None,
                 "token_ep": metadata.token_endpoint if metadata else None,
@@ -474,6 +493,26 @@ async def approve_profile(
         {"id": profile_id, "reviewer": reviewer, "high_risk_ack": bool(high_risk) and high_risk_scopes_approved},
     )
     await session.commit()
+
+    # WP-A6 Finding 6: sync the matching oauth_provider_policy row so a real
+    # submission against this issuer doesn't separately fail closed with
+    # UnknownIssuerError just because no admin hand-authored a policy row —
+    # see sync_policy_from_provider_profile's docstring for why this only
+    # widens, never narrows, an existing policy.
+    if profile.issuer:
+        from app.services.oauth_policy import sync_policy_from_provider_profile
+        await sync_policy_from_provider_profile(
+            session,
+            issuer=profile.issuer,
+            allowed_scopes=profile.allowed_scopes or profile.default_scopes,
+            blocked_scopes=profile.blocked_scopes,
+            allowed_redirect_patterns=profile.allowed_redirect_patterns,
+            allowed_client_auth_methods=profile.allowed_client_auth_methods,
+            token_audience_or_resource=profile.token_audience_or_resource,
+            created_by=reviewer,
+        )
+        await session.commit()
+
     return await get_profile(session, profile_id)
 
 

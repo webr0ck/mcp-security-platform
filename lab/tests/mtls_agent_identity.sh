@@ -56,9 +56,12 @@ podman exec mcp-gateway nginx -t >/dev/null 2>&1 && ok "gateway nginx config val
 code=$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/v1/auth/oidc/login?redirect=%2Fportal")
 chk "$code" "307" "OIDC login redirect unbroken (no cert)"
 
-# 2. /api/v1/tools/ WITHOUT a client cert -> 401 at the gateway (both listeners)
+# 2. /api/v1/tools/ WITHOUT a client cert -> 401 (both listeners, different
+#    layers: :8443 now forwards to the app and gets 401 from AuthMiddleware
+#    since no session/bearer is presented either; :8445 still 401s at nginx
+#    for lacking a cert).
 code=$(curl -sk -o /dev/null -w '%{http_code}' "$BASE/api/v1/tools/list")
-chk "$code" "401" "no-cert /api/v1/tools/ rejected on :8443 (always-closed there)"
+chk "$code" "401" "no-cert, no-session /api/v1/tools/ rejected on :8443 (app-layer now)"
 code=$(curl -sk -o /dev/null -w '%{http_code}' "$MTLS_BASE/api/v1/tools/list")
 chk "$code" "401" "no-cert /api/v1/tools/ rejected by the :8445 mTLS gateway"
 

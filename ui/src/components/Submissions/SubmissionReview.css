@@ -95,6 +95,18 @@
 
 .review__description { font-size: 14px; color: var(--text-secondary, #94a3b8); line-height: 1.6; margin: 0; }
 
+.review__idp-config {
+  font-size: 12px;
+  background: var(--bg-inset, #0f1720);
+  border: 1px solid var(--border-subtle, #1f2937);
+  border-radius: 4px;
+  padding: 8px;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .review__github { display: flex; flex-direction: column; gap: 6px; }
 .review__github-link {
   display: inline-flex; align-items: center; gap: 6px;

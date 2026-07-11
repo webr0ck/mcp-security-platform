@@ -325,42 +325,62 @@ async def enroll(service: str, request: Request) -> HTMLResponse:
             extra={"service": service, "error": str(exc)},
         )
 
-    # Task 12: If server found in registry with upstream_idp_config, use it
+    # Task 12 / WP-A6 Finding 2: If server found in registry, use its
+    # REVIEWER-APPROVED config — never the submitter-controlled
+    # upstream_idp_config. Reading the requested config here let the consent
+    # page (and the audit record of what scopes the user consented to)
+    # diverge from what the dynamic_external_oauth adapter actually dispatches
+    # with (which has always read approved_upstream_idp_config only).
+    approved_oauth_scopes: list[str] | None = None
+    _has_requested_idp_type = False
     if registry_config and registry_config.status == "approved":
-        # Query upstream_idp_config from DB (registry.ServerConfig doesn't include it)
         try:
             from app.core.database import engine as _db_engine
             async with _db_engine.connect() as conn:
                 row = await conn.execute(
                     text(
-                        "SELECT upstream_idp_config FROM server_registry "
+                        "SELECT approved_upstream_idp_config, approved_oauth_scopes, upstream_idp_type "
+                        "FROM server_registry "
                         "WHERE service_name = :sname AND status = :st LIMIT 1"
                     ),
                     {"sname": service, "st": "approved"},
                 )
                 result = row.fetchone()
-                if result and result[0]:
-                    idp_config = result[0] if isinstance(result[0], dict) else json.loads(result[0])
+                if result:
+                    if result[0]:
+                        idp_config = result[0] if isinstance(result[0], dict) else json.loads(result[0])
+                    approved_oauth_scopes = list(result[1]) if result[1] else None
+                    _has_requested_idp_type = bool(result[2])
         except Exception as exc:
             logger.warning(
-                "upstream_idp_config_lookup_failed",
+                "approved_upstream_idp_config_lookup_failed",
                 extra={"service": service, "error": str(exc)},
             )
 
-        # Task 12: If upstream_idp_config found, validate required fields
         if idp_config:
             if not idp_config.get("issuer") or not idp_config.get("client_id"):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Service '{service}' has no IdP configured (issuer or client_id missing)",
+                    detail=f"Service '{service}' has an approved IdP config missing issuer or client_id",
                 )
-            # Extract scopes from idp_config (or use default if missing)
-            requested_scopes = idp_config.get("scopes", [])
+            requested_scopes = approved_oauth_scopes if approved_oauth_scopes else idp_config.get("scopes", [])
             if isinstance(requested_scopes, str):
                 requested_scopes = [s.strip() for s in requested_scopes.split() if s.strip()]
+        elif _has_requested_idp_type:
+            # Fail closed (WP-A6 Finding 2): the submitter requested an OAuth/IdP
+            # config for this server, but no reviewer has approved it yet — never
+            # fall back to the unapproved requested config.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Service '{service}' has a submitted OAuth/IdP config that has not "
+                    "been reviewer-approved yet. An admin must approve this server's "
+                    "OAuth configuration before it can be enrolled."
+                ),
+            )
         else:
-            # Registry entry exists but upstream_idp_config is NULL — fall through to
-            # hardcoded adapters so existing m365/bitbucket/dex enrollments keep working.
+            # No OAuth/IdP config was ever requested for this server — fall through
+            # to hardcoded adapters so existing m365/bitbucket/dex enrollments keep working.
             registry_config = None
 
     if not registry_config:
@@ -420,10 +440,18 @@ async def enroll(service: str, request: Request) -> HTMLResponse:
         }),
     )
 
-    # Resolve redirect_uri for display (D1: show exact redirect_uri)
+    # Resolve redirect_uri for display (D1: show exact redirect_uri).
+    # WP-A6 Finding 2: this must reflect the actual resolved adapter/config,
+    # not always the Entra-specific setting — a generic external_oauth
+    # service's real redirect_uri (idp_config['redirect_uri'], or the
+    # {PROXY_BASE_URL}/auth/callback/{service} default computed by
+    # dynamic_external_oauth.py) was previously shown as the unrelated Entra one.
     try:
         settings = get_settings()
-        redirect_uri = getattr(settings, "ENTRA_REDIRECT_URI", "")
+        if idp_config:
+            redirect_uri = idp_config.get("redirect_uri") or f"{settings.PROXY_BASE_URL.rstrip('/')}/auth/callback/{service}"
+        else:
+            redirect_uri = getattr(settings, "ENTRA_REDIRECT_URI", "")
     except Exception:
         redirect_uri = "(configured on server)"
 
@@ -615,6 +643,82 @@ async def enroll_consent(
     return RedirectResponse(url=auth_url, status_code=302)
 
 
+async def _run_post_enrollment_discovery(*, service: str, access_token: str) -> None:
+    """
+    WP-A6 Finding 3: immediately after a successful OAuth enrollment, run the
+    server's ServiceAdapter (resolved via its oauth_provider_profile.service_adapter
+    slug — GenericServiceAdapter/no-op if the server has no profile or the
+    profile has no adapter) and persist any resolved runtime context to
+    server_registry.service_context.
+
+    Security boundary (C-01/C-02 fix, 2026-07-11 audit): only ever reads
+    approved_upstream_idp_config (never the submitter-controlled
+    upstream_idp_config — see server_registry.py:736's documented rule), and
+    only runs for app-level injection modes where service_context is a
+    single, server-wide value. Per-user modes (external_oauth_user_token)
+    must never write server_registry.service_context: that column has no
+    principal dimension, so the last user to enroll would silently
+    overwrite the resource/tenant context used by every other user and by
+    the deployed container.
+
+    Fail-soft by design (mirrors RFC 8414 discover_metadata's posture): a
+    discovery failure here must not fail an otherwise-successful OAuth
+    enrollment — the resource/tenant context can always be resolved again on
+    a later enrollment, whereas enrollment itself is now-or-never for this
+    callback. The enforcement/fail-closed half of Finding 3
+    (verify_access()) runs at deploy-verify time instead (deploy_verifier.py).
+    """
+    # C-02: app-level injection modes only — service_context is server-wide,
+    # not per-principal. Allow-list, deny-by-default for anything else
+    # (including per-user external_oauth_user_token and unrecognized modes).
+    _APP_LEVEL_INJECTION_MODES = {"external_oauth_client_credentials", "kc_token_exchange"}
+    try:
+        from app.core.database import engine as _db_engine
+        async with _db_engine.connect() as conn:
+            row = (await conn.execute(
+                text(
+                    "SELECT sr.server_id, sr.approved_upstream_idp_config, p.service_adapter, p.injection_mode "
+                    "FROM server_registry sr JOIN oauth_provider_profile p "
+                    "ON p.id = sr.oauth_provider_profile_id "
+                    "WHERE sr.service_name = :sname AND sr.status = 'approved' LIMIT 1"
+                ),
+                {"sname": service},
+            )).fetchone()
+        if row is None:
+            return  # no profile selected for this server — nothing to discover
+        server_id, approved_config_raw, adapter_slug, injection_mode = row
+        if injection_mode not in _APP_LEVEL_INJECTION_MODES:
+            return  # per-user or unrecognized mode — never write global service_context
+        if not approved_config_raw:
+            return  # C-01: not yet approved — never discover against submitter-controlled config
+        approved_config = approved_config_raw if isinstance(approved_config_raw, dict) else (
+            json.loads(approved_config_raw) if approved_config_raw else {}
+        )
+
+        from app.credential_broker.adapters.service_adapter_registry import get_service_adapter
+        svc_adapter = get_service_adapter(adapter_slug)
+
+        discovered = await svc_adapter.post_enrollment_discovery(access_token, approved_config)
+        selected = svc_adapter.select_resource(discovered, user_choice=None)
+        runtime_context = svc_adapter.build_runtime_context(approved_config, selected)
+
+        from app.core.database import AsyncSessionLocal as _AsyncSessionLocal
+        async with _AsyncSessionLocal() as db:
+            await db.execute(
+                text(
+                    "UPDATE server_registry SET service_context = CAST(:ctx AS jsonb), updated_at = now() "
+                    "WHERE server_id = :sid"
+                ),
+                {"ctx": json.dumps(runtime_context.to_dict()), "sid": str(server_id)},
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.warning(
+            "post_enrollment_discovery_failed",
+            extra={"service": service, "error": str(exc)},
+        )
+
+
 @router.get("/callback/{service}")
 async def callback(service: str, code: str, state: str, request: Request) -> HTMLResponse:
     adapter = await _get_adapter(service)
@@ -657,7 +761,7 @@ async def callback(service: str, code: str, state: str, request: Request) -> HTM
     # Re-enrollment (a new GET/POST /consent) is required to pick up any scope changes.
     consented_scopes: str = flow.get("scopes", "")  # "" for pre-R5 records (backward compat)
 
-    _, refresh_token, _ = await adapter.exchange_code(code, code_verifier=code_verifier)
+    access_token, refresh_token, _ = await adapter.exchange_code(code, code_verifier=code_verifier)
 
     from app.credential_broker.kms import VaultKMSClient
     from app.credential_broker.approaches.approach_a import encrypt
@@ -714,6 +818,8 @@ async def callback(service: str, code: str, state: str, request: Request) -> HTM
             },
         )
         await db.commit()
+
+    await _run_post_enrollment_discovery(service=service, access_token=access_token)
 
     await _emit_credential_audit(request, client_id, service)
 

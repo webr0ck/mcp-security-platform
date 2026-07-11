@@ -97,6 +97,7 @@ class CreateProfileRequest(BaseModel):
     slug: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9_-]*$")
     display_name: str = Field(min_length=1, max_length=256)
     provider_type: str
+    injection_mode: str
     issuer_or_metadata_url: str | None = None  # if set, discovery runs before insert
     default_scopes: list[str] = Field(default_factory=list)
     allowed_scopes: list[str] = Field(default_factory=list)
@@ -104,6 +105,24 @@ class CreateProfileRequest(BaseModel):
     token_audience_or_resource: str | None = None
     service_adapter: str | None = None
     supports_client_credentials: bool = False
+
+
+@router.get("/api/v1/oauth-provider-profiles")
+async def list_approved_profiles(request: Request) -> dict:
+    """
+    WP-A6 Finding 6: self-service listing of APPROVED profiles for the
+    onboarding wizard — any authenticated caller (no admin role required,
+    same posture as /api/v1/wizard/recommend-provider-type), always
+    status='approved' regardless of query params, so a non-expert submitter
+    can pick a profile for POST /api/v1/servers.oauth_provider_profile_id
+    without ever seeing draft/pending_review/rejected rows or needing admin
+    access. Previously no route exposed this at all — only the admin-gated
+    /api/v1/admin/oauth-provider-profiles listing existed.
+    """
+    async for db in get_db():
+        rows = await profile_svc.list_profiles(db, status="approved")
+        return {"profiles": [_serialize(r) for r in rows]}
+    return {"profiles": []}  # pragma: no cover — get_db always yields
 
 
 @router.get("/api/v1/admin/oauth-provider-profiles")
@@ -136,6 +155,7 @@ async def create_profile(body: CreateProfileRequest, request: Request) -> dict:
                 slug=body.slug,
                 display_name=body.display_name,
                 provider_type=body.provider_type,
+                injection_mode=body.injection_mode,
                 created_by=_actor(request),
                 metadata=metadata,
                 default_scopes=body.default_scopes,
@@ -197,6 +217,7 @@ def _serialize(p: profile_svc.ProfileRow) -> dict:
         "slug": p.slug,
         "display_name": p.display_name,
         "provider_type": p.provider_type,
+        "injection_mode": p.injection_mode,
         "issuer": p.issuer,
         "authorization_endpoint": p.authorization_endpoint,
         "token_endpoint": p.token_endpoint,

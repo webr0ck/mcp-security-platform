@@ -50,8 +50,20 @@ export const audit = {
 
 // ── Servers ───────────────────────────────────────────────────────────────────
 export const servers = {
-  list: () => request<import('@/types').MCPServer[]>('/api/v1/admin/servers'),
-  approve: (id: string) => request(`/api/v1/admin/servers/${id}/approve`, { method: 'POST' }),
+  list: () => request<{ servers: import('@/types').MCPServer[] }>('/api/v1/admin/servers')
+    .then(r => r.servers),
+  // D3 dual-control: approval requires a single-use consent token minted by
+  // requestConsent() below — POST /api/v1/admin/servers/{id}/approve 422s on
+  // an empty body (H-04, 2026-07-11 audit).
+  requestConsent: (id: string) =>
+    request<{ consent_token: string; jti: string; expires_in_seconds: number }>(
+      `/api/v1/servers/${id}/consent`, { method: 'POST', body: JSON.stringify({ action: 'approve' }) }
+    ),
+  approve: (id: string, consentToken: string) =>
+    request(`/api/v1/admin/servers/${id}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ consent_token: consentToken }),
+    }),
   suspend: (id: string) => request(`/api/v1/admin/servers/${id}`, {
     method: 'PATCH',
     body: JSON.stringify({ status: 'suspended' }),
@@ -176,6 +188,10 @@ export interface Submission {
   reviewed_at?: string | null
   created_at: string
   updated_at: string | null
+  upstream_url?: string | null
+  service_name?: string | null
+  upstream_idp_type?: string | null
+  upstream_idp_config?: Record<string, unknown> | null
 }
 
 export interface DesignPrompt { id: string; prompt: string }

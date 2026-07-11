@@ -1888,6 +1888,8 @@ async def _run_tool_discovery(
     server_id: str,
     db: AsyncSession,
     actor_client_id: str,
+    *,
+    require_approved: bool = True,
 ) -> JSONResponse:
     """
     Discover tools from an approved upstream MCP server.
@@ -1900,6 +1902,14 @@ async def _run_tool_discovery(
     there is the submitter, not an admin — the admin already approved the
     submission; this call does not re-check admin role, callers are
     responsible for their own authorization).
+
+    require_approved (H-01, 2026-07-11 audit): keyword-only, defaults to True
+    (unchanged behavior). The verify-time callers in deploy_verifier.py pass
+    False because they now intentionally run discovery BEFORE promoting
+    server_registry.status to 'approved' — status is the actual entitlement/
+    credential-issuance gate, so it must only flip after probes succeed, not
+    before. Never exposed as a request parameter on the HTTP route below —
+    only internal service code can set it False.
 
     Per Task 13 specification:
     1. Verify server exists and status='approved' (404 if not)
@@ -1946,7 +1956,7 @@ async def _run_tool_discovery(
     if server_row is None:
         raise HTTPException(404, {"code": "NOT_FOUND", "message": f"Server '{server_id}' not found."})
 
-    if server_row.status != "approved":
+    if require_approved and server_row.status != "approved":
         raise HTTPException(
             403,
             {

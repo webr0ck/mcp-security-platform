@@ -138,6 +138,25 @@ def validate_mode_and_idp(
     # user, service_account, service, none: no IdP type requirement
 
 
+_UPSTREAM_IDP_TYPE_BY_MODE: dict[str, str] = {
+    "oauth_user_token": "gateway_idp",
+    "kc_token_exchange": "gateway_idp",
+    "entra_user_token": "entra",
+    "entra_client_credentials": "entra",
+    "external_oauth_client_credentials": "external_oauth",
+    "external_oauth_user_token": "external_oauth",
+}
+
+
+def upstream_idp_type_for_mode(injection_mode: str) -> str | None:
+    """The upstream_idp_type validate_mode_and_idp requires for a given
+    injection_mode, or None for modes with no IdP-type requirement (user,
+    service, service_account, basic_auth, none). Single source of truth so
+    profile-driven registration (WP-A6 Finding 1) derives the same mapping
+    validate_mode_and_idp enforces, instead of re-guessing it."""
+    return _UPSTREAM_IDP_TYPE_BY_MODE.get(injection_mode)
+
+
 # ============================================================================
 # IdP Configuration Validation
 # ============================================================================

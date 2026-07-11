@@ -180,7 +180,7 @@ curl -s http://localhost:8000/api/v1/tools \
 | Proxy health | `http://localhost:8000/health/ready` | No auth |
 | Proxy admin credentials UI | `http://localhost:8000/admin/credentials` | Requires `admin` role (alice) |
 | Hardened gateway (TLS + WAF, remote access) | `https://<LAB_HOST>:8443` | Public/OAuth/MCP traffic — everything except `/api/v1/tools/`. mTLS is **off** here (see troubleshooting) |
-| Hardened gateway, mTLS-required tools API | `https://<LAB_HOST>:8445` | `/api/v1/tools/` only — the only path that still does optional client-cert verification (PRD-0006 R-2). Not reachable on `:8443`. |
+| Hardened gateway, mTLS-required tools API | `https://<LAB_HOST>:8445` | `/api/v1/tools/` only — the only path that still does optional client-cert verification (PRD-0006 R-2). `/api/v1/tools/` is also reachable on `:8443` (no cert required there — normal OAuth/session/API-key auth applies, see the troubleshooting entry below). |
 
 ### Identity providers
 
@@ -525,6 +525,93 @@ restart, to pick up the new port mapping:
 podman-compose -f docker-compose.yml -f docker-compose.dev.yml -f podman-compose.lab.yml -f compose.wazuh.yml \
   up -d --force-recreate --no-deps gateway
 ```
+
+### MCP client trusts the handshake but still rejects the certificate (`CRYPT_E_NO_REVOCATION_CHECK`, "certificate not trusted")
+
+Different failure than the Schannel handshake bug above — this means the TLS handshake itself
+succeeded, but the client doesn't trust the CA that signed the gateway's server certificate
+(expected: the lab uses a locally-generated `mkcert` cert, which nothing trusts by default outside
+the machine `mkcert -install` was run on). Fix: download the CA from the gateway itself and trust
+it once —
+
+- **Portal (fastest):** sign in at `/portal`, open your profile (top-right avatar) → **Certificate
+  setup**, and follow the download link + OS-specific instructions there.
+- **Direct download:** `GET /ca.crt` on the gateway (works over both `:8443`/HTTPS and the plain
+  `:8088`/HTTP listener — the latter is deliberately unauthenticated over plain HTTP so a client
+  that doesn't trust anything yet can still fetch it). Requires `lab-setup.sh` to have run with
+  `mkcert` installed (it copies `mkcert -CAROOT`'s `rootCA.pem` into `lab/nginx/lab-certs/`); if the
+  file is missing, `/ca.crt` 404s — generate the leaf cert per `lab/nginx/lab-certs/README.md` and
+  re-run `lab-setup.sh`, or copy `$(mkcert -CAROOT)/rootCA.pem` there manually.
+- No client cert is needed to fetch it — `/ca.crt` is a public file (the CA's public cert, not a
+  secret), served with `modsecurity off` for that one location since CRS's default file-extension
+  policy (rule 920440) blocks `.crt`.
+
+**If the client cert error persists after trusting the CA** (confirmed 2026-07-11, Codex on
+Windows): trusting the CA in the Windows cert store is not enough on its own. mkcert's root has no
+CRL/OCSP revocation info, and Codex's TLS backend hard-fails on that
+(`CRYPT_E_NO_REVOCATION_CHECK`, `os error -2146893018`) even once the CA is trusted, instead of
+treating "no revocation info" as acceptable for a private CA. **Fix: set `SSL_CERT_FILE` to the
+downloaded CA before launching Codex** — this makes Codex validate against the given CA bundle
+directly rather than going through the Windows-native revocation-checking path:
+
+```powershell
+$env:SSL_CERT_FILE = "C:\path\to\mcp-lab-ca.crt"
+codex mcp login mcp-gateway
+```
+
+Durable fix (not yet done, tracked in `README.md`'s Enforced-vs-Roadmap table under **Identity**):
+replace the mkcert server cert with a Tailscale-issued one (`tailscale cert <magicdns-hostname>`) —
+publicly trusted with real revocation metadata, so no client-side CA trust step or `SSL_CERT_FILE`
+override is needed for anyone.
+
+### Codex OAuth callback fails: "Authorization server response missing required issuer"
+
+Not a cert problem — Codex (like other strict OAuth 2.1 clients) requires the authorization
+callback to carry an `iss` query parameter identifying the issuer (RFC 9207, a mix-up-attack
+defense). **Fixed 2026-07-11** by bumping the lab's Keycloak image from `24.0` to `26.0`
+(`podman-compose.lab.yml`) — Keycloak only started sending `iss` in the callback starting in 26.x;
+24.0.5's discovery `issuer` was already correct, it just never echoed it back on the redirect.
+
+KC 26 also replaced the `hostname:v1` config provider (`KC_HOSTNAME_URL` + `KC_HOSTNAME_STRICT`)
+with `hostname:v2` by default, which refuses to start ("hostname is not configured") unless
+`KC_HOSTNAME` (not `_URL`) is set to the full external URL. Both env vars are now set to the same
+value in the compose file — harmless redundancy, keeps compatibility if anything still reads the
+old var name.
+
+**KC 26 access tokens missing `sub` claim → every OIDC-authenticated call 401s with
+"unauthenticated"** (found + fixed 2026-07-11, same reset that bumped KC to 26): Keycloak 26
+apparently gates the `sub` claim on the **`basic`** client scope more strictly than 24 did — any
+client whose `defaultClientScopes` list doesn't explicitly include `basic` issues access tokens
+with no `sub` claim (the ID token still has it — only the access token is affected). The proxy's
+`_validate_oidc_jwt` (`app/middleware/auth.py`) treats a missing `sub` as "not a valid identity"
+and returns `None` **silently, with no log line** (it's not a signature/JWKS failure, so the
+usual `OIDC JWT validation failed` log never fires) — every call from that client 401s with the
+generic `unauthenticated` message, which looks identical to a cert/token-missing error. Affected
+in this realm: `claude-code`, `lab-test`, `svc-mcp-agent` (all had an explicit
+`defaultClientScopes` list that predates `basic` being required) — `mcp-proxy` was unaffected
+because it uses Keycloak's built-in default scope list, which already includes `basic`. Fixed by
+adding `"basic"` to all three clients' `defaultClientScopes` in `lab/keycloak/realm-mcp.json`
+(source of truth for future fresh boots) and applying it live via the admin API on the running
+realm (`PUT /admin/realms/mcp/clients/{id}/default-client-scopes/{basic-scope-id}`). If you add a
+**new** OIDC client to this realm, give it `basic` explicitly or leave `defaultClientScopes`
+unset entirely (inherits the realm's built-in defaults, which include it).
+
+If you hit `container ... has dependent containers` / `cannot remove container ... running`
+force-recreating a service: a one-shot seeder container (`restart: "no"`, e.g.
+`lab-keycloak-seeder`/`lab-seeder`) with `depends_on: condition: service_healthy` holds a
+reference even after it has exited, and podman-compose's own `--force-recreate` doesn't handle
+this. **Use `make -f Makefile.lab lab-recreate SERVICE=<name> [PULL=1]`**
+(`lab/scripts/lab-recreate.sh`) instead of `podman-compose ... --force-recreate --no-deps` — it
+removes the known dependent seeder first, recreates the target, waits for healthy, then re-runs
+the seeder. Example: `make -f Makefile.lab lab-recreate SERVICE=lab-keycloak PULL=1`.
+
+### `/api/v1/tools/` returns 401 with a valid OAuth session but no client cert
+
+This is expected on production and, since 2026-07-11, on the lab's `:8443` listener too — a client
+certificate was never required by RBAC, only by the gateway's nginx config on `:8443` (fixed
+because OAuth-only shell/CLI clients cannot present one). If you get a 401 here with a valid
+session, the cause is a normal auth/entitlement failure (check the response body's `error` field),
+not the cert requirement — see §2 of `docs/ARCHITECTURE.md` for the current listener behavior.
 
 ### Session JWT invalid / 401 after proxy restart
 

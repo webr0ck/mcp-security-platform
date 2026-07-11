@@ -86,12 +86,22 @@ def clean_mcp_upstream_b3():
 
 def _create_draft(token: str, name: str, repo_url: str) -> str:
     r = httpx.post(f"{BASE_URL}/api/v1/submissions", headers=_auth_headers(token),
-                   json={"name": name, "github_repo_url": repo_url}, verify=False, timeout=60)
+                   json={"name": name, "github_repo_url": repo_url,
+                         "description": f"{name} acceptance test fixture"},
+                   verify=False, timeout=60)
     assert r.status_code == 201, f"draft create failed: {r.status_code} {r.text}"
     return r.json()["server_id"]
 
 
-def _submit(token: str, server_id: str) -> None:
+def _submit(token: str, server_id: str, requested_upstream_url: str = "http://at4-placeholder:8000/mcp") -> None:
+    # description + requested_upstream_url are required before submit (V075) —
+    # description is set at draft-create time above, requested_upstream_url
+    # needs its own PATCH since POST /api/v1/submissions doesn't accept it.
+    patch = httpx.patch(f"{BASE_URL}/api/v1/submissions/{server_id}",
+                         headers=_auth_headers(token),
+                         json={"requested_upstream_url": requested_upstream_url},
+                         verify=False, timeout=60)
+    assert patch.status_code == 200, f"patch requested_upstream_url failed: {patch.status_code} {patch.text}"
     r = httpx.post(f"{BASE_URL}/api/v1/submissions/{server_id}/submit",
                    headers=_auth_headers(token), json={}, verify=False, timeout=60)
     assert r.status_code == 200, f"submit failed: {r.status_code} {r.text}"
@@ -141,7 +151,7 @@ def _proxy_exec_python(code: str, timeout: int = 60) -> subprocess.CompletedProc
 def test_apply_deploy_verify_full_loop(alice_token, carol_token, clean_mcp_upstream_b3):
     name = f"at4-clean-{uuid.uuid4().hex[:8]}"
     server_id = _create_draft(alice_token, name, CLEAN_URL)
-    _submit(alice_token, server_id)
+    _submit(alice_token, server_id, requested_upstream_url=clean_mcp_upstream_b3)
 
     scan_status = _poll(
         f"SELECT scan_status FROM server_registry WHERE server_id='{server_id}'",
