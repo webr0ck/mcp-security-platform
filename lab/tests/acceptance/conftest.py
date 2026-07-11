@@ -317,28 +317,41 @@ def service_token() -> str:
     return _kc_service_token()
 
 
+def _redis_password() -> str:
+    env_lab = REPO_ROOT / ".env.lab"
+    for line in env_lab.read_text().splitlines():
+        if line.startswith("REDIS_PASSWORD="):
+            return line.split("=", 1)[1]
+    return ""
+
+
 @pytest.fixture(autouse=True, scope="module")
-def _reset_anomaly_limits(alice_token):
+def _reset_anomaly_limits():
     """This suite invokes the same handful of tools many times in a short
     window, which trips the platform's own anomaly_threshold_exceeded OPA
     policy (a real, working control: 'rapid invocations' is >10 calls in a
-    30s sliding window, tracked by anomaly:window:{client_id} in Redis) and
+    300s sliding window, tracked by anomaly:window:{client_id} in Redis) and
     self-denies the very calls we're trying to test.
 
-    Module-scoped, not function-scoped: the reset endpoint itself is rate
-    limited to 10 resets per client per 5 minutes (admin_limits.py's
-    `_RESET_RL`) specifically to prevent reset-flooding — calling it before
-    every individual test (~24 in this suite) trips THAT limiter instead,
-    which fails silently because httpx doesn't raise on a non-2xx status
-    unless you ask it to. Once per test file keeps each module's own call
-    volume (well under 10) from carrying into the next. Best-effort; never
-    fails the suite."""
+    Module-scoped, not function-scoped, and goes straight at Redis via
+    `podman exec` rather than the admin reset API (same pattern as
+    test_at3_onboarding.py's `_clear_taint`): the admin API's own reset
+    endpoint is deliberately rate-limited to 10 calls per client per 5
+    minutes (admin_limits.py's `_RESET_RL`) as an anti-abuse control, and
+    with 8 modules x 3 clients = 24 resets per full-suite run that budget is
+    exhausted mid-run on its own — worse across back-to-back reruns in the
+    same 5-minute window, where later resets silently no-op (httpx doesn't
+    raise on non-2xx unless asked to) and stale anomaly-window state leaks
+    across runs (confirmed live: caused AT3/AT4 to intermittently fail with
+    anomaly_threshold_exceeded on a second run within 5 minutes of the
+    first). Hitting Redis directly avoids competing with that production
+    rate limit for a test-only concern. Best-effort; never fails the suite."""
+    pw = _redis_password()
     for client_id in ("alice@corp", "bob@corp", "carol@corp"):
         try:
-            httpx.post(f"{BASE_URL}/api/v1/admin/limits/{client_id}/reset",
-                      headers=_auth_headers(alice_token), json={"target": "both"},
-                      verify=False, timeout=15)
-        except httpx.HTTPError:
+            podman_exec("mcp-redis", ["redis-cli", "-a", pw, "DEL",
+                                       f"anomaly:window:{client_id}", f"rl:mcp:{client_id}"])
+        except Exception:
             pass
     yield
 

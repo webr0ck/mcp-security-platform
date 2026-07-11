@@ -182,6 +182,32 @@ curl -X POST http://localhost:8000/api/v1/tools/invoke ...
 make -f Makefile.lab lab-smoke
 ```
 
+### Registering a new server directly (bypassing the submission wizard)
+
+Servers onboarded through the self-service submission flow (`docs/ARCHITECTURE.md`
+§5.5) get these fields populated for free by the scan pipeline. A server
+inserted directly into `server_registry` (seeder script, manual SQL, a new
+lab compose service) will silently fail every invocation unless you also set:
+
+- **`last_rescanned_at`** — invoke-time supply-chain scan-freshness gate
+  (`proxy/app/services/invocation.py` Step 1.2) denies any tool whose
+  server's `last_rescanned_at` is `NULL` or older than `SCAN_MAX_AGE_HOURS`.
+  A row inserted outside the scan pipeline starts `NULL` and looks approved
+  right up until the first invoke, which then 403s. Set it to `now()` (or run
+  the row through the real scanner) at registration time.
+- **`upstream_allowlist_entry`** — invoke-time DNS-rebind/TOCTOU revalidation
+  (`invocation.py` Step 3c) re-resolves the upstream hostname on every call
+  and checks it against this column (`NULL` = registered as a public
+  upstream). If the column doesn't match the upstream's real resolved
+  IP/CIDR, every invocation fails closed with `upstream_revalidation_failed`
+  regardless of how healthy the container is. Set it to the correct CIDR/IP
+  for the upstream you're registering (or leave `NULL` only if it's
+  genuinely public).
+
+Both gaps present identically at the API layer — a 200 on the tool-catalog
+list, then a deny on the first real `tools/call`. Check `audit_events.deny_reasons`
+first if a freshly-registered server won't invoke.
+
 ## Entra Integration (Optional)
 
 For Microsoft Graph API testing using a service principal (client_credentials flow — no browser redirect needed).
