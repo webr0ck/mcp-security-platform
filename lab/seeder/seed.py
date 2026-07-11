@@ -425,26 +425,37 @@ async def fix_oidc_issuer_placeholder(conn: asyncpg.Connection) -> int:
     A plain UPDATE then hits oidc_role_mappings_unique. Delete the now-redundant
     placeholder row instead of updating it whenever the target (real_issuer,
     claim_key, claim_value) already exists; only UPDATE the rows that don't.
+
+    The DELETE and UPDATE run inside one transaction with the table locked
+    (SHARE ROW EXCLUSIVE, blocks other writers, allows concurrent reads) so a
+    concurrent migration replay can't reinsert a placeholder row between the
+    two statements — asyncpg does not otherwise wrap sequential conn.execute()
+    calls in a shared transaction (each autocommits independently), which
+    would leave the DELETE committed even if the UPDATE later failed.
     """
-    await conn.execute(
-        """
-        DELETE FROM oidc_role_mappings AS placeholder
-        USING oidc_role_mappings AS real
-        WHERE placeholder.oidc_issuer = '__OIDC_ISSUER_PLACEHOLDER__'
-          AND real.oidc_issuer = $1
-          AND real.claim_key = placeholder.claim_key
-          AND real.claim_value = placeholder.claim_value
-        """,
-        OIDC_ISSUER_URL,
-    )
-    result = await conn.execute(
-        """
-        UPDATE oidc_role_mappings
-        SET oidc_issuer = $1
-        WHERE oidc_issuer = '__OIDC_ISSUER_PLACEHOLDER__'
-        """,
-        OIDC_ISSUER_URL,
-    )
+    async with conn.transaction():
+        await conn.execute(
+            "LOCK TABLE oidc_role_mappings IN SHARE ROW EXCLUSIVE MODE"
+        )
+        await conn.execute(
+            """
+            DELETE FROM oidc_role_mappings AS placeholder
+            USING oidc_role_mappings AS real
+            WHERE placeholder.oidc_issuer = '__OIDC_ISSUER_PLACEHOLDER__'
+              AND real.oidc_issuer = $1
+              AND real.claim_key = placeholder.claim_key
+              AND real.claim_value = placeholder.claim_value
+            """,
+            OIDC_ISSUER_URL,
+        )
+        result = await conn.execute(
+            """
+            UPDATE oidc_role_mappings
+            SET oidc_issuer = $1
+            WHERE oidc_issuer = '__OIDC_ISSUER_PLACEHOLDER__'
+            """,
+            OIDC_ISSUER_URL,
+        )
     # asyncpg returns "UPDATE N" as a status string
     updated = int(result.split()[-1]) if result else 0
     if updated:
