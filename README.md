@@ -317,6 +317,7 @@ In `~/.claude/settings.json` (or `~/.claude.json`) on the machine running Claude
 | [`LAB.md`](LAB.md) | Full self-contained lab for testing |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Canonical, reusable architecture spec — enough to re-implement from scratch, incl. the security invariants (§10). The Enforced-vs-Roadmap table above is authoritative for per-control status. |
 | [`docs/TESTING.md`](docs/TESTING.md) | How to run the suite and the security gate |
+| [`docs/PROMPT_EXAMPLES.md`](docs/PROMPT_EXAMPLES.md) | Example prompts for common self-service workflows — checking access, toggling a server, building and onboarding a new MCP server end-to-end |
 | [`SECURITY.md`](SECURITY.md) | Responsible disclosure + tracked known-limitations |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
 | [`AGENTS.md`](AGENTS.md) | Repo map & conventions for contributors |

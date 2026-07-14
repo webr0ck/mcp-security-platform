@@ -292,7 +292,10 @@ async def create_server(body: ServerCreate, request: Request):
     _settings = _get_settings()
     _allowlist = _settings.upstream_private_cidr_allowlist_parsed
     try:
-        _ae = await validate_upstream_url_ssrf(body.upstream_url, private_cidr_allowlist=_allowlist)
+        _ae = await validate_upstream_url_ssrf(
+            body.upstream_url, private_cidr_allowlist=_allowlist,
+            allow_http_dev=(_settings.ENVIRONMENT == "development"),
+        )
     except InvalidOnboardingConfig as exc:
         raise HTTPException(status_code=400, detail=f"SSRF validation failed: {exc}") from exc
     _upstream_allowlist_entry: str | None = _ae if _ae else None
@@ -347,7 +350,10 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
         _settings = _get_settings()
         _allowlist = _settings.upstream_private_cidr_allowlist_parsed
         try:
-            _patch_ae = await validate_upstream_url_ssrf(updates["upstream_url"], private_cidr_allowlist=_allowlist)
+            _patch_ae = await validate_upstream_url_ssrf(
+                updates["upstream_url"], private_cidr_allowlist=_allowlist,
+                allow_http_dev=(_settings.ENVIRONMENT == "development"),
+            )
         except (SSRFError, ValueError, InvalidOnboardingConfig) as exc:
             raise HTTPException(status_code=422, detail=f"upstream_url blocked by SSRF policy: {exc}") from exc
         updates["upstream_allowlist_entry"] = _patch_ae if _patch_ae else None
@@ -704,10 +710,26 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     from app.core.config import get_settings as _get_settings
     _approval_settings = _get_settings()
     _approval_allowlist = _approval_settings.upstream_private_cidr_allowlist_parsed
-    try:
-        await validate_upstream_url_ssrf(url_record[0], private_cidr_allowlist=_approval_allowlist)
-    except (SSRFError, ValueError, InvalidOnboardingConfig) as exc:
-        raise HTTPException(status_code=422, detail=f"SSRF validation failed: {exc}") from exc
+    # NOTE (2026-07-14): the self-service submission flow (submission.py's
+    # create/patch/submit) stores the submitter's URL in the separate
+    # `requested_upstream_url` column, not `upstream_url` — by design, the
+    # real `upstream_url` is only populated post-approval via the "provide
+    # the live backend URL" PATCH step (which already runs this same SSRF
+    # check itself). Re-validating an intentionally-still-empty upstream_url
+    # here always failed with a misleading "must have an explicit scheme"
+    # error for every self-service submission, regardless of what the
+    # submitter actually provided. Skip validation (nothing to validate yet)
+    # when upstream_url is empty; only re-validate when it's already set
+    # (e.g. a server registered directly via /api/v1/servers, which does
+    # populate upstream_url immediately).
+    if url_record[0]:
+        try:
+            await validate_upstream_url_ssrf(
+                url_record[0], private_cidr_allowlist=_approval_allowlist,
+                allow_http_dev=(_approval_settings.ENVIRONMENT == "development"),
+            )
+        except (SSRFError, ValueError, InvalidOnboardingConfig) as exc:
+            raise HTTPException(status_code=422, detail=f"SSRF validation failed: {exc}") from exc
 
     # S3: Pin the healthcheck to the IP already validated above (TOCTOU rebind fix).
     # A TTL-0 DNS flip between validate_upstream_url_ssrf and the healthcheck
@@ -720,14 +742,15 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
     _registered_allowlist_entry: str | None = url_record[3]  # upstream_allowlist_entry column
     _pinned_ips: list[str] = []
     _healthcheck_hostname: str | None = None
-    try:
-        _pinned_ips = await revalidate_upstream_ip_at_invoke(
-            upstream_url=url_record[0],
-            registered_allowlist_entry=_registered_allowlist_entry,
-        )
-        _healthcheck_hostname = _urlparse(url_record[0]).hostname or None
-    except UpstreamRevalidationError as exc:
-        raise HTTPException(status_code=400, detail=f"IP revalidation failed at approval: {exc}") from exc
+    if url_record[0]:
+        try:
+            _pinned_ips = await revalidate_upstream_ip_at_invoke(
+                upstream_url=url_record[0],
+                registered_allowlist_entry=_registered_allowlist_entry,
+            )
+            _healthcheck_hostname = _urlparse(url_record[0]).hostname or None
+        except UpstreamRevalidationError as exc:
+            raise HTTPException(status_code=400, detail=f"IP revalidation failed at approval: {exc}") from exc
 
     owner_sub = url_record[1]
     adapter_name = url_record[2]
@@ -811,7 +834,10 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
             text(
                 "INSERT INTO audit_events "
                 "(event_id, event_type, client_id, tool_name, outcome, request_id, sha256_hash, latency_ms) "
-                "VALUES (:eid, 'SERVER_APPROVED', :approver, :server_id, 'success', :rid, '', 0)"
+                # 'success' violated audit_events_outcome_check (only 'allow'/'deny' are
+                # permitted) — this silently rolled back every approval's whole transaction
+                # (UPDATE + INSERT share one commit). Found 2026-07-14 approving test-api-noauth.
+                "VALUES (:eid, 'SERVER_APPROVED', :approver, :server_id, 'allow', :rid, '', 0)"
             ),
             {
                 "eid": str(uuid.uuid4()),

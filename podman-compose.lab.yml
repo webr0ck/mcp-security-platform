@@ -537,6 +537,41 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # ── Entra ID MCP — directory lookup (users/groups), same app registration
+  # ── as lab-mcp-m365, always app-only (2026-07-14) ───────────────────────────
+  # list_users/list_groups are Graph endpoints that work fine with application
+  # permissions — unlike /me-style endpoints, no delegated per-user token needed.
+  lab-mcp-entra-id:
+    <<: *mcp-hardening
+    build: ./lab/mcp-servers/entra-id
+    image: lab-mcp-entra-id:lab
+    container_name: lab-mcp-entra-id
+    ports:
+      - "127.0.0.1:8107:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      SERVER_NAME: "entra-id-mcp"
+      AZURE_TENANT_ID: "${AZURE_TENANT_ID}"
+      AZURE_CLIENT_ID: "${AZURE_CLIENT_ID}"
+      # AZURE_CLIENT_SECRET deliberately absent — injected by broker at call time
+      # via X-Entra-Client-Secret (injection_mode=entra_client_credentials), same
+      # as lab-mcp-m365.
+      M365_TOKEN_URL: "${M365_TOKEN_URL:-}"
+      M365_GRAPH_BASE: "${M365_GRAPH_BASE:-}"
+      HTTPS_PROXY: "http://lab-egress-proxy:3128"
+      NO_PROXY: "lab-mcp-entra-id,lab-mock-idp,lab-mock-graph,localhost,127.0.0.1"
+    networks:
+      - mcp-entra-id-net  # pairwise net with proxy only
+      - mcp-egress-net    # egress-only path to lab-egress-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   # ── Egress proxy — allowlisting forward proxy for lab MCP servers (Task 2.4) ─
   # Squid is the only service with mcp-egress-net (internet-reachable).
   # lab-mcp-m365 routes its Entra/Graph calls through here via HTTPS_PROXY env.
@@ -626,6 +661,38 @@ services:
     networks:
       # HIGH-2: dropped shared lab-net (echo has no backend) — no MCP-to-MCP path
       - mcp-echo-net   # pairwise net with proxy only; replaces internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Test-API MCP — onboarding acceptance-test target (2026-07-14) ───────────
+  # Fronts the local policy-document test API (policy_api_server.py) with two
+  # tool families against the SAME backend: read tools need no credential
+  # (injection_mode=none), add_policy_line requires a broker-injected Basic
+  # credential (injection_mode=basic_auth) — mirrors the pattern used to test
+  # echo-basic/echo-sa/echo-dex-external against one shared upstream.
+  lab-mcp-test-api:
+    <<: *mcp-hardening
+    build:
+      context: ./lab/mcp-servers/test-api
+    image: lab-mcp-test-api:lab
+    container_name: lab-mcp-test-api
+    ports:
+      - "127.0.0.1:8106:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      SERVER_NAME: "test-api-mcp"
+      POLICY_API_READ_URL: "http://127.0.0.1:9191"
+      POLICY_API_RW_URL: "http://127.0.0.1:9292"
+      POLICY_BEARER_TOKEN: "security-token"
+      FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
+    networks:
+      - mcp-test-api-net   # pairwise net with proxy only; backend API runs in-container on loopback
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
       interval: 10s
@@ -1077,8 +1144,10 @@ services:
       - mcp-netbox-net
       - mcp-gitea-net
       - mcp-m365-net
+      - mcp-entra-id-net
       - mcp-rag-assistant-net
       - mcp-echo-net
+      - mcp-test-api-net
       - mcp-catfacts-net
       - mcp-fetch-net
       - mcp-notes-net
@@ -1265,10 +1334,16 @@ networks:
   mcp-m365-net:
     driver: bridge
     internal: true
+  mcp-entra-id-net:
+    driver: bridge
+    internal: true
   mcp-rag-assistant-net:
     driver: bridge
     internal: true
   mcp-echo-net:
+    driver: bridge
+    internal: true
+  mcp-test-api-net:
     driver: bridge
     internal: true
   mcp-catfacts-net:

@@ -2049,7 +2049,20 @@ async def _run_tool_discovery(
             # response preference — spec-compliant servers (this platform's own
             # lab fleet included) 406 without it. Mirrors services/invocation.py's
             # handshake_headers, the reference implementation for this transport.
-            _mcp_accept_headers = {"Accept": "application/json, text/event-stream"}
+            #
+            # X-User-Sub/X-User-Role (2026-07-14): the mcphub_sdk PlatformMCPServer's
+            # _ContextMiddleware rejects any non-/health request with 403 when
+            # require_proxy=True (the default emitted by get_server_scaffold for
+            # every injection_mode) and no X-User-Sub header is present. Discovery
+            # never invokes a tool — see provision_mcp.py's own comment on this
+            # same requirement — so a synthetic system identity is safe here;
+            # without it, discover-tools 403s on every require_proxy=True server,
+            # i.e. every server onboarded via the standard scaffold.
+            _mcp_accept_headers = {
+                "Accept": "application/json, text/event-stream",
+                "X-User-Sub": "system:discovery",
+                "X-User-Role": "admin",
+            }
 
             init_resp = await client.post(upstream_url, json=init_payload, headers=_mcp_accept_headers, timeout=10)
             init_resp.raise_for_status()
