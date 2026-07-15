@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _ADMIN_ROLES = frozenset({"admin", "platform_admin"})
-_PATCH_ALLOWED = frozenset({"name", "upstream_url", "service_name"})
+_PATCH_ALLOWED = frozenset({"name", "upstream_url", "service_name", "trust_tier"})
 
 
 def _require_platform_admin(request: Request) -> None:
@@ -181,6 +181,25 @@ class ServerUpdate(BaseModel):
     name: Optional[str] = None
     upstream_url: Optional[str] = None
     service_name: Optional[str] = None
+    # SEP-1913 trust_tier rank (2026-07-15): no endpoint previously existed to
+    # raise a server's trust_tier after activation — the only path was a raw
+    # SQL UPDATE. Every newly-discovered server defaults to trust_tier=0
+    # (untrustedPublic), which taints the calling session's next call for up
+    # to an hour (taint_floor.py) regardless of which tool is called next.
+    # That's the correct behavior for a server nobody has vetted yet, but
+    # there was no legitimate way for a platform_admin to promote a server
+    # once they'd actually verified it — found while onboarding
+    # test-api-noauth/basicauth and entra-id-directory. See taint_floor.py's
+    # SEP-1913 rank table for the meaning of each value.
+    trust_tier: Optional[int] = None
+
+    @field_validator("trust_tier")
+    @classmethod
+    def trust_tier_range(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (0 <= v <= 4):
+            raise ValueError("trust_tier must be 0-4 (SEP-1913: 0=untrustedPublic, "
+                              "1=trustedPublic, 2=internal, 3=user, 4=system)")
+        return v
 
 
 class ServerRegister(BaseModel):
@@ -371,8 +390,25 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
             ),
             {**updates, "server_id": server_id},
         )
-        await db.commit()
         rows_updated = result.rowcount
+        if rows_updated and "trust_tier" in updates:
+            # Security-sensitive escalation (SEP-1913 rank change affects the
+            # taint floor for every future caller of this server) — append-only
+            # audit record, same pattern as SERVER_APPROVED in approve_server().
+            await db.execute(
+                text(
+                    "INSERT INTO audit_events "
+                    "(event_id, event_type, client_id, tool_name, outcome, request_id, sha256_hash, latency_ms) "
+                    "VALUES (:eid, 'SERVER_TRUST_TIER_CHANGED', :actor, :server_id, 'allow', :rid, '', 0)"
+                ),
+                {
+                    "eid": str(uuid.uuid4()),
+                    "actor": getattr(request.state, "client_id", "unknown"),
+                    "server_id": server_id,
+                    "rid": getattr(request.state, "request_id", ""),
+                },
+            )
+        await db.commit()
     if rows_updated == 0:
         raise HTTPException(status_code=404, detail="Server not found")
     return JSONResponse({"server_id": server_id, "updated": list(updates)})
