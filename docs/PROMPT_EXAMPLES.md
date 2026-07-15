@@ -100,9 +100,25 @@ just answer the questions the agent asks you):
     `Access denied: session restricted by trust policy` — every newly
     discovered tool starts at `trust_tier=0`, and calling one taints your
     session for up to an hour, denying your *next* call regardless of which
-    tool it targets. This is documented, expected behavior, not a bug —
-    ask a platform admin to clear it if you need to keep testing
-    immediately rather than waiting it out.
+    tool it targets. This is documented, expected behavior, not a bug: the
+    platform is correctly treating "a server nobody has verified yet" as
+    untrusted.
+
+    Once the server has actually been verified (you or an admin called its
+    tools and confirmed they behave correctly), ask an admin to promote it
+    instead of repeatedly working around the taint:
+
+    > Set trust_tier to 2 (internal) on the ticket-system server — I've verified it works.
+
+    This calls `PATCH /api/v1/admin/servers/{server_id}` with
+    `{"trust_tier": 2}` (platform_admin only; SEP-1913 range 0-4 — 0/1 are
+    still "public" tiers that taint the floor, 2 = "internal" is the floor
+    for "trusted", 3 = "user", 4 = "system"). It's audited
+    (`SERVER_TRUST_TIER_CHANGED`) since it changes the taint floor for every
+    future caller of that server. Note this only stops *new* taints going
+    forward — if your session was already tainted by an earlier call before
+    the promotion, that existing taint still has to expire (or be cleared
+    once) on its own.
 
 ## "I already have a running server, just register it"
 
