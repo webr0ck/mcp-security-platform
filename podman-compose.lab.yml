@@ -832,7 +832,7 @@ services:
   lab-mcp-self-service:
     <<: *mcp-hardening
     build:
-      context: ./lab/mcp-servers/self-service
+      context: ./mcp-servers/self-service
     image: lab-mcp-self-service:lab
     container_name: lab-mcp-self-service
     # override hardening default (64): FastMCP streamable_http worker threads.
@@ -1099,7 +1099,7 @@ services:
       # so MCP backends can't dial the proxy back over their per-backend network.
       # lab-mcp-self-service is a deliberate exception: it lives on the pairwise
       # mcp-self-service-net specifically to call back into /api/v1/design-assist
-      # and /api/v1/submissions (see lab/mcp-servers/self-service/server.py). It
+      # and /api/v1/submissions (see mcp-servers/self-service/server.py). It
       # authenticates those calls with its OWN service API key (client_id
       # lab-self-service) — NOT a forwarded copy of the caller's OAuth token
       # (passthrough never forwards that; see docs/spec/02-credential-broker.md

@@ -764,6 +764,107 @@ async def get_server_scaffold(injection_mode: str) -> dict:
     return {"error": "scaffold_unavailable", "detail": "Could not fetch scaffold from platform."}
 
 
+@mcp.tool()
+async def list_pending_reviews() -> dict:
+    """
+    List MCP server submissions awaiting security review.
+
+    Admin/security_reviewer/platform_admin only — this tool is hidden from
+    tools/list for other roles, and the underlying proxy endpoint enforces
+    the same role check independently.
+
+    Returns: {submissions: [{server_id, name, owner_sub, submission_status,
+        scan_status, injection_mode, data_categories, has_write_ops,
+        github_repo_url, scan_report, review_notes, reviewed_by, reviewed_at,
+        created_at, updated_at}]}
+    """
+    url = f"{PROXY_BASE_URL}/api/v1/admin/submissions"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, headers=_oauth_headers())
+        if r.status_code >= 400:
+            return {"error": "api_error", "detail": r.text[:300]}
+        return r.json()
+    except Exception as exc:
+        return {"error": "proxy_unreachable", "detail": str(exc)}
+
+
+@mcp.tool()
+async def review_submission(server_id: str) -> dict:
+    """
+    Full review detail for one submission: config, scan/SBOM report, and (if
+    a GitHub repo was provided) its file tree + key file contents fetched via
+    a fresh shallow clone.
+
+    Args:
+        server_id: The UUID from list_pending_reviews.
+
+    Returns: {server_id, name, owner_sub, submission_status, config,
+        scan_report, sbom_components, review_notes, repo}
+    """
+    url = f"{PROXY_BASE_URL}/api/v1/admin/submissions/{server_id}/review"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=_oauth_headers())
+        if r.status_code == 404:
+            return {"error": "not_found"}
+        if r.status_code >= 400:
+            return {"error": "api_error", "detail": r.text[:300]}
+        return r.json()
+    except Exception as exc:
+        return {"error": "proxy_unreachable", "detail": str(exc)}
+
+
+@mcp.tool()
+async def approve_submission(server_id: str, notes: str = "") -> dict:
+    """
+    Approve a submission that has passed scan and is awaiting review.
+
+    You cannot approve your own submission (segregation of duties, enforced
+    server-side).
+
+    Args:
+        server_id: The UUID from list_pending_reviews.
+        notes: Optional review notes shown to the submitter.
+
+    Returns: {server_id, submission_status} or {error, detail}
+    """
+    url = f"{PROXY_BASE_URL}/api/v1/admin/submissions/{server_id}/approve"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(url, headers=_oauth_headers(), content=json.dumps({"notes": notes}))
+        if r.status_code >= 400:
+            return {"error": "api_error", "detail": r.text[:300]}
+        return r.json()
+    except Exception as exc:
+        return {"error": "proxy_unreachable", "detail": str(exc)}
+
+
+@mcp.tool()
+async def reject_submission(server_id: str, notes: str = "") -> dict:
+    """
+    Permanently reject a submission.
+
+    You cannot reject your own submission (segregation of duties, enforced
+    server-side).
+
+    Args:
+        server_id: The UUID from list_pending_reviews.
+        notes: Optional reason shown to the submitter.
+
+    Returns: {server_id, submission_status} or {error, detail}
+    """
+    url = f"{PROXY_BASE_URL}/api/v1/admin/submissions/{server_id}/reject"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(url, headers=_oauth_headers(), content=json.dumps({"notes": notes}))
+        if r.status_code >= 400:
+            return {"error": "api_error", "detail": r.text[:300]}
+        return r.json()
+    except Exception as exc:
+        return {"error": "proxy_unreachable", "detail": str(exc)}
+
+
 # ── startup ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

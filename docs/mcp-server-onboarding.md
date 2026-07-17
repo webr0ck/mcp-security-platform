@@ -155,7 +155,7 @@ client that never sets that header, `inbound_auth` is `None` and **no**
 Authorization header reaches the upstream at all. `lab-mcp-self-service`
 handles this by falling back to its own `SELF_SERVICE_API_KEY` service
 credential when no user token is present (see `_oauth_headers()` in
-`lab/mcp-servers/self-service/server.py`) — if you rely on this fallback,
+`mcp-servers/self-service/server.py`) — if you rely on this fallback,
 make sure the key is actually valid (see the seeder gotcha below).
 
 **Seeder key rotation vs. running containers:** `lab/seeder/seed.py`'s
@@ -178,6 +178,114 @@ as pending. Every downstream that can raise `CredentialEnrollmentRequiredError`
 service missing from it will still block calls with a real enrollment URL,
 but the meta-tool a user checks won't warn them it's needed. Add your new
 server here the moment it uses per-user OAuth injection.
+
+## 10. Self-service is a default platform server now, not lab-only — and its
+    auto-entitlement is a special case, not a pattern to copy
+
+Self-service (`mcp-servers/self-service/`, service name `self-service` in
+`docker-compose.yml`) was promoted from a lab-only demo backend
+(`lab-mcp-self-service`) to a default production server: it has its own
+`server_registry` row (name `self-service`), its own pairwise Docker network
+with the proxy (`proxy-self-service-net`), and a migration
+(`infra/db/migrations/V052__self_service_default_seed.sql`) that seeds that
+server row plus all ten of its tools — the six existing submitter/design-assist
+tools and four new reviewer tools (§10a below). It ships in every environment
+by default; there is no lab-only gate on it anymore.
+
+**Fixed (post-Task-8 follow-up):** the V052 migration's tool→server linking
+step originally only back-filled `server_id` where it was currently `NULL`
+(`UPDATE tool_registry ... WHERE t.server_id IS NULL`). The six
+pre-existing tools (`self-service-mcp`, `plan_mcp_server`,
+`get_auth_mode_recommendation`, `submit_mcp_server`,
+`check_submission_status`, `get_server_scaffold`) were seeded long ago by
+`lab/seeder` against the *old* `lab-self-service` server row and already had
+a non-NULL `server_id` — so the `IS NULL` guard skipped them, leaving them
+linked to `lab-self-service` while the four new reviewer tools (freshly
+inserted with `server_id IS NULL`) linked to the *new* `self-service` row.
+
+The two `server_registry` rows do **not** share an `upstream_url` — the
+legacy `lab-self-service` row points at
+`http://lab-mcp-self-service:8000/mcp` and the new `self-service` row at
+`http://self-service:8000/mcp`; these were never the same value. The actual
+mismatch was introduced by V052's own tool-row `UPDATE`: the migration's
+`INSERT ... ON CONFLICT (name, version) DO UPDATE` unconditionally rewrites
+`upstream_url` on all ten `tool_registry` rows it owns — including the six
+pre-existing ones — to the *new* server's `upstream_url`
+(`http://self-service:8000/mcp`), even though those six rows'
+`server_id` FK still pointed at the *old* `lab-self-service` row (whose own
+`upstream_url` was never touched). So after V052's INSERT ran, those six
+rows had `upstream_url = http://self-service:8000/mcp` but
+`server_id` → a server row whose `upstream_url` was
+`http://lab-mcp-self-service:8000/mcp` — a mismatch V052 itself created
+between a row's `upstream_url` column and its `server_id` FK target, not a
+pre-existing coincidental collision between the two server rows. Combined
+with `_ensure_self_service_entitlement()` (§10a) only granting access to the
+new `self-service` server, a brand-new human principal saw the four
+reviewer tools (correctly gated by `required_roles`) but not the six
+onboarding tools.
+
+The fix removes the `t.server_id IS NULL` condition from that `UPDATE`
+entirely: since the preceding `INSERT ... ON CONFLICT (name, version) DO
+UPDATE` already rewrites `upstream_url` to the exact same value
+(`http://self-service:8000/mcp`) for all ten rows this migration owns, the
+linking step now matches — and repoints — any tool_registry row whose
+`upstream_url` equals the new server's `upstream_url`, regardless of its
+current `server_id`. Nothing else in the table coincidentally shares that
+`upstream_url`, so this is safe and idempotent to re-run. After re-applying
+V052, all ten tools (the six submitter/design-assist tools plus the four
+reviewer tools) share the same `server_id`, pointing at the `self-service`
+row — verified live: a fresh human principal now sees all six onboarding
+tools plus (subject to `required_roles`) the four reviewer tools after their
+first `/mcp` request triggers `_ensure_self_service_entitlement()`. The
+`lab-self-service` server row itself is left in place (unused going forward,
+not deleted) — retiring it outright is a separate cleanup, not required for
+correct behavior.
+
+### 10a. The `required_roles` metadata convention (Part C)
+
+A `tool_registry` row can restrict its own visibility in `tools/list` to
+specific realm roles by setting a `required_roles` key inside its
+`metadata` JSONB column:
+
+```json
+{"required_roles": ["admin", "platform_admin", "security_reviewer"]}
+```
+
+Absent or empty `required_roles` = unrestricted (matches every pre-existing
+row — this is purely additive). The gate is enforced in
+`_registered_tools_for_client()` (`proxy/app/routers/mcp_server.py`):
+`if required_roles and not (set(required_roles) & set(roles)): continue`.
+It is a **discovery-time** convenience gate only — belt-and-suspenders, not
+the security boundary. The actual invoke-time authorization for the four
+reviewer tools is enforced independently and more strictly in
+`proxy/app/routers/submission.py` (`_require_reviewer` /
+`_require_submission_reviewer`), so a tool hidden from `tools/list` by this
+gate would also be rejected server-side if called directly; this metadata key
+only prevents it from *cluttering discovery* for principals who can't use it.
+
+### 10b. Auto-entitlement: a deliberate, narrow exception — do not copy it
+
+Every human principal is now automatically granted an entitlement to the
+`self-service` server the first time they hit `/mcp`
+(`_ensure_self_service_entitlement()` in `proxy/app/middleware/auth.py`,
+called from `AuthMiddleware.dispatch` when `principal_type == "human"` and
+`request.url.path == "/mcp"`). This exists because the platform's
+entitlement model has **no wildcard/"everyone" grant primitive** — every
+other server requires an explicit `entitlement` row or `server_role_grant`
+per principal, by design (least privilege). Self-service is the deliberate
+exception: it is the one server every human principal is meant to have
+out of the box, since it's how a first-time user discovers and requests
+access to everything else (`list_available_mcps`, `plan_mcp_server`,
+`submit_mcp_server`, ...) — a platform with no self-service access has no
+bootstrapping path for a new user at all.
+
+**This is a special case for this one server, not a pattern to replicate.**
+Do not add an auto-entitlement hook for a new server just because it would
+be convenient — that reintroduces the wildcard grant the entitlement model
+was designed to avoid, one server at a time. If a new server genuinely needs
+default-on access for every principal, that is itself a decision that needs
+the same justification self-service had (it's the platform's own onboarding
+surface) and should be reviewed accordingly, not copy-pasted.
 
 ## Audit findings this doc is derived from (2026-07-04 functional check)
 
@@ -223,3 +331,22 @@ server here the moment it uses per-user OAuth injection.
    `lab-mcp-self-service`'s fallback `SELF_SERVICE_API_KEY` was stale/revoked
    in the DB relative to `.env.lab` (seeder rotated it on a later run without
    the container being recreated). → §7, §8.
+9. Two gaps surfaced bringing up the promoted `self-service` server
+   end-to-end for the first time: (a) **Not yet fixed** —
+   `podman-compose.lab.yml`'s `proxy` service overrides
+   `PROXY_INGRESS_TRUSTED_HOSTS` to `gateway,lab-mcp-self-service`, which
+   entirely replaces (not merges with) `docker-compose.yml`'s
+   `gateway,self-service` default — so the new `self-service` container's
+   REST callback to the proxy 403s (`INGRESS_DENIED`) in the lab compose
+   profile until `self-service` is added to that overridden list too. (b)
+   **Fixed** — the V052 migration's tool-to-server linking originally only
+   backfilled `NULL` `server_id` values, so the six pre-V052 self-service
+   tools stayed linked to the old `lab-self-service` server row instead of
+   the new `self-service` row; the `IS NULL` guard was removed so the
+   linking step re-links by `upstream_url` match unconditionally — see §10
+   for the full explanation. Neither issue blocks the four reviewer tools'
+   own `required_roles` gating (verified working correctly for both a
+   reviewer and non-reviewer principal); (a) still blocks the new
+   `self-service` container's own outbound REST callback under the lab
+   compose profile specifically — unrelated to (b), which is fully
+   resolved. → §4, §10.
