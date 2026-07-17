@@ -85,7 +85,7 @@ lab-test:
 
 ## lab-smoke        Run the smoke-test script against live endpoints
 lab-smoke:
-	bash lab/scripts/lab-smoke.sh
+	set -a; . ./.env.lab; set +a; bash lab/scripts/lab-smoke.sh
 
 ## lab-probe        CR-17 / WP-D1 synthetic probe: login -> low-risk invoke -> audit check
 lab-probe:
