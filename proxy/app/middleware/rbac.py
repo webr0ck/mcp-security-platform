@@ -116,9 +116,16 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     ("ANY", "/mcp", {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor", "readonly"}),
     # Portal — admin-only fragments/actions listed first (longer-prefix wins)
     ("POST",  "/portal/actions/save-grants", {"admin", "platform_admin"}),  # OPA grant management
+    # Submissions review queue: also security_reviewer (mirrors submission.py's
+    # _require_submission_reviewer). Must precede the generic
+    # /portal/fragments/admin rule below (admin/platform_admin only), and the
+    # generic /portal/admin/{tab} direct-URL route falls under the plain
+    # /portal catch-all further down — security_reviewer added there too so a
+    # reviewer-only principal (no auditor role) can still open the shell.
+    ("GET",   "/portal/fragments/admin/submissions", {"admin", "platform_admin", "security_reviewer"}),
     ("GET",   "/portal/fragments/admin",     {"admin", "platform_admin"}),  # admin tab and sub-tabs
-    ("GET",   "/portal",                     {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor"}),  # general portal access
-    ("ANY",   "/portal",                     {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor"}),  # catch-all for portal
+    ("GET",   "/portal",                     {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor", "security_reviewer"}),  # general portal access
+    ("ANY",   "/portal",                     {"admin", "platform_admin", "agent", "user", "manager", "server_owner", "auditor", "security_reviewer"}),  # catch-all for portal
     # Catalog endpoints
     ("GET",   "/api/v1/catalog",             {"admin", "platform_admin", "user", "agent", "manager", "server_owner", "auditor"}),
 ]

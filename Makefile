@@ -191,7 +191,7 @@ lab-up:
 	while [ $$n -lt $$max ]; do \
 		n=$$((n+1)); \
 		curl -sf -o /dev/null http://localhost:8082/realms/mcp                      2>/dev/null && kc="ok"    || kc="-"; \
-		curl -sf -o /dev/null http://localhost:8000/health/ready                   2>/dev/null && proxy="ok" || proxy="-"; \
+		curl -sf -k -o /dev/null https://localhost:8443/health/ready               2>/dev/null && proxy="ok" || proxy="-"; \
 		curl -sf -o /dev/null "http://localhost:8201/v1/sys/health?standbyok=true" 2>/dev/null && vault="ok" || vault="-"; \
 		curl -sf -o /dev/null http://localhost:3001/api/health                     2>/dev/null && gf="ok"    || gf="-"; \
 		curl -sf -k -o /dev/null https://localhost:55000/                          2>/dev/null && wazuh="ok" || wazuh="-"; \

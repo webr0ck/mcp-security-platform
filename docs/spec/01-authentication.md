@@ -700,9 +700,55 @@ one being revoked). This is a platform-wide lockout guard, not just a self-locko
 | RFC 7519 (JWT) | session JWT (HS256) + IdP tokens (RS256) | Enforced |
 | RFC 8725 (JWT BCP) | pinned algs, `kid` selection, `iss`/`aud`/`nonce`, fail-closed JWKS | Enforced |
 | RFC 8693 (token exchange) | `kc_token_exchange` / `oauth_user_token` injection mode | **Partial** — direct-OIDC (Bearer) callers only; internal-session (browser) callers fail closed **(roadmap)** |
+| RFC 9207 (authorization response `iss`) | Keycloak advertises `authorization_response_iss_parameter_supported: true` and includes `iss` in every code callback | Enforced — but see §8.1 client-compat note |
 
 RFC 8693 status detail: on-behalf-of exchange requires the caller's own IdP access token as the
 subject token. That token exists only on the direct-OIDC Bearer path (`request.state.user_kc_token`,
 `auth.py` ~L270). Browser/session callers have no such token stored, so `oauth_user_token` for them
 fails closed today. Reference: `credential_broker/dispatcher.py` mode docs (~L9–L17); README
 "Credential injection modes" row.
+
+### 8.1 RFC 9207 client compatibility — Codex `iss` regression (roadmap: discovery compat mode)
+
+**Incident (2026-07-14).** `codex mcp login mcp-gateway` (codex-cli 0.143.0–0.144.4) fails after a
+successful browser PKCE flow with `Authorization server response missing required issuer`, and never
+reaches the token endpoint. Upstream bug: modelcontextprotocol/rust-sdk PR #896 (SEP-2468) added
+strict RFC 9207 validation — the callback **must** carry `iss` whenever AS metadata advertises
+`authorization_response_iss_parameter_supported: true` — but codex's local callback handler drops the
+`iss` query parameter before validation, so the check always sees "missing". Tracked at
+openai/codex#31573; worked in codex 0.141.0.
+
+**Why this platform is hit and "etalon" deployments are not.** The difference is *not* a defect on
+our side — it is the opposite:
+
+| | This platform (Keycloak) | Typical IdPs codex is tested against (e.g. Entra ID) |
+|---|---|---|
+| Advertises `authorization_response_iss_parameter_supported` | `true` | absent (verified live 2026-07-14) |
+| Sends `iss` in the code callback | yes, always (verified live) | no |
+| rmcp strict check triggered | yes → login fails | no → login works |
+
+The regression only bites servers that fully implement RFC 9207; non-compliant IdPs skate by because
+the check is conditional on the advertised flag. Our discovery doc, callback `iss`, and code→token
+exchange were all replay-verified correct during diagnosis.
+
+**Approved short-term workaround (client-side).** Pin codex to 0.141.0 until #31573 is fixed. No
+server change.
+
+**Roadmap: discovery compatibility switch (not yet implemented).** For clients we cannot pin, add an
+opt-in degraded-metadata mode at the gateway, defaulting **off**:
+
+- **Mechanism:** the gateway already proxies + filters `/.well-known/oauth-authorization-server` and
+  `/realms/mcp/.well-known/openid-configuration` (RFC 8414 row above). The compat mode removes the
+  single key `authorization_response_iss_parameter_supported` from the proxied JSON. Keycloak still
+  sends `iss` in callbacks (harmless extra param); strict clients simply stop *requiring* it.
+- **Exposure options, in preference order:**
+  1. **Separate listener/port** (e.g. `:8444`) serving only the filtered discovery + the same
+     `/realms/` + `/mcp` routes — compliant clients on `:8443` keep full RFC 9207; only clients
+     explicitly pointed at the compat port get degraded metadata. Blast radius is per-client opt-in.
+  2. **Global env switch** (`OAUTH_DISCOVERY_RFC9207_COMPAT=1` on the gateway) filtering the main
+     listener — simpler, but degrades the mix-up defence for *every* client, so it must be a
+     consciously-set lab/emergency flag, never the default.
+- **Security note:** RFC 9207 `iss` exists to defeat authorization-server mix-up attacks. Hiding the
+  capability flag does not remove the parameter, but it licenses clients to skip verifying it. The
+  compat surface must therefore stay opt-in, logged at gateway startup, and be removed once the
+  upstream codex fix ships.

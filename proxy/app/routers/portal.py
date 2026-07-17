@@ -107,6 +107,24 @@ def _require_admin(request: Request) -> None:
         )
 
 
+_REVIEWER_ROLES = {"admin", "platform_admin", "security_reviewer"}
+
+
+def _is_reviewer(roles: list[str]) -> bool:
+    """admin/platform_admin/security_reviewer can review+approve submissions —
+    mirrors submission.py's _require_submission_reviewer. Plain 'auditor' is
+    read-only by design and intentionally excluded."""
+    return any(r in _REVIEWER_ROLES for r in roles)
+
+
+def _require_submission_reviewer(request: Request) -> None:
+    if not _is_reviewer(_roles(request)):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "FORBIDDEN", "message": "admin, platform_admin, or security_reviewer role required."},
+        )
+
+
 # ---------------------------------------------------------------------------
 # Shared CSS + JS constants (identical variables to admin_credentials.py)
 # ---------------------------------------------------------------------------
@@ -1092,9 +1110,15 @@ async def portal_shell(request: Request):
     cid = _client_id(request)
     is_admin = "admin" in roles
 
-    if is_admin:
+    if is_admin or _is_reviewer(roles):
         tab = request.query_params.get("tab", "servers")
-        if tab not in _VALID_TABS:
+        if not is_admin:
+            # security_reviewer/platform_admin only have backend rights on the
+            # submissions review queue — every other admin fragment still
+            # 403s via its own _require_admin(), so land them where their
+            # role actually works instead of a dead tab.
+            tab = "submissions"
+        elif tab not in _VALID_TABS:
             tab = "servers"
         return HTMLResponse(content=await _build_admin_shell(cid, roles, initial_tab=tab))
     return HTMLResponse(content=_build_agent_shell(cid, roles))
@@ -1105,9 +1129,12 @@ async def portal_admin_tab(tab: str, request: Request):
     """Direct URL for admin tabs — /portal/admin/limits etc."""
     _require_portal_access(request)
     roles = _roles(request)
-    if "admin" not in roles:
+    is_admin = "admin" in roles
+    if not is_admin and not _is_reviewer(roles):
         raise HTTPException(status_code=403, detail="admin role required")
-    if tab not in _VALID_TABS:
+    if not is_admin:
+        tab = "submissions"
+    elif tab not in _VALID_TABS:
         tab = "servers"
     return HTMLResponse(content=await _build_admin_shell(_client_id(request), roles, initial_tab=tab))
 
@@ -2151,7 +2178,8 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             mine_result = await session.execute(text("""
                 SELECT server_id, name, submission_status, scan_status, scan_report, updated_at,
                        injection_mode, service_name, upstream_url, github_repo_url,
-                       requested_upstream_url
+                       requested_upstream_url, review_notes, upstream_idp_config,
+                       description, data_categories, has_write_ops
                 FROM server_registry
                 WHERE owner_sub = :cid
                   AND submission_status NOT IN ('draft')
@@ -2355,6 +2383,39 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
                   <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.75rem"
                           onclick="providePendingUrl('{_psid}')">Go live</button>
                 </div>"""
+            edit_resubmit_form = ""
+            if st == "changes_requested":
+                _esid = esc_py(str(sub.get("server_id") or ""))
+                _idp_cfg = sub.get("upstream_idp_config")
+                if isinstance(_idp_cfg, str):
+                    try:
+                        _idp_cfg = json.loads(_idp_cfg)
+                    except (TypeError, ValueError):
+                        _idp_cfg = None
+                _audience = (_idp_cfg or {}).get("audience") if isinstance(_idp_cfg, dict) else None
+                _notes = sub.get("review_notes") or ""
+                _notes_html = (
+                    f'<div style="font-size:11px;color:#fbbf24;margin-top:4px">Reviewer notes: {esc_py(_notes)}</div>'
+                    if _notes else ""
+                )
+                edit_resubmit_form = f"""
+                {_notes_html}
+                <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
+                  <input id="editrepo-{_esid}" type="url" placeholder="GitHub repo URL"
+                         value="{esc_py(sub.get('github_repo_url') or '')}"
+                         style="background:#0f172a;border:1px solid #334155;border-radius:6px;
+                                color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
+                  <input id="editdesc-{_esid}" type="text" placeholder="Description"
+                         value="{esc_py(sub.get('description') or '')}"
+                         style="background:#0f172a;border:1px solid #334155;border-radius:6px;
+                                color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
+                  <input id="editaud-{_esid}" type="text" placeholder="Token-exchange audience (e.g. lab-tickets) — only needed for kc_token_exchange/oauth_user_token modes"
+                         value="{esc_py(_audience or '')}"
+                         style="background:#0f172a;border:1px solid #334155;border-radius:6px;
+                                color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
+                  <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.75rem;align-self:flex-start"
+                          onclick="editAndResubmit('{_esid}')">Save &amp; resubmit for review</button>
+                </div>"""
             rows_html.append(f"""
             <div style="padding:0.5rem 0;border-bottom:1px solid #1e293b">
               <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2367,6 +2428,7 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
               {backend_note}
               {scaffold_note}
               {provide_url_form}
+              {edit_resubmit_form}
             </div>""")
         my_submissions_html = f"""
         <details style="margin-bottom:1rem" open>
@@ -2387,6 +2449,36 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
             }});
             const d = await r.json();
             if (!r.ok) {{ alert(d.detail || 'Failed to go live'); return; }}
+            await htmx.ajax('GET', '/portal/fragments/my-access', {{target:'#portal-body', swap:'innerHTML'}});
+            ssShowTab('submit');
+          }} catch (e) {{ alert('Network error: ' + e); }}
+        }}
+        async function editAndResubmit(sid) {{
+          const repo = (document.getElementById('editrepo-' + sid)?.value || '').trim();
+          const desc = (document.getElementById('editdesc-' + sid)?.value || '').trim();
+          const aud = (document.getElementById('editaud-' + sid)?.value || '').trim();
+          const patchBody = {{}};
+          if (repo) patchBody.github_repo_url = repo;
+          if (desc) patchBody.description = desc;
+          if (aud) patchBody.upstream_idp_config = {{audience: aud}};
+          try {{
+            const pr = await fetch('/api/v1/submissions/' + sid, {{
+              method: 'PATCH', headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify(patchBody),
+            }});
+            if (!pr.ok) {{
+              const d = await pr.json().catch(() => ({{}}));
+              alert('Save failed: ' + (d.detail?.message || d.detail || pr.status));
+              return;
+            }}
+            const sr = await fetch('/api/v1/submissions/' + sid + '/submit', {{
+              method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: '{{}}',
+            }});
+            if (!sr.ok) {{
+              const d = await sr.json().catch(() => ({{}}));
+              alert('Resubmit failed: ' + (d.detail?.message || d.detail || sr.status));
+              return;
+            }}
             await htmx.ajax('GET', '/portal/fragments/my-access', {{target:'#portal-body', swap:'innerHTML'}});
             ssShowTab('submit');
           }} catch (e) {{ alert('Network error: ' + e); }}
@@ -2848,10 +2940,12 @@ async def fragment_admin_servers(request: Request):
       }});
     }}
     function adminApproveSrv(id) {{
-      if (!confirm('Approve this server? (Requires a consent token — use POST /api/v1/admin/servers/'+id+'/approve with consent_token body)')) return;
-      fetch('/api/v1/admin/servers/' + id + '/approve', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:'{{}}'}})
-        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.detail?.message || d.detail || 'Consent token required')))
-        .catch(e => alert('Network error: ' + e));
+      if (!confirm('Approve this server? This mints a dual-control consent token and immediately consumes it.')) return;
+      fetch('/api/v1/servers/' + id + '/consent', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:'{{}}'}})
+        .then(r => r.ok ? r.json() : r.json().then(d => Promise.reject(d.detail?.message || d.detail || 'Failed to mint consent token')))
+        .then(d => fetch('/api/v1/admin/servers/' + id + '/approve', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{consent_token: d.consent_token}})}}))
+        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => Promise.reject(d.detail?.message || d.detail || 'Approve failed')))
+        .catch(e => alert('Error: ' + e));
     }}
     function adminRejectSrv(id) {{
       if (!confirm('Reject and remove this server?')) return;
@@ -5306,7 +5400,7 @@ async def fragment_admin_access_detail(principal: str, request: Request):
 @router.get("/fragments/admin/submissions", response_class=HTMLResponse)
 async def fragment_admin_submissions(request: Request):
     """Security team review queue — all non-draft submissions."""
-    _require_admin(request)
+    _require_submission_reviewer(request)
     try:
         from collections import defaultdict
         from sqlalchemy import text
@@ -5629,7 +5723,8 @@ async def fragment_admin_submissions(request: Request):
         htmx.ajax('GET', '/portal/fragments/admin/submissions', {{target:'#adm-content', swap:'innerHTML'}});
       }} else {{
         const err = await r.json().catch(() => ({{}}));
-        alert('Action failed: ' + (err.detail || r.status));
+        const msg = (err.detail && typeof err.detail === 'object') ? (err.detail.message || JSON.stringify(err.detail)) : (err.detail || r.status);
+        alert('Action failed: ' + msg);
       }}
     }}
     </script>
