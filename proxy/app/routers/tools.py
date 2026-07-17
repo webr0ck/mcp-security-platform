@@ -931,7 +931,11 @@ async def release_tool(
     # TOCTOU/SSRF guarantees as every other outbound call this platform makes.
     upstream_url = row["upstream_url"]
     try:
-        validate_server_url(upstream_url, allow_http_localhost=(settings.ENVIRONMENT == "development"))
+        validate_server_url(
+            upstream_url,
+            allow_http_localhost=(settings.ENVIRONMENT == "development"),
+            allowed_cidr=row["upstream_allowlist_entry"],
+        )
         pinned_ips = await revalidate_upstream_ip_at_invoke(
             upstream_url=upstream_url,
             registered_allowlist_entry=row["upstream_allowlist_entry"],
@@ -1989,6 +1993,7 @@ async def _run_tool_discovery(
         validate_server_url(
             upstream_url,
             allow_http_localhost=(_settings.ENVIRONMENT == "development"),
+            allowed_cidr=server_row.upstream_allowlist_entry,
         )
     except SSRFError as _ssrf_exc:
         logger.warning(
@@ -2007,6 +2012,18 @@ async def _run_tool_discovery(
             upstream_url=upstream_url,
             registered_allowlist_entry=_registered_allowlist_entry,
         )
+        if _registered_allowlist_entry:
+            # Audit visibility (ssrf-legacy-gate-unification): discovery proceeded
+            # against a private upstream because the resolved IP fell inside an
+            # allowlisted CIDR — surface this distinctly from the ordinary public path.
+            logger.warning(
+                "discover_tools proceeding against allowlisted private upstream",
+                extra={
+                    "server_id": server_id,
+                    "upstream_url": upstream_url,
+                    "matched_cidr": _registered_allowlist_entry,
+                },
+            )
     except UpstreamRevalidationError as _rebind_exc:
         logger.warning(
             "discover_tools DNS-rebind or TOCTOU detected — denying request",

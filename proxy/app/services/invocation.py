@@ -668,10 +668,75 @@ async def invoke_tool(
         raise OPADenyError(opa_result["reasons"])
 
     # -------------------------------------------------------------------------
+    # Step 3a-pre: fetch the registered upstream allowlist CIDR (Task 3.1 /
+    # ISO-F2.6 / SSRF-legacy-gate-unification).
+    #
+    # upstream_allowlist_entry: fetched from server_registry using the tool's
+    # server_id if available. NULL / empty = registered as a public upstream.
+    #
+    # Hoisted above Step 3b (was previously fetched only at Step 3c, ~line 790)
+    # so that BOTH Step 3b (legacy SSRF gate) and Step 3c (invoke-time
+    # revalidation) share one fetch and one variable — see
+    # docs/design/ssrf-legacy-gate-unification.md. Do NOT re-fetch at Step 3c.
+    # -------------------------------------------------------------------------
+    _registered_allowlist_entry: str | None = tool_record.get("upstream_allowlist_entry")
+    if _registered_allowlist_entry is None and tool_server_id:
+        # upstream_allowlist_entry was not pre-fetched in tool_record (e.g. SELECT *
+        # from tool_registry does not carry server_registry columns). Fetch it once.
+        try:
+            from app.core.database import AsyncSessionLocal as _ASL
+            from sqlalchemy import text as _text
+            async with _ASL() as _db:
+                _sr = await _db.execute(
+                    _text(
+                        "SELECT upstream_allowlist_entry FROM server_registry "
+                        "WHERE server_id = :sid AND deleted_at IS NULL LIMIT 1"
+                    ),
+                    {"sid": tool_server_id},
+                )
+                _sr_row = _sr.fetchone()
+                if _sr_row is not None:
+                    _registered_allowlist_entry = _sr_row[0]  # may still be None (public)
+        except Exception as _sr_exc:
+            logger.error(
+                "invoke Step 3a-pre: failed to fetch upstream_allowlist_entry from server_registry — "
+                "failing closed (upstream_revalidation_failed)",
+                extra={"tool_server_id": tool_server_id, "error": str(_sr_exc)},
+            )
+            await _emit_audit_event(
+                tool_id=str(tool_id),
+                tool_name=tool_name,
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=["upstream_revalidation_failed", "server_registry_lookup_error"],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=anomaly_score,
+                opa_decision_id=opa_decision_id,
+                is_testing=is_testing,
+                source_ip=source_ip,
+                principal_type=principal_type,
+            principal_id=principal_id,
+                roles=client_roles,
+                session_jti=session_jti,
+            )
+            from app.services.policy import OPAUnavailableError
+            raise OPAUnavailableError(
+                "upstream_revalidation_failed: cannot fetch server allowlist entry"
+            ) from _sr_exc
+
+    # -------------------------------------------------------------------------
     # Step 3b: SSRF guard — re-validate upstream URL at call time (C3)
     # Registration-time check alone is insufficient: upstream_url may have been
     # changed via PATCH after approval. Call-time validation is an independent
     # defense-in-depth layer.
+    #
+    # allowed_cidr: scoped to the single registered CIDR for this server (never
+    # the global allowlist) — see ssrf.py::validate_server_url docstring and
+    # docs/design/ssrf-legacy-gate-unification.md. Exempts a private/reserved
+    # IP host from the blanket block; never exempts the metadata floor, scheme
+    # enforcement, or the credentials-in-URL check.
     # -------------------------------------------------------------------------
     from app.core.config import settings
     from app.services.ssrf import SSRFError, validate_server_url as _validate_server_url
@@ -680,6 +745,7 @@ async def invoke_tool(
         _validate_server_url(
             upstream_url,
             allow_http_localhost=(settings.ENVIRONMENT == "development"),
+            allowed_cidr=_registered_allowlist_entry,
         )
     except SSRFError as exc:
         raise ValueError(f"SSRF blocked upstream URL at invoke time: {exc}") from exc
@@ -779,60 +845,13 @@ async def invoke_tool(
     # CIDR.  We resolve here, validate against the registered policy, and fail
     # closed (503) on any anomaly per INV-004 parity.
     #
-    # upstream_allowlist_entry: fetched from server_registry using the tool's
-    # server_id if available. NULL / empty = registered as a public upstream.
+    # _registered_allowlist_entry was already fetched at Step 3a-pre (shared
+    # with Step 3b above) — do not re-fetch here.
     # -------------------------------------------------------------------------
     from app.services.server_onboarding import (
         UpstreamRevalidationError,
         revalidate_upstream_ip_at_invoke,
     )
-
-    _registered_allowlist_entry: str | None = tool_record.get("upstream_allowlist_entry")
-    if _registered_allowlist_entry is None and tool_server_id:
-        # upstream_allowlist_entry was not pre-fetched in tool_record (e.g. SELECT *
-        # from tool_registry does not carry server_registry columns). Fetch it once.
-        try:
-            from app.core.database import AsyncSessionLocal as _ASL
-            from sqlalchemy import text as _text
-            async with _ASL() as _db:
-                _sr = await _db.execute(
-                    _text(
-                        "SELECT upstream_allowlist_entry FROM server_registry "
-                        "WHERE server_id = :sid AND deleted_at IS NULL LIMIT 1"
-                    ),
-                    {"sid": tool_server_id},
-                )
-                _sr_row = _sr.fetchone()
-                if _sr_row is not None:
-                    _registered_allowlist_entry = _sr_row[0]  # may still be None (public)
-        except Exception as _sr_exc:
-            logger.error(
-                "invoke Step 3c: failed to fetch upstream_allowlist_entry from server_registry — "
-                "failing closed (upstream_revalidation_failed)",
-                extra={"tool_server_id": tool_server_id, "error": str(_sr_exc)},
-            )
-            await _emit_audit_event(
-                tool_id=str(tool_id),
-                tool_name=tool_name,
-                tool_version=tool_record.get("version"),
-                client_id=client_id,
-                outcome="deny",
-                deny_reasons=["upstream_revalidation_failed", "server_registry_lookup_error"],
-                request_id=request_id,
-                latency_ms=0,
-                anomaly_score=anomaly_score,
-                opa_decision_id=opa_decision_id,
-                is_testing=is_testing,
-                source_ip=source_ip,
-                principal_type=principal_type,
-            principal_id=principal_id,
-                roles=client_roles,
-                session_jti=session_jti,
-            )
-            from app.services.policy import OPAUnavailableError
-            raise OPAUnavailableError(
-                "upstream_revalidation_failed: cannot fetch server allowlist entry"
-            ) from _sr_exc
 
     _pinned_ips: list[str] = []
     try:
@@ -840,6 +859,18 @@ async def invoke_tool(
             upstream_url=upstream_url,
             registered_allowlist_entry=_registered_allowlist_entry,
         )
+        if _registered_allowlist_entry:
+            # Audit visibility (ssrf-legacy-gate-unification): invocation proceeded
+            # against a private upstream because the resolved IP fell inside an
+            # allowlisted CIDR — surface this distinctly from the ordinary public path.
+            logger.warning(
+                "invoke Step 3c: proceeding against allowlisted private upstream",
+                extra={
+                    "server_id": tool_server_id,
+                    "upstream_url": upstream_url,
+                    "matched_cidr": _registered_allowlist_entry,
+                },
+            )
     except UpstreamRevalidationError as _rebind_exc:
         logger.warning(
             "invoke Step 3c: DNS-rebind or TOCTOU detected — denying invocation",

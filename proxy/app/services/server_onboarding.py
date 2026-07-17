@@ -28,7 +28,12 @@ import logging
 import socket
 from urllib.parse import urlparse
 
-from app.services.ssrf import _is_blocked_ip
+from app.services.ssrf import (
+    _is_blocked_ip,
+    _is_floor_blocked,
+    _METADATA_FLOOR_V4,
+    _METADATA_FLOOR_V6,
+)
 from app.services.auth_modes import all_mode_values
 
 logger = logging.getLogger(__name__)
@@ -266,21 +271,93 @@ def validate_upstream_idp_config(
 # ============================================================================
 
 
+def _cidr_floor_overlap(
+    net: "ipaddress.IPv4Network | ipaddress.IPv6Network",
+) -> "ipaddress.IPv4Network | ipaddress.IPv6Network | None":
+    """
+    Return the floor network *net* overlaps with, if any (single source of
+    truth: app.services.ssrf._METADATA_FLOOR_V4/V6), else None.
+    """
+    floor_nets = _METADATA_FLOOR_V4 if isinstance(net, ipaddress.IPv4Network) else _METADATA_FLOOR_V6
+    for floor_net in floor_nets:
+        try:
+            if floor_net.network_address in net:
+                return floor_net
+        except TypeError:
+            continue
+    return None
+
+
+def _cidr_is_subset_of_floor(
+    net: "ipaddress.IPv4Network | ipaddress.IPv6Network",
+    floor_net: "ipaddress.IPv4Network | ipaddress.IPv6Network",
+) -> bool:
+    """True if *net* is equal to or a subnet of *floor_net* (i.e. net can
+    ONLY ever resolve inside the floor — never a legitimate broad range that
+    happens to also cover the floor address)."""
+    try:
+        return net.subnet_of(floor_net)
+    except (TypeError, ValueError):
+        return False
+
+
 def _parse_cidr_allowlist(cidr_list: list[str]) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
     """
     Parse a list of CIDR strings into network objects.
 
+    ssrf-legacy-gate-unification (2026-07-17), refined per lead decision
+    2026-07-17: an entry's relationship to a cloud-metadata floor address
+    (169.254.169.254, 169.254.170.2, 100.100.100.200, fd00:ec2::254) is
+    handled in two tiers:
+      - REJECT (InvalidOnboardingConfig) if the entry is equal to or a
+        subnet of a floor network (e.g. 169.254.169.254/32 itself) — that
+        can only ever resolve to the metadata endpoint, so it is always a
+        deliberate-or-fatal misconfiguration.
+      - WARN (loud, names the exact floor address and entry) if a broader
+        entry merely CONTAINS a floor address (e.g. 100.64.0.0/10 contains
+        100.100.100.200) — still registered, because the unconditional
+        runtime floor check in ssrf.validate_server_url and
+        revalidate_upstream_ip_at_invoke already guarantees traffic to that
+        address is blocked regardless of this allowlist entry. Hard-
+        rejecting broad-but-legitimate ranges (e.g. the lab's Tailscale
+        100.64.0.0/10) would re-break the exact onboarding path this change
+        exists to fix.
+    IPv4 entries broader than /24 are separately logged as a WARNING (not
+    rejected) — the live lab legitimately runs 10.89.0.0/16 and 100.64.0.0/10.
+
     Raises:
-        InvalidOnboardingConfig: if any entry is not a valid CIDR.
+        InvalidOnboardingConfig: if any entry is not a valid CIDR, or is
+            equal to/a subnet of a cloud-metadata floor address.
     """
     networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
     for entry in cidr_list:
         try:
-            networks.append(ipaddress.ip_network(entry, strict=False))
+            net = ipaddress.ip_network(entry, strict=False)
         except ValueError as exc:
             raise InvalidOnboardingConfig(
                 f"UPSTREAM_PRIVATE_CIDR_ALLOWLIST entry '{entry}' is not a valid CIDR: {exc}"
             ) from exc
+        floor_hit = _cidr_floor_overlap(net)
+        if floor_hit is not None:
+            if _cidr_is_subset_of_floor(net, floor_hit):
+                raise InvalidOnboardingConfig(
+                    f"UPSTREAM_PRIVATE_CIDR_ALLOWLIST entry '{entry}' is equal to or a "
+                    f"subnet of the cloud-metadata floor address {floor_hit} and cannot "
+                    "be registered — it can only ever resolve to the metadata endpoint."
+                )
+            logger.warning(
+                "UPSTREAM_PRIVATE_CIDR_ALLOWLIST entry contains a cloud-metadata floor "
+                "address — registered anyway because the runtime floor check blocks "
+                "traffic to it unconditionally, but verify this overlap is expected",
+                extra={"cidr_entry": entry, "floor_address": str(floor_hit)},
+            )
+        if isinstance(net, ipaddress.IPv4Network) and net.prefixlen < 24:
+            logger.warning(
+                "UPSTREAM_PRIVATE_CIDR_ALLOWLIST entry is broader than /24 — "
+                "verify this is intentional",
+                extra={"cidr_entry": entry, "prefixlen": net.prefixlen},
+            )
+        networks.append(net)
     return networks
 
 
@@ -290,8 +367,14 @@ def _ip_in_allowlist(
 ) -> str | None:
     """
     Return the matching CIDR string if ip_str is contained in any network,
-    or None if it is not.
+    or None if it is not. Floor-blocked (cloud-metadata) IPs never match,
+    even if a sloppy allowlist entry would otherwise cover them — this is
+    defense-in-depth on top of the parse-time rejection in
+    _parse_cidr_allowlist, in case a pre-existing/legacy entry slipped in
+    before that check existed.
     """
+    if _is_floor_blocked(ip_str):
+        return None
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -624,7 +707,16 @@ async def revalidate_upstream_ip_at_invoke(
             ) from exc
 
         outside: list[str] = []
+        floor_hit: list[str] = []
         for ip_str in ip_addresses:
+            # CRITICAL (ssrf-legacy-gate-unification): unconditional cloud-metadata
+            # floor check, even for an allowlisted CIDR. Without this, an
+            # allowlisted CIDR containing 169.254.169.254 pins credentialed
+            # requests straight to cloud metadata — the registered-CIDR
+            # membership check below says nothing about the metadata floor.
+            if _is_floor_blocked(ip_str):
+                floor_hit.append(ip_str)
+                continue
             try:
                 ip_obj = ipaddress.ip_address(ip_str)
             except ValueError:
@@ -632,6 +724,14 @@ async def revalidate_upstream_ip_at_invoke(
                 continue
             if ip_obj not in registered_net:
                 outside.append(ip_str)
+
+        if floor_hit:
+            raise UpstreamRevalidationError(
+                f"Upstream host '{host}' resolved to cloud-metadata IP(s) {floor_hit} — "
+                "the metadata floor is never exemptable, even via a registered "
+                f"allowlist CIDR '{registered_allowlist_entry}'. "
+                "Invocation denied (reason: upstream_revalidation_failed)."
+            )
 
         if outside:
             raise UpstreamRevalidationError(

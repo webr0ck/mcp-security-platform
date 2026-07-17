@@ -43,6 +43,47 @@ _BLOCKED_V6 = [
     ipaddress.ip_network("fd00:ec2::/32"),       # AWS IPv6 metadata
 ]
 
+# ---------------------------------------------------------------------------
+# Always-blocked cloud-metadata floor (ssrf-legacy-gate-unification, 2026-07-17)
+#
+# NON-CONFIGURABLE. Never exemptable via allowed_cidr, no matter how broad or
+# sloppy the stored allowlist entry is (e.g. an admin allowlisting
+# 169.254.0.0/16 must NOT open the metadata endpoint). Checked unconditionally,
+# before allowed_cidr is even consulted, against the host IP AND every
+# resolved IP AND every embedded IPv4 form (IPv4-mapped/6to4/Teredo/NAT64/
+# v4-compatible) extracted via _embedded_v4s.
+# ---------------------------------------------------------------------------
+_METADATA_FLOOR_V4 = [
+    ipaddress.ip_network("169.254.169.254/32"),  # AWS/GCP/Azure/OCI link-local metadata
+    ipaddress.ip_network("169.254.170.2/32"),    # AWS ECS task metadata
+    ipaddress.ip_network("100.100.100.200/32"),  # Alibaba Cloud metadata
+]
+_METADATA_FLOOR_V6 = [
+    ipaddress.ip_network("fd00:ec2::254/128"),   # AWS IPv6 metadata
+]
+
+
+def _is_floor_blocked(addr: str) -> bool:
+    """
+    True if *addr* is (or embeds) a cloud-metadata address. This check is
+    unconditional and has no exemption path — not even a matching
+    allowed_cidr can bypass it.
+    """
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv4Address):
+        return any(ip in net for net in _METADATA_FLOOR_V4)
+    # IPv6: check the address itself, plus any embedded IPv4 form (reuses the
+    # same unwrap used by the regular blocklist, so a globally-routable
+    # IPv6 wrapper cannot smuggle a metadata IPv4 target past the floor).
+    if any(ip in net for net in _METADATA_FLOOR_V6):
+        return True
+    return any(
+        any(v4 in net for net in _METADATA_FLOOR_V4) for v4 in _embedded_v4s(ip)
+    )
+
 # IPv6 transition prefixes that embed a 32-bit IPv4 address in their low bits.
 # These can be globally-routable (is_global == True) while wrapping a
 # private/loopback/metadata IPv4 target, so the embedded v4 must be re-checked.
@@ -75,37 +116,93 @@ def _embedded_v4s(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
     return found
 
 
-def _is_blocked_ip(addr: str) -> bool:
+def _is_blocked_ip(
+    addr: str,
+    allowed_cidr: "ipaddress.IPv4Network | ipaddress.IPv6Network | None" = None,
+) -> bool:
+    """
+    True if *addr* is a private/reserved IP that should be blocked.
+
+    The cloud-metadata floor (_is_floor_blocked) is checked first and is
+    NEVER exemptable, regardless of allowed_cidr. Everything else (10/8,
+    172.16/12, 192.168/16, 127/8, 100.64/10, the rest of 169.254/16, ULA,
+    link-local, etc.) is exemptable when the resolved IP — or its embedded
+    IPv4 form, symmetrically — falls inside allowed_cidr.
+    """
+    if _is_floor_blocked(addr):
+        return True
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
     if isinstance(ip, ipaddress.IPv4Address):
-        return _v4_blocked(ip)
-    # IPv6: re-check any embedded IPv4 (mapped/6to4/Teredo/NAT64/v4-compatible)
-    # against the V4 blocklist so a globally-routable wrapper cannot smuggle a
-    # private/loopback/metadata IPv4 target through.
-    if any(_v4_blocked(v4) for v4 in _embedded_v4s(ip)):
-        return True
-    # Explicit IPv6 blocklist (loopback, unspecified, ULA, link-local, AWS v6 metadata).
-    if any(ip in net for net in _BLOCKED_V6):
-        return True
-    # Deny-by-default: only a globally-routable IPv6 may be an upstream target.
-    # This catches :: (unspecified), ULA, link-local, documentation ranges, etc.
-    # without enumerating every reserved prefix by hand.
-    return not ip.is_global
+        blocked = _v4_blocked(ip)
+    else:
+        # IPv6: re-check any embedded IPv4 (mapped/6to4/Teredo/NAT64/v4-compatible)
+        # against the V4 blocklist so a globally-routable wrapper cannot smuggle a
+        # private/loopback/metadata IPv4 target through.
+        if any(_v4_blocked(v4) for v4 in _embedded_v4s(ip)):
+            blocked = True
+        # Explicit IPv6 blocklist (loopback, unspecified, ULA, link-local, AWS v6 metadata).
+        elif any(ip in net for net in _BLOCKED_V6):
+            blocked = True
+        else:
+            # Deny-by-default: only a globally-routable IPv6 may be an upstream
+            # target. This catches :: (unspecified), ULA, link-local,
+            # documentation ranges, etc. without enumerating every reserved
+            # prefix by hand.
+            blocked = not ip.is_global
+
+    if not blocked or allowed_cidr is None:
+        return blocked
+
+    # Exemption: the IP itself, OR (symmetrically) any of its embedded IPv4
+    # forms, falls inside the single allowed_cidr network. A mismatched
+    # address family against allowed_cidr simply never matches (Python's
+    # ipaddress __contains__ returns False rather than raising across
+    # families) — never treat that as "exempt" (fail closed).
+    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [ip]
+    if isinstance(ip, ipaddress.IPv6Address):
+        candidates.extend(_embedded_v4s(ip))
+    if any(_candidate_in_cidr(c, allowed_cidr) for c in candidates):
+        return False
+    return True
 
 
-def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
+def _candidate_in_cidr(
+    ip: "ipaddress.IPv4Address | ipaddress.IPv6Address",
+    net: "ipaddress.IPv4Network | ipaddress.IPv6Network",
+) -> bool:
+    """Version-safe membership check — never raises across mismatched families."""
+    try:
+        return ip in net
+    except TypeError:
+        return False
+
+
+def validate_server_url(
+    url: str,
+    allow_http_localhost: bool = False,
+    allowed_cidr: str | None = None,
+) -> None:
     """
     Raise SSRFError if the URL is unsafe.
 
-    Checks performed:
+    Checks performed, in strict order:
     1. URL must be parseable
     2. Scheme must be https (or http if allow_http_localhost and host is localhost/127.0.0.1)
-    3. Host must not resolve to a blocked IP range
-    4. Host must not be a raw blocked IP
-    5. No credentials in the URL (user:pass@ prefix)
+    3. No credentials in the URL (user:pass@ prefix)
+    4. Unconditional cloud-metadata floor check (host + every resolved IP) —
+       raises regardless of allowed_cidr; never exemptable.
+    5. Host/resolved-IP must not be a blocked private/reserved IP UNLESS it
+       falls inside allowed_cidr (checked only after floor clears).
+
+    allowed_cidr: a single CIDR string (server_registry.upstream_allowlist_entry)
+    that exempts a private/reserved IP host from the blanket private-IP block.
+    Pass None (default) to preserve today's blind behaviour — every existing
+    caller that doesn't opt in is unaffected. Exemption applies ONLY to the
+    private/reserved-range checks; it never overrides scheme enforcement, the
+    no-credentials-in-URL check, or the ALWAYS-BLOCKED cloud-metadata floor.
     """
     try:
         parsed = urlparse(url)
@@ -123,6 +220,19 @@ def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
     if parsed.username or parsed.password:
         raise SSRFError("URL must not contain credentials (user:pass@)")
 
+    # Parse allowed_cidr once, fail closed on a malformed stored value —
+    # never silently degrade to "no exemption" nor "everything exempt".
+    # Parsed before the scheme check: the dev-mode raw-IP gate below must also
+    # honor the registered allowlist entry.
+    _allowed_net: "ipaddress.IPv4Network | ipaddress.IPv6Network | None" = None
+    if allowed_cidr:
+        try:
+            _allowed_net = ipaddress.ip_network(allowed_cidr, strict=False)
+        except ValueError as exc:
+            raise SSRFError(
+                f"Stored allowed_cidr {allowed_cidr!r} is not a valid CIDR: {exc}"
+            ) from exc
+
     # Scheme check
     if parsed.scheme == "http":
         if not allow_http_localhost:
@@ -130,14 +240,35 @@ def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
         # Dev mode: allow localhost AND internal container hostnames (non-raw-IP names).
         # Raw IP addresses are still blocked by the IP check below.
         # Container names (lab-mcp-echo, mcp-netbox, etc.) are non-IP hostnames — allowed.
-        is_raw_ip = _is_blocked_ip(host) or host.replace(".", "").replace(":", "").isdigit()
-        if host not in ("localhost", "127.0.0.1", "::1") and is_raw_ip:
+        # Exception: a raw IP inside the registered allowlist CIDR (and off the
+        # metadata floor) is a legitimately onboarded plain-HTTP private
+        # upstream — server_onboarding already permits plain-HTTP to
+        # allowlisted private CIDRs, and this gate must not re-block it.
+        # Raw PUBLIC IPs over http stay blocked (the isdigit clause), same as before.
+        try:
+            _host_ip: "ipaddress.IPv4Address | ipaddress.IPv6Address | None" = ipaddress.ip_address(host)
+        except ValueError:
+            _host_ip = None
+        allowlisted_raw_ip = (
+            _host_ip is not None
+            and _allowed_net is not None
+            and not _is_floor_blocked(host)
+            and _candidate_in_cidr(_host_ip, _allowed_net)
+        )
+        is_raw_ip = _is_blocked_ip(host, _allowed_net) or host.replace(".", "").replace(":", "").isdigit()
+        if host not in ("localhost", "127.0.0.1", "::1") and is_raw_ip and not allowlisted_raw_ip:
             raise SSRFError("HTTP scheme with raw IP is only allowed for localhost in development mode")
     elif parsed.scheme != "https":
         raise SSRFError(f"Scheme {parsed.scheme!r} is not allowed; use HTTPS")
 
-    # Direct IP check
-    if _is_blocked_ip(host):
+    # Unconditional cloud-metadata floor — checked before allowed_cidr is even
+    # consulted, and has no exemption path at all, not even for a matching
+    # allowed_cidr.
+    if _is_floor_blocked(host):
+        raise SSRFError(f"Host {host!r} resolves to a blocked private/reserved IP range (cloud-metadata floor)")
+
+    # Direct IP check (with allowlist exemption for non-floor private ranges)
+    if _is_blocked_ip(host, _allowed_net):
         raise SSRFError(f"Host {host!r} resolves to a blocked private/reserved IP range")
 
     # DNS resolution check (best-effort — catches obvious rebind; not a full guard)
@@ -159,8 +290,14 @@ def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
             raise SSRFError(f"DNS resolution failed for {host!r}: {exc}.") from exc
         for _, _, _, _, sockaddr in resolved:
             ip_str = sockaddr[0]
+            ip_str_clean = ip_str.split("%")[0]
+            # Unconditional metadata floor — every resolved IP, no exemption.
+            if _is_floor_blocked(ip_str_clean):
+                raise SSRFError(
+                    f"Host {host!r} resolves to blocked private/reserved IP {ip_str!r} (cloud-metadata floor)"
+                )
             try:
-                ip_obj = ipaddress.ip_address(ip_str.split("%")[0])
+                ip_obj = ipaddress.ip_address(ip_str_clean)
             except ValueError:
                 continue
             if ip_obj.is_global:
@@ -174,7 +311,13 @@ def validate_server_url(url: str, allow_http_localhost: bool = False) -> None:
         resolved = socket.getaddrinfo(host, None)
         for _, _, _, _, sockaddr in resolved:
             ip_str = sockaddr[0]
-            if _is_blocked_ip(ip_str):
+            # Unconditional metadata floor — every resolved IP, no exemption
+            # (checked ahead of the exemptable _is_blocked_ip call below).
+            if _is_floor_blocked(ip_str):
+                raise SSRFError(
+                    f"Host {host!r} resolves to blocked private/reserved IP {ip_str!r} (cloud-metadata floor)"
+                )
+            if _is_blocked_ip(ip_str, _allowed_net):
                 raise SSRFError(
                     f"Host {host!r} resolves to blocked IP {ip_str!r} "
                     "(private/reserved range)"
