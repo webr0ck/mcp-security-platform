@@ -328,8 +328,8 @@ In `~/.claude/settings.json` (or `~/.claude.json`) on the machine running Claude
 
 ---
 
-Built by [Alexander Romanov](https://purplehootie.com) — writing about runtime AI-agent security at
-[purplehootie.com](https://purplehootie.com).
+Built on personal time by [Alexander Romanov](https://purplehootie.com) — writing about runtime
+AI-agent security at [purplehootie.com](https://purplehootie.com).
 
 > This is an independent open-source project and is **not affiliated with or endorsed by** Anthropic
 > or the Model Context Protocol maintainers. "Model Context Protocol" and "MCP" refer to the open
