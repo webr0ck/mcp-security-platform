@@ -291,7 +291,8 @@ async def list_servers(request: Request):
         rows = await db.execute(
             text(
                 "SELECT server_id, name, upstream_url, status, owner_sub, "
-                "injection_mode, service_name, created_at, approved_at "
+                "injection_mode, service_name, debug_mode, trust_tier, "
+                "created_at, approved_at "
                 "FROM server_registry WHERE deleted_at IS NULL ORDER BY created_at DESC"
             )
         )
