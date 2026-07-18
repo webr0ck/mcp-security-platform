@@ -137,13 +137,28 @@ The production gateway (`gateway/`) needs the equivalent route.
 4. Regression: Claude Code OAuth flow unchanged; `scopes_supported` override and
    `/oauth/register` bridge intact.
 
-## Verification (required before "fixed")
+## Verification
 
-Unit/integration tests above **plus** a live handshake with a current Codex
-(≥ 0.143, e.g. 0.144.5) completing `codex mcp login mcp-gateway` end-to-end:
-token-endpoint POST, authenticated `POST /mcp` initialize → 200, tools listed.
-This needs the real client host (the Windows machine in the diagnostics report);
-CI cannot exercise it.
+**Implemented and verified live (2026-07-18).** The gateway is now RFC 9207
+consistent:
+- `authorization_servers == AS-metadata issuer == protected-resource issuer ==`
+  `https://<host>/realms/mcp` (asserted live against all discovery forms).
+- A **real authorization callback captured through the gateway** carries
+  `iss=https://<host>/realms/mcp` — the exact value strict clients expect.
+- A Keycloak bearer token reaches `POST /mcp` initialize → 200.
+
+**Codex 0.144.5 still fails** with `missing required issuer` even though the
+callback contains the correct, matching `iss`. This confirms the residual failure
+is the **client-side** regression (openai/codex#31573), not the gateway: the
+server now sends a compliant response the buggy client refuses to accept. There is
+no further server-side change that fixes 0.144.x.
+
+### Running current Codex against the gateway
+
+Since the gateway is compliant but the client is broken, use Codex's
+`bearer_token_env_var` to bypass the broken interactive callback (still a
+Keycloak-issued, gateway-validated token — not a static API key), or downgrade to
+0.141.0. Full steps: `docs/troubleshooting/oauth-client-connection.md`.
 
 ## Article
 

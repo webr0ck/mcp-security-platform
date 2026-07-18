@@ -63,13 +63,36 @@ same value.
 
 ## Fix / workarounds
 
-1. **Preferred (platform):** ensure the gateway runs the issuer-consistency fix
-   (commit in `oauth_metadata.py` — `authorization_servers` = realm issuer; AS
-   metadata served at the RFC 8414 path-insertion URL). Verify with the log check
-   above.
-2. **Client-side stopgap only** (if the gateway can't be updated yet): pin the
-   client to a pre-regression version (Codex 0.141.0). This is a workaround, not a
-   fix — the gateway should be made compliant.
+**Gateway side is already fixed and RFC 9207-compliant.** Verified empirically
+(2026-07-18): a real authorization callback through the gateway carries
+`iss=https://<host>/realms/mcp` — exactly the value the client expects — and
+`authorization_servers == AS-issuer == callback iss == the realm URL`. See the log
+check above. So the server sends a correct, present, matching issuer.
+
+**Codex 0.144.x still fails anyway** — it rejects a valid, present `iss`
+([openai/codex#31573](https://github.com/openai/codex/issues/31573); 0.144.x has
+related OAuth-refresh bugs too, [#33403](https://github.com/openai/codex/issues/33403)).
+No server change can fix a client that won't accept a compliant response. Two ways
+to run **current** Codex against the gateway:
+
+1. **Recommended — bearer-token config (no downgrade, bypasses the broken OAuth
+   callback).** Codex's `bearer_token_env_var` sends `Authorization: Bearer <token>`
+   directly; the gateway's OIDC bearer path validates it (a real Keycloak access
+   token, not a static API key). Proven to reach `POST /mcp` initialize → 200.
+
+   ```toml
+   [mcp_servers.mcp-gateway]
+   url = "https://<host>:8443/mcp"
+   bearer_token_env_var = "MCP_GATEWAY_TOKEN"
+   ```
+
+   Set `MCP_GATEWAY_TOKEN` to a Keycloak access token for your user (obtain it via
+   your normal login / a refresh; it is short-lived, so refresh when it expires).
+   This keeps auth Keycloak-issued and validated — it just skips Codex's buggy
+   interactive callback.
+
+2. **Client downgrade** to a pre-regression Codex (0.141.0) — works, but pins you
+   to an old client. Upgrade back once OpenAI ships the #31573 fix.
 
 ## Not this issue
 
