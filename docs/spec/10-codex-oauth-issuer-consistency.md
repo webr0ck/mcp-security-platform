@@ -16,7 +16,17 @@ Authorization server response missing required issuer: expected <issuer>
 The failure is at **callback issuer validation**, before the authorization-code
 exchange. Claude Code (more lenient) still works; older Codex (≤ 0.141) worked.
 
-## Root cause — a real topology inconsistency, not only a client bug
+## Framing: the strict client is right
+
+This is **not** a Codex bug to work around — it is our non-compliance that a
+spec-correct client surfaced. Codex ≥0.143 implements RFC 9207 issuer validation
+correctly and rejects an inconsistent issuer. Claude Code "works" only because it
+is lenient and does not validate the callback `iss` against discovery. So the fix
+is to make the gateway **actually RFC-compliant**, which fixes Codex *and* removes
+a latent bug that any future strict MCP agent would hit. "It works in Claude Code"
+was masking the defect, not disproving it.
+
+## Root cause — a real topology inconsistency, not a client bug
 
 rmcp PR #896 implements RFC 9207 / SEP-2468 issuer validation:
 
