@@ -937,7 +937,11 @@ services:
       # bind-mount all three modsecurity.d config files — the container rootfs is read_only:true
       # so 90-copy-modsecurity-config.sh cannot create new files there at runtime.
       - ./lab/modsecurity-crs/modsecurity.conf:/etc/modsecurity.d/modsecurity.conf
-      - ./lab/modsecurity-crs/modsecurity-override.conf:/etc/modsecurity.d/modsecurity-override.conf
+      # :ro — this is our custom rule-exemption file. The image's
+      # 90-copy-modsecurity-config.sh regenerates modsecurity.d/*.conf at runtime;
+      # a RW mount let it clobber our exemptions (and, being a bind-mount, wipe the
+      # host source). Read-only preserves our rules while the copy script no-ops on it.
+      - ./lab/modsecurity-crs/modsecurity-override.conf:/etc/modsecurity.d/modsecurity-override.conf:ro
       - ./lab/modsecurity-crs/setup.conf:/etc/modsecurity.d/setup.conf
 
   # ── Alertmanager: null receiver + read_only: false for rootless Podman ───────
