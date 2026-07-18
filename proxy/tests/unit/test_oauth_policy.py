@@ -195,6 +195,49 @@ class TestHighRiskScopes:
     def test_high_risk_scope_set_matches_canonical_five(self):
         assert HIGH_RISK_SCOPES == frozenset({"write", "admin", "mail", "files", "offline_access"})
 
+    def test_wildcard_consent_default_scope_is_high_risk(self):
+        # PRD-0011 WS-4 (appsec): Microsoft Graph '<resource>/.default' grants
+        # app-only consent to whatever perms the app registration already holds —
+        # open-ended, so it MUST be flagged high-risk even though it is not a
+        # literal member of HIGH_RISK_SCOPES.
+        from app.services.oauth_policy import _split_high_risk
+        assert _split_high_risk(["https://graph.microsoft.com/.default"]) == [
+            "https://graph.microsoft.com/.default"
+        ]
+        assert _split_high_risk([".default"]) == [".default"]
+        # A normal bounded scope is NOT high-risk.
+        assert _split_high_risk(["openid", "profile"]) == []
+
+    @pytest.mark.asyncio
+    async def test_entra_default_scope_requires_reviewer_ack(self):
+        # End-to-end through the validator: a .default-only Entra submission is
+        # rejected without high_risk_scopes_approved, accepted with it.
+        row = {
+            "id": "22222222-2222-2222-2222-222222222222",
+            "issuer": "https://login.microsoftonline.com/e756f76f/v2.0",
+            "tenant": None,
+            "allowed_scopes": ["https://graph.microsoft.com/.default"],
+            "blocked_scopes": [],
+            "max_risk": "medium",
+            "allowed_redirect_patterns": [],
+            "allowed_client_auth_methods": [],
+            "allowed_token_audiences": [],
+        }
+        cfg = {
+            "issuer": "https://login.microsoftonline.com/e756f76f/v2.0",
+            "scopes": ["https://graph.microsoft.com/.default"],
+        }
+        with pytest.raises(HighRiskScopeApprovalRequiredError):
+            await validate_requested_config(
+                _fake_session_with_row(row), upstream_idp_config=cfg,
+                high_risk_scopes_approved=False,
+            )
+        result = await validate_requested_config(
+            _fake_session_with_row(row), upstream_idp_config=cfg,
+            high_risk_scopes_approved=True,
+        )
+        assert result.high_risk_scopes == ["https://graph.microsoft.com/.default"]
+
 
 # ---------------------------------------------------------------------------
 # Audience-string dimension: kc_token_exchange (RFC 8693)

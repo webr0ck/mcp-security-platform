@@ -1356,6 +1356,16 @@ async def main() -> None:
         log.error("dex_external_oauth.sql seeding failed: %s", exc)
         results["dex_external_oauth_sql"] = f"FAILED: {exc}"
 
+    # PRD-0011 WS-4: seed the Entra oauth_provider_policy trust anchor so real
+    # Entra submissions can reach the reviewer approval gate (finding #5).
+    log.info("Seeding Entra oauth_provider_policy trust anchor...")
+    try:
+        await run_sql_file(conn, SQL_DIR / "entra_oauth_policy.sql")
+        results["entra_oauth_policy_sql"] = "OK"
+    except Exception as exc:
+        log.error("entra_oauth_policy.sql seeding failed: %s", exc)
+        results["entra_oauth_policy_sql"] = f"FAILED: {exc}"
+
     # 5. Insert RBAC seed rows
     log.info("Seeding RBAC roles...")
     try:

@@ -282,8 +282,20 @@ def _json_dumps(value: list[str]) -> str:
     return json.dumps(value)
 
 
+def _is_wildcard_consent_scope(scope: str) -> bool:
+    """True for wildcard/app-only-consent scopes (e.g. Microsoft Graph's
+    '<resource>/.default'). These grant consent to whatever permissions are
+    ALREADY admin-consented for the app registration in the IdP — an open-ended
+    delegation to IdP-side state that is invisible to this platform and can
+    change without any policy row changing. Treated as high-risk so a reviewer
+    must explicitly acknowledge it (high_risk_scopes_approved=true)."""
+    return scope == ".default" or scope.endswith("/.default")
+
+
 def _split_high_risk(requested_scopes: list[str]) -> list[str]:
-    return sorted(set(requested_scopes) & HIGH_RISK_SCOPES)
+    hits = set(requested_scopes) & HIGH_RISK_SCOPES
+    hits |= {s for s in requested_scopes if _is_wildcard_consent_scope(s)}
+    return sorted(hits)
 
 
 def validate_scopes_against_policy(requested_scopes: list[str], policy: PolicyRow) -> None:
