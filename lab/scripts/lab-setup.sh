@@ -116,6 +116,14 @@ if [[ -z "${NB_KEY}" || "${NB_KEY}" == *change-me* || "${NB_KEY}" == *placeholde
     env_set "LAB_NETBOX_SECRET_KEY" "${NEW_KEY}"
 fi
 
+# Generate ops-agent shared secret if missing or placeholder (WS-A). The compose
+# files reference it as ${OPS_AGENT_TOKEN:?...} (hard-required, fail-closed), so a
+# fresh clone must have a real value here or `lab-up`/`lab-reset` fail at parse.
+OPS_TOKEN="$(grep '^OPS_AGENT_TOKEN=' "${ENV_LAB}" | cut -d= -f2- || true)"
+if [[ -z "${OPS_TOKEN}" || "${OPS_TOKEN}" == *change-me* || "${OPS_TOKEN}" == *placeholder* ]]; then
+    env_set "OPS_AGENT_TOKEN" "$(openssl rand -hex 32)"
+fi
+
 # Load env vars into current shell
 set -a
 # shellcheck disable=SC1090
