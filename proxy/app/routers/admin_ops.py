@@ -11,15 +11,18 @@ Endpoints:
   POST /api/v1/admin/servers/{id}/restart
   POST /api/v1/admin/servers/{id}/rebuild
 
-Authz: platform_admin OR the server's own owner/maintainer (reusing the
-_require_owner_or_maintainer pattern from server_registry.py — a caller must
-actually be *this* server's owner_sub or a listed maintainer, not merely hold
-a role called "server_owner").
+Authz (all three, per spec): platform_admin OR the server's own
+owner/maintainer (reusing the _require_owner_or_maintainer pattern from
+server_registry.py — a caller must actually be *this* server's owner_sub or
+a listed maintainer, not merely hold a role called "server_owner").
 
 The container/service name acted upon is NEVER taken from client input —
 it's derived server-side from urlparse(server.upstream_url).hostname, so a
 caller cannot ask the ops-agent to act on an arbitrary container even if they
-control the request body.
+control the request body. As defense-in-depth, the derived hostname is also
+checked against the same mcp-/lab-mcp- allowlist prefix the ops-agent itself
+enforces, so a malformed/foreign upstream_url is rejected here rather than
+relying solely on the ops-agent's own check.
 
 Fail-closed: if OPS_AGENT_URL or OPS_AGENT_TOKEN is unset, or the agent is
 unreachable, every endpoint here returns 503 rather than silently no-op'ing
@@ -43,6 +46,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _MAX_TAIL = 1000
+# Mirrors the ops-agent's own container-name allowlist (ops-agent/app.py) —
+# defense-in-depth so a malformed/foreign upstream_url is rejected here
+# rather than relying solely on the ops-agent's own check.
+_CONTAINER_ALLOWLIST_PREFIXES = ("mcp-", "lab-mcp-")
 
 
 async def _get_server_row(server_id: str) -> dict | None:
@@ -65,7 +72,15 @@ def _derive_container_name(upstream_url: str) -> str:
     """
     hostname = urlparse(upstream_url).hostname
     if not hostname:
-        raise HTTPException(status_code=422, detail="server upstream_url has no resolvable hostname")
+        raise HTTPException(
+            status_code=422, detail="server upstream_url has no resolvable hostname"
+        )
+    if not hostname.startswith(_CONTAINER_ALLOWLIST_PREFIXES):
+        raise HTTPException(
+            status_code=422,
+            detail=f"derived container {hostname!r} is not an MCP backend "
+                   "(expected an mcp-/lab-mcp- prefixed host)",
+        )
     return hostname
 
 
@@ -119,16 +134,21 @@ def _forward_error(resp: httpx.Response) -> None:
         detail = resp.json().get("detail", resp.text)
     except Exception:
         detail = resp.text
-    raise HTTPException(status_code=resp.status_code if resp.status_code >= 400 else 502, detail=detail)
+    status = resp.status_code if resp.status_code >= 400 else 502
+    raise HTTPException(status_code=status, detail=detail)
 
 
 @router.get("/api/v1/admin/servers/{server_id}/logs")
-async def get_server_logs(server_id: str, request: Request, tail: int = Query(200, ge=1, le=_MAX_TAIL)):
+async def get_server_logs(
+    server_id: str, request: Request, tail: int = Query(200, ge=1, le=_MAX_TAIL)
+):
     row = await _require_authz(server_id, request)
     _require_debug_mode(row)
     container = _derive_container_name(row["upstream_url"])
 
-    resp = await _call_ops_agent("GET", "/ops/logs", params={"container": container, "tail": tail})
+    resp = await _call_ops_agent(
+        "GET", "/ops/logs", params={"container": container, "tail": tail}
+    )
     if resp.status_code != 200:
         _forward_error(resp)
 
