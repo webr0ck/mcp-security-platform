@@ -1366,6 +1366,18 @@ async def main() -> None:
         log.error("entra_oauth_policy.sql seeding failed: %s", exc)
         results["entra_oauth_policy_sql"] = f"FAILED: {exc}"
 
+    # PRD-0011: mark all seeded 'approved' servers scan-passed with a fresh
+    # timestamp. Without this, invocation.py's supply-chain scan-freshness gate
+    # denies EVERY tool call on a fresh boot (nothing enqueues scan_jobs for the
+    # trusted in-repo fixtures). Must run AFTER all server-creating seeds above.
+    log.info("Marking seeded approved servers scan-passed (fresh-boot usability)...")
+    try:
+        await run_sql_file(conn, SQL_DIR / "mark_seeded_servers_scanned.sql")
+        results["mark_seeded_servers_scanned_sql"] = "OK"
+    except Exception as exc:
+        log.error("mark_seeded_servers_scanned.sql seeding failed: %s", exc)
+        results["mark_seeded_servers_scanned_sql"] = f"FAILED: {exc}"
+
     # 5. Insert RBAC seed rows
     log.info("Seeding RBAC roles...")
     try:
