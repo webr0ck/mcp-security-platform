@@ -136,6 +136,17 @@ class AuditEvent:
     principal_id: str | None = None
     principal_issuer: str | None = None
 
+    # notices: advisory-only messages that do NOT affect the outcome (e.g. a
+    #   taint-floor notify-only disclaimer). Fix 7
+    #   (docs/spec/11-server-lifecycle-and-hardening-batch.md §7): previously
+    #   these were smuggled into deny_reasons on an outcome=ALLOW event, which
+    #   misleads any reader that treats a non-empty deny_reasons as "this was
+    #   denied". deny_reasons stays empty for ALLOW outcomes; advisory text
+    #   belongs here instead. Default empty list is backward-compatible with
+    #   every existing caller. Not part of the canonical integrity hash
+    #   (advisory enrichment only, same treatment as tainted/principal_id).
+    notices: list[str] = field(default_factory=list)
+
     # NOTE: prev_hash was deleted in Task 1.2 (plan decision: delete, not wire).
     # Hash-chain / sequence tamper evidence is P5 scope; per-event HMAC (Task 0.2)
     # is the tamper-evidence mechanism for this build. Callers that previously
@@ -216,4 +227,6 @@ class AuditEvent:
             # CR-10 (WP-A1)
             "principal_id": self.principal_id,
             "principal_issuer": self.principal_issuer,
+            # Fix 7 — advisory notices, distinct from deny_reasons.
+            "notices": self.notices,
         }

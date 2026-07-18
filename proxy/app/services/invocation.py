@@ -177,6 +177,108 @@ async def _lookup_profile_with_cache(
     )
 
 
+async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
+    """
+    Check whether a named profile has at least one mcp_profiles binding row.
+
+    Fix 1 (docs/spec/11-server-lifecycle-and-hardening-batch.md §1):
+    named profiles (bound at OIDC login via ``?profile=<name>``) are the
+    access-restriction mechanism for session-bound logins. Previously, a
+    tool with no explicit binding row under a named profile fell through to
+    ``profile_data = {}`` in Step 2.5, which OPA treats as "no restriction"
+    (default-allow) — the same as the legacy per-identity path. That defeats
+    the purpose of a named profile: once an admin has started configuring
+    one, every UNBOUND tool should be denied, not silently allowed.
+
+    Semantics:
+      - Named profile has >=1 binding row anywhere (i.e. it has been
+        configured at all) → caller should default-deny any tool lacking
+        its own binding row (synthesize a disabled profile).
+      - Named profile has zero binding rows (freshly created, not yet
+        configured) → keep default-allow so the profile isn't bricked
+        before an admin has added the first binding.
+
+    Fail-closed semantics mirror ``_lookup_profile_with_cache`` (Task 1.10 /
+    SELF-F2) — a restriction mechanism must never silently default-allow on
+    a DB error:
+
+      DB success:            use the count + update Redis cache (TTL 300s)
+      DB error + cache hit:  use cached bool (last-known-state)
+      DB error + cache miss: raise ProfileLookupError → caller 503s
+
+    Returns:
+      True if the named profile has one or more binding rows, else False.
+
+    Raises:
+      ProfileLookupError: if DB is unreachable and no cached value is
+        available.
+    """
+    import json as _json
+    from app.core.redis_client import redis_pool
+
+    cache_key = f"mcp_profile:uuid:{profile_uuid}:__has_bindings__"
+
+    # -----------------------------------------------------------------------
+    # Tier 1: Redis cache
+    # -----------------------------------------------------------------------
+    cached_raw: str | None = None
+    try:
+        redis = redis_pool.client
+        cached_raw = await redis.get(cache_key)
+    except Exception as _redis_exc:
+        logger.warning(
+            "Named-profile binding-count cache Redis read failed",
+            extra={"profile_uuid": profile_uuid, "error": str(_redis_exc)},
+        )
+
+    if cached_raw is not None:
+        try:
+            return _json.loads(cached_raw) is True
+        except Exception:
+            pass  # malformed cache entry — fall through to DB
+
+    # -----------------------------------------------------------------------
+    # Tier 2: PostgreSQL mcp_profiles — count rows for this profile_uuid
+    # -----------------------------------------------------------------------
+    has_binding: bool | None = None
+    db_succeeded = False
+    try:
+        from app.core.database import AsyncSessionLocal
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as _db:
+            row = await _db.execute(
+                text("SELECT COUNT(*) AS cnt FROM mcp_profiles WHERE profile_uuid=:uuid"),
+                {"uuid": profile_uuid},
+            )
+            prow = row.mappings().first()
+            has_binding = bool(prow is not None and int(prow["cnt"]) > 0)
+        db_succeeded = True
+    except Exception as _db_exc:
+        logger.error(
+            "Named-profile binding-count DB lookup failed",
+            extra={"profile_uuid": profile_uuid, "error": str(_db_exc)},
+        )
+
+    if db_succeeded:
+        try:
+            redis = redis_pool.client
+            await redis.setex(cache_key, _PROFILE_CACHE_TTL_SECONDS, _json.dumps(bool(has_binding)))
+        except Exception as _cache_exc:
+            logger.warning(
+                "Failed to write named-profile binding-count to Redis cache",
+                extra={"profile_uuid": profile_uuid, "error": str(_cache_exc)},
+            )
+        return bool(has_binding)
+
+    # -----------------------------------------------------------------------
+    # DB failed. We have no cached value (cache hit was handled above).
+    # Fail-closed: raise ProfileLookupError → caller converts to 503.
+    # -----------------------------------------------------------------------
+    raise ProfileLookupError(
+        f"DB unreachable and no cached binding-count for profile {profile_uuid}"
+    )
+
+
 async def _get_recent_calls_for_opa(client_id: str) -> list[dict]:
     """
     Read the per-client Redis anomaly window and return it in the format
@@ -480,7 +582,12 @@ async def invoke_tool(
                 tool_version=tool_record.get("version"),
                 client_id=client_id,
                 outcome="allow",
-                deny_reasons=[f"taint_floor_notice:required_integrity={_required}"],
+                # Fix 7 (docs/spec/11-server-lifecycle-and-hardening-batch.md
+                # §7): this is an ALLOW — deny_reasons must stay empty so the
+                # event isn't misread as a deny. The taint notice is advisory
+                # only and belongs in `notices`.
+                deny_reasons=[],
+                notices=[f"taint_floor_notice:required_integrity={_required}"],
                 request_id=request_id,
                 latency_ms=0,
                 anomaly_score=0.0,
@@ -577,6 +684,17 @@ async def invoke_tool(
         )
         if _profile_result is not None:
             profile_data = _profile_result
+        # Fix 1 (docs/spec/11-server-lifecycle-and-hardening-batch.md §1):
+        # named-profile default-deny. No explicit binding row exists for
+        # THIS tool under the named profile. If the profile has been
+        # configured at all (>=1 binding row anywhere), an unbound tool
+        # is "not granted" — synthesize a disabled profile so OPA denies
+        # with mcp_disabled_for_profile. An unconfigured profile (zero
+        # binding rows) keeps default-allow so it isn't bricked before
+        # an admin has added the first binding. Legacy per-identity path
+        # (profile_uuid is None) is unaffected — still default-allow.
+        elif profile_uuid and await _named_profile_has_any_binding(profile_uuid):
+            profile_data = {"enabled": False, "allowed_functions": []}
     except ProfileLookupError as _profile_exc:
         logger.error(
             "Profile lookup fail-closed: DB unreachable and no cached profile — "
@@ -1438,6 +1556,7 @@ async def _emit_audit_event(
     session_jti: str | None = None,
     tainted: bool | None = None,
     principal_id: str | None = None,
+    notices: list[str] | None = None,
 ) -> str:
     """
     Emit a structured audit event via mcp-audit-logger.
@@ -1456,6 +1575,12 @@ async def _emit_audit_event(
         principal_type: 'human' | 'agent' | 'service' from request.state.
         roles: List of roles held by the caller at invocation time.
         session_jti: OIDC session JWT ID for tracing session-scoped invocations.
+
+    Args (Fix 7, docs/spec/11-server-lifecycle-and-hardening-batch.md §7):
+        notices: Advisory-only messages that do NOT affect outcome (e.g. a
+            taint-floor notify-only disclaimer). Callers MUST NOT put advisory
+            text in deny_reasons for an outcome="allow" event — deny_reasons
+            is reserved for reasons a request was actually denied.
     """
     try:
         from mcp_audit_logger import AuditEvent, AuditEventType, AuditOutcome, MCPAuditLogger
@@ -1495,6 +1620,7 @@ async def _emit_audit_event(
             roles=roles,
             session_jti=session_jti,
             tainted=tainted,
+            notices=notices or [],
         )
         sha256_hash = audit_logger.emit(event)
         event_id = str(event.event_id)
@@ -1617,8 +1743,8 @@ async def _emit_audit_event(
                     risk_level="unknown",  # not available here; rules use json.risk_level from filebeat
                     request_id=request_id,
                     principal_type=principal_type,
-            principal_id=principal_id,
                     deny_reasons=deny_reasons or [],
+                    notices=notices or [],
                 )
             except Exception:
                 pass  # swallow — secondary path must never affect INV-001

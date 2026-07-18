@@ -21,6 +21,11 @@ JSON payload fields:
   request_id     string  — correlation ID
   principal_type string? — "human" | "agent" | "service" (omitted if None)
   deny_reasons   list?   — OPA deny reason codes (omitted if empty/None)
+  notices        list?   — advisory-only notices, e.g. taint-floor notify-only
+                            disclaimers (omitted if empty/None). Fix 7
+                            (docs/spec/11-server-lifecycle-and-hardening-batch.md
+                            §7): kept separate from deny_reasons so an ALLOW
+                            event is never mistaken for a DENY.
 
 Wazuh syslog priority mapping:
   outcome=deny          → user.err    (priority 11)
@@ -64,6 +69,7 @@ def emit(
     request_id: str,
     principal_type: str | None = None,
     deny_reasons: list[str] | None = None,
+    notices: list[str] | None = None,
 ) -> None:
     """Emit one MCP audit event as a UDP syslog datagram.
 
@@ -93,6 +99,8 @@ def emit(
             payload["principal_type"] = principal_type
         if deny_reasons:
             payload["deny_reasons"] = deny_reasons
+        if notices:
+            payload["notices"] = notices
 
         msg = f"<{priority}>{ts} MCP-PROXY mcp_audit: {json.dumps(payload, separators=(',', ':'))}"
         data = msg.encode("utf-8")[:_MAX_DATAGRAM]
