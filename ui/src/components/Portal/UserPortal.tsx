@@ -81,7 +81,7 @@ function ToggleSwitch({ enabled, loading, onToggle, label }: {
         data-testid="toggle-btn"
         style={{
           width: 40, height: 22, borderRadius: 11, border: 'none', cursor: loading ? 'wait' : 'pointer',
-          background: enabled ? '#00d4ff' : '#2a3a4a', position: 'relative',
+          background: enabled ? 'var(--accent)' : 'var(--border-bright)', position: 'relative',
           transition: 'background 0.2s', flexShrink: 0,
           // outline:none removed — browser default focus ring restored (issue #8 / WCAG 2.4.7)
         }}
