@@ -11,10 +11,16 @@ Endpoints:
   POST /api/v1/admin/servers/{id}/restart
   POST /api/v1/admin/servers/{id}/rebuild
 
-Authz (all three, per spec): platform_admin OR the server's own
-owner/maintainer (reusing the _require_owner_or_maintainer pattern from
-server_registry.py — a caller must actually be *this* server's owner_sub or
-a listed maintainer, not merely hold a role called "server_owner").
+Authz:
+  - logs (read-only, debug_mode-gated): platform_admin OR this server's own
+    owner/maintainer (reusing the _require_owner_or_maintainer pattern from
+    server_registry.py — a caller must actually be *this* server's owner_sub
+    or a listed maintainer, not merely hold a role called "server_owner").
+  - restart/rebuild (destructive lifecycle): platform_admin ONLY. Two
+    automated security reviews (2026-07-18) flagged deriving the target
+    container from the mutable upstream_url as a confused-deputy/IDOR risk;
+    restricting these to platform_admin closes it (upstream_url is itself
+    platform_admin-only mutable via PATCH, so this is the tightest binding).
 
 The container/service name acted upon is NEVER taken from client input —
 it's derived server-side from urlparse(server.upstream_url).hostname, so a
@@ -40,7 +46,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
-from app.routers.server_registry import _require_owner_or_maintainer
+from app.routers.server_registry import _require_owner_or_maintainer, _require_platform_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -93,11 +99,22 @@ def _require_debug_mode(row: dict) -> None:
         )
 
 
-async def _require_authz(server_id: str, request: Request) -> dict:
+async def _require_authz(server_id: str, request: Request, *, admin_only: bool = False) -> dict:
+    """
+    Authorize a lifecycle op on server_id and return the server row.
+
+    admin_only=False (logs): this server's owner/maintainer, or a platform_admin.
+    admin_only=True (restart/rebuild): platform_admin ONLY. The admin check runs
+      BEFORE the row is fetched so a non-admin cannot distinguish an existing
+      server (would be 403) from a missing one (404).
+    """
+    if admin_only:
+        _require_platform_admin(request)
     row = await _get_server_row(server_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Server not found")
-    _require_owner_or_maintainer(row, request, allow_platform_admin=True)
+    if not admin_only:
+        _require_owner_or_maintainer(row, request, allow_platform_admin=True)
     return row
 
 
@@ -157,7 +174,7 @@ async def get_server_logs(
 
 @router.post("/api/v1/admin/servers/{server_id}/restart")
 async def restart_server(server_id: str, request: Request):
-    row = await _require_authz(server_id, request)
+    row = await _require_authz(server_id, request, admin_only=True)
     _require_debug_mode(row)
     container = _derive_container_name(row["upstream_url"])
 
@@ -176,7 +193,7 @@ async def restart_server(server_id: str, request: Request):
 
 @router.post("/api/v1/admin/servers/{server_id}/rebuild")
 async def rebuild_server(server_id: str, request: Request):
-    row = await _require_authz(server_id, request)
+    row = await _require_authz(server_id, request, admin_only=True)
     _require_debug_mode(row)
     container = _derive_container_name(row["upstream_url"])
 

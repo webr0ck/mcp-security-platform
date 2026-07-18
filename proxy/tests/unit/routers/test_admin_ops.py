@@ -334,3 +334,39 @@ async def test_restart_server_unreachable_ops_agent_returns_503():
         with pytest.raises(HTTPException) as exc_info:
             await admin_ops.restart_server("s1", _make_request(roles=["platform_admin"]))
         assert exc_info.value.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# IDOR hardening (2026-07-18 security review): container allowlist +
+# platform_admin-only restart/rebuild.
+# ---------------------------------------------------------------------------
+
+def test_derive_container_name_rejects_non_mcp_host():
+    """A hostname outside the mcp-/lab-mcp- allowlist is refused (defense-in-depth
+    against a confused-deputy via a foreign upstream_url)."""
+    from app.routers.admin_ops import _derive_container_name
+    with pytest.raises(HTTPException) as exc_info:
+        _derive_container_name("http://postgres:5432/mcp")
+    assert exc_info.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_restart_server_rejects_non_admin_owner():
+    """restart is platform_admin ONLY — a mere owner/maintainer gets 403, and the
+    admin check happens before any DB lookup (no server row disclosure)."""
+    from app.routers import admin_ops
+    with pytest.raises(HTTPException) as exc_info:
+        await admin_ops.restart_server(
+            "s1", _make_request(roles=["server_owner"], client_id="alice")
+        )
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_rebuild_server_rejects_non_admin_owner():
+    from app.routers import admin_ops
+    with pytest.raises(HTTPException) as exc_info:
+        await admin_ops.rebuild_server(
+            "s1", _make_request(roles=["server_owner"], client_id="alice")
+        )
+    assert exc_info.value.status_code == 403
