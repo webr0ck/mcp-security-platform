@@ -444,6 +444,15 @@ async def _resolve_active_profile_uuid(profile_ref: str) -> str | None:
     WS-1 (PRD-0011): used by the external OIDC BEARER path only. The
     browser/session path resolves profiles by name inline and is unaffected.
     """
+    # A malformed (non-UUID) value is a client error, not a service fault:
+    # validate the shape first so the caller returns 403 (like an unknown GUID)
+    # rather than letting Postgres raise on the uuid cast and surfacing a 503
+    # ("retry later" — wrong, the input is permanently bad).
+    import uuid as _uuid
+    try:
+        _uuid.UUID(str(profile_ref))
+    except (ValueError, AttributeError, TypeError):
+        return None
     from sqlalchemy import text as _sqltext
     from app.core.database import AsyncSessionLocal as _ASL
     async with _ASL() as _db:

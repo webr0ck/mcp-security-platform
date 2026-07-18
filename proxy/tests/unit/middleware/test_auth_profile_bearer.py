@@ -83,11 +83,24 @@ async def test_resolver_returns_uuid_for_active_profile():
 
 @pytest.mark.unit
 async def test_resolver_returns_none_for_unknown_profile():
+    # A well-formed but unknown GUID reaches the DB and comes back empty -> None.
     from app.middleware import auth
     with patch("app.core.database.AsyncSessionLocal") as sess:
         ctx = sess.return_value.__aenter__.return_value
         ctx.execute = AsyncMock(return_value=AsyncMock(fetchone=lambda: None))
-        assert await auth._resolve_active_profile_uuid("deadbeef") is None
+        assert await auth._resolve_active_profile_uuid(
+            "00000000-0000-0000-0000-000000000000"
+        ) is None
+
+
+@pytest.mark.unit
+async def test_resolver_returns_none_for_malformed_uuid_without_db():
+    # A malformed (non-UUID) value must NOT hit the DB (avoids a uuid-cast error
+    # that would surface as a 503) — it short-circuits to None -> caller 403.
+    from app.middleware import auth
+    with patch("app.core.database.AsyncSessionLocal") as sess:
+        assert await auth._resolve_active_profile_uuid("not-a-uuid") is None
+        sess.assert_not_called()
 
 
 @pytest.mark.unit
