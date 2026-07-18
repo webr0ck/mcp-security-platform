@@ -307,8 +307,9 @@ services:
           pids: 64
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
-    ports:
-      - "127.0.0.1:8100:8000"
+    # Fix 8: no host port. Reachable proxy-side via mcp-grafana-net (internal
+    # podman network / DNS) — see docker-compose.override.yml.example for an
+    # opt-in host-port restore for local debugging.
     environment:
       GRAFANA_URL: "http://lab-grafana:3000"
       GRAFANA_SERVICE_ACCOUNT_TOKEN: ${GRAFANA_SERVICE_ACCOUNT_TOKEN}
@@ -339,8 +340,7 @@ services:
       dockerfile: Dockerfile
     image: mcp-netbox-server:lab
     container_name: mcp-netbox
-    ports:
-      - "127.0.0.1:8101:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       NETBOX_URL: "http://lab-netbox:8080"
       TRANSPORT: "http"
@@ -369,8 +369,7 @@ services:
     build:
       context: ./lab/mcp-servers/lab-tickets
     container_name: lab-mcp-lab-tickets
-    ports:
-      - "127.0.0.1:8109:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       KC_ISSUER: "http://lab-keycloak:8080/realms/mcp"
       HOST: "0.0.0.0"
@@ -445,8 +444,7 @@ services:
           memory: 256m
           cpus: "0.5"
           pids: 256
-    ports:
-      - "127.0.0.1:8102:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       GITEA_URL: "http://lab-gitea:3000"
       TRANSPORT: "http"
@@ -505,8 +503,7 @@ services:
           memory: 256m
           cpus: "0.5"
           pids: 512
-    ports:
-      - "127.0.0.1:8103:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -546,8 +543,7 @@ services:
     build: ./lab/mcp-servers/entra-id
     image: lab-mcp-entra-id:lab
     container_name: lab-mcp-entra-id
-    ports:
-      - "127.0.0.1:8107:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -622,8 +618,7 @@ services:
           memory: 256m
           cpus: "0.5"
           pids: 256
-    ports:
-      - "127.0.0.1:8104:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       DOCS_DIR: "/app/docs"
       KB_DIR: "/app/kb"
@@ -651,8 +646,7 @@ services:
       context: ./lab/mcp-servers/echo
     image: lab-mcp-echo:lab
     container_name: lab-mcp-echo
-    ports:
-      - "127.0.0.1:8105:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -681,8 +675,7 @@ services:
       context: ./lab/mcp-servers/test-api
     image: lab-mcp-test-api:lab
     container_name: lab-mcp-test-api
-    ports:
-      - "127.0.0.1:8106:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -713,8 +706,7 @@ services:
       context: ./lab/mcp-servers/catfacts
     image: lab-mcp-catfacts:lab
     container_name: lab-mcp-catfacts
-    ports:
-      - "127.0.0.1:8110:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -746,8 +738,7 @@ services:
       context: ./lab/mcp-servers/fetch
     image: lab-mcp-fetch:lab
     container_name: lab-mcp-fetch
-    ports:
-      - "127.0.0.1:8111:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -785,8 +776,7 @@ services:
           memory: 256m
           cpus: "0.5"
           pids: 256
-    ports:
-      - "127.0.0.1:8112:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -842,8 +832,7 @@ services:
           memory: 256m
           cpus: "0.5"
           pids: 256
-    ports:
-      - "127.0.0.1:8108:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -871,8 +860,7 @@ services:
       context: ./lab/mcp-servers/search
     image: lab-mcp-search:lab
     container_name: lab-mcp-search
-    ports:
-      - "127.0.0.1:8113:8000"
+    # Fix 8: no host port — see docker-compose.override.yml.example.
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -1080,6 +1068,52 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # ── ops-agent (WS-A): holds the podman socket so the proxy never has to ────
+  # No gateway ingress, no host port. Reachable only by the proxy on
+  # proxy-ops-agent-net. See ops-agent/app.py and
+  # docs/spec/11-server-lifecycle-and-hardening-batch.md §WS-A.
+  lab-ops-agent:
+    build:
+      context: ./ops-agent
+      dockerfile: Dockerfile
+    image: lab-ops-agent:lab
+    container_name: lab-ops-agent
+    # Socket + working-tree bind mounts need root inside the container in the
+    # lab (rootless Podman socket ownership); matches the promtail override
+    # above for the same reason. Production/standard tiers should run this
+    # with a socket-group-matched non-root user instead — see ops-agent/
+    # Dockerfile's non-root USER default for that path.
+    user: "0:0"
+    security_opt:
+      - label=disable
+    volumes:
+      # Mount the ACTUAL podman socket (see PODMAN_SOCK convention used by
+      # compose.wazuh.yml / promtail above) — read-write, since ops-agent
+      # must issue `podman restart` / `podman-compose up --build`, not just
+      # read container state.
+      - ${PODMAN_SOCK:-/run/user/1000/podman/podman.sock}:/var/run/docker.sock
+      # Compose files + build contexts needed for `podman-compose up -d
+      # --build <service>`. Read-only: ops-agent must never edit compose
+      # definitions, only invoke them.
+      - ${PWD}:/workspace:ro
+    environment:
+      OPS_AGENT_TOKEN: "${OPS_AGENT_TOKEN:?OPS_AGENT_TOKEN must be set in .env.lab}"
+      OPS_AGENT_PODMAN_BIN: "podman"
+      OPS_AGENT_PODMAN_COMPOSE_BIN: "podman-compose"
+      # Matches LAB_COMPOSE in Makefile.lab — must stay in sync so rebuild
+      # resolves the same merged topology the lab actually boots with.
+      OPS_AGENT_COMPOSE_FILES: "docker-compose.yml,docker-compose.dev.yml,podman-compose.lab.yml,compose.wazuh.yml"
+      OPS_AGENT_COMPOSE_PROJECT_DIR: "/workspace"
+    networks:
+      - proxy-ops-agent-net   # pairwise with proxy only — no other peers, no host port
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
   proxy:
     depends_on:
       opa:
@@ -1087,6 +1121,8 @@ services:
       lab-dex:
         condition: service_healthy
       lab-keycloak:
+        condition: service_healthy
+      lab-ops-agent:
         condition: service_healthy
     build:
       context: .
@@ -1121,6 +1157,11 @@ services:
       # Lab Vault uses persistent file storage (not dev mode), so the proxy must
       # use the lab token from .env.lab — not the hardcoded "root" from dev compose.
       - VAULT_TOKEN=${VAULT_TOKEN}
+      # WS-A: ops-agent forwarding — server lifecycle (logs/restart/rebuild)
+      # fails closed (503) if either is unset. Port 9000 matches
+      # ops-agent/app.py's default uvicorn bind.
+      - OPS_AGENT_URL=http://lab-ops-agent:9000
+      - OPS_AGENT_TOKEN=${OPS_AGENT_TOKEN:?OPS_AGENT_TOKEN must be set in .env.lab}
     command: >
       uvicorn app.main:app
       --host 0.0.0.0
@@ -1158,6 +1199,7 @@ services:
       - mcp-self-service-net
       - mcp-search-net
       - mcp-lab-tickets-net
+      - proxy-ops-agent-net # pairwise with lab-ops-agent only (WS-A)
 
   # ── DB: several rootless-Podman overrides needed:
   # - user: postgres → avoid su-exec user-switch failure
@@ -1366,6 +1408,11 @@ networks:
     driver: bridge
     internal: true
   mcp-lab-tickets-net:
+    driver: bridge
+    internal: true
+  # ── ops-agent pairwise net (WS-A): proxy <-> lab-ops-agent only. Internal —
+  # no routing to/from the host. ops-agent publishes no host port either.
+  proxy-ops-agent-net:
     driver: bridge
     internal: true
   # Notes sidecar net — only lab-mcp-notes + lab-notes-redis; proxy is NOT on this net

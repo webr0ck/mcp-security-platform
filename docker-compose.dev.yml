@@ -88,13 +88,19 @@ services:
       com.mcp.security-note: "RT-NEW-002: no host port — prevents auth cache injection via LAN"
 
   opa:
-    # RT-005 fix: OPA has no authentication. Binding to 0.0.0.0:8181 lets any
-    # network peer read the full grants/policy database without credentials.
-    # Restrict to loopback for local Rego development: `curl localhost:8181/...`
-    # To open temporarily: override with `ports: ["0.0.0.0:8181:8181"]` in a
-    # local docker-compose.override.yml (never commit that file).
-    ports:
-      - "127.0.0.1:8181:8181"
+    # Fix 8 (docs/spec/11-server-lifecycle-and-hardening-batch.md): NO ports:
+    # key here on purpose. RT-005: OPA has no authentication — publishing
+    # :8181 (even loopback-bound) exposes the full Rego + grants database to
+    # any local process. Compose list-merge APPENDS ports across layered
+    # files rather than letting a later file remove an earlier publish, so a
+    # `ports:` entry here would survive into podman-compose.lab.yml's merged
+    # topology even though that file's own opa service has no ports key
+    # (verified by scripts/check_network_isolation.py under the real
+    # Makefile.lab LAB_COMPOSE layering).
+    # For local Rego development: `podman exec mcp-opa curl localhost:8181/...`
+    # To open temporarily (dev machine only — never commit): copy
+    # docker-compose.override.yml.example to docker-compose.override.yml and
+    # uncomment the opa ports block there.
     # INV-012: development is the only environment where bundle signing is
     # disabled. This override replaces the signed bundle.tar.gz command from
     # docker-compose.yml with an unsigned read-only directory mount so that
