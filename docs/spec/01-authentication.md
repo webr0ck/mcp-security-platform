@@ -215,6 +215,14 @@ Wire sequence:
    - `scopes_supported` → only the scopes actually enabled on the public client.
    Reference: `oauth_metadata.py::oauth_server_metadata` (~L159).
 
+   > **RFC 9207 issuer consistency (strict clients, e.g. Codex ≥ 0.143).** Pointing
+   > `authorization_servers` at the proxy origin while the AS-metadata `issuer` and
+   > the IdP callback `iss` are the realm URL is inconsistent, and RFC 9207 clients
+   > reject it ("missing required issuer"). The planned fix keeps the proxy-fronted,
+   > filtered metadata but serves it at — and points `authorization_servers` to —
+   > the **realm issuer URL** (`{public}/realms/mcp`), so all three values match.
+   > See [`10-codex-oauth-issuer-consistency.md`](10-codex-oauth-issuer-consistency.md).
+
 4. **RFC 7591 dynamic client registration.** `POST /oauth/register` returns a **public** client
    (`token_endpoint_auth_method: "none"`, **no `client_secret`**), PKCE S256 required. The
    implementation **MUST**:
