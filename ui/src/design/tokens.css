@@ -22,8 +22,9 @@
   /* ── Text ─────────────────────────────────────────────────────────────── */
   --text-primary:   #e7eaf0;
   --text-secondary: #8a93a4;
-  --text-muted:     #5b6474;
-  --text-disabled:  #3a4150;
+  --text-muted:     #828b9c;  /* WCAG-AA fix (C1): was #5b6474 (3.0:1, fail) -> clears 4.5:1 on void+surface */
+  --text-label:     #828b9c;  /* section labels / breadcrumb sep — AA-passing; use instead of --text-disabled for non-disabled text */
+  --text-disabled:  #3a4150;  /* reserved for actually-disabled controls only (contrast-exempt) */
 
   /* ── Brand accent — blue ──────────────────────────────────────────────── */
   --accent:        #4f9cf9;
