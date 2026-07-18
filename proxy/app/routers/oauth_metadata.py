@@ -283,6 +283,14 @@ def _protected_resource_metadata(request: Request, resource_path: str = "") -> d
         "bearer_methods_supported": ["header"],
         "resource_documentation": f"{proxy}/docs",
         "introspection_endpoint": f"{issuer}/protocol/openid-connect/token/introspect" if issuer else None,
+        # RFC 9728 does not mandate "issuer" on protected-resource metadata, but
+        # current Codex (>=0.143, rmcp PR896 / openai/codex#31573) fails OAuth
+        # with "missing required issuer" against documents that omit it. Value
+        # is the token-issuing IdP's issuer identifier (matches the JWT "iss"
+        # claim clients will see after the code exchange) — purely additive,
+        # does not change `resource`/`authorization_servers`/scope filtering,
+        # so it cannot regress Claude Code's existing flow.
+        "issuer": issuer if issuer else None,
     }
 
 

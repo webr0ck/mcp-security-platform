@@ -53,6 +53,30 @@ class TestProtectedResourceMetadata:
         body = client.get("/.well-known/oauth-protected-resource").json()
         assert "header" in body["bearer_methods_supported"]
 
+    def test_includes_issuer(self, client):
+        # Codex >=0.143 (rmcp PR896 / openai/codex#31573) fails OAuth with
+        # "missing required issuer" against a protected-resource metadata
+        # document that omits "issuer". RFC 9728 doesn't mandate it, but this
+        # is the minimal platform-side accommodation (WS-5).
+        # OIDC_ISSUER_URL is unset in this test environment (no .env.lab), so
+        # patch it to a realistic value — production always sets it.
+        with patch("app.routers.oauth_metadata.settings.OIDC_ISSUER_URL", "http://keycloak.test/realms/mcp"):
+            body = client.get("/.well-known/oauth-protected-resource").json()
+        assert body.get("issuer"), "protected-resource metadata must carry a non-empty issuer"
+
+    def test_issuer_present_on_resource_scoped_variant(self, client):
+        with patch("app.routers.oauth_metadata.settings.OIDC_ISSUER_URL", "http://keycloak.test/realms/mcp"):
+            body = client.get("/.well-known/oauth-protected-resource/mcp").json()
+        assert body.get("issuer")
+
+    def test_issuer_addition_does_not_disturb_existing_fields(self, client):
+        # Additive-only change: resource/authorization_servers/bearer_methods_supported
+        # must be untouched so Claude Code's existing flow doesn't regress.
+        body = client.get("/.well-known/oauth-protected-resource").json()
+        assert "resource" in body
+        assert isinstance(body["authorization_servers"], list) and len(body["authorization_servers"]) == 1
+        assert body["bearer_methods_supported"] == ["header"]
+
 
 # ---------------------------------------------------------------------------
 # /.well-known/oauth-authorization-server (RFC 8414)
