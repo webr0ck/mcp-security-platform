@@ -401,6 +401,24 @@ image-build step is a named, tested stub with a concrete upgrade path (mirror
 `scanner_worker/Dockerfile`'s binary-install pattern); every other part of the pipeline (queue,
 digest pinning, evaluator, launcher hardening, verify, contract check, API) is real and tested.
 
+**Post-deployment lifecycle (WS-A, `ops-agent/`).** Day-2 operations on an
+*already-deployed* server — read its logs, restart it, rebuild its image — are
+handled by a second socket-capable component, the **`ops-agent`**, kept to the
+same "only the socket-holder touches the socket" discipline as `deploy_launcher`.
+It is a standalone service (its own container), the **sole holder of the
+container-runtime socket for these ops**, with **no gateway ingress** — reachable
+only by the proxy on the internal network, authenticated by a shared `X-Ops-Token`,
+and refusing any container name outside the `mcp-`/`lab-mcp-` allowlist (fail-closed).
+The proxy side (`routers/admin_ops.py`) never touches the socket: it authorizes,
+derives the target container **server-side** from `server_registry.upstream_url`
+(never from client input — see INV note on the confused-deputy review below),
+and forwards. **restart/rebuild are platform_admin-only**; **logs** are
+owner/maintainer + `debug_mode`-gated. Fail-closed: if the ops-agent is unset or
+unreachable every endpoint returns 503, never a direct podman fallback. `rebuild`
+today recreates the image from its existing build context; a per-server
+`git pull`-of-latest is roadmap (needs a repo-path mapping per server). See
+`docs/spec/11-server-lifecycle-and-hardening-batch.md`.
+
 **End-to-end acceptance (PRD-0005 R-4)**: `lab/tests/submission_lifecycle_e2e.sh` drives the whole
 lifecycle over the real gateway — submit (alice) → automated scan (mcp_checker findings + both SBOMs)
 → segregation-of-duties (submitter self-approve → 403) → approve (carol, `security_reviewer`) →
@@ -741,6 +759,8 @@ ones are gated by `make security-check`; the rest are enforced by design and rev
 | INV-013 | Every brokered credential is AES-256-GCM envelope-encrypted under a per-user HKDF-SHA256 KEK (≥256-bit master), keyed on the **authenticated** identity, with a synchronous lifecycle audit | `credential_broker/{kms,approaches/approach_a}.py` |
 | INV-014 | Session-JTI revocation **fails closed** — any Redis/DB error ⇒ deny (never allow a revoked token) | `middleware/auth.py::_is_session_jti_revoked` |
 | INV-015 | MCP-profile lookup **fails closed** — DB error + cache miss ⇒ 503, never an empty (unrestricted) profile | `services/invocation.py::_lookup_profile_with_cache` |
+| INV-016 | A **named profile** (session-bound via `?profile=` at OIDC login — the access-*restriction* mechanism) is an **allowlist**: once it has *any* binding row, a tool with no explicit row is **denied** (`{"enabled": false}` synthesized → `mcp_disabled_for_profile`), not default-allowed. A profile with zero bindings still allows all (an unconfigured profile is not silently a deny-all). The "does this profile have any binding" check itself fails closed (DB error + no cache ⇒ 503). The legacy per-identity profile path (no `profile_uuid`) is unchanged — default-allow. | `services/invocation.py::_named_profile_has_any_binding` |
+| INV-017 | The isolation gate (`scripts/check_network_isolation.py`, `make security-check`) **fails if OPA (`:8181`) or any MCP backend publishes a host port** under the default lab-up compose layering — a comment that removes a port cannot be trusted when a later merged file re-adds it, so the invariant is machine-checked, not documented. Preserves "no backend invocation bypasses the shared invocation path" against same-host loopback re-exposure. | `scripts/check_network_isolation.py` |
 
 Identity anti-spoofing (P1-1): an OIDC email is only used as the identity key when the IdP asserts it
 **verified** (`verified_oidc_identity`); with realm `verifyEmail=true`, a changed email is unverified
