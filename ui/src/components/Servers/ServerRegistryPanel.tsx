@@ -2,9 +2,20 @@ import { useEffect, useState } from 'react'
 import { Button } from '../common/Button'
 import { Badge } from '../common/Badge'
 import { Card } from '../common/Card'
+import { Modal } from '../common/Modal'
 import { servers as serversApi, ApiError } from '@/services/api'
 import type { MCPServer } from '@/types'
 import '../AdminPanel/AdminPanel.css'
+
+// SEP-1913 rank labels — mirrors taint_floor.py's docstring table exactly
+// (0=untrustedPublic .. 4=system); keep in sync if that ranking changes.
+const TRUST_TIER_LABELS: Record<number, string> = {
+  0: '0 — untrustedPublic',
+  1: '1 — trustedPublic',
+  2: '2 — internal',
+  3: '3 — user',
+  4: '4 — system',
+}
 
 // H-04 (2026-07-11 audit): the generic message hid which action actually
 // failed (approve vs. suspend vs. list). Surface the real backend detail
@@ -17,6 +28,8 @@ function friendlyError(action: string, e: unknown): string {
 
 interface PendingConsent { token: string; expiresAt: number }
 
+interface EditFormState { upstream_url: string; service_name: string; trust_tier: string }
+
 export function ServerRegistryPanel() {
   const [servers, setServers] = useState<MCPServer[]>([])
   const [loading, setLoading] = useState(true)
@@ -25,6 +38,21 @@ export function ServerRegistryPanel() {
   // D3 dual-control: a consent token minted via "Request approval" must be
   // handed to Approve before the backend will accept the approval.
   const [consents, setConsents] = useState<Record<string, PendingConsent>>({})
+
+  // WS-A: edit modal
+  const [editing, setEditing] = useState<MCPServer | null>(null)
+  const [editForm, setEditForm] = useState<EditFormState>({ upstream_url: '', service_name: '', trust_tier: '' })
+  const [editError, setEditError] = useState('')
+
+  // WS-A: rebuild recreates the container — require an explicit confirm click
+  // (same pattern as CredentialsPanel's revoke confirm).
+  const [rebuildConfirmId, setRebuildConfirmId] = useState<string | null>(null)
+
+  // WS-A: view-logs modal
+  const [logsFor, setLogsFor] = useState<MCPServer | null>(null)
+  const [logsText, setLogsText] = useState('')
+  const [logsLoading, setLogsLoading] = useState(false)
+  const [logsError, setLogsError] = useState('')
 
   async function load() {
     setLoading(true); setError('')
@@ -63,6 +91,66 @@ export function ServerRegistryPanel() {
     try { await serversApi.suspend(id); await load() }
     catch (e) { setError(friendlyError('Suspend', e)) }
     finally { setBusyId(null) }
+  }
+
+  function openEdit(s: MCPServer) {
+    setEditing(s)
+    setEditError('')
+    setEditForm({
+      upstream_url: s.upstream_url,
+      service_name: s.service_name ?? '',
+      trust_tier: s.trust_tier != null ? String(s.trust_tier) : '',
+    })
+  }
+
+  async function saveEdit() {
+    if (!editing) return
+    setEditError('')
+    if (!editForm.upstream_url.trim()) { setEditError('Upstream URL is required.'); return }
+    const body: { upstream_url?: string; service_name?: string; trust_tier?: number } = {
+      upstream_url: editForm.upstream_url.trim(),
+      service_name: editForm.service_name.trim() || undefined,
+    }
+    if (editForm.trust_tier !== '') {
+      const tier = Number(editForm.trust_tier)
+      if (!Number.isInteger(tier) || tier < 0 || tier > 4) { setEditError('Trust tier must be 0-4.'); return }
+      body.trust_tier = tier
+    }
+    setBusyId(editing.server_id)
+    try {
+      await serversApi.update(editing.server_id, body)
+      setEditing(null)
+      await load()
+    } catch (e) { setEditError(friendlyError('Save server', e)) }
+    finally { setBusyId(null) }
+  }
+
+  async function restart(id: string) {
+    setBusyId(id)
+    try { await serversApi.restart(id) }
+    catch (e) { setError(friendlyError('Restart', e)) }
+    finally { setBusyId(null) }
+  }
+
+  async function rebuild(id: string) {
+    if (rebuildConfirmId !== id) { setRebuildConfirmId(id); return }
+    setRebuildConfirmId(null)
+    setBusyId(id)
+    try { await serversApi.rebuild(id) }
+    catch (e) { setError(friendlyError('Rebuild', e)) }
+    finally { setBusyId(null) }
+  }
+
+  async function openLogs(s: MCPServer) {
+    setLogsFor(s)
+    setLogsText('')
+    setLogsError('')
+    setLogsLoading(true)
+    try {
+      const { logs } = await serversApi.logs(s.server_id, 200)
+      setLogsText(logs)
+    } catch (e) { setLogsError(friendlyError('Load logs', e)) }
+    finally { setLogsLoading(false) }
   }
 
   const pending = servers.filter(s => s.status === 'pending')
@@ -133,6 +221,32 @@ export function ServerRegistryPanel() {
                           Suspend
                         </Button>
                       )}
+                      <Button size="sm" variant="secondary" onClick={() => openEdit(s)} disabled={busyId === s.server_id}>
+                        Edit
+                      </Button>
+                      {s.status === 'approved' && (
+                        <>
+                          <Button size="sm" variant="secondary" onClick={() => restart(s.server_id)} disabled={busyId === s.server_id}>
+                            Restart
+                          </Button>
+                          {rebuildConfirmId === s.server_id ? (
+                            <>
+                              <span className="mono-sm">Recreates the container — confirm?</span>
+                              <Button size="sm" variant="danger" onClick={() => rebuild(s.server_id)} disabled={busyId === s.server_id}>Confirm rebuild</Button>
+                              <Button size="sm" variant="ghost" onClick={() => setRebuildConfirmId(null)} disabled={busyId === s.server_id}>Cancel</Button>
+                            </>
+                          ) : (
+                            <Button size="sm" variant="secondary" onClick={() => rebuild(s.server_id)} disabled={busyId === s.server_id}>
+                              Rebuild
+                            </Button>
+                          )}
+                        </>
+                      )}
+                      {s.debug_mode === true && (
+                        <Button size="sm" variant="secondary" onClick={() => openLogs(s)} disabled={busyId === s.server_id}>
+                          View logs
+                        </Button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -141,6 +255,63 @@ export function ServerRegistryPanel() {
           </table>
         )}
       </Card>
+
+      {editing && (
+        <Modal
+          title={`Edit ${editing.name}`}
+          onClose={() => setEditing(null)}
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => setEditing(null)} disabled={busyId === editing.server_id}>Cancel</Button>
+              <Button variant="primary" loading={busyId === editing.server_id} onClick={saveEdit}>Save</Button>
+            </>
+          }
+        >
+          {editError && <p className="form-error" role="alert">{editError}</p>}
+          <div className="form-grid">
+            <div className="form-field form-field--wide">
+              <label htmlFor="edit-upstream-url">Upstream URL <span className="required">*</span></label>
+              <input
+                id="edit-upstream-url"
+                value={editForm.upstream_url}
+                onChange={e => setEditForm(f => ({ ...f, upstream_url: e.target.value }))}
+                placeholder="https://…"
+              />
+            </div>
+            <div className="form-field form-field--wide">
+              <label htmlFor="edit-service-name">Service name</label>
+              <input
+                id="edit-service-name"
+                value={editForm.service_name}
+                onChange={e => setEditForm(f => ({ ...f, service_name: e.target.value }))}
+                placeholder="e.g. gitea"
+              />
+            </div>
+            <div className="form-field form-field--wide">
+              <label htmlFor="edit-trust-tier">Trust tier</label>
+              <select
+                id="edit-trust-tier"
+                value={editForm.trust_tier}
+                onChange={e => setEditForm(f => ({ ...f, trust_tier: e.target.value }))}
+              >
+                <option value="">Unchanged</option>
+                {Object.entries(TRUST_TIER_LABELS).map(([v, label]) => (
+                  <option key={v} value={v}>{label}</option>
+                ))}
+              </select>
+              <p className="form-hint">Raising this affects the taint floor for future callers (SEP-1913) — only promote a server once it's actually been vetted.</p>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {logsFor && (
+        <Modal title={`Logs — ${logsFor.name}`} onClose={() => setLogsFor(null)}>
+          {logsLoading && <p>Loading…</p>}
+          {logsError && <p className="form-error" role="alert">{logsError}</p>}
+          {!logsLoading && !logsError && <pre className="modal-logs">{logsText || '(no output)'}</pre>}
+        </Modal>
+      )}
     </div>
   )
 }

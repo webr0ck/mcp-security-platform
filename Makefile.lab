@@ -10,7 +10,8 @@ LAB_COMPOSE = podman-compose --env-file .env.lab \
 
 .PHONY: lab-setup lab-up lab-down lab-reset lab-rebuild lab-recreate lab-init lab-test lab-smoke \
         lab-logs lab-dex-logs lab-ps lab-entra-check lab-vault-init \
-        lab-proxy-shell lab-netbox-shell smoke-four lab-acceptance lab-probe wazuh-up wazuh-dashboard-up incidents help
+        lab-proxy-shell lab-netbox-shell lab-ops-agent-logs lab-ops-agent-health \
+        smoke-four lab-acceptance lab-probe wazuh-up wazuh-dashboard-up incidents help
 
 ## lab-setup       Zero-to-usable: start stack, migrate DB, provision tokens, seed, smoke test
 lab-setup:
@@ -172,6 +173,14 @@ lab-vault-init:
 ## lab-proxy-shell  Open a bash shell inside the proxy container
 lab-proxy-shell:
 	$(LAB_COMPOSE) exec proxy bash
+
+## lab-ops-agent-logs  Tail the ops-agent container's own logs (WS-A)
+lab-ops-agent-logs:
+	$(LAB_COMPOSE) logs -f lab-ops-agent
+
+## lab-ops-agent-health  Curl the ops-agent's unauthenticated /health probe
+lab-ops-agent-health:
+	$(LAB_COMPOSE) exec lab-ops-agent python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:9000/health').read().decode())"
 
 ## lab-netbox-shell Open a sh shell inside the NetBox container
 lab-netbox-shell:

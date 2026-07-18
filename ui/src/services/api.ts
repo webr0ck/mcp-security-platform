@@ -87,6 +87,23 @@ export const servers = {
     method: 'PATCH',
     body: JSON.stringify({ status: 'suspended' }),
   }),
+  // WS-A (docs/spec/11-server-lifecycle-and-hardening-batch.md): edit the
+  // fields the backend already allowlists in _PATCH_ALLOWED
+  // (server_registry.py) — name/upstream_url/service_name/trust_tier.
+  update: (id: string, body: { name?: string; upstream_url?: string; service_name?: string; trust_tier?: number }) =>
+    request<{ server_id: string; updated: string[] }>(`/api/v1/admin/servers/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  // Lifecycle ops — forwarded by proxy routers/admin_ops.py to the isolated
+  // ops-agent (no container runtime socket in the proxy itself). Gated on
+  // debug_mode=true server-side; the UI-side gate below is UX only.
+  restart: (id: string) =>
+    request<{ status?: string } | undefined>(`/api/v1/admin/servers/${id}/restart`, { method: 'POST' }),
+  rebuild: (id: string) =>
+    request<{ status?: string } | undefined>(`/api/v1/admin/servers/${id}/rebuild`, { method: 'POST' }),
+  logs: (id: string, tail = 200) =>
+    request<{ logs: string }>(`/api/v1/admin/servers/${id}/logs?tail=${tail}`),
 }
 
 // ── OIDC configuration ────────────────────────────────────────────────────────

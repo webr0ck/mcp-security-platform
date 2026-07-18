@@ -29,6 +29,14 @@ export interface MCPServer {
   service_name: string | null
   created_at: string
   approved_at: string | null
+  // Optional: only present when the backend list SELECT includes these
+  // columns (server_registry.py:list_servers currently does not — see
+  // docs/spec/15-profile-naming-and-credential-ui.md). Treat missing/undefined
+  // as "unknown" and fail closed (hide debug-gated actions) rather than
+  // assuming false.
+  debug_mode?: boolean
+  // SEP-1913 rank (0=untrustedPublic .. 4=system) — see taint_floor.py.
+  trust_tier?: number
 }
 
 export interface RoleAssignment {

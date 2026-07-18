@@ -35,6 +35,7 @@ ALLOWED_PROXY_PEERS = {
     "gateway", "grafana", "step-ca",          # ingress / benign control plane
     "opa", "ollama", "redis", "db", "vault",  # backends the proxy dials
     "self-service",                           # self-service MCP server (pairwise, calls back into design-assist/submissions)
+    "lab-ops-agent",                          # WS-A: server lifecycle (logs/restart/rebuild); pairwise, no host port, no gateway ingress
     # IdP services legitimately on gateway-net in multi-tier deploys
     "keycloak", "keycloak-seeder",
 }
@@ -45,6 +46,7 @@ PAIRWISE = {
     "db": "proxy-db-net",
     "vault": "vault-net",
     "self-service": "proxy-self-service-net",
+    "lab-ops-agent": "proxy-ops-agent-net",
 }
 
 # ── One-shot init / seeder containers excluded from persistent peer check ─────
@@ -408,6 +410,72 @@ def _check_mcp_isolation(c: dict, compose_file: str, fails: list[str]) -> None:
         )
 
 
+# ── Fix 8 (docs/spec/11-server-lifecycle-and-hardening-batch.md §8) ──────────
+# Compose list-merge APPENDS ports across layered files — a later file cannot
+# remove an earlier file's `ports:` publish. Checking each compose file in
+# isolation (as _run_checks_for_file does above) therefore CANNOT catch a
+# leak introduced by an earlier layer in the real boot topology: exactly how
+# docker-compose.dev.yml's OPA :8181 publish survived into the merged lab
+# topology even though podman-compose.lab.yml's own opa service defines no
+# ports key. This check resolves the SAME merged file set Makefile.lab's
+# lab-up target actually boots (LAB_COMPOSE) and fails if OPA or any MCP
+# backend service publishes a host port anywhere in that merged result.
+LAB_UP_COMPOSE_FILES = [
+    "docker-compose.yml",
+    "docker-compose.dev.yml",
+    "podman-compose.lab.yml",
+    "compose.wazuh.yml",
+]
+
+
+def _svc_has_published_port(s: dict) -> bool:
+    """
+    True if the service's `ports:` key would publish anything to the host.
+    Handles both compose-binary-resolved form (list of dicts with
+    target/published/protocol) and raw string form ("host:container" or
+    "ip:host:container"). `expose:` is intentionally NOT checked here — it
+    does not publish to the host.
+    """
+    ports = s.get("ports")
+    return bool(ports)
+
+
+def _check_lab_up_no_host_ports(fails: list[str]) -> None:
+    print(f"\n--- Merged lab-up topology (Fix 8): {' + '.join(LAB_UP_COMPOSE_FILES)} ---")
+    existing = [f for f in LAB_UP_COMPOSE_FILES if Path(f).exists()]
+    if len(existing) != len(LAB_UP_COMPOSE_FILES):
+        missing = sorted(set(LAB_UP_COMPOSE_FILES) - set(existing))
+        print(f"WARN  Skipping merged lab-up host-port check — missing files: {missing}")
+        return
+
+    c = _resolve_compose(LAB_UP_COMPOSE_FILES)
+    if c is None:
+        fails.append("[lab-up merged] compose config resolution failed")
+        return
+
+    svc = c.get("services") or {}
+    tag = "[lab-up merged] "
+
+    def chk(label: str, cond: bool) -> None:
+        print(("PASS  " if cond else "FAIL  ") + tag + label)
+        if not cond:
+            fails.append(tag + label)
+
+    if "opa" in svc:
+        chk(
+            f"opa: publishes no host port (ports={svc['opa'].get('ports')})",
+            not _svc_has_published_port(svc["opa"]),
+        )
+
+    for name, s in svc.items():
+        if not _is_mcp_service(name):
+            continue
+        chk(
+            f"MCP {name}: publishes no host port (ports={s.get('ports')})",
+            not _svc_has_published_port(s),
+        )
+
+
 def _check_egress_proxy(c: dict, compose_file: str, fails: list[str]) -> None:
     """
     Additional gate (Task 2.4): squid/egress-proxy service must not be on
@@ -533,6 +601,14 @@ def main() -> int:
         default=["docker-compose.yml"],
         help="Compose file(s) to check (default: docker-compose.yml)",
     )
+    parser.add_argument(
+        "--skip-lab-up-merge-check",
+        action="store_true",
+        help="Skip the Fix-8 merged lab-up host-port check (LAB_UP_COMPOSE_FILES). "
+             "Runs by default alongside whatever compose_files are passed, since it "
+             "catches a class of leak (an earlier layer's ports: surviving merge) "
+             "that per-file checks cannot see.",
+    )
     args = parser.parse_args()
 
     print("════════════════════════════════════════════════════════")
@@ -546,6 +622,9 @@ def main() -> int:
             print(f"WARN  Compose file not found, skipping: {f}")
             continue
         _run_checks_for_file(f, fails)
+
+    if not args.skip_lab_up_merge_check:
+        _check_lab_up_no_host_ports(fails)
 
     print()
     if fails:

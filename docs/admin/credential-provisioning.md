@@ -14,6 +14,14 @@ secret's plaintext value in any subsequent read** — only upload/rotate is poss
 
 ## Upload or rotate a credential
 
+**UI path (Fix 6, `docs/spec/11-server-lifecycle-and-hardening-batch.md`):** this same endpoint is
+also reachable from the portal — **Servers → Credentials tab** — so `entra_client_credentials`-style
+servers can get a credential without reading this file or a test. Pick the tool, click
+"Manage credential", fill in credential type / owner / secret, save. The UI form posts the exact
+body shape shown below (`ui/src/components/Servers/CredentialsPanel.tsx`,
+`credentials.upload()` in `ui/src/services/api.ts`); the curl form remains the reference for
+scripting/CI.
+
 ```bash
 curl -sf -X PUT http://localhost:8000/admin/credentials/$TOOL_ID \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \

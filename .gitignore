@@ -23,6 +23,10 @@ server.key
 lab/nginx/lab-certs/*.pem
 # RT-004 fix: local key override written after red-team rotation — never commit
 proxy/.env
+# Fix 8 (docs/spec/11-server-lifecycle-and-hardening-batch.md): opt-in dev
+# convenience overlay that restores host-port debugging access. Never
+# committed — see docker-compose.override.yml.example for the template.
+docker-compose.override.yml
 # OPA-002/003: bearer token is a runtime secret — never commit
 infra/secrets/*
 !infra/secrets/.gitkeep
