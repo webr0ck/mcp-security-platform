@@ -156,14 +156,17 @@ async def _fetch_idp_discovery() -> dict:
     return {}
 
 
-@router.get("/.well-known/oauth-authorization-server")
-async def oauth_server_metadata(request: Request):
+async def _authorization_server_metadata(request: Request) -> dict:
     """
-    RFC 8414 server metadata — proxies Keycloak's discovery document.
+    RFC 8414 server metadata — proxies Keycloak's discovery document with the
+    proxy's value-adds (registration bridge, PKCE S256, filtered scopes).
 
-    Always injects registration_endpoint pointing at this proxy's /oauth/register
-    so MCP clients can do dynamic client registration and receive the "claude-code"
-    public-client credentials without needing any pre-shared secret.
+    ISSUER CONSISTENCY (RFC 9207 / doc 10): `issuer` is the realm issuer URL and
+    MUST equal both the callback `iss` Keycloak emits and the `authorization_servers`
+    entry in the protected-resource metadata. Strict clients (Codex >=0.143) fetch
+    this document for the realm issuer via RFC 8414 path-insertion
+    (`{origin}/.well-known/oauth-authorization-server/realms/<realm>`) — served by
+    the path-insertion route below, which returns THIS same document.
     """
     public = _public_issuer()
     proxy = _proxy_base(request)
@@ -185,6 +188,10 @@ async def oauth_server_metadata(request: Request):
             "scopes_supported": ["openid", "profile", "email", "roles"],
         }
 
+    # RFC 9207/8414 issuer consistency: pin issuer to the realm URL (the value
+    # Keycloak also puts in the callback `iss`). Never let it drift to the proxy
+    # origin — a split issuer is what strict clients reject.
+    data["issuer"] = public
     # Inject the proxy's registration bridge — always overrides the IdP's own
     # value so we control which client credentials are handed to MCP clients.
     data["registration_endpoint"] = f"{proxy}/oauth/register"
@@ -196,7 +203,39 @@ async def oauth_server_metadata(request: Request):
     # requesting an unenabled scope returns invalid_scope.
     data["scopes_supported"] = ["openid", "profile", "email", "roles", "offline_access"]
 
+    # OAuth-discovery debuggability (doc 10): one greppable line carrying the
+    # issuer identity the server advertises, so an operator can confirm from logs
+    # that issuer == authorization_servers == (expected) callback iss without a
+    # client. Search: "oauth.discovery".
+    logger.info(
+        "oauth.discovery as_metadata issuer=%s registration_endpoint=%s path=%s",
+        data.get("issuer"), data["registration_endpoint"], request.url.path,
+    )
     return data
+
+
+@router.get("/.well-known/oauth-authorization-server")
+async def oauth_server_metadata(request: Request):
+    return await _authorization_server_metadata(request)
+
+
+@router.get("/.well-known/oauth-authorization-server/{rest:path}")
+async def oauth_server_metadata_path_insert(request: Request, rest: str):
+    """RFC 8414 §3.1 path-insertion form for a path-containing issuer.
+
+    For issuer `{origin}/realms/<realm>` the metadata URL is
+    `{origin}/.well-known/oauth-authorization-server/realms/<realm>`. Strict
+    RFC 9207 clients (Codex) use this once `authorization_servers` points at the
+    realm issuer. Returns the SAME filtered document (issuer = realm URL) so the
+    issuer stays consistent end-to-end."""
+    return await _authorization_server_metadata(request)
+
+
+@router.get("/.well-known/openid-configuration/{rest:path}")
+async def openid_configuration_path_insert(request: Request, rest: str):
+    """OIDC discovery path-insertion fallback ({origin}/.well-known/openid-configuration/realms/<realm>).
+    Some clients try OIDC discovery for the issuer; serve the same consistent doc."""
+    return await _authorization_server_metadata(request)
 
 
 @router.post("/oauth/register")
@@ -271,27 +310,30 @@ def _protected_resource_metadata(request: Request, resource_path: str = "") -> d
     """
     proxy = _proxy_base(request)
     issuer = _public_issuer()
-    # Point authorization_servers at the proxy's own filtered discovery endpoint
-    # (not Keycloak directly). If we listed Keycloak's issuer URL, MCP clients
-    # would fetch Keycloak's native discovery document which advertises every realm
-    # scope — causing invalid_scope on the authorization request. Our proxy's
-    # /.well-known/oauth-authorization-server overrides scopes_supported to only
-    # the scopes enabled on the claude-code public client.
-    return {
+    # RFC 9207/8414 issuer consistency (doc 10): authorization_servers MUST be the
+    # realm issuer URL — the SAME value as this doc's `issuer`, the AS-metadata
+    # `issuer`, and the callback `iss` Keycloak emits. Previously this pointed at
+    # the proxy ORIGIN so the proxy could front filtered discovery; that split
+    # (origin vs realm) is exactly what strict RFC 9207 clients (Codex >=0.143)
+    # reject. We keep the filtering + registration bridge by serving that same
+    # filtered AS metadata at the realm issuer's RFC 8414 path-insertion URL
+    # (see oauth_server_metadata_path_insert) — so pointing here at the realm
+    # issuer loses nothing and makes every issuer value identical.
+    result = {
         "resource": proxy + resource_path,
-        "authorization_servers": [proxy],
+        "authorization_servers": [issuer] if issuer else [proxy],
         "bearer_methods_supported": ["header"],
         "resource_documentation": f"{proxy}/docs",
         "introspection_endpoint": f"{issuer}/protocol/openid-connect/token/introspect" if issuer else None,
-        # RFC 9728 does not mandate "issuer" on protected-resource metadata, but
-        # current Codex (>=0.143, rmcp PR896 / openai/codex#31573) fails OAuth
-        # with "missing required issuer" against documents that omit it. Value
-        # is the token-issuing IdP's issuer identifier (matches the JWT "iss"
-        # claim clients will see after the code exchange) — purely additive,
-        # does not change `resource`/`authorization_servers`/scope filtering,
-        # so it cannot regress Claude Code's existing flow.
+        # RFC 9728 does not mandate "issuer", but current Codex (>=0.143, rmcp
+        # PR896) fails without it. Same realm issuer identifier as above.
         "issuer": issuer if issuer else None,
     }
+    logger.info(
+        "oauth.discovery protected_resource resource=%s authorization_servers=%s issuer=%s",
+        result["resource"], result["authorization_servers"], result["issuer"],
+    )
+    return result
 
 
 @router.get("/.well-known/oauth-protected-resource")

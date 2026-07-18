@@ -252,3 +252,30 @@ class TestValidateRedirectUri:
         from fastapi import HTTPException
         with pytest.raises(HTTPException):
             self._validate("javascript:void(0)")
+
+
+# ---------------------------------------------------------------------------
+# RFC 9207 / doc 10 — issuer consistency (regression for the Codex fix)
+# ---------------------------------------------------------------------------
+
+class TestIssuerConsistency:
+    """authorization_servers, the AS-metadata issuer, and the PRM issuer must all
+    be the realm issuer URL — a split (proxy origin vs realm) is what strict
+    RFC 9207 clients (Codex >=0.143) reject. See docs/spec/10-*."""
+
+    def test_prm_authorization_servers_equals_realm_issuer(self, monkeypatch):
+        from app.routers import oauth_metadata as om
+        monkeypatch.setattr(om.settings, "OIDC_ISSUER_URL", "https://h:8443/realms/mcp")
+        monkeypatch.setattr(om.settings, "PROXY_BASE_URL", "https://h:8443")
+
+        class _Req:
+            @property
+            def base_url(self):
+                return "https://h:8443/"
+
+        d = om._protected_resource_metadata(_Req(), "/mcp")
+        assert d["issuer"] == "https://h:8443/realms/mcp"
+        # The core invariant: authorization_servers MUST equal the realm issuer,
+        # NOT the proxy origin (https://h:8443).
+        assert d["authorization_servers"] == [d["issuer"]]
+        assert d["authorization_servers"] != ["https://h:8443"]
