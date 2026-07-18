@@ -64,6 +64,17 @@ FROM server_registry s
 WHERE s.upstream_allowlist_entry = '10.89.0.0/16'
 ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING;
 
+-- Grant alice's mTLS identity the same entitlements. When alice reaches the proxy
+-- via a client cert (X-Client-Cert-CN: alice@corp — e.g. lab-smoke's grafana
+-- check) the principal is 'agent:{MTLS_CA_ID}:alice@corp' (type=agent), NOT the
+-- Keycloak 'human:' principal above, so without this the mTLS path is NOT_ENTITLED
+-- for every server. MTLS_CA_ID defaults to 'step-ca' (see config.py).
+INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by, entitlement_version)
+SELECT s.server_id, 'agent:step-ca:alice@corp', 'agent', 'lab-seeder', 1
+FROM server_registry s
+WHERE s.upstream_allowlist_entry = '10.89.0.0/16'
+ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING;
+
 -- Grant the lab API key (Claude Code SELF_SERVICE_API_KEY) an entitlement on each onboarded server
 INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by, entitlement_version)
 SELECT s.server_id, 'human:apikey:lab-self-service', 'human', 'lab-seeder', 1

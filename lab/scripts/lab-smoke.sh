@@ -148,10 +148,20 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 4: Dex enrollment redirect
+# Test 4: Dex enrollment consent page
+# R-5/D1: GET /auth/enroll/{service} renders a consent page (HTTP 200) with a
+# POST form to /auth/enroll/{service}/consent — it deliberately does NOT redirect
+# straight to the IdP (the older 302→:5556 behavior). See oauth.py::enroll.
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 4: Dex enrollment redirect (GET /auth/enroll/dex)"
+echo "Test 4: Dex enrollment consent page (GET /auth/enroll/dex)"
+ENROLL_BODY=$(
+    pcurl -s \
+        -H "X-Session-Id: smoke-1" \
+        -H "X-Client-Cert-CN: alice@corp" \
+        -H "X-Gateway-Secret: ${GATEWAY_SHARED_SECRET}" \
+        "${PROXY_BASE}/auth/enroll/dex"
+)
 ENROLL_STATUS=$(
     pcurl -s -o /dev/null -w "%{http_code}" \
         -H "X-Session-Id: smoke-1" \
@@ -159,22 +169,12 @@ ENROLL_STATUS=$(
         -H "X-Gateway-Secret: ${GATEWAY_SHARED_SECRET}" \
         "${PROXY_BASE}/auth/enroll/dex"
 )
-REDIRECT_URL=$(
-    pcurl -s -o /dev/null -w "%{redirect_url}" \
-        -H "X-Session-Id: smoke-1" \
-        -H "X-Client-Cert-CN: alice@corp" \
-        -H "X-Gateway-Secret: ${GATEWAY_SHARED_SECRET}" \
-        "${PROXY_BASE}/auth/enroll/dex"
-)
 
-if [[ "${ENROLL_STATUS}" == "302" ]] && echo "${REDIRECT_URL}" | grep -q "5556"; then
-    run_test "Dex enrollment redirect (302 → :5556)" "pass" ""
-elif [[ "${ENROLL_STATUS}" == "302" ]]; then
-    run_test "Dex enrollment redirect (302 → :5556)" "fail" \
-        "Got 302 but redirect URL '${REDIRECT_URL}' does not contain :5556"
+if [[ "${ENROLL_STATUS}" == "200" ]] && echo "${ENROLL_BODY}" | grep -q "/auth/enroll/dex/consent"; then
+    run_test "Dex enrollment consent page (200 + consent form)" "pass" ""
 else
-    run_test "Dex enrollment redirect (302 → :5556)" "fail" \
-        "Expected 302, got ${ENROLL_STATUS}. Redirect: ${REDIRECT_URL}"
+    run_test "Dex enrollment consent page (200 + consent form)" "fail" \
+        "Expected 200 with a POST form to /auth/enroll/dex/consent, got status ${ENROLL_STATUS}"
 fi
 
 # ---------------------------------------------------------------------------

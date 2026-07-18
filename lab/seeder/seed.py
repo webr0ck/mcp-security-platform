@@ -860,7 +860,7 @@ async def seed_m365_credential(conn: asyncpg.Connection, master_hex: str) -> boo
 
     try:
         await store_service_credential(
-            conn, master_hex, "entra_client_credentials", "m365-mcp", azure_secret
+            conn, master_hex, "entra_client_credentials", "m365-graph", azure_secret
         )
         log.info("m365 AZURE_CLIENT_SECRET seeded into credential_store as entra_client_credentials")
         return True
