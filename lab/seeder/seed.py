@@ -1112,15 +1112,31 @@ async def seed_m365_client_credentials(conn: asyncpg.Connection, master_hex: str
 
 async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     """
-    Generate (or retrieve) a service API key for lab-mcp-self-service.
+    Generate a service API key for lab-mcp-self-service.
 
     The key is stored in the proxy's api_keys table under client_id
     'lab-self-service' with role 'agent'. The seeder generates a random
     hex key, hashes it via the same hash_api_key path used by the proxy,
     and writes the raw key to .env.lab as SELF_SERVICE_API_KEY.
 
-    Idempotent: if a non-revoked key for 'lab-self-service' already exists,
-    returns a new one (re-generation is safe — old key is revoked).
+    NOT idempotent, by necessity: every call ROTATES the key (old one
+    revoked, a brand-new one generated) because the raw key can't be
+    retrieved from the stored hash to reissue the same value. This means
+    lab-mcp-self-service's already-running container (which baked in the
+    OLD key at process start) goes stale on every seeder run, not just the
+    first — confirmed live 2026-07-18 (submit_mcp_server/check_submission_status
+    -> create_failed/unauthenticated, self-service's own outbound POST to
+    /api/v1/submissions 401'ing, api_keys.key_hash matching neither the
+    running container's env nor .env.lab).
+
+    CALLERS MUST NOT invoke the lab-seeder service standalone
+    (`podman-compose run --rm lab-seeder`) and stop there — always go
+    through lab-setup.sh, whose Step 10 re-sources .env.lab and
+    force-recreates lab-mcp-grafana/lab-mcp-gitea/lab-mcp-self-service
+    immediately after the seeder exits, precisely to close this gap. A
+    standalone reseed (e.g. to add a single new fixture, such as the
+    readonly-demo profile) silently desyncs lab-mcp-self-service until
+    something recreates it.
 
     Returns the raw (unhashed) key, or None on failure.
     """
