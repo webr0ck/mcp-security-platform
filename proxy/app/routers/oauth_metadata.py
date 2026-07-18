@@ -203,6 +203,17 @@ async def _authorization_server_metadata(request: Request) -> dict:
     # requesting an unenabled scope returns invalid_scope.
     data["scopes_supported"] = ["openid", "profile", "email", "roles", "offline_access"]
 
+    # WORKAROUND (openai/codex#31573): Codex/rmcp 0.144.x has a broken RFC 9207
+    # validator — when the AS advertises authorization_response_iss_parameter_supported=true
+    # it REQUIRES + validates the callback `iss`, but then fails to match a valid,
+    # PRESENT iss and reports "missing required issuer" (reproduced locally: the
+    # callback carries iss=<realm URL> exactly, Codex still rejects it). M365/
+    # Atlassian work with Codex because they don't force this check. We stop
+    # ADVERTISING iss support so rmcp skips the broken path; Keycloak still SENDS
+    # iss in the callback (spec-correct clients may still validate it), and
+    # PKCE + state continue to defend against mix-up. Revisit once #31573 ships.
+    data["authorization_response_iss_parameter_supported"] = False
+
     # OAuth-discovery debuggability (doc 10): one greppable line carrying the
     # issuer identity the server advertises, so an operator can confirm from logs
     # that issuer == authorization_servers == (expected) callback iss without a
