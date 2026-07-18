@@ -786,7 +786,7 @@ services:
           cpus: "0.5"
           pids: 256
     ports:
-      - "127.0.0.1:8106:8000"
+      - "127.0.0.1:8112:8000"
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -872,7 +872,7 @@ services:
     image: lab-mcp-search:lab
     container_name: lab-mcp-search
     ports:
-      - "127.0.0.1:8107:8000"
+      - "127.0.0.1:8113:8000"
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"

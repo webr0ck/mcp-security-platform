@@ -1119,24 +1119,22 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     hex key, hashes it via the same hash_api_key path used by the proxy,
     and writes the raw key to .env.lab as SELF_SERVICE_API_KEY.
 
-    NOT idempotent, by necessity: every call ROTATES the key (old one
-    revoked, a brand-new one generated) because the raw key can't be
-    retrieved from the stored hash to reissue the same value. This means
-    lab-mcp-self-service's already-running container (which baked in the
-    OLD key at process start) goes stale on every seeder run, not just the
-    first — confirmed live 2026-07-18 (submit_mcp_server/check_submission_status
-    -> create_failed/unauthenticated, self-service's own outbound POST to
-    /api/v1/submissions 401'ing, api_keys.key_hash matching neither the
-    running container's env nor .env.lab).
+    Idempotent (2026-07-18 fix): if SELF_SERVICE_API_KEY is already set in the
+    environment (from .env.lab, which the running lab-mcp-self-service container
+    baked in at process start), that exact key is REUSED and the DB row is only
+    (re)installed if missing — the key is NOT rotated. This means a standalone
+    reseed (`podman-compose run --rm lab-seeder`, e.g. to add a single fixture
+    like the readonly-demo profile) no longer desyncs the running container.
 
-    CALLERS MUST NOT invoke the lab-seeder service standalone
-    (`podman-compose run --rm lab-seeder`) and stop there — always go
-    through lab-setup.sh, whose Step 10 re-sources .env.lab and
-    force-recreates lab-mcp-grafana/lab-mcp-gitea/lab-mcp-self-service
-    immediately after the seeder exits, precisely to close this gap. A
-    standalone reseed (e.g. to add a single new fixture, such as the
-    readonly-demo profile) silently desyncs lab-mcp-self-service until
-    something recreates it.
+    Only a true first boot (no SELF_SERVICE_API_KEY in the environment) mints a
+    fresh key; the caller writes it to .env.lab. lab-setup.sh's Step 10 still
+    force-recreates lab-mcp-self-service after the seeder, which remains correct
+    for that first-boot case.
+
+    History: before this fix the function rotated the key on every call (the raw
+    key can't be recovered from the stored hash), which silently 401'd every
+    submit_mcp_server/check_submission_status after any standalone reseed — see
+    ExternalTestResults/2026-07-18_14_01_results.md finding #2.
 
     Returns the raw (unhashed) key, or None on failure.
     """
@@ -1144,7 +1142,13 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     import hmac as _hmac
     import secrets
 
-    raw_key = secrets.token_hex(32)
+    # Idempotent: REUSE the key already in .env.lab (which the running
+    # lab-mcp-self-service container baked in at process start) instead of
+    # minting a new one every seed. A standalone reseed used to rotate the key
+    # out from under the running container -> 401 drift (2026-07-18 finding).
+    # Only mint a fresh key when none exists yet (true first boot).
+    existing_key = os.environ.get("SELF_SERVICE_API_KEY", "").strip()
+    raw_key = existing_key or secrets.token_hex(32)
     # Must match proxy/app/core/security.py:hash_api_key — HMAC-SHA-256.
     # Plain sha256 won't authenticate; the proxy always recomputes with HMAC.
     hmac_key = os.environ.get("API_KEY_HMAC_KEY", "")
@@ -1154,21 +1158,31 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     key_hash = _hmac.new(hmac_key.encode(), raw_key.encode(), hashlib.sha256).hexdigest()
 
     try:
-        # Revoke any existing non-revoked keys for this client_id
-        await conn.execute(
+        # If this exact key is already active, there is nothing to do — do NOT
+        # revoke/reinsert (that would bump created_at churn for no reason and is
+        # a no-op anyway). Only when the DB lacks this hash do we (re)install it,
+        # revoking any stale rows for the client first.
+        already_active = await conn.fetchrow(
             """
-            UPDATE api_keys SET revoked_at = NOW()
-            WHERE client_id = 'lab-self-service' AND revoked_at IS NULL
-            """,
-        )
-        # Insert new key
-        await conn.execute(
-            """
-            INSERT INTO api_keys (client_id, key_hash, created_at, created_by)
-            VALUES ('lab-self-service', $1, NOW(), 'seeder')
+            SELECT 1 FROM api_keys
+            WHERE client_id = 'lab-self-service' AND key_hash = $1 AND revoked_at IS NULL
             """,
             key_hash,
         )
+        if already_active is None:
+            await conn.execute(
+                """
+                UPDATE api_keys SET revoked_at = NOW()
+                WHERE client_id = 'lab-self-service' AND revoked_at IS NULL
+                """,
+            )
+            await conn.execute(
+                """
+                INSERT INTO api_keys (client_id, key_hash, created_at, created_by)
+                VALUES ('lab-self-service', $1, NOW(), 'seeder')
+                """,
+                key_hash,
+            )
         # 'agent' for basic access; 'profile_service' for cross-user profile
         # reads/writes (caller_id='lab-self-service' != principal, so the
         # profiles router needs a role grant — scoped narrowly to avoid blanket
