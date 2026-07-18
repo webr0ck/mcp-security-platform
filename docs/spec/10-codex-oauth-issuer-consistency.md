@@ -137,28 +137,40 @@ The production gateway (`gateway/`) needs the equivalent route.
 4. Regression: Claude Code OAuth flow unchanged; `scopes_supported` override and
    `/oauth/register` bridge intact.
 
-## Verification
+## Two parts to the fix (both required)
 
-**Implemented and verified live (2026-07-18).** The gateway is now RFC 9207
-consistent:
-- `authorization_servers == AS-metadata issuer == protected-resource issuer ==`
-  `https://<host>/realms/mcp` (asserted live against all discovery forms).
-- A **real authorization callback captured through the gateway** carries
-  `iss=https://<host>/realms/mcp` — the exact value strict clients expect.
-- A Keycloak bearer token reaches `POST /mcp` initialize → 200.
+Making the topology RFC-consistent (above) was **necessary but not sufficient**.
+Reproducing locally with codex 0.144.1 + Playwright showed that even with a
+correct, consistent, PRESENT callback `iss=<realm URL>`, codex still failed
+`missing required issuer`. The trigger:
 
-**Codex 0.144.5 still fails** with `missing required issuer` even though the
-callback contains the correct, matching `iss`. This confirms the residual failure
-is the **client-side** regression (openai/codex#31573), not the gateway: the
-server now sends a compliant response the buggy client refuses to accept. There is
-no further server-side change that fixes 0.144.x.
+**rmcp 0.144.x's RFC 9207 validator is broken.** When the AS advertises
+`authorization_response_iss_parameter_supported: true`, rmcp *requires and
+validates* the callback `iss` — but then fails to match a valid, present iss and
+reports it "missing" (openai/codex#31573). Microsoft/Entra and Atlassian work with
+codex because they don't force this check.
 
-### Running current Codex against the gateway
+**Workaround (part 2):** `_authorization_server_metadata` overrides
+`authorization_response_iss_parameter_supported` to **false**, so rmcp skips the
+broken path. Keycloak still SENDS `iss` in the callback (spec-correct clients may
+still validate it), and PKCE + `state` still defend against mix-up. This is a
+per-client-bug workaround at the metadata level (it affects all clients, since the
+`.well-known` document has no client identity); revisit once #31573 ships.
 
-Since the gateway is compliant but the client is broken, use Codex's
-`bearer_token_env_var` to bypass the broken interactive callback (still a
-Keycloak-issued, gateway-validated token — not a static API key), or downgrade to
-0.141.0. Full steps: `docs/troubleshooting/oauth-client-connection.md`.
+## Verification — WORKING (2026-07-18)
+
+Reproduced and fixed end-to-end with the **local codex 0.144.1** client:
+- Discovery is clean: `authorization_servers == AS-metadata issuer ==`
+  `protected-resource issuer == callback iss == https://<host>/realms/mcp`
+  (verified via the `oauth.discovery` logs and a real captured callback).
+- With `authorization_response_iss_parameter_supported=false`,
+  `codex mcp login mcp-gateway` → **"Successfully logged in"**, and
+  `codex mcp list` shows `mcp-gateway … Auth: OAuth` (no bearer token, no
+  downgrade). Driven via Playwright (headless) logging in as a real user.
+
+No bearer-token config and no client downgrade are needed. The
+`bearer_token_env_var` path remains documented in the troubleshooting KB as a
+fallback only.
 
 ## Article
 

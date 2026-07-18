@@ -61,38 +61,38 @@ print('authorization_servers=',d['authorization_servers'],'issuer=',d['issuer'])
 `iss` (from the browser's redirect to `127.0.0.1:<port>?...&iss=...`) equals that
 same value.
 
-## Fix / workarounds
+## Fix (server-side — Codex OAuth login works now)
 
-**Gateway side is already fixed and RFC 9207-compliant.** Verified empirically
-(2026-07-18): a real authorization callback through the gateway carries
-`iss=https://<host>/realms/mcp` — exactly the value the client expects — and
-`authorization_servers == AS-issuer == callback iss == the realm URL`. See the log
-check above. So the server sends a correct, present, matching issuer.
+Two-part gateway fix (`proxy/app/routers/oauth_metadata.py`), verified
+end-to-end with local codex 0.144.1 (`codex mcp login mcp-gateway` →
+"Successfully logged in"; `codex mcp list` → `Auth: OAuth`):
 
-**Codex 0.144.x still fails anyway** — it rejects a valid, present `iss`
-([openai/codex#31573](https://github.com/openai/codex/issues/31573); 0.144.x has
-related OAuth-refresh bugs too, [#33403](https://github.com/openai/codex/issues/33403)).
-No server change can fix a client that won't accept a compliant response. Two ways
-to run **current** Codex against the gateway:
+1. **Issuer consistency** — `authorization_servers`, the AS-metadata `issuer`, and
+   the callback `iss` are all the realm URL (`https://<host>/realms/mcp`). The
+   filtered AS metadata is served at the RFC 8414 path-insertion URL.
+2. **Stop advertising `authorization_response_iss_parameter_supported`** — set to
+   `false`. rmcp 0.144.x REQUIRES + validates the callback `iss` when this is
+   `true`, but its validator is broken and rejects a valid, present `iss` as
+   "missing" ([openai/codex#31573](https://github.com/openai/codex/issues/31573);
+   related refresh bug [#33403](https://github.com/openai/codex/issues/33403)).
+   Microsoft/Entra and Atlassian work with codex because they don't force this.
+   Keycloak still SENDS `iss` in the callback; PKCE + `state` still protect the
+   flow. Revisit once #31573 ships.
 
-1. **Recommended — bearer-token config (no downgrade, bypasses the broken OAuth
-   callback).** Codex's `bearer_token_env_var` sends `Authorization: Bearer <token>`
-   directly; the gateway's OIDC bearer path validates it (a real Keycloak access
-   token, not a static API key). Proven to reach `POST /mcp` initialize → 200.
+If Codex login regresses, verify the metadata still advertises `false`:
 
-   ```toml
-   [mcp_servers.mcp-gateway]
-   url = "https://<host>:8443/mcp"
-   bearer_token_env_var = "MCP_GATEWAY_TOKEN"
-   ```
+```bash
+podman exec mcp-proxy python -c "import urllib.request,json; \
+print(json.load(urllib.request.urlopen('http://localhost:8000/.well-known/oauth-authorization-server/realms/mcp')).get('authorization_response_iss_parameter_supported'))"
+# expected: False
+```
 
-   Set `MCP_GATEWAY_TOKEN` to a Keycloak access token for your user (obtain it via
-   your normal login / a refresh; it is short-lived, so refresh when it expires).
-   This keeps auth Keycloak-issued and validated — it just skips Codex's buggy
-   interactive callback.
+### Fallback only (not needed with the fix above)
 
-2. **Client downgrade** to a pre-regression Codex (0.141.0) — works, but pins you
-   to an old client. Upgrade back once OpenAI ships the #31573 fix.
+- **bearer-token config** — `bearer_token_env_var` sends `Authorization: Bearer
+  <Keycloak token>` (gateway OIDC bearer path validates it), bypassing OAuth
+  entirely. Useful if running an even older/newer broken client.
+- **client downgrade** to Codex 0.141.0.
 
 ## Not this issue
 
