@@ -1228,6 +1228,65 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
                 profile_uuid=getattr(request.state, "profile_uuid", None),
             )
+        # R-2/Fix-3: mirror _route_to_registry's single-tool-per-server wrapper
+        # retry. tool_registry.name (e.g. "search-kb") can differ from the
+        # upstream's real primary tool name (e.g. "search" — see lab/mcp-servers/
+        # search/server.py's @mcp.tool() def search(...)). Without this, every
+        # tools/call routed through this meta-tool bounced with a JSON-RPC
+        # "Unknown tool: <registry name>" error baked straight into the returned
+        # text, even though _route_to_registry's direct-call path already
+        # resolves and retries this exact case.
+        if (
+            method == "tools/call"
+            and isinstance(result, dict)
+            and "error" in result
+            and "unknown tool" in str(result["error"].get("message", "")).lower()
+        ):
+            resolved_name = await _resolve_upstream_subtool_name(
+                tool_record, client_id, client_roles, request, request_id
+            )
+            if resolved_name and resolved_name != lookup_name:
+                retry_request = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": resolved_name,
+                        "arguments": arguments.get("arguments") or {},
+                    },
+                }
+                try:
+                    async with _INVOKE_SEMAPHORE:
+                        result = await inv_svc.invoke_tool(
+                            tool_record=tool_record,
+                            json_rpc_request=retry_request,
+                            client_id=client_id,
+                            client_roles=client_roles,
+                            is_testing=False,
+                            request_id=request_id,
+                            inbound_auth=request.headers.get("x-downstream-authorization"),
+                            principal_id=getattr(request.state, "principal_id", None),
+                            principal_type=getattr(request.state, "principal_type", None),
+                            principal_issuer=getattr(request.state, "principal_issuer", None),
+                            principal_display_sub=getattr(
+                                request.state, "principal_display_sub", None
+                            ),
+                            user_kc_token=getattr(request.state, "user_kc_token", None),
+                            source_ip=(
+                                request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                                or (request.client.host if request.client else None)
+                            ),
+                            session_jti=getattr(request.state, "session_jti", None),
+                            profile_uuid=getattr(request.state, "profile_uuid", None),
+                        )
+                except Exception:
+                    logger.exception(
+                        "invoke_tool wrapper retry error for %s -> %s", lookup_name, resolved_name
+                    )
+                    return {
+                        "type": "text",
+                        "text": "Tool invocation failed (internal error). Check server logs.",
+                    }
         return {"type": "text", "text": json.dumps(result, indent=2)}
     except Exception as exc:
         from app.services.entitlement import NotEntitledError
