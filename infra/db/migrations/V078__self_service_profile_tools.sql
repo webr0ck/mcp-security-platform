@@ -4,13 +4,22 @@
 -- invoke_tool dispatches by exact tool name, but the self-service MCP server
 -- only exposes get_profile / enable_mcp / disable_mcp / enable_function /
 -- disable_function (see lab/tests/test_self_service_mcp.py). This migration
--- deletes the broken catch-all row and registers the 5 real function names as
--- individual, routable tool_registry rows. Idempotent (ON CONFLICT (name) DO
--- NOTHING) and safe to re-run.
+-- SOFT-DELETES the broken catch-all row and registers the 5 real function names
+-- as individual, routable tool_registry rows. Idempotent and safe to re-run.
+--
+-- NOTE: hard DELETE is impossible here — audit_events.tool_id has an ON DELETE
+-- SET NULL FK to tool_registry, and the append-only audit_events immutability
+-- guard (fn_audit_events_immutability_guard) rejects the implied UPDATE. So we
+-- soft-delete via deleted_at, which every discovery/invoke query already
+-- filters on (deleted_at IS NULL). The unique constraint is (name, version).
 -- =============================================================================
 BEGIN;
 
-DELETE FROM tool_registry WHERE name = 'self-service-mcp';
+-- Soft-delete the unroutable catch-all row (audit-safe; hard DELETE is blocked
+-- by the audit-events immutability guard).
+UPDATE tool_registry
+SET deleted_at = now(), status = 'disabled', updated_at = now()
+WHERE name = 'self-service-mcp' AND deleted_at IS NULL;
 
 INSERT INTO tool_registry
   (tool_id, name, version, description, schema, upstream_url, status, risk_level,
@@ -42,7 +51,7 @@ VALUES
    '{"type":"object","properties":{"mcp_name":{"type":"string"},"function_name":{"type":"string"},"target_profile":{"type":"string"}},"required":["mcp_name","function_name"],"additionalProperties":false}'::jsonb,
    'http://self-service:8000/mcp', 'active', 'low', 10, '["Writes mcp_profiles"]'::jsonb,
    'system:default-seed', null, 'A', 'none', null, null, '{}'::jsonb)
-ON CONFLICT (name) DO NOTHING;
+ON CONFLICT (name, version) DO NOTHING;
 
 -- Link the 5 new rows to the self-service server_registry row (upstream_url match).
 UPDATE tool_registry t
