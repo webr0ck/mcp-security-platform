@@ -38,6 +38,25 @@ export const health = {
   get: () => request<{ status: string; services: Record<string, string> }>('/health'),
 }
 
+// ── Auth session (Keycloak browser login flow — proxy/app/routers/oidc_browser.py) ─
+// NOTE: the session/logout routes live under /api/v1/auth/oidc/*, not /api/v1/auth/me
+// (that path doesn't exist server-side — proxy/app/routers/auth.py is a stub with no
+// routes; oidc_browser.py is where the real implementation lives).
+export interface SessionInfo {
+  subject: string
+  client_id: string
+  roles: string[]
+  auth_method: string
+  expires_at: number
+}
+
+export const auth = {
+  session: () => request<SessionInfo>('/api/v1/auth/oidc/session'),
+  logout: () => request<{ message: string }>('/api/v1/auth/oidc/logout', { method: 'POST' }),
+  loginUrl: (redirectAfter: string = '/') =>
+    `/api/v1/auth/oidc/login?redirect=${encodeURIComponent(redirectAfter)}`,
+}
+
 // ── Audit events ──────────────────────────────────────────────────────────────
 export const audit = {
   list: (params?: { limit?: number; outcome?: string; client_id?: string }) => {
@@ -248,4 +267,75 @@ export const adminSubmissions = {
     request<{ server_id: string; submission_status: string }>(
       `/api/v1/admin/submissions/${id}/request-changes`, { method: 'POST', body: JSON.stringify({ notes }) }
     ),
+}
+
+// ── Credential store (proxy/app/routers/admin_credentials.py) ────────────────────
+// NOTE: these routes intentionally live at /admin/credentials/*, not /api/v1/*
+// (admin_credentials.router carries no prefix override in main.py) — this is the
+// same backend that originally served the htmx admin page at GET /admin/credentials;
+// this JSON API (GET .../api, PUT/DELETE .../{tool_id}) is the same surface that
+// page already used, just consumed from the React UI instead.
+//
+// Static secrets uploaded here (api_key, basic_auth, entra_client_secret,
+// service_account_jwt, oauth2_refresh) are AES-256-GCM encrypted at rest
+// (credential_broker/approaches/approach_a.py) and injected by the proxy at
+// invocation time. Keycloak-brokered modes (service_account, kc_token_exchange /
+// oauth_user_token, entra_user_token) mint tokens live at call time via
+// credential_broker/keycloak_client.py — they don't consume an uploaded secret
+// through this form. See services/auth_modes.py (backend) for the canonical mode
+// catalog INJECTION_MODE_LABELS below is kept in sync with.
+
+export interface CredentialTool {
+  tool_id: string
+  name: string
+  version: string
+  status: string
+  injection_mode: string
+  service_name: string | null
+  inject_header: string | null
+  inject_prefix: string | null
+  kc_client_id: string | null
+  kc_token_audience: string | null
+  entra_tenant_id: string | null
+  entra_client_id: string | null
+  entra_scope: string | null
+  has_service_credential: boolean
+}
+
+export interface CredentialUploadBody {
+  secret: string
+  credential_type: string
+  owner_type: 'service' | 'user'
+  user_sub?: string
+  username?: string
+  description?: string
+}
+
+export const CREDENTIAL_TYPES = [
+  { value: 'api_key', label: 'API key' },
+  { value: 'oauth2_refresh', label: 'OAuth2 refresh token' },
+  { value: 'entra_client_secret', label: 'Microsoft Entra client secret' },
+  { value: 'service_account_jwt', label: 'Service-account JWT' },
+  { value: 'basic_auth', label: 'Basic auth (username + password)' },
+] as const
+
+export const credentials = {
+  list: () => request<{ tools: CredentialTool[]; count: number }>('/admin/credentials/api'),
+
+  upload: (toolId: string, body: CredentialUploadBody) =>
+    request<{ message: string; tool_id: string; service: string; owner_type: string }>(
+      `/admin/credentials/${encodeURIComponent(toolId)}`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    ),
+
+  revoke: (toolId: string, ownerType: 'service' | 'user', userSub?: string) => {
+    const q = new URLSearchParams({
+      owner_type: ownerType,
+      ...(userSub ? { user_sub: userSub } : {}),
+    }).toString()
+    return request<{ message: string; tool_id: string }>(
+      `/admin/credentials/${encodeURIComponent(toolId)}?${q}`,
+      { method: 'DELETE' }
+    )
+  },
 }

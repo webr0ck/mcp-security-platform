@@ -116,6 +116,46 @@
   padding: var(--sp-4) var(--sp-5);
   border-top: 1px solid var(--border-dim);
 }
+
+.sidebar__identity {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.sidebar__identity-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sidebar__identity-user {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar__identity-role {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+.sidebar__signout {
+  flex-shrink: 0;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-base);
+  border-radius: var(--r-sm);
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.sidebar__signout:hover { background: var(--danger-dim); color: var(--danger); border-color: rgba(239,83,80,0.28); }
+
 .sidebar__health {
   display: flex;
   align-items: center;

@@ -5,6 +5,7 @@ import { UserPortal } from './components/Portal/UserPortal'
 import { ServersSection } from './components/Servers/ServersSection'
 import { SettingsSection } from './components/Settings/SettingsSection'
 import { Unauthorized } from './components/common/Unauthorized'
+import { SignInPrompt } from './components/common/SignInPrompt'
 import { useAuth } from './auth/AuthContext'
 
 export function App() {
@@ -14,6 +15,8 @@ export function App() {
   return (
     <AppShell>
       {(view) => {
+        if (auth.loading) return null
+        if (!auth.authenticated) return <SignInPrompt />
         switch (view) {
           case 'overview': return <SecurityDashboard />
           case 'servers':  return <ServersSection />

@@ -108,3 +108,33 @@
   gap: var(--sp-2);
 }
 .cred-empty__icon { font-size: 32px; margin-bottom: var(--sp-2); }
+
+/* Credential tool list */
+.cred-tool-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+.cred-tool { border: 1px solid var(--border-base); border-radius: var(--r-md); background: var(--bg-elevated); }
+.cred-tool__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  flex-wrap: wrap;
+}
+.cred-tool__info { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; min-width: 0; }
+.cred-tool__name { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.cred-tool__form {
+  padding: var(--sp-4);
+  border-top: 1px solid var(--border-dim);
+  animation: fade-in var(--t-slow) var(--ease) both;
+}
+.cred-tool__owner-choice { display: flex; gap: var(--sp-4); padding-top: 6px; }
+.cred-tool__owner-option { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
+
+.form-error {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--danger-dim);
+  color: var(--danger);
+  font-size: 13px;
+  margin-bottom: var(--sp-2);
+}
