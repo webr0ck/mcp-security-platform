@@ -353,7 +353,37 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Task 4.3: named profile UUID from session JWT claim (cookie path 2 or Bearer 3a).
         # None when no profile was bound at login (backward compatible: legacy mcp_profiles path).
         # mTLS and API-key callers never have a profile_uuid.
-        request.state.profile_uuid = getattr(request.state, "_session_profile_uuid", None)
+        #
+        # Task 1.1 + WS-1: named profile UUID.
+        # Session/cookie paths set _session_profile_uuid from a signed JWT claim.
+        # The external OIDC BEARER path has no profile claim, so accept a
+        # client-supplied profile GUID from ?profile=<uuid> (or X-MCP-Profile).
+        # GUID (not name): unguessable, no profile-name enumeration.
+        _profile_uuid = getattr(request.state, "_session_profile_uuid", None)
+        if _profile_uuid is None and auth_method == "oidc":
+            _pref = request.query_params.get("profile") or request.headers.get("x-mcp-profile")
+            if _pref:
+                try:
+                    _resolved = await _resolve_active_profile_uuid(_pref.strip())
+                except Exception as _pexc:
+                    # INV-015: fail-closed on DB error — never silently drop the
+                    # requested restriction and continue with full visibility.
+                    logger.error("profile GUID resolution failed for %r: %s", _pref, _pexc)
+                    return JSONResponse(
+                        status_code=503,
+                        content={"error": "profile_lookup_failed",
+                                 "message": "Profile lookup unavailable — retry."},
+                    )
+                if _resolved is None:
+                    # Supplied-but-invalid: DENY. Falling back to no-profile would
+                    # grant MORE visibility than the requested profile (fail-open).
+                    return JSONResponse(
+                        status_code=403,
+                        content={"error": "profile_not_found",
+                                 "message": "Requested profile is unknown or inactive."},
+                    )
+                _profile_uuid = _resolved
+        request.state.profile_uuid = _profile_uuid
 
         # ----------------------------------------------------------------
         # Load roles: merge DB role_assignments with any roles in the JWT.
@@ -400,6 +430,29 @@ async def _redis_jti_lookup(jti: str) -> str | None:
     from app.core.redis_client import redis_pool
     redis = redis_pool.client
     return await redis.get(f"revoked_jti:{jti}")
+
+
+async def _resolve_active_profile_uuid(profile_ref: str) -> str | None:
+    """
+    Resolve a client-supplied profile GUID to its UUID if the profile exists
+    and is active. Returns None if no such active profile.
+
+    Raises on DB error — the caller (bearer-path wiring below) converts that
+    into a 503 (INV-015 fail-closed: never silently continue as if no
+    profile were requested).
+
+    WS-1 (PRD-0011): used by the external OIDC BEARER path only. The
+    browser/session path resolves profiles by name inline and is unaffected.
+    """
+    from sqlalchemy import text as _sqltext
+    from app.core.database import AsyncSessionLocal as _ASL
+    async with _ASL() as _db:
+        _r = await _db.execute(
+            _sqltext("SELECT id FROM profiles WHERE id = :pid AND is_active = TRUE LIMIT 1"),
+            {"pid": profile_ref},
+        )
+        _row = _r.fetchone()
+        return str(_row[0]) if _row else None
 
 
 async def _db_jti_lookup(jti: str):
