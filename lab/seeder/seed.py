@@ -1378,6 +1378,16 @@ async def main() -> None:
         log.error("mark_seeded_servers_scanned.sql seeding failed: %s", exc)
         results["mark_seeded_servers_scanned_sql"] = f"FAILED: {exc}"
 
+    # PRD-0011: ship a demo named profile so ?profile=<guid> scoping is
+    # demonstrable on a fresh boot (the lab otherwise seeds zero named profiles).
+    log.info("Seeding demo named profile (readonly-demo)...")
+    try:
+        await run_sql_file(conn, SQL_DIR / "demo_named_profile.sql")
+        results["demo_named_profile_sql"] = "OK"
+    except Exception as exc:
+        log.error("demo_named_profile.sql seeding failed: %s", exc)
+        results["demo_named_profile_sql"] = f"FAILED: {exc}"
+
     # 5. Insert RBAC seed rows
     log.info("Seeding RBAC roles...")
     try:
