@@ -318,6 +318,16 @@ class Settings(BaseSettings):
     ARTIFACTORY_API_KEY: str = ""
 
     # =========================================================================
+    # Ops Agent (WS-A) — server lifecycle (logs/restart/rebuild)
+    # =========================================================================
+    # The proxy never holds the container-runtime socket directly
+    # (least-privilege / fail-closed thesis) — it forwards authorized
+    # requests to the isolated ops-agent service instead. Both unset (the
+    # default) means server lifecycle endpoints fail-closed with 503.
+    OPS_AGENT_URL: str = ""
+    OPS_AGENT_TOKEN: str = ""
+
+    # =========================================================================
     # SSRF / Private-Upstream Allowlist (Task 3.1, ISO-F2.6)
     # =========================================================================
     # Comma-separated list of CIDR ranges that private MCP server upstreams are

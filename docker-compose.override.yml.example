@@ -1,0 +1,82 @@
+# docker-compose.override.yml.example
+#
+# Opt-in, LOCAL-ONLY dev convenience overlay. Restores host-port access to
+# control-plane / MCP-backend services that the default lab-up layering
+# deliberately does NOT publish (Fix 8 —
+# docs/spec/11-server-lifecycle-and-hardening-batch.md §8): OPA has no
+# authentication, and MCP backend ports are a direct invocation-path bypass
+# (skips proxy auth/RBAC/OPA/credential-injection entirely).
+#
+# Usage:
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   # uncomment only what you need below
+#   podman-compose --env-file .env.lab \
+#     -f docker-compose.yml -f docker-compose.dev.yml \
+#     -f podman-compose.lab.yml -f compose.wazuh.yml \
+#     -f docker-compose.override.yml up -d
+#
+# docker-compose.override.yml is gitignored — NEVER commit it. Compose
+# list-merge APPENDS ports across layered files (a later file cannot remove
+# an earlier publish), which is exactly the bug Fix 8 closed — do not
+# reintroduce it by committing a version of this file with ports uncommented.
+#
+# scripts/check_network_isolation.py intentionally does NOT include this
+# override file in its default check invocation, so leaving it in place
+# locally won't fail `make security-check` — but it DOES mean your local
+# topology no longer matches the isolation gate's assumptions while it's
+# active. Remove or comment the block back out when you're done debugging.
+
+services:
+
+  # ── OPA: full Rego + grants database, no auth. Loopback-bound is still a
+  # meaningful exposure on a shared dev machine — only enable when you
+  # actually need `curl localhost:8181/...` from the host. ──────────────────
+  # opa:
+  #   ports:
+  #     - "127.0.0.1:8181:8181"
+
+  # ── MCP backends: each publishes a raw, unauthenticated listener that
+  # bypasses the proxy's identity/RBAC/OPA/credential-injection pipeline
+  # entirely. Uncomment only the ones you're actively debugging. ────────────
+  # lab-mcp-grafana:
+  #   ports:
+  #     - "127.0.0.1:8100:8000"
+  # mcp-netbox:
+  #   ports:
+  #     - "127.0.0.1:8101:8000"
+  # lab-mcp-gitea:
+  #   ports:
+  #     - "127.0.0.1:8102:8000"
+  # lab-mcp-m365:
+  #   ports:
+  #     - "127.0.0.1:8103:8000"
+  # lab-rag-assistant:
+  #   ports:
+  #     - "127.0.0.1:8104:8000"
+  # lab-mcp-echo:
+  #   ports:
+  #     - "127.0.0.1:8105:8000"
+  # lab-mcp-test-api:
+  #   ports:
+  #     - "127.0.0.1:8106:8000"
+  # lab-mcp-entra-id:
+  #   ports:
+  #     - "127.0.0.1:8107:8000"
+  # lab-mcp-self-service:
+  #   ports:
+  #     - "127.0.0.1:8108:8000"
+  # lab-mcp-lab-tickets:
+  #   ports:
+  #     - "127.0.0.1:8109:8000"
+  # lab-mcp-catfacts:
+  #   ports:
+  #     - "127.0.0.1:8110:8000"
+  # lab-mcp-fetch:
+  #   ports:
+  #     - "127.0.0.1:8111:8000"
+  # lab-mcp-notes:
+  #   ports:
+  #     - "127.0.0.1:8112:8000"
+  # lab-mcp-search:
+  #   ports:
+  #     - "127.0.0.1:8113:8000"
