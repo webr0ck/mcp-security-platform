@@ -36,7 +36,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
@@ -104,6 +104,43 @@ class EntitlementGrantBody(BaseModel):
         if not v.strip():
             raise ValueError("principal_id must not be empty")
         return v.strip()
+
+    # Fix 2 (docs/spec/13-entitlement-and-submission-hardening.md §2): the
+    # invoke-time check computes principal_id as "{type}:{issuer}:{subject}"
+    # (see middleware/auth.py::_build_principal_id — e.g.
+    # "human:keycloak:alice@corp" for a verified-email OIDC session). A bare
+    # username like "human:keycloak:alice" (missing the "@corp" the real
+    # subject carries) or any principal_id not shaped as type:issuer:subject
+    # silently grants an entitlement that never matches anything at invoke
+    # time. This is shape validation only — it does NOT resolve principal_id
+    # against a live identity store; that is a larger change tracked
+    # separately.
+    @model_validator(mode="after")
+    def principal_id_shape(self) -> EntitlementGrantBody:
+        # Split into exactly 3 parts: type, issuer, subject — the subject
+        # itself may legitimately contain ':' (or other characters), so we
+        # must not split on every colon.
+        parts = self.principal_id.split(":", 2)
+        example = f"{self.principal_type}:keycloak:alice@corp"
+        if len(parts) != 3 or not all(p.strip() for p in parts):
+            raise ValueError(
+                "principal_id must have the shape 'type:issuer:subject' "
+                f"(e.g. {example!r}), got {self.principal_id!r}"
+            )
+        p_type, _issuer, _subject = parts
+        if p_type not in _VALID_PRINCIPAL_TYPES:
+            raise ValueError(
+                f"principal_id type segment {p_type!r} must be one of "
+                f"{sorted(_VALID_PRINCIPAL_TYPES)} — expected shape "
+                f"'type:issuer:subject' (e.g. {example!r})"
+            )
+        if p_type != self.principal_type:
+            raise ValueError(
+                f"principal_id type segment {p_type!r} does not match "
+                f"principal_type {self.principal_type!r} — expected shape "
+                f"'{self.principal_type}:issuer:subject' (e.g. {example!r})"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,12 @@ def _make_request(
 SERVER_ID = "aaaaaaaa-0000-0000-0000-000000000001"
 ENT_ID = "bbbbbbbb-0000-0000-0000-000000000002"
 PRINCIPAL_ID = "agent-007"
+# Fix 2 shape-validated equivalents of PRINCIPAL_ID for constructing
+# EntitlementGrantBody in the INV-001 audit-flow tests below — PRINCIPAL_ID
+# itself stays a bare display value where it's only used inside mocked DB
+# rows (which aren't shape-validated).
+PRINCIPAL_ID_AGENT = f"agent:internal-ca:{PRINCIPAL_ID}"
+PRINCIPAL_ID_HUMAN = f"human:keycloak:{PRINCIPAL_ID}"
 
 
 # ---------------------------------------------------------------------------
@@ -49,19 +55,25 @@ class TestEntitlementGrantBody:
     @pytest.mark.unit
     def test_valid_human(self):
         from app.routers.entitlements import EntitlementGrantBody
-        body = EntitlementGrantBody(principal_id="user-1", principal_type="human")
+        body = EntitlementGrantBody(
+            principal_id="human:keycloak:alice@corp", principal_type="human"
+        )
         assert body.principal_type == "human"
 
     @pytest.mark.unit
     def test_valid_agent(self):
         from app.routers.entitlements import EntitlementGrantBody
-        body = EntitlementGrantBody(principal_id="agent-1", principal_type="agent")
+        body = EntitlementGrantBody(
+            principal_id="agent:internal-ca:deploy-bot", principal_type="agent"
+        )
         assert body.principal_type == "agent"
 
     @pytest.mark.unit
     def test_valid_kc_group(self):
         from app.routers.entitlements import EntitlementGrantBody
-        body = EntitlementGrantBody(principal_id="group-1", principal_type="kc_group")
+        body = EntitlementGrantBody(
+            principal_id="kc_group:keycloak:platform-admins", principal_type="kc_group"
+        )
         assert body.principal_type == "kc_group"
 
     @pytest.mark.unit
@@ -69,7 +81,7 @@ class TestEntitlementGrantBody:
         from pydantic import ValidationError
         from app.routers.entitlements import EntitlementGrantBody
         with pytest.raises(ValidationError):
-            EntitlementGrantBody(principal_id="x", principal_type="robot")
+            EntitlementGrantBody(principal_id="x:y:z", principal_type="robot")
 
     @pytest.mark.unit
     def test_empty_principal_id_rejected(self):
@@ -81,8 +93,81 @@ class TestEntitlementGrantBody:
     @pytest.mark.unit
     def test_principal_id_stripped(self):
         from app.routers.entitlements import EntitlementGrantBody
-        body = EntitlementGrantBody(principal_id="  trimmed  ", principal_type="agent")
-        assert body.principal_id == "trimmed"
+        body = EntitlementGrantBody(
+            principal_id="  agent:internal-ca:trimmed  ", principal_type="agent"
+        )
+        assert body.principal_id == "agent:internal-ca:trimmed"
+
+    # --- Fix 2 (docs/spec/13-entitlement-and-submission-hardening.md §2) ---
+    # principal_id shape validation: type:issuer:subject, at least 3
+    # colon-separated segments, non-empty, type consistent with principal_type.
+
+    @pytest.mark.unit
+    def test_bare_username_rejected(self):
+        """The exact regression this fix closes: a bare-username principal_id
+        (no issuer/subject segments) previously granted 201 but never matched
+        the invoke-time computed principal_id (type:issuer:subject) — silently
+        granting nothing."""
+        from pydantic import ValidationError
+        from app.routers.entitlements import EntitlementGrantBody
+        with pytest.raises(ValidationError, match="type:issuer:subject"):
+            EntitlementGrantBody(principal_id="alice", principal_type="human")
+
+    @pytest.mark.unit
+    def test_missing_subject_segment_rejected(self):
+        """Only two segments (type:issuer, no subject) is still malformed."""
+        from pydantic import ValidationError
+        from app.routers.entitlements import EntitlementGrantBody
+        with pytest.raises(ValidationError, match="type:issuer:subject"):
+            EntitlementGrantBody(principal_id="human:keycloak", principal_type="human")
+
+    @pytest.mark.unit
+    def test_empty_subject_segment_rejected(self):
+        """Trailing colon with nothing after it (human:keycloak:) is malformed."""
+        from pydantic import ValidationError
+        from app.routers.entitlements import EntitlementGrantBody
+        with pytest.raises(ValidationError):
+            EntitlementGrantBody(principal_id="human:keycloak:", principal_type="human")
+
+    @pytest.mark.unit
+    def test_type_mismatch_with_principal_type_rejected(self):
+        """principal_id's type segment must match the declared principal_type."""
+        from pydantic import ValidationError
+        from app.routers.entitlements import EntitlementGrantBody
+        with pytest.raises(ValidationError, match="does not match"):
+            EntitlementGrantBody(
+                principal_id="agent:internal-ca:deploy-bot", principal_type="human"
+            )
+
+    @pytest.mark.unit
+    def test_unknown_type_segment_rejected(self):
+        """A type segment outside {human, agent, kc_group} is rejected even
+        though principal_type itself is constrained by the Literal — this
+        guards the principal_id string's own type prefix independently."""
+        from pydantic import ValidationError
+        from app.routers.entitlements import EntitlementGrantBody
+        with pytest.raises(ValidationError):
+            EntitlementGrantBody(principal_id="robot:keycloak:alice", principal_type="human")
+
+    @pytest.mark.unit
+    def test_subject_with_extra_colons_accepted(self):
+        """Subject segment may itself contain ':' — split(':', 2) must not
+        truncate it."""
+        from app.routers.entitlements import EntitlementGrantBody
+        body = EntitlementGrantBody(
+            principal_id="agent:internal-ca:svc:deploy:prod", principal_type="agent"
+        )
+        assert body.principal_id == "agent:internal-ca:svc:deploy:prod"
+
+    @pytest.mark.unit
+    def test_well_formed_human_email_subject_accepted(self):
+        """The canonical shape computed by middleware/auth.py::_build_principal_id
+        for a verified-email OIDC session."""
+        from app.routers.entitlements import EntitlementGrantBody
+        body = EntitlementGrantBody(
+            principal_id="human:keycloak:alice@corp", principal_type="human"
+        )
+        assert body.principal_id == "human:keycloak:alice@corp"
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +591,7 @@ class TestINV001AuditBeforeResponse:
         from app.routers.entitlements import grant_entitlement, EntitlementGrantBody
 
         req = _make_request(roles=["platform_admin"])
-        body = EntitlementGrantBody(principal_id=PRINCIPAL_ID, principal_type="agent")
+        body = EntitlementGrantBody(principal_id=PRINCIPAL_ID_AGENT, principal_type="agent")
 
         # Mock DB: no existing row → INSERT returns new row
         import uuid
@@ -566,7 +651,7 @@ class TestINV001AuditBeforeResponse:
         from app.routers.entitlements import grant_entitlement, EntitlementGrantBody
 
         req = _make_request(roles=["platform_admin"])
-        body = EntitlementGrantBody(principal_id=PRINCIPAL_ID, principal_type="human")
+        body = EntitlementGrantBody(principal_id=PRINCIPAL_ID_HUMAN, principal_type="human")
 
         import uuid
         new_ent_id = uuid.UUID(ENT_ID)
@@ -692,7 +777,7 @@ class TestINV001AuditBeforeResponse:
         from app.routers.entitlements import grant_entitlement, EntitlementGrantBody
 
         req = _make_request(roles=["platform_admin"])
-        body = EntitlementGrantBody(principal_id=PRINCIPAL_ID, principal_type="agent")
+        body = EntitlementGrantBody(principal_id=PRINCIPAL_ID_AGENT, principal_type="agent")
 
         import uuid
         ent_uuid = uuid.UUID(ENT_ID)
@@ -757,7 +842,7 @@ class TestINV001AuditBeforeResponse:
         from app.routers.entitlements import grant_entitlement, EntitlementGrantBody
 
         req = _make_request(roles=["platform_admin"])
-        body = EntitlementGrantBody(principal_id=PRINCIPAL_ID, principal_type="human")
+        body = EntitlementGrantBody(principal_id=PRINCIPAL_ID_HUMAN, principal_type="human")
 
         import uuid
         ent_uuid = uuid.UUID(ENT_ID)

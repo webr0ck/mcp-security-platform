@@ -31,7 +31,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 from sqlalchemy import text
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -290,6 +290,14 @@ def _validate_github_url(v: Optional[str]) -> Optional[str]:
 
 
 class DraftCreate(BaseModel):
+    # Fix 4 (docs/spec/13-entitlement-and-submission-hardening.md §4): reject
+    # unknown fields instead of silently dropping them. Previously a client
+    # that (reasonably) tried to pass data_categories at draft-creation time
+    # had it silently ignored by default pydantic extra="ignore" behavior —
+    # the name got claimed (201) with the category data never captured, and
+    # the mistake only surfaced later, if at all. Fail loudly instead.
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     description: str = ""
     github_repo_url: Optional[str] = None  # None = no-code path
@@ -308,6 +316,11 @@ class DraftCreate(BaseModel):
 
 
 class DraftUpdate(BaseModel):
+    # Fix 4 (docs/spec/13-entitlement-and-submission-hardening.md §4): reject
+    # unknown/misspelled fields (e.g. a typo'd category key) instead of
+    # silently dropping them — same rationale as DraftCreate above.
+    model_config = ConfigDict(extra="forbid")
+
     description: Optional[str] = None
     github_repo_url: Optional[str] = None
     injection_mode: Optional[str] = None
@@ -320,23 +333,47 @@ class DraftUpdate(BaseModel):
     upstream_idp_type: Optional[str] = None
     upstream_idp_config: Optional[dict] = None
     mode_override_reason: Optional[str] = None
-    data_categories: Optional[list[str]] = None
+    # Fix 4 (§4): data_categories enum surfaced via json_schema_extra so it
+    # is discoverable in the generated OpenAPI schema (and by any client/tool
+    # that introspects it), not just in a 422 error message after a failed
+    # guess.
+    data_categories: Optional[list[str]] = Field(
+        default=None,
+        json_schema_extra={"items": {"enum": sorted(_VALID_CATEGORIES)}},
+        description=(
+            "Data categories this server's tools touch. Valid values: "
+            + ", ".join(sorted(_VALID_CATEGORIES))
+        ),
+    )
     has_write_ops: Optional[bool] = None
 
     @field_validator("injection_mode")
     @classmethod
     def valid_mode(cls, v: str | None) -> str | None:
         if v and v not in _VALID_MODES:
-            raise ValueError(f"unknown injection_mode '{v}'")
+            raise ValueError(
+                f"unknown injection_mode {v!r} — valid modes: {sorted(_VALID_MODES)}"
+            )
         return v
 
+    # Fix 4 (§4): this field_validator runs at pydantic parse time — BEFORE
+    # FastAPI ever calls update_draft() — so an unknown category never
+    # reaches the DB and never mutates server_registry. The draft row (and
+    # the name it claimed back at POST /api/v1/submissions time) is
+    # untouched by a failed PATCH: the same draft can simply be re-PATCHed
+    # with a corrected data_categories list, so the name is never
+    # permanently consumed by this validation failure. The valid enum is
+    # included in the error so a client doesn't have to guess-and-check.
     @field_validator("data_categories")
     @classmethod
     def valid_cats(cls, v: list[str] | None) -> list[str] | None:
         if v:
             bad = set(v) - _VALID_CATEGORIES
             if bad:
-                raise ValueError(f"unknown categories: {bad}")
+                raise ValueError(
+                    f"unknown data_categories: {sorted(bad)} — valid categories: "
+                    f"{sorted(_VALID_CATEGORIES)}"
+                )
         return v
 
 
