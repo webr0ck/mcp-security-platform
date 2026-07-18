@@ -28,6 +28,14 @@ reference:
 | Profile approval fails with a missing-fields error | `token_endpoint`/`authorization_endpoint`/`issuer` are required for every `provider_type` except `same_platform_idp` — fill them in before retrying approval. |
 | Profile approval fails with an unknown-issuer error | No `oauth_provider_policy` row exists for that issuer yet — create one first. |
 
+## Connecting your MCP client (OAuth login) fails
+
+If your MCP client (Codex, Claude Code, …) fails to *log in* to the gateway —
+e.g. `missing required issuer` at the callback — that's a client↔gateway OAuth
+issue, distinct from the server-onboarding errors above. See
+[oauth-client-connection.md](oauth-client-connection.md) for the cause, the
+`grep oauth.discovery` log check, and the fix.
+
 ## "I changed `auth_modes.py` and something broke in docs/tests"
 
 `proxy/tests/unit/test_auth_modes_doc_current.py` will fail — that's by design (WP-D2's
