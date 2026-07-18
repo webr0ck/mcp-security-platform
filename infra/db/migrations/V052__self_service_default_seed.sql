@@ -38,11 +38,43 @@ INSERT INTO tool_registry (
     inject_header, inject_prefix, metadata
 ) VALUES
 (
-    gen_random_uuid(), 'self-service-mcp', '1.0.0',
-    'Per-identity MCP permission management: list, enable/disable MCPs and functions per profile.',
-    '{"type":"object","properties":{"mcp_name":{"type":"string"},"function_name":{"type":"string"},"target_profile":{"type":"string"}},"additionalProperties":false}'::jsonb,
+    gen_random_uuid(), 'get_profile', '1.0.0',
+    'List a profile''s MCP/function permissions.',
+    '{"type":"object","properties":{"mcp_name":{"type":"string"},"target_profile":{"type":"string"}},"additionalProperties":false}'::jsonb,
     'http://self-service:8000/mcp',
-    'active', 'low', 10, '["Manages per-user access grants","Writes to mcp_profiles table"]'::jsonb,
+    'active', 'low', 10, '["Reads mcp_profiles"]'::jsonb,
+    'system:default-seed', null, 'A', 'none', null, null, '{}'::jsonb
+),
+(
+    gen_random_uuid(), 'enable_mcp', '1.0.0',
+    'Enable an MCP for a profile.',
+    '{"type":"object","properties":{"mcp_name":{"type":"string"},"target_profile":{"type":"string"}},"required":["mcp_name"],"additionalProperties":false}'::jsonb,
+    'http://self-service:8000/mcp',
+    'active', 'low', 10, '["Writes mcp_profiles"]'::jsonb,
+    'system:default-seed', null, 'A', 'none', null, null, '{}'::jsonb
+),
+(
+    gen_random_uuid(), 'disable_mcp', '1.0.0',
+    'Disable an MCP for a profile.',
+    '{"type":"object","properties":{"mcp_name":{"type":"string"},"target_profile":{"type":"string"}},"required":["mcp_name"],"additionalProperties":false}'::jsonb,
+    'http://self-service:8000/mcp',
+    'active', 'low', 10, '["Writes mcp_profiles"]'::jsonb,
+    'system:default-seed', null, 'A', 'none', null, null, '{}'::jsonb
+),
+(
+    gen_random_uuid(), 'enable_function', '1.0.0',
+    'Enable a specific function of an MCP for a profile.',
+    '{"type":"object","properties":{"mcp_name":{"type":"string"},"function_name":{"type":"string"},"target_profile":{"type":"string"}},"required":["mcp_name","function_name"],"additionalProperties":false}'::jsonb,
+    'http://self-service:8000/mcp',
+    'active', 'low', 10, '["Writes mcp_profiles"]'::jsonb,
+    'system:default-seed', null, 'A', 'none', null, null, '{}'::jsonb
+),
+(
+    gen_random_uuid(), 'disable_function', '1.0.0',
+    'Disable a specific function of an MCP for a profile.',
+    '{"type":"object","properties":{"mcp_name":{"type":"string"},"function_name":{"type":"string"},"target_profile":{"type":"string"}},"required":["mcp_name","function_name"],"additionalProperties":false}'::jsonb,
+    'http://self-service:8000/mcp',
+    'active', 'low', 10, '["Writes mcp_profiles"]'::jsonb,
     'system:default-seed', null, 'A', 'none', null, null, '{}'::jsonb
 ),
 (
