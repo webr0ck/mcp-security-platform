@@ -252,6 +252,44 @@ else
     log_warn "V007 migration failed — container may not be running yet, continuing"
 fi
 
+# ── Step 5.5: Fix self-service upstream_allowlist_entry CIDR placeholder ─────
+# PRD-0011 WS-3 (#2) / RCA: V052__self_service_default_seed.sql seeds
+# server_registry.self-service.upstream_allowlist_entry as the literal string
+# __SELF_SERVICE_UPSTREAM_CIDR_PLACEHOLDER__ (same convention as V002's
+# __OIDC_ISSUER_PLACEHOLDER__ — see V052's own header comment). Unlike the OIDC
+# issuer, nothing was ever wired to substitute this one: lab/seeder/seed.py only
+# has fix_oidc_issuer_placeholder(), no CIDR equivalent, and no other script
+# references __SELF_SERVICE_UPSTREAM_CIDR_PLACEHOLDER__ (confirmed by grep).
+# Left as-is, every self-service tool call 403s with upstream_revalidation_failed
+# on a fresh install (the invoke-time DNS-rebind/TOCTOU guard in
+# proxy/app/services/invocation.py treats an unmatched upstream as "public").
+#
+# The value is the mcp-self-service-net bridge subnet, which podman assigns
+# dynamically per-install and must NOT be hardcoded into a shared migration
+# (docker's own bridge subnet differs — see V052's header, which documents the
+# equivalent manual `docker network inspect` + UPDATE for non-lab installs).
+# The network is already created by `compose up` in Step 4 above (podman/
+# podman-compose create all declared networks up front, independent of which
+# containers manage to start — lab-mcp-self-service itself may still be down
+# at this point since its SELF_SERVICE_API_KEY isn't seeded until Step 10), so
+# the subnet is knowable here.
+log "Step 5.5: Fixing self-service upstream_allowlist_entry CIDR placeholder"
+
+# The self-service container's per-network /24 always falls inside podman's
+# default 10.89.0.0/16 pool, so the /16 is the stable, proven allowlist value
+# (matches the live acceptance-test fix). Override via SELF_SERVICE_UPSTREAM_CIDR
+# for a non-default install. The WHERE-guard keeps this idempotent and won't
+# clobber a value someone set deliberately.
+# ponytail: fixed /16 default; per-net auto-detect only if a deployment ever
+# moves off podman's default pool (then set SELF_SERVICE_UPSTREAM_CIDR).
+SELF_SERVICE_CIDR="${SELF_SERVICE_UPSTREAM_CIDR:-10.89.0.0/16}"
+SELF_SERVICE_CIDR_SQL="UPDATE server_registry SET upstream_allowlist_entry = '${SELF_SERVICE_CIDR}' WHERE name = 'self-service' AND upstream_allowlist_entry = '__SELF_SERVICE_UPSTREAM_CIDR_PLACEHOLDER__';"
+if podman exec "${DB_CONTAINER}" psql -U "${DB_USER}" -d "${DB_NAME}" -c "${SELF_SERVICE_CIDR_SQL}" 2>&1 | tee -a "${LOG_FILE}"; then
+    log_ok "self-service upstream_allowlist_entry resolved to ${SELF_SERVICE_CIDR} (idempotent — no-op if already set)"
+else
+    log_warn "Failed to update self-service upstream_allowlist_entry — server_registry row may not exist yet (re-run once V052 has applied); self-service tool calls will 403 upstream_revalidation_failed until this is set"
+fi
+
 # ── Step 6: Vault initialization ─────────────────────────────────────────────
 log "Step 6: Initializing Vault KV"
 

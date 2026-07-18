@@ -76,6 +76,8 @@ lab-init:
 	  -e "PGPASSWORD=$${DB_PASSWORD:-}" \
 	  mcp-db bash /tmp/init-db-roles.sh
 	$(LAB_COMPOSE) run --rm lab-seeder
+	@echo "Resolving self-service upstream_allowlist_entry CIDR placeholder (V052 seeds a literal __SELF_SERVICE_UPSTREAM_CIDR_PLACEHOLDER__ that nothing else substitutes on a fresh lab-up — self-service tool calls 403 upstream_revalidation_failed until fixed). Podman's default pool is 10.89.0.0/16; override with SELF_SERVICE_UPSTREAM_CIDR."
+	podman exec mcp-db psql -U mcp_app -d mcp_security -c "UPDATE server_registry SET upstream_allowlist_entry = '$${SELF_SERVICE_UPSTREAM_CIDR:-10.89.0.0/16}' WHERE name = 'self-service' AND upstream_allowlist_entry = '__SELF_SERVICE_UPSTREAM_CIDR_PLACEHOLDER__';" || echo "  WARN: self-service CIDR update failed (row may not exist yet)"
 	@echo "Recreating containers whose env-baked credential was just (re)minted by init-db-roles.sh/lab-seeder — a plain restart does not reload podman-compose-interpolated env vars..."
 	$(LAB_COMPOSE) up -d --force-recreate --no-deps scanner-worker compliance-checker lab-mcp-grafana lab-mcp-self-service
 
