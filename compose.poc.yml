@@ -29,7 +29,22 @@ networks:
   wazuh-net:
     driver: bridge
     internal: true
-  mcp-servers-net:
+  # F-001 fix (ISO-F1.4, same class as the lab fix in f070803): the single
+  # shared mcp-servers-net below used to put mcp-echo, mcp-notes, and
+  # mcp-search all on one bridge — a lateral-movement path where any one of
+  # the three MCP servers being compromised could reach the other two's
+  # :8000 directly, bypassing proxy/OPA/entitlement entirely. Split into one
+  # private, single-occupant net per MCP server (same per-server-net shape
+  # used by podman-compose.lab.yml's mcp-<name>-net nets — see the proxy:
+  # override below for why proxy is NOT multi-homed onto these here), so no
+  # two MCP servers ever share a network with each other.
+  poc-mcp-echo-net:
+    driver: bridge
+    internal: true
+  poc-mcp-notes-net:
+    driver: bridge
+    internal: true
+  poc-mcp-search-net:
     driver: bridge
     internal: true
   # Dedicated pairwise net for mcp-notes ↔ redis.  Keeps the MCP server off
@@ -185,7 +200,7 @@ services:
       HOST: "0.0.0.0"
       PORT: "8000"
     networks:
-      - mcp-servers-net
+      - poc-mcp-echo-net
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -205,7 +220,7 @@ services:
       PORT: "8000"
       REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/3"
     networks:
-      - mcp-servers-net
+      - poc-mcp-notes-net
       # Use a dedicated pairwise net rather than the platform proxy-redis-net
       # (F-001 / ISO-F1.3: MCP servers must not share platform backend networks)
       - poc-mcp-notes-redis-net
@@ -230,7 +245,7 @@ services:
       HOST: "0.0.0.0"
       PORT: "8000"
     networks:
-      - mcp-servers-net
+      - poc-mcp-search-net
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -273,6 +288,19 @@ services:
   # ── POC proxy overlay: enable taint floor for the demo ────────────────────
   # TAINT_FLOOR_ENABLED defaults to false in config.py. Override it here so
   # the taint floor mechanism fires in the POC lab without requiring a .env edit.
+  #
+  # NOTE: proxy is deliberately NOT given a `networks:` override here. Before
+  # this F-001 fix, proxy had no explicit network membership in this overlay
+  # file and was therefore never actually wired to mcp-servers-net either —
+  # that pre-existing proxy<->POC-MCP-server connectivity gap is unrelated to
+  # the ISO-F1.4 lateral-movement leak this change closes (MCP servers
+  # sharing a network with EACH OTHER) and is out of scope here. Adding an
+  # explicit proxy `networks:` list in this file would also flip
+  # scripts/check_network_isolation.py's `_is_overlay_context()` heuristic to
+  # "complete topology", which would then false-positive on this raw-YAML
+  # single-file view (opa/db/vault aren't visible here — they live in the
+  # included base files) — see the compose-driver resolution failure noted
+  # above. Leave proxy's network membership exactly as-is.
   proxy:
     environment:
       TAINT_FLOOR_ENABLED: "true"
