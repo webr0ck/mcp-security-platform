@@ -50,12 +50,12 @@ Verified on a real `lab-reset` wipe: `lab-smoke` 4/4, `test-lab-functional`
 
 ---
 
-## 🚧 In progress — FINAL fresh-boot verify of the whole "finish all" batch
-Everything below is committed to `main`; a `lab-reset` (fresh V083 + rebuilt
-ops-agent w/ git + new egress/workdir wiring + Phase 2 UI + convergence refactor)
-is running as the final gate. On green → `## Shipped`. **Next step for a fresh
-session:** read the boot result, run `lab-smoke` + `test-lab-functional` +
-`check_network_isolation.py`, then hand to owner for their full check.
+## ✅ "Finish all" batch — DONE + FRESH-BOOT VERIFIED (2026-07-19)
+Fresh `lab-reset` (V083 + V082 apply clean, ops-agent rebuilt with `git`, new
+egress/workdir wiring, Phase 2 UI, convergence refactor all boot healthy):
+**lab-smoke 4/4 · test-lab-functional 46/1/0 · F-001 isolation gate ALL PASS**
+(incl. new POC-tier fix); git-rebuild endpoint wired + fail-closed (403 non-admin).
+**Ready for owner's full check.** Everything below is on `main`.
 
 ### PRD-0012 — URL-first onboarding, re-approval on change, debug-mode-first ✅ (Phase 1 + 2)
 Spec: `docs/prd/PRD-0012-...md` (v2, 3-critic-hardened). Owner decisions: self-hosted
