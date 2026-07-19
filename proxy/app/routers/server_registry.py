@@ -363,8 +363,53 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
     updates = {k: v for k, v in updates.items() if k in _PATCH_ALLOWED}
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+    # PRD-0012 C3: a live self-hosted server's upstream_url must go through
+    # request-change (quarantine every tool + demote status + re-verify),
+    # never a silent overwrite (the original defect this PRD fixes —
+    # server_registry.py:356 used to PATCH upstream_url straight onto a live
+    # server with no re-scan/re-review at all). Platform-deployed servers
+    # (is_self_hosted=false) and rows that aren't live yet (not yet
+    # status='approved') have nothing to protect and fall through unchanged.
+    reroute_result: dict | None = None
+    if "upstream_url" in updates:
+        async with AsyncSessionLocal() as db:
+            _reroute_row = (await db.execute(
+                text("SELECT is_self_hosted, status FROM server_registry "
+                     "WHERE server_id = :sid AND deleted_at IS NULL"),
+                {"sid": server_id},
+            )).mappings().first()
+        if _reroute_row is None:
+            raise HTTPException(status_code=404, detail="Server not found")
+        if _reroute_row["is_self_hosted"] and _reroute_row["status"] == "approved":
+            from app.services.server_lifecycle import (
+                RequestChangeNotEligibleError,
+                ServerNotFoundError,
+                request_change_for_server,
+            )
+            _new_url = updates.pop("upstream_url")
+            _actor = getattr(request.state, "client_id", "unknown-admin")
+            try:
+                reroute_result = await request_change_for_server(
+                    server_id, _actor, new_upstream_url=_new_url,
+                    asserted_ip_only=True,
+                    reason="admin PATCH upstream_url (re-routed to request-change)",
+                )
+            except ServerNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except RequestChangeNotEligibleError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    if not updates:
+        if reroute_result is not None:
+            return JSONResponse({
+                "server_id": server_id, "updated": ["upstream_url"], "request_change": reroute_result,
+            })
+        raise HTTPException(status_code=400, detail="No fields to update")
+
     # SSRF guard: fail-closed DNS — DNS failure rejects the URL (same as registration).
     # Task 3.1: also update upstream_allowlist_entry when upstream_url changes.
+    # (Reached only for a non-self-hosted or not-yet-live row — the live
+    # self-hosted case is popped from `updates` and re-routed above.)
     if "upstream_url" in updates:
         from app.core.config import get_settings as _get_settings
         _settings = _get_settings()
@@ -412,7 +457,11 @@ async def update_server(server_id: str, body: ServerUpdate, request: Request):
         await db.commit()
     if rows_updated == 0:
         raise HTTPException(status_code=404, detail="Server not found")
-    return JSONResponse({"server_id": server_id, "updated": list(updates)})
+    resp: dict = {"server_id": server_id, "updated": list(updates)}
+    if reroute_result is not None:
+        resp["updated"] = resp["updated"] + ["upstream_url"]
+        resp["request_change"] = reroute_result
+    return JSONResponse(resp)
 
 
 async def _get_server_owner_row(server_id: str) -> dict | None:
@@ -540,6 +589,134 @@ async def set_server_debug_mode(server_id: str, body: DebugModeUpdate, request: 
         client_id=server_id, details={"server_id": server_id},
     )
     return JSONResponse({"server_id": server_id, "debug_mode": body.enabled})
+
+
+class RequestChangeBody(BaseModel):
+    """Request body for POST /api/v1/servers/{id}/request-change (PRD-0012 C3)."""
+    new_upstream_url: Optional[str] = None
+    new_github_repo_url: Optional[str] = None
+    # Submitter-asserted claim that only the endpoint address changed, not the
+    # code. Default False (conservative — full re-review) per the PRD's
+    # fail-safe-toward-more-review rule: an unasserted or wrongly-asserted
+    # claim never skips re-verification of the running endpoint itself, it
+    # only affects whether a human reviewer is also required.
+    asserted_ip_only: bool = False
+    reason: str = ""
+
+
+@router.post("/api/v1/servers/{server_id}/request-change")
+async def request_change(server_id: str, body: RequestChangeBody, request: Request):
+    """
+    PRD-0012 C3 — request a backend/endpoint change on a live self-hosted
+    server. Owner or maintainer (platform_admin as a rescue valve, same
+    pattern as debug-mode). Quarantines every tool for this server and
+    demotes server_registry.status to 'quarantined' atomically (TRAP-2/
+    TRAP-5), then classifies the change as IP-only (auto-approved once a
+    live schema fetch confirms nothing else changed) or code-change (full
+    guarded re-scan + reviewer re-approval).
+    """
+    row = await _get_server_owner_row(server_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Server not found")
+    _require_owner_or_maintainer(row, request, allow_platform_admin=True)
+    actor = getattr(request.state, "client_id", "unknown")
+
+    from app.services.server_lifecycle import ChangeApprovalError as _CAErr
+    from app.services.server_lifecycle import (
+        RequestChangeNotEligibleError,
+        ServerNotFoundError,
+        request_change_for_server,
+    )
+    try:
+        result = await request_change_for_server(
+            server_id, actor,
+            new_upstream_url=body.new_upstream_url,
+            new_github_repo_url=body.new_github_repo_url,
+            asserted_ip_only=body.asserted_ip_only,
+            reason=body.reason,
+        )
+    except ServerNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RequestChangeNotEligibleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except _CAErr as exc:
+        raise HTTPException(status_code=422, detail=f"upstream_url rejected: {exc}") from exc
+
+    from app.services.admin_audit import emit_admin_config_event
+    await emit_admin_config_event(
+        actor, "server_request_change", server_id,
+        {"reason": body.reason, **{k: v for k, v in result.items() if k != "server_id"}},
+    )
+    return JSONResponse(result)
+
+
+@router.post("/api/v1/servers/{server_id}/verify")
+async def verify_server_endpoint(server_id: str, request: Request):
+    """
+    PRD-0012 C4 — retry verification while in debug/maintenance mode.
+    Distinct from "go live" (POST /servers/{id}/debug-mode {enabled:false}):
+    this only re-runs run_verification_probes and reports the result; on
+    failure the server stays in debug mode with the probe error surfaced,
+    never advancing toward invocable-by-everyone on its own.
+    """
+    row = await _get_server_owner_row(server_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Server not found")
+    _require_owner_or_maintainer(row, request, allow_platform_admin=True)
+    if not row.get("debug_mode"):
+        raise HTTPException(
+            status_code=409, detail="server is not in debug/maintenance mode — nothing to verify",
+        )
+
+    async with AsyncSessionLocal() as db:
+        _url_row = (await db.execute(
+            text(
+                "SELECT upstream_url FROM server_registry "
+                "WHERE server_id = :sid AND deleted_at IS NULL"
+            ),
+            {"sid": server_id},
+        )).mappings().first()
+    upstream_url = _url_row["upstream_url"] if _url_row else None
+    if not upstream_url:
+        raise HTTPException(status_code=409, detail="server has no upstream_url set")
+
+    actor = getattr(request.state, "client_id", "unknown")
+    from app.services.deploy_verifier import VerificationFailedError, run_verification_probes
+
+    try:
+        report = await run_verification_probes(
+            server_id, upstream_url, actor_client_id=actor, require_approved=False,
+        )
+    except VerificationFailedError as exc:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                text(
+                    "UPDATE server_registry SET verification_report = CAST(:report AS jsonb), "
+                    "updated_at = now() WHERE server_id = :sid"
+                ),
+                {"report": json.dumps(exc.report), "sid": server_id},
+            )
+            await db.commit()
+        return JSONResponse(
+            {
+                "server_id": server_id, "verified": False,
+                "debug_mode": True, "verification_report": exc.report,
+            },
+            status_code=422,
+        )
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text(
+                "UPDATE server_registry SET verification_report = CAST(:report AS jsonb), "
+                "updated_at = now() WHERE server_id = :sid"
+            ),
+            {"report": json.dumps(report), "sid": server_id},
+        )
+        await db.commit()
+    return JSONResponse({
+        "server_id": server_id, "verified": True, "debug_mode": True, "verification_report": report,
+    })
 
 
 @router.delete("/api/v1/admin/servers/{server_id}", status_code=204, response_class=Response)

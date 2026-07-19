@@ -301,6 +301,15 @@ class DraftCreate(BaseModel):
     name: str
     description: str = ""
     github_repo_url: Optional[str] = None  # None = no-code path
+    # PRD-0012 discriminator: True (default) = self-hosted — the submitter
+    # runs their own backend and supplies requested_upstream_url at submit
+    # (C1). False = platform-deployed — the platform builds/deploys the repo
+    # via apply_submission and assigns the URL after; no requested_upstream_url
+    # is required or expected. Persisted verbatim to server_registry.is_self_hosted,
+    # which is the single source of truth every downstream branch (approve,
+    # request-change) reads — never re-inferred from github_repo_url/
+    # deployment_status.
+    self_host: bool = True
 
     @field_validator("name")
     @classmethod
@@ -325,6 +334,10 @@ class DraftUpdate(BaseModel):
     github_repo_url: Optional[str] = None
     injection_mode: Optional[str] = None
     requested_upstream_url: Optional[str] = None
+    # PRD-0012: allow changing deployment intent while still in draft/
+    # changes_requested (e.g. the wizard's step-1 choice was wrong) — same
+    # semantics as DraftCreate.self_host.
+    self_host: Optional[bool] = None
 
     @field_validator("github_repo_url")
     @classmethod
@@ -410,16 +423,17 @@ async def create_draft(body: DraftCreate, request: Request) -> JSONResponse:
         await session.execute(text("""
             INSERT INTO server_registry
                 (server_id, name, upstream_url, status, owner_sub, injection_mode,
-                 github_repo_url, description, submission_status, scan_status)
+                 github_repo_url, description, submission_status, scan_status, is_self_hosted)
             VALUES
                 (:sid, :name, '', 'pending', :owner, 'none',
-                 :repo_url, :description, 'draft', 'pending')
+                 :repo_url, :description, 'draft', 'pending', :self_host)
         """), {
             "sid": sid,
             "name": body.name,
             "owner": owner,
             "repo_url": body.github_repo_url,
             "description": body.description,
+            "self_host": body.self_host,
         })
         await session.commit()
     return JSONResponse({"server_id": sid, "submission_status": "draft"}, status_code=201)
@@ -478,6 +492,7 @@ async def update_draft(server_id: str, body: DraftUpdate, request: Request) -> J
     _set("upstream_idp_type", body.upstream_idp_type)
     _set("mode_override_reason", body.mode_override_reason)
     _set("has_write_ops", body.has_write_ops)
+    _set("is_self_hosted", body.self_host)
 
     if body.upstream_idp_config is not None:
         fields.append("upstream_idp_config = CAST(:idp_config AS jsonb)")
@@ -519,20 +534,25 @@ async def submit_for_review(
     # submitter to actually answer "what does this do" and "where will it
     # run" before the submission can even enter the queue — description was
     # previously collected by the wizard and silently dropped, so submissions
-    # with no description at all reached awaiting_review. requested_upstream_url
-    # used to be required only for repo-backed submissions (the no-code path
-    # has no server yet) — but that carve-out let a no-code submission reach
-    # the SAME awaiting_review queue as a real one with nothing but a free-text
-    # description, indistinguishable to a reviewer from an incomplete config.
-    # Both fields — and injection_mode, the auth *type* (never the secret
-    # itself) — are now required unconditionally: get_server_scaffold remains
-    # available with no submission at all for "I don't have code/a server yet",
-    # so this doesn't block that path, it just keeps it out of the review queue.
+    # with no description at all reached awaiting_review. description and
+    # injection_mode — the auth *type* (never the secret itself) — are
+    # required unconditionally: get_server_scaffold remains available with no
+    # submission at all for "I don't have code/a server yet", so this doesn't
+    # block that path, it just keeps it out of the review queue.
+    #
+    # requested_upstream_url (PRD-0012 C1) is required ONLY when
+    # is_self_hosted — the self-hosted flow is url-first (the owner already
+    # runs a backend at submit time). A platform-deployed submission
+    # (is_self_hosted=false, set via DraftCreate.self_host=false) has no URL
+    # yet at all: the platform assigns runtime_url only after build+deploy
+    # (apply_submission -> deploy_launcher -> deploy_verifier), so requiring
+    # one here would make that path permanently unreachable.
     sub = await _get_submission(server_id, owner_sub=owner)
+    is_self_hosted = bool(sub.get("is_self_hosted", True))
     missing: list[str] = []
     if not (sub.get("description") or "").strip():
         missing.append("description")
-    if not (sub.get("requested_upstream_url") or "").strip():
+    if is_self_hosted and not (sub.get("requested_upstream_url") or "").strip():
         missing.append("requested_upstream_url")
     if not (sub.get("injection_mode") or "").strip():
         missing.append("injection_mode")
@@ -545,6 +565,33 @@ async def submit_for_review(
                 "missing_fields": missing,
             },
         )
+
+    # PRD-0012 C1: the reviewer must be shown (and act against) a real,
+    # SSRF-safe target — full validate_upstream_url_ssrf (scheme/embedded-
+    # cred/CIDR checks), not the cheap structural guard DraftUpdate already
+    # ran. Runs BEFORE the CAS update below (non-name-consuming, Fix-4
+    # pattern) — a submission that fails this check never enters the review
+    # queue at all, and the draft/name it already claimed is untouched so the
+    # submitter can simply patch requested_upstream_url and resubmit.
+    # Only applies to the self-hosted path — a platform-deployed submission
+    # has no requested_upstream_url yet to validate.
+    if is_self_hosted:
+        from app.core.config import get_settings as _get_submit_settings
+        _submit_settings = _get_submit_settings()
+        try:
+            await validate_upstream_url_ssrf(
+                sub["requested_upstream_url"],
+                private_cidr_allowlist=_submit_settings.upstream_private_cidr_allowlist_parsed,
+                allow_http_dev=(_submit_settings.ENVIRONMENT == "development"),
+            )
+        except InvalidOnboardingConfig as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "SSRF_VALIDATION_FAILED",
+                    "message": f"requested_upstream_url rejected: {exc}",
+                },
+            ) from exc
 
     # M1 fix: atomic conditional update — no separate read-then-write.
     # If two concurrent requests race, only one wins the CAS; the other gets rowcount=0 → 409.
@@ -891,10 +938,25 @@ async def review_submission_detail(server_id: str, request: Request) -> JSONResp
 
 @router.post("/api/v1/admin/submissions/{server_id}/approve")
 async def approve_submission(server_id: str, body: ReviewAction, request: Request) -> JSONResponse:
-    """Approve submission — repo path moves to approved_pending_url (submitter still
-    supplies the running URL); no-code path (F-15) has no URL to ever supply, so it
-    goes straight to the terminal 'scaffold_ready' state instead — never
-    approved_pending_url, never "active"/"running" language.
+    """Approve submission.
+
+    PRD-0012 C2: for a self-hosted, repo-backed submission (is_self_hosted —
+    everything created through this router today, since is_self_hosted
+    defaults TRUE and only flips FALSE via apply_submission's explicit
+    opt-in to the platform-managed build/deploy pipeline), approval now runs
+    the full SSRF-validate -> verify -> debug-mode -> release pipeline
+    inline (server_lifecycle.approve_self_hosted_server) instead of parking
+    at 'approved_pending_url' — the owner already gave us the real URL at
+    submit time (C1), so there is nothing left to wait for. Landing lands in
+    debug_mode (owner/maintainer-only invocation, Step 1.1) with tools
+    released from quarantine (evidence-legitimate: scan passed + server
+    approved + verification probes passed, INV-006/CR-07) — the owner tests
+    real calls via POST /servers/{id}/verify, then goes live via
+    POST /servers/{id}/debug-mode {enabled:false}.
+
+    Platform-deployed (is_self_hosted=false) and no-code (github_repo_url
+    empty, F-15) submissions keep the legacy behavior unchanged:
+    'approved_pending_url' / 'scaffold_ready' respectively.
 
     WP-A2 (CR-13 + CR-03 fold-in): this is also the single reviewer gate where
     requested OAuth/IdP config (server_registry.upstream_idp_config,
@@ -918,17 +980,18 @@ async def approve_submission(server_id: str, body: ReviewAction, request: Reques
     if sub.get("scan_status") not in ("passed", "not_applicable", "review_required"):
         raise HTTPException(status_code=409, detail="cannot approve a scan-blocked submission")
 
-    # R-10/F-15: no-code submissions (no repo) can never reach provide_running_url —
-    # there is no server anywhere to supply a URL for.
-    new_status = "approved_pending_url" if sub.get("github_repo_url") else "scaffold_ready"
+    has_repo = bool(sub.get("github_repo_url"))
+    is_self_hosted = bool(sub.get("is_self_hosted", True))
 
     async with AsyncSessionLocal() as session:
         oauth_approval = await _validate_oauth_policy_at_approval(session, sub, body)
         high_risk_by = reviewer if oauth_approval.get("high_risk_scopes_approved_by") else None
+        # Review metadata + OAuth approval columns are recorded regardless of
+        # which branch runs below — reviewed_by/reviewed_at/oauth_* must be
+        # persisted even if the self-hosted verification pipeline fails.
         await session.execute(text("""
             UPDATE server_registry
-            SET submission_status = :new_status,
-                review_notes = :notes,
+            SET review_notes = :notes,
                 reviewed_by = :reviewer,
                 reviewed_at = now(),
                 updated_at = now(),
@@ -940,7 +1003,7 @@ async def approve_submission(server_id: str, body: ReviewAction, request: Reques
                 high_risk_scopes_approved_at = CASE WHEN CAST(:high_risk_by AS TEXT) IS NOT NULL THEN now() ELSE high_risk_scopes_approved_at END
             WHERE server_id = :sid
         """), {
-            "notes": body.notes, "reviewer": reviewer, "sid": server_id, "new_status": new_status,
+            "notes": body.notes, "reviewer": reviewer, "sid": server_id,
             "approved_idp_config": json.dumps(oauth_approval["approved_upstream_idp_config"]) if oauth_approval["approved_upstream_idp_config"] is not None else None,
             "approved_token_audience": oauth_approval["approved_token_audience"],
             # approved_oauth_scopes is TEXT[] (pre-existing V014 column, now wired
@@ -950,6 +1013,61 @@ async def approve_submission(server_id: str, body: ReviewAction, request: Reques
             "oauth_policy_id": oauth_approval["oauth_policy_id"],
             "high_risk_by": high_risk_by,
         })
+        await session.commit()
+
+    if has_repo and is_self_hosted:
+        from app.services.server_lifecycle import ChangeApprovalError, approve_self_hosted_server
+
+        try:
+            result = await approve_self_hosted_server(
+                server_id,
+                sub["requested_upstream_url"],
+                reviewer,
+                new_submission_status="active",
+                release_notes=f"approved by {reviewer}: scan passed, verification probes passed",
+            )
+        except ChangeApprovalError as exc:
+            await emit_admin_config_event(
+                reviewer, "submission_approve_verification_failed", server_id,
+                {"notes": body.notes, "error": str(exc)}, outcome="deny",
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "VERIFICATION_FAILED",
+                    "message": f"Approval SSRF/verification failed — submission stays awaiting_review: {exc}",
+                    "verification_report": exc.report,
+                },
+            ) from exc
+
+        new_status = result["submission_status"]
+        await emit_admin_config_event(
+            reviewer, "submission_approve", server_id,
+            {
+                "notes": body.notes,
+                "submission_status": new_status,
+                "debug_mode": True,
+                "tools_released": result["tools_released"],
+                "oauth_policy_id": oauth_approval.get("oauth_policy_id"),
+                "high_risk_scopes_approved_by": high_risk_by,
+            },
+        )
+        return JSONResponse({
+            "server_id": server_id,
+            "submission_status": new_status,
+            "debug_mode": True,
+            "tools_released": result["tools_released"],
+            "verification_report": result["verification_report"],
+        })
+
+    # Legacy / platform-deployed / no-code path — unchanged.
+    # R-10/F-15: no-code submissions (no repo) can never reach provide_running_url —
+    # there is no server anywhere to supply a URL for.
+    new_status = "approved_pending_url" if has_repo else "scaffold_ready"
+    async with AsyncSessionLocal() as session:
+        await session.execute(text(
+            "UPDATE server_registry SET submission_status = :new_status, updated_at = now() WHERE server_id = :sid"
+        ), {"new_status": new_status, "sid": server_id})
         await session.commit()
     await emit_admin_config_event(
         reviewer, "submission_approve", server_id,
@@ -965,10 +1083,83 @@ async def approve_submission(server_id: str, body: ReviewAction, request: Reques
 
 @router.post("/api/v1/admin/submissions/{server_id}/reject")
 async def reject_submission(server_id: str, body: ReviewAction, request: Request) -> JSONResponse:
-    """Reject a submission permanently."""
+    """
+    Reject a submission.
+
+    PRD-0012 (product HIGH-3): a change-triggered re-review (request-change
+    demoted a previously-LIVE server for re-approval — last_good_upstream_url
+    is set) rolls BACK to last-known-good on rejection instead of terminally
+    killing a server that was working fine before the owner's requested
+    change: restores upstream_url, status='approved', submission_status=
+    'active', debug_mode off, and re-activates every tool_registry row whose
+    name appears in the last_good_tool_schema snapshot (anything discovered
+    only during the failed re-review attempt stays quarantined — safer to
+    under- than over-release). A first-time submission (no last_good_* ever
+    recorded) keeps the existing terminal 'rejected' behavior unchanged.
+    """
     _require_submission_reviewer(request)
     reviewer = _client_id(request)
-    _require_not_self_review(await _get_submission(server_id), reviewer, list(getattr(request.state, "client_roles", []) or []))
+    sub = await _get_submission(server_id)
+    _require_not_self_review(sub, reviewer, list(getattr(request.state, "client_roles", []) or []))
+
+    if sub.get("last_good_upstream_url"):
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(text("""
+                UPDATE server_registry
+                SET status = 'approved',
+                    submission_status = 'active',
+                    upstream_url = last_good_upstream_url,
+                    scan_commit = COALESCE(last_good_scan_commit, scan_commit),
+                    debug_mode = FALSE,
+                    debug_enabled_by = NULL,
+                    debug_enabled_at = NULL,
+                    review_notes = :notes,
+                    reviewed_by = :reviewer,
+                    reviewed_at = now(),
+                    updated_at = now()
+                WHERE server_id = :sid
+                  AND deleted_at IS NULL
+                  AND submission_status IN ('awaiting_review', 'scan_blocked', 'scan_pending', 'changes_requested')
+                RETURNING last_good_upstream_url, last_good_tool_schema
+            """), {"notes": body.notes, "reviewer": reviewer, "sid": server_id})
+            row = result.mappings().first()
+            if row is None:
+                raise HTTPException(status_code=409, detail="submission is not in a rejectable state")
+
+            good_names = [e.get("name") for e in (row["last_good_tool_schema"] or []) if e.get("name")]
+            reactivated = 0
+            if good_names:
+                react = await session.execute(text("""
+                    UPDATE tool_registry
+                    SET status = 'active',
+                        upstream_url = :url,
+                        released_by = :reviewer,
+                        released_at = now(),
+                        release_notes = :notes,
+                        updated_at = now()
+                    WHERE server_id = :sid
+                      AND deleted_at IS NULL
+                      AND name = ANY(:names)
+                """), {
+                    "url": row["last_good_upstream_url"], "reviewer": reviewer,
+                    "notes": f"reject-rollback to last-known-good by {reviewer}",
+                    "sid": server_id, "names": good_names,
+                })
+                reactivated = react.rowcount or 0
+            await session.commit()
+
+        await emit_admin_config_event(
+            reviewer, "submission_reject_rollback", server_id,
+            {"notes": body.notes, "tools_reactivated": reactivated},
+        )
+        return JSONResponse({
+            "server_id": server_id,
+            "submission_status": "active",
+            "rolled_back_to_last_good": True,
+            "tools_reactivated": reactivated,
+        })
+
+    # First-time reject — no last-known-good ever recorded — terminal, unchanged.
     async with AsyncSessionLocal() as session:
         # M3 fix: state guard prevents corrupting active servers via reject API.
         result = await session.execute(text("""
@@ -1223,7 +1414,7 @@ async def apply_submission(server_id: str, request: Request) -> JSONResponse:
         await session.execute(text(
             """
             UPDATE server_registry
-            SET deployment_status = 'build_requested', updated_at = now()
+            SET deployment_status = 'build_requested', is_self_hosted = FALSE, updated_at = now()
             WHERE server_id = :sid
             """
         ), {"sid": server_id})

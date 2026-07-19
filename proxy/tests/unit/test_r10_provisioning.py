@@ -85,6 +85,12 @@ async def test_approve_submission_repo_path_stays_approved_pending_url():
         "scan_status": "passed",
         "github_repo_url": "https://github.com/octocat/Hello-World",
         "reviewed_by": None,
+        # PRD-0012: is_self_hosted=False (platform-deployed) is the only repo
+        # path that still lands in approved_pending_url — a self-hosted
+        # (is_self_hosted=True, the default) submission now runs the C2
+        # inline verify/debug-mode pipeline instead. See
+        # test_submission_prd0012.py for that new behavior.
+        "is_self_hosted": False,
     }
 
     captured_params = {}

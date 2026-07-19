@@ -29,9 +29,10 @@ Also handles the "worker gave up" cases:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import text
 
@@ -78,8 +79,10 @@ async def _evaluate_submission_scan(session, job, raw) -> None:
     # not submission_status. A CVE gate ambiguity is still something a human
     # reviewer clears through the ordinary approve/reject/request-changes
     # flow, it just must never present as an unqualified clean pass.
-    subm_status = ("scan_blocked" if status == "blocked"
-                   else ("awaiting_review" if status in ("passed", "review_required") else "scan_running"))
+    subm_status = (
+        "scan_blocked" if status == "blocked"
+        else ("awaiting_review" if status in ("passed", "review_required") else "scan_running")
+    )
     await session.execute(text(
         """
         UPDATE server_registry
@@ -113,10 +116,68 @@ async def _evaluate_submission_scan(session, job, raw) -> None:
                job.job_id, job.server_id, status)
 
 
+async def _evaluate_change_rereview_scan(session, job, raw) -> None:
+    """
+    PRD-0012 C3/TRAP-6 — guarded re-review scan evaluator for the
+    code-change path of POST /api/v1/servers/{id}/request-change.
+
+    Unlike _evaluate_submission_scan (used only for a submission's FIRST
+    scan, where there is no concurrent-demoted-state race to guard against),
+    this CAS-guards its UPDATE on the exact demoted state request-change put
+    the row into (status='quarantined', submission_status='awaiting_review')
+    before writing any new scan_status/submission_status — a concurrent
+    reject/delete of the submission mid-rescan must never be clobbered by a
+    late-arriving worker result (architect §4). If the CAS misses, the
+    result is logged and dropped; evaluate_pending() still marks the raw
+    result evaluated so it is never retried forever.
+    """
+    waivers = await _fetch_active_waivers(session, job.server_id)
+    status = _decide_status(raw.raw_findings, raw.worker_error, waivers)
+    subm_status = (
+        "scan_blocked" if status == "blocked"
+        else ("awaiting_review" if status in ("passed", "review_required") else "scan_running")
+    )
+    result = await session.execute(text(
+        """
+        UPDATE server_registry
+        SET scan_status = :scan_status,
+            scan_report = CAST(:report AS jsonb),
+            submission_status = :subm_status,
+            sbom_components = CAST(:components AS jsonb),
+            sbom_cyclonedx = CAST(:cyclonedx AS jsonb),
+            scanned_at = now(),
+            last_rescanned_at = now(),
+            scan_commit = :commit,
+            updated_at = now()
+        WHERE server_id = :sid
+          AND status = 'quarantined'
+          AND submission_status = 'awaiting_review'
+        """
+    ), {
+        "scan_status": status,
+        "report": json.dumps(raw.raw_findings),
+        "subm_status": subm_status,
+        "components": json.dumps(raw.sbom_components or []),
+        "cyclonedx": json.dumps(raw.sbom_cyclonedx) if raw.sbom_cyclonedx is not None else None,
+        "commit": raw.scan_commit,
+        "sid": str(job.server_id),
+    })
+    if result.rowcount == 0:
+        logger.warning(
+            "change_rereview_scan job_id=%s server_id=%s: CAS missed (server no longer "
+            "status=quarantined/submission_status=awaiting_review — a concurrent reject/delete "
+            "likely intervened); dropping this result rather than clobbering current state",
+            job.job_id, job.server_id,
+        )
+        return
+    logger.info("evaluated change_rereview_scan job_id=%s server_id=%s -> scan_status=%s",
+               job.job_id, job.server_id, status)
+
+
 async def _evaluate_rescan(session, job, raw) -> None:
     waivers = await _fetch_active_waivers(session, job.server_id)
     status = _decide_status(raw.raw_findings, raw.worker_error, waivers)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # Rescan never touches submission_status — approved servers stay approved
     # (matches pre-CR-14 rescan_scheduler semantics).
     await session.execute(text(
@@ -128,8 +189,14 @@ async def _evaluate_rescan(session, job, raw) -> None:
             updated_at        = :now
         WHERE server_id = :sid
         """
-    ), {"scan_status": status, "report": json.dumps(raw.raw_findings), "now": now, "sid": str(job.server_id)})
-    logger.info("evaluated rescan job_id=%s server_id=%s -> scan_status=%s", job.job_id, job.server_id, status)
+    ), {
+        "scan_status": status, "report": json.dumps(raw.raw_findings),
+        "now": now, "sid": str(job.server_id),
+    })
+    logger.info(
+        "evaluated rescan job_id=%s server_id=%s -> scan_status=%s",
+        job.job_id, job.server_id, status,
+    )
 
 
 async def evaluate_pending() -> int:
@@ -154,6 +221,8 @@ async def evaluate_pending() -> int:
             try:
                 if raw.job_type == "rescan":
                     await _evaluate_rescan(session, job, raw)
+                elif raw.job_type == "change_rereview_scan":
+                    await _evaluate_change_rereview_scan(session, job, raw)
                 else:
                     await _evaluate_submission_scan(session, job, raw)
                 await session.execute(text(
@@ -193,6 +262,20 @@ async def evaluate_pending() -> int:
                     WHERE server_id = :sid
                     """
                 ), {"report": json.dumps(report), "sid": str(job.server_id)})
+            elif job.job_type == "change_rereview_scan":
+                # TRAP-6: same CAS guard as _evaluate_change_rereview_scan —
+                # only touch a row still in the demoted state request-change put
+                # it in; a concurrent reject/delete must win, never be clobbered.
+                await session.execute(text(
+                    """
+                    UPDATE server_registry
+                    SET scan_status = 'error', scan_report = CAST(:report AS jsonb),
+                        updated_at = now()
+                    WHERE server_id = :sid
+                      AND status = 'quarantined'
+                      AND submission_status = 'awaiting_review'
+                    """
+                ), {"report": json.dumps(report), "sid": str(job.server_id)})
             else:
                 await session.execute(text(
                     """
@@ -202,8 +285,10 @@ async def evaluate_pending() -> int:
                     WHERE server_id = :sid
                     """
                 ), {"report": json.dumps(report), "sid": str(job.server_id)})
-            logger.error("job %s dead-lettered with no raw result; server_id=%s marked scan_status=error",
-                        job.job_id, job.server_id)
+            logger.error(
+                "job %s dead-lettered with no raw result; server_id=%s marked scan_status=error",
+                job.job_id, job.server_id,
+            )
             evaluated += 1
         await session.commit()
 
@@ -231,9 +316,7 @@ async def stop() -> None:
     global _task
     if _task and not _task.done():
         _task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await _task
-        except asyncio.CancelledError:
-            pass
     _task = None
     logger.info("scan evaluator loop stopped")
