@@ -18,6 +18,35 @@ from httpx import AsyncClient, ASGITransport
 # Tests that run against a real server send HTTP requests to localhost:8000
 # and never use these credentials directly; they are only needed to satisfy
 # pydantic-settings validation when importing the app.
+def _default_redis_host() -> str:
+    """
+    Resolve the right Mac-host-vs-in-container REDIS_HOST default.
+
+    Inside the mcp-proxy container, REDIS_HOST is deliberately left UNSET in
+    the container env — compose relies on the app's own Settings default
+    ("redis", see app/core/config.py). Historically this function's caller
+    used a blanket os.environ.setdefault("REDIS_HOST", "localhost") for Mac-
+    host convenience, but setdefault() always wins when the var is unset,
+    which silently pointed in-container test runs at the wrong host and
+    broke Redis connectivity for in-container integration tests (see the
+    now-redundant workaround this used to require in
+    tests/integration/test_taint_floor_invoke.py::redis_ready).
+
+    Fix: probe whether "redis" resolves via DNS. If it does, we're on the
+    podman/docker network — leave REDIS_HOST unset so the app's own "redis"
+    default (or an explicitly-set REDIS_HOST) wins. Only fall back to
+    "localhost" when "redis" is unresolvable, i.e. we're really running on
+    the Mac host outside the container network.
+    """
+    import socket
+
+    try:
+        socket.getaddrinfo("redis", 6379)
+    except OSError:
+        return "localhost"
+    return "redis"
+
+
 _SETTINGS_DEFAULTS = {
     # Skip production-startup validation so unit / oracle tests work without
     # a full container stack or real secrets loaded into the shell.
@@ -41,7 +70,9 @@ _SETTINGS_DEFAULTS = {
     # (i.e. they are no-ops inside a container where DB_HOST=db is already set
     # by docker-compose).
     "DB_HOST": "localhost",
-    "REDIS_HOST": "localhost",
+    # REDIS_HOST: see _default_redis_host() — must NOT unconditionally win
+    # with "localhost" inside the proxy container.
+    "REDIS_HOST": _default_redis_host(),
     "REDIS_PORT": "6379",
     "OPA_HOST": "localhost",
 }

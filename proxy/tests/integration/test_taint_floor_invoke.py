@@ -31,25 +31,13 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-async def redis_ready(monkeypatch):
+async def redis_ready():
     # `.client` raises when uninitialized; check the backing attr instead.
     #
-    # tests/conftest.py sets REDIS_HOST="localhost" via os.environ.setdefault()
-    # for convenience when running integration tests from the Mac host (outside
-    # the podman network). Inside the proxy container REDIS_HOST is unset in the
-    # container env (compose relies on the app's own "redis" default), so that
-    # setdefault silently wins and points redis_pool at the wrong host. Detect
-    # that in-container case here and correct it — this is a test-harness
-    # quirk unrelated to the taint-floor behavior under test.
-    if settings.REDIS_HOST == "localhost":
-        import socket
-
-        try:
-            socket.getaddrinfo("redis", settings.REDIS_PORT)
-        except OSError:
-            pass  # not resolvable (e.g. genuinely on the Mac host) — leave as-is
-        else:
-            monkeypatch.setattr(settings, "REDIS_HOST", "redis")
+    # tests/conftest.py's REDIS_HOST default now probes DNS itself (resolves
+    # to "redis" in-container, "localhost" on the Mac host), so the
+    # in-container correction that used to live here is redundant — kept as
+    # a no-op fixture for the fixture-name dependency below.
     if getattr(redis_pool, "_client", None) is None:
         await redis_pool.initialize()
     yield
