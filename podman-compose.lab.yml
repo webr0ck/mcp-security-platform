@@ -596,6 +596,7 @@ services:
       - mcp-catfacts-egress-net    # connects lab-mcp-catfacts needing egress
       - mcp-fetch-egress-net       # connects lab-mcp-fetch needing egress
       - scanner-worker-egress-net  # CR-14: connects scanner-worker needing egress
+      - ops-agent-egress-net       # connects lab-ops-agent needing egress (git pull rebuild)
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -1108,6 +1109,12 @@ services:
       # --build <service>`. Read-only: ops-agent must never edit compose
       # definitions, only invoke them.
       - ${PWD}:/workspace:ro
+      # Writable-under-a-read-only-mount: a dedicated named volume for
+      # /ops/rebuild-from-git's per-service git checkouts, layered on top of
+      # the otherwise-read-only /workspace mount above. Scoped to exactly
+      # this subpath so ops-agent never gets write access to the platform's
+      # own checked-out source tree — only to its own git-pull scratch space.
+      - ops-agent-git-workdirs-data:/workspace/.ops-agent-git-workdirs
     environment:
       OPS_AGENT_TOKEN: "${OPS_AGENT_TOKEN:?OPS_AGENT_TOKEN must be set in .env.lab}"
       OPS_AGENT_PODMAN_BIN: "podman"
@@ -1116,8 +1123,21 @@ services:
       # resolves the same merged topology the lab actually boots with.
       OPS_AGENT_COMPOSE_FILES: "docker-compose.yml,docker-compose.dev.yml,podman-compose.lab.yml,compose.wazuh.yml"
       OPS_AGENT_COMPOSE_PROJECT_DIR: "/workspace"
+      OPS_AGENT_GIT_WORKDIR_ROOT: "/workspace/.ops-agent-git-workdirs"
+      # Matches the `image: <container_name>:lab` convention every mcp-/
+      # lab-mcp- service in this file uses today — see the documented
+      # limitation on rebuild_service_from_git in ops-agent/app.py.
+      OPS_AGENT_GIT_IMAGE_TAG_SUFFIX: "lab"
+      # git (and anything else on ops-agent-egress-net) reaches the internet
+      # only via lab-egress-proxy's allowlist — github.com/codeload.github.com/
+      # objects.githubusercontent.com are already allowlisted there for
+      # scanner-worker's git-clone path (lab/egress-proxy/squid.conf); reused
+      # as-is rather than adding a second allowlist entry set.
+      HTTPS_PROXY: "http://lab-egress-proxy:3128"
+      NO_PROXY: "lab-ops-agent,localhost,127.0.0.1"
     networks:
       - proxy-ops-agent-net   # pairwise with proxy only — no other peers, no host port
+      - ops-agent-egress-net  # egress-only path to lab-egress-proxy -> github.com et al, for /ops/rebuild-from-git
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
       interval: 10s
@@ -1334,6 +1354,9 @@ volumes:
   lab-netbox-db-data:
   lab-gitea-data:
   lab-keycloak-data:
+  # ops-agent's writable git-pull scratch space (see lab-ops-agent above) —
+  # deliberately its own volume, not part of the read-only /workspace mount.
+  ops-agent-git-workdirs-data:
 
 # ── Networks ─────────────────────────────────────────────────────────────────
 # NOTE ON ALLOWLIST DRIFT: podman assigns these bridge subnets sequentially from
@@ -1463,6 +1486,14 @@ networks:
   # internal:true default — same allowlisting egress-proxy pattern as
   # mcp-egress-net above, reusing lab-egress-proxy rather than a second squid.
   scanner-worker-egress-net:
+    driver: bridge
+    internal: false   # internet access via lab-egress-proxy NAT, allowlisted
+  # rebuild-from-git ("true git pull per server"): ops-agent's egress path to
+  # clone/pull a server's public github_repo_url. Same allowlisting
+  # egress-proxy pattern, reusing the git-host entries already allowlisted
+  # for scanner-worker-egress-net (github.com/codeload.github.com/
+  # objects.githubusercontent.com) — no squid.conf changes needed.
+  ops-agent-egress-net:
     driver: bridge
     internal: false   # internet access via lab-egress-proxy NAT, allowlisted
 

@@ -5,6 +5,7 @@ calls are mocked; no real Postgres or ops-agent required.
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -279,16 +280,39 @@ async def test_restart_server_emits_admin_audit_event():
     assert kwargs["client_id"] == "s1"
 
 
-@pytest.mark.asyncio
-async def test_rebuild_server_forwards_error_from_ops_agent():
-    from app.routers import admin_ops
+def _platform_hosted_row(**overrides):
     row = {
         "server_id": "s1",
         "owner_sub": "admin1",
         "maintainers": [],
         "debug_mode": True,
         "upstream_url": "http://lab-mcp-echo:8000/mcp",
+        "github_repo_url": "https://github.com/example/repo.git",
+        "is_self_hosted": False,
     }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_rebuild_server_no_repo_configured_returns_400():
+    """No github_repo_url on the server row -> 400, before ever calling ops-agent."""
+    from app.routers import admin_ops
+    row = _platform_hosted_row(github_repo_url=None)
+
+    with patch("app.routers.admin_ops.AsyncSessionLocal", _mock_db_session(row)), \
+         patch("app.routers.admin_ops.httpx.AsyncClient") as mock_client_cls:
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_ops.rebuild_server("s1", _make_request(roles=["platform_admin"]))
+        assert exc_info.value.status_code == 400
+        assert "no git repo configured" in str(exc_info.value.detail)
+        mock_client_cls.assert_not_called()  # ops-agent must never be called
+
+
+@pytest.mark.asyncio
+async def test_rebuild_server_forwards_error_from_ops_agent():
+    from app.routers import admin_ops
+    row = _platform_hosted_row()
     fake_client = AsyncMock()
     fake_client.request = AsyncMock(
         return_value=_mock_httpx_response(
@@ -302,11 +326,114 @@ async def test_rebuild_server_forwards_error_from_ops_agent():
     with patch("app.routers.admin_ops.AsyncSessionLocal", _mock_db_session(row)), \
          patch.object(admin_ops.settings, "OPS_AGENT_URL", "http://lab-ops-agent:9000"), \
          patch.object(admin_ops.settings, "OPS_AGENT_TOKEN", "secret-token"), \
-         patch("app.routers.admin_ops.httpx.AsyncClient", return_value=fake_client_cm):
+         patch("app.routers.admin_ops.httpx.AsyncClient", return_value=fake_client_cm), \
+         patch(
+             "app.routers.admin_ops._apply_platform_rebuild_rereview", new_callable=AsyncMock
+         ) as mock_rereview, \
+         patch(
+             "app.routers.admin_ops.request_change_for_server", new_callable=AsyncMock
+         ) as mock_request_change:
         with pytest.raises(HTTPException) as exc_info:
             await admin_ops.rebuild_server("s1", _make_request(roles=["platform_admin"]))
         assert exc_info.value.status_code == 502
         assert "boom" in str(exc_info.value.detail)
+
+    # rebuild itself failed -> neither re-review path may run.
+    mock_rereview.assert_not_called()
+    mock_request_change.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_server_success_forwards_git_url_and_triggers_platform_rereview():
+    """Platform-hosted (is_self_hosted=False) success path: git_url is forwarded to
+    ops-agent's /ops/rebuild-from-git, and a successful rebuild triggers the
+    self-contained platform re-review path (request_change_for_server is never
+    called for these rows — it 400s on is_self_hosted=False)."""
+    from app.routers import admin_ops
+    row = _platform_hosted_row()
+    fake_client = AsyncMock()
+    fake_client.request = AsyncMock(
+        return_value=_mock_httpx_response(
+            200, {"service": "lab-mcp-echo", "rebuilt": True, "commit": "deadbeef"}
+        )
+    )
+    fake_client_cm = MagicMock()
+    fake_client_cm.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client_cm.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.routers.admin_ops.AsyncSessionLocal", _mock_db_session(row)), \
+         patch.object(admin_ops.settings, "OPS_AGENT_URL", "http://lab-ops-agent:9000"), \
+         patch.object(admin_ops.settings, "OPS_AGENT_TOKEN", "secret-token"), \
+         patch("app.routers.admin_ops.httpx.AsyncClient", return_value=fake_client_cm), \
+         patch(
+             "app.routers.admin_ops._apply_platform_rebuild_rereview", new_callable=AsyncMock,
+             return_value={"server_id": "s1", "classification": "code_change",
+                           "submission_status": "awaiting_review", "tools_quarantined": 2,
+                           "job_id": "job-1"},
+         ) as mock_rereview, \
+         patch(
+             "app.routers.admin_ops.request_change_for_server", new_callable=AsyncMock
+         ) as mock_request_change, \
+         patch(
+             "app.services.admin_audit.emit_admin_config_event", new_callable=AsyncMock
+         ):
+        resp = await admin_ops.rebuild_server("s1", _make_request(roles=["platform_admin"]))
+
+    assert resp.status_code == 200
+    body = json.loads(resp.body)
+    assert body["rebuilt"] is True
+    assert body["git_url"] == "https://github.com/example/repo.git"
+    assert body["change_review"]["job_id"] == "job-1"
+
+    # git_url + service forwarded to the ops-agent's git-pull endpoint.
+    fake_client.request.assert_called_once()
+    call_args, call_kwargs = fake_client.request.call_args
+    assert call_args[1] == "http://lab-ops-agent:9000/ops/rebuild-from-git"
+    assert call_kwargs["json"] == {"service": "lab-mcp-echo", "git_url": "https://github.com/example/repo.git"}
+
+    mock_rereview.assert_awaited_once_with("s1", "admin1", "https://github.com/example/repo.git")
+    mock_request_change.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_server_self_hosted_row_uses_request_change_for_server():
+    """The unusual case of an is_self_hosted=True row still resolving to an
+    ops-agent-reachable host: request_change_for_server (the guarded,
+    already-reviewed PRD-0012 C3 path) is used, not the platform-only
+    fallback."""
+    from app.routers import admin_ops
+    row = _platform_hosted_row(is_self_hosted=True)
+    fake_client = AsyncMock()
+    fake_client.request = AsyncMock(
+        return_value=_mock_httpx_response(200, {"service": "lab-mcp-echo", "rebuilt": True})
+    )
+    fake_client_cm = MagicMock()
+    fake_client_cm.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client_cm.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.routers.admin_ops.AsyncSessionLocal", _mock_db_session(row)), \
+         patch.object(admin_ops.settings, "OPS_AGENT_URL", "http://lab-ops-agent:9000"), \
+         patch.object(admin_ops.settings, "OPS_AGENT_TOKEN", "secret-token"), \
+         patch("app.routers.admin_ops.httpx.AsyncClient", return_value=fake_client_cm), \
+         patch(
+             "app.routers.admin_ops._apply_platform_rebuild_rereview", new_callable=AsyncMock
+         ) as mock_rereview, \
+         patch(
+             "app.routers.admin_ops.request_change_for_server", new_callable=AsyncMock,
+             return_value={"server_id": "s1", "classification": "code_change", "job_id": "job-2"},
+         ) as mock_request_change, \
+         patch(
+             "app.services.admin_audit.emit_admin_config_event", new_callable=AsyncMock
+         ):
+        resp = await admin_ops.rebuild_server("s1", _make_request(roles=["platform_admin"]))
+
+    assert resp.status_code == 200
+    mock_request_change.assert_awaited_once_with(
+        "s1", "admin1",
+        new_github_repo_url="https://github.com/example/repo.git",
+        asserted_ip_only=False,
+    )
+    mock_rereview.assert_not_called()
 
 
 @pytest.mark.asyncio

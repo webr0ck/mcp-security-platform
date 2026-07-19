@@ -13,8 +13,12 @@ WORKDIR /app
 # only need the podman CLI in remote mode + podman-compose, not a full local
 # engine (no crun/conmon storage stack). `podman` from Debian provides the
 # remote-capable client; podman-compose is a pure-Python pip package.
+# git is required for the /ops/rebuild-from-git path (CR: "true git pull per
+# server") — clones/pulls a server's public github_repo_url into a dedicated
+# writable workdir before building. podman-compose remains the only thing
+# that touches the (read-only) compose build contexts under /workspace.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends podman \
+    && apt-get install -y --no-install-recommends podman git \
     && rm -rf /var/lib/apt/lists/*
 
 # Talk to the bind-mounted podman socket instead of a local engine. `podman`

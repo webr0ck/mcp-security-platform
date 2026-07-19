@@ -146,6 +146,135 @@ def test_rebuild_fails_closed_when_compose_files_unset(monkeypatch):
     assert resp.status_code == 503
 
 
+def _fake_addrinfo(ip: str):
+    return [(2, 1, 6, "", (ip, 0))]
+
+
+def test_rebuild_from_git_rejects_non_https_url(client):
+    c, _ = client
+    resp = c.post(
+        "/ops/rebuild-from-git",
+        json={"service": "lab-mcp-echo", "git_url": "git://github.com/example/repo.git"},
+        headers={"X-Ops-Token": "test-token-123"},
+    )
+    assert resp.status_code == 422
+
+
+def test_rebuild_from_git_rejects_non_allowlisted_service(client):
+    c, _ = client
+    resp = c.post(
+        "/ops/rebuild-from-git",
+        json={"service": "mcp-db", "git_url": "https://github.com/example/repo.git"},
+        headers={"X-Ops-Token": "test-token-123"},
+    )
+    assert resp.status_code == 422
+
+
+def test_rebuild_from_git_rejects_unsafe_ref(client):
+    c, _ = client
+    resp = c.post(
+        "/ops/rebuild-from-git",
+        json={"service": "lab-mcp-echo", "git_url": "https://github.com/example/repo.git",
+              "ref": "--upload-pack=evil"},
+        headers={"X-Ops-Token": "test-token-123"},
+    )
+    assert resp.status_code == 422
+
+
+def test_rebuild_from_git_rejects_embedded_credentials(client):
+    c, app_module = client
+    with patch.object(app_module.socket, "getaddrinfo", return_value=_fake_addrinfo("93.184.216.34")):
+        resp = c.post(
+            "/ops/rebuild-from-git",
+            json={"service": "lab-mcp-echo", "git_url": "https://user:pass@github.com/example/repo.git"},
+            headers={"X-Ops-Token": "test-token-123"},
+        )
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("bad_ip", ["127.0.0.1", "169.254.169.254", "10.0.0.5", "::1"])
+def test_rebuild_from_git_rejects_non_public_host(client, bad_ip):
+    c, app_module = client
+    with patch.object(app_module.socket, "getaddrinfo", return_value=_fake_addrinfo(bad_ip)):
+        resp = c.post(
+            "/ops/rebuild-from-git",
+            json={"service": "lab-mcp-echo", "git_url": "https://github.com/example/repo.git"},
+            headers={"X-Ops-Token": "test-token-123"},
+        )
+    assert resp.status_code == 422
+
+
+def test_rebuild_from_git_fails_closed_when_compose_files_unset(monkeypatch):
+    app_module = _fresh_app(monkeypatch, compose_files="")
+    c = TestClient(app_module.app)
+    resp = c.post(
+        "/ops/rebuild-from-git",
+        json={"service": "lab-mcp-echo", "git_url": "https://github.com/example/repo.git"},
+        headers={"X-Ops-Token": "test-token-123"},
+    )
+    assert resp.status_code == 503
+
+
+def test_rebuild_from_git_success_clones_builds_and_ups(client, tmp_path):
+    c, app_module = client
+    monkeypatch_root = tmp_path / "git-workdirs"
+    app_module.GIT_WORKDIR_ROOT = str(monkeypatch_root)
+
+    calls = []
+
+    def fake_run(argv, capture_output=True, text=True, timeout=None, shell=False, cwd=None):
+        calls.append(argv)
+        if argv[0] == "git" and "rev-parse" in argv:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="deadbeef\n", stderr="")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="ok\n", stderr="")
+
+    with patch.object(app_module.socket, "getaddrinfo", return_value=_fake_addrinfo("93.184.216.34")), \
+         patch("subprocess.run", side_effect=fake_run):
+        resp = c.post(
+            "/ops/rebuild-from-git",
+            json={"service": "lab-mcp-echo", "git_url": "https://github.com/example/repo.git", "ref": "main"},
+            headers={"X-Ops-Token": "test-token-123"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rebuilt"] is True
+    assert body["service"] == "lab-mcp-echo"
+    assert body["commit"] == "deadbeef"
+    assert body["image_tag"] == "lab-mcp-echo:lab"
+
+    # git clone used fixed argv with a `--` separator before url/dest — no
+    # string interpolation, ref passed as a discrete argv element.
+    clone_argv = next(a for a in calls if a[0] == "git" and "clone" in a)
+    assert clone_argv[-3] == "--"
+    assert clone_argv[-2] == "https://github.com/example/repo.git"
+    assert "--branch" in clone_argv and "main" in clone_argv
+
+    build_argv = next(a for a in calls if a[0] == "podman" and "build" in a)
+    assert build_argv[:3] == ["podman", "build", "-t"]
+    assert build_argv[3] == "lab-mcp-echo:lab"
+
+    up_argv = next(a for a in calls if a[0] == "podman-compose")
+    assert up_argv[-2:] == ["up", "-d"] or up_argv[-1] == "lab-mcp-echo"
+    assert "--build" not in up_argv  # image already built in the podman-build step above
+
+
+def test_rebuild_from_git_clone_failure_returns_502_not_silent(client, tmp_path):
+    c, app_module = client
+    app_module.GIT_WORKDIR_ROOT = str(tmp_path / "git-workdirs")
+
+    fake_fail = subprocess.CompletedProcess(args=[], returncode=128, stdout="", stderr="fatal: repo not found")
+    with patch.object(app_module.socket, "getaddrinfo", return_value=_fake_addrinfo("93.184.216.34")), \
+         patch("subprocess.run", return_value=fake_fail):
+        resp = c.post(
+            "/ops/rebuild-from-git",
+            json={"service": "lab-mcp-echo", "git_url": "https://github.com/example/repo.git"},
+            headers={"X-Ops-Token": "test-token-123"},
+        )
+    assert resp.status_code == 502
+    assert "clone" in resp.json()["detail"].lower()
+
+
 def test_no_shell_true_anywhere_in_source():
     """Static guard: subprocess.run must never be called with shell=True.
 
