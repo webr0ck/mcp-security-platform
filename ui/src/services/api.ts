@@ -225,6 +225,7 @@ export interface Submission {
   created_at: string
   updated_at: string | null
   upstream_url?: string | null
+  requested_upstream_url?: string | null
   service_name?: string | null
   upstream_idp_type?: string | null
   upstream_idp_config?: Record<string, unknown> | null
@@ -238,7 +239,7 @@ export interface DesignPromptsResponse {
 }
 
 export const submissions = {
-  create: (body: { name: string; github_repo_url?: string; description?: string }) =>
+  create: (body: { name: string; github_repo_url?: string; description?: string; self_host?: boolean }) =>
     request<{ server_id: string; submission_status: string }>(
       '/api/v1/submissions', { method: 'POST', body: JSON.stringify(body) }
     ),
@@ -246,6 +247,7 @@ export const submissions = {
   update: (id: string, body: {
     github_repo_url?: string; description?: string
     injection_mode?: string; data_categories?: string[]; has_write_ops?: boolean
+    requested_upstream_url?: string
   }) =>
     request<{ server_id: string; updated: boolean }>(
       `/api/v1/submissions/${id}`, { method: 'PATCH', body: JSON.stringify(body) }

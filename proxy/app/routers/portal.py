@@ -2405,6 +2405,10 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
                          value="{esc_py(sub.get('github_repo_url') or '')}"
                          style="background:#0f172a;border:1px solid #334155;border-radius:6px;
                                 color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
+                  <input id="editurl-{_esid}" type="url" placeholder="Backend URL (https://your-server.example.com/mcp)"
+                         value="{esc_py(sub.get('requested_upstream_url') or '')}"
+                         style="background:#0f172a;border:1px solid #334155;border-radius:6px;
+                                color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
                   <input id="editdesc-{_esid}" type="text" placeholder="Description"
                          value="{esc_py(sub.get('description') or '')}"
                          style="background:#0f172a;border:1px solid #334155;border-radius:6px;
@@ -2455,10 +2459,12 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
         }}
         async function editAndResubmit(sid) {{
           const repo = (document.getElementById('editrepo-' + sid)?.value || '').trim();
+          const url = (document.getElementById('editurl-' + sid)?.value || '').trim();
           const desc = (document.getElementById('editdesc-' + sid)?.value || '').trim();
           const aud = (document.getElementById('editaud-' + sid)?.value || '').trim();
           const patchBody = {{}};
           if (repo) patchBody.github_repo_url = repo;
+          if (url) patchBody.requested_upstream_url = url;
           if (desc) patchBody.description = desc;
           if (aud) patchBody.upstream_idp_config = {{audience: aud}};
           try {{
@@ -2762,7 +2768,9 @@ async def fragment_admin_servers(request: Request):
             result = await session.execute(text("""
                 SELECT server_id, name, upstream_url, status, owner_sub,
                        injection_mode, updated_at, maintainers, debug_mode,
-                       public_to_authenticated, has_write_ops
+                       public_to_authenticated, has_write_ops,
+                       debug_enabled_at, debug_enabled_by, verification_report,
+                       is_self_hosted, github_repo_url
                 FROM server_registry
                 ORDER BY name
             """))
@@ -2872,8 +2880,18 @@ async def fragment_admin_servers(request: Request):
                 f'<button onclick="htmx.ajax(\'GET\',\'/portal/fragments/admin/detections?server_id={sid}\','
                 f'{{target:\'#adm-content\',swap:\'innerHTML\'}})">Detections</button>'
                 f'<button onclick="adminSetMaintainers(\'{sid}\',{maint_json})">Maintainers…</button>'
-                f'<button onclick="adminToggleDebug(\'{sid}\',{"false" if debug_on else "true"})">'
-                f'{"Disable" if debug_on else "Enable"} debug mode</button>'
+                # PRD-0012 C3/C4: self-hosted-only actions. Edit endpoint/config
+                # re-routes through POST /request-change (quarantine+demote+
+                # re-verify, never a silent overwrite); Update-from-git calls
+                # the ops-agent rebuild path (git-pull + restart), same
+                # request-change re-review contract on the backend side.
+                + (f'<button onclick="adminEditEndpoint(\'{sid}\',{esc_py(json.dumps(s.upstream_url or ""))})">'
+                   f'Edit endpoint/config…</button>' if s.is_self_hosted else '')
+                + (f'<button onclick="adminRebuildSrv(\'{sid}\')">Update from git &amp; rebuild</button>'
+                   if s.is_self_hosted and s.github_repo_url else '')
+                + (f'<button onclick="adminVerifySrv(\'{sid}\')">Retry verification</button>' if debug_on else '')
+                + f'<button onclick="adminToggleDebug(\'{sid}\',{"false" if debug_on else "true"})">'
+                f'{"Go live / exit maintenance" if debug_on else "Enable debug mode"}</button>'
                 # WS-A: view container logs — only offered while in debug/maintenance
                 # mode, matching the server-side debug_mode gate on the logs endpoint.
                 + (f'<button onclick="adminViewLogs(\'{sid}\')">View logs</button>' if debug_on else '')
@@ -2889,6 +2907,47 @@ async def fragment_admin_servers(request: Request):
                 f'</div></div>'
             )
 
+        # PRD-0012 C4: first-class maintenance banner — NOT buried in the ⋯
+        # menu (the original complaint was a hidden control). Shown whenever
+        # debug_mode is on, with a staleness hint computed from
+        # debug_enabled_at so a server stuck in maintenance for days stands out.
+        maint_banner_html = ""
+        if st == "approved" and bool(s.debug_mode):
+            staleness = ""
+            _dea = getattr(s, "debug_enabled_at", None)
+            if _dea is not None:
+                import datetime as _dt
+                try:
+                    _dea_dt = _dea if isinstance(_dea, _dt.datetime) else _dt.datetime.fromisoformat(str(_dea))
+                    _days = (_dt.datetime.utcnow() - _dea_dt.replace(tzinfo=None)).total_seconds() / 86400
+                    if _days >= 1:
+                        staleness = f' &middot; in maintenance {int(_days)}d'
+                except Exception:
+                    staleness = ""
+            _vr = getattr(s, "verification_report", None)
+            if isinstance(_vr, str):
+                try:
+                    _vr = json.loads(_vr)
+                except (TypeError, ValueError):
+                    _vr = None
+            verify_note = ""
+            if isinstance(_vr, dict):
+                if _vr.get("invocation_probe_ok"):
+                    verify_note = ' <span style="color:#4ade80">&#x2713; last verification passed</span>'
+                elif _vr.get("healthcheck") is False:
+                    verify_note = ' <span style="color:#f87171">&#x2717; last verification failed — see logs</span>'
+            maint_banner_html = f"""
+            <div class="srv-maint-banner" style="margin-top:0.5rem;background:#1c1408;border:1px solid #78350f;
+                        border-radius:8px;padding:0.6rem 0.85rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+              <span style="font-size:13px;color:#fbbf24;font-weight:600">&#x1F527; In maintenance{esc_py(staleness)}</span>
+              <span style="font-size:12px;color:#d1a35c;flex:1">Verify (view logs / retry verification), then go live.{verify_note}</span>
+              <div style="display:flex;gap:6px">
+                <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminViewLogs('{sid}')">View logs</button>
+                <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminVerifySrv('{sid}')">Retry verification</button>
+                <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminToggleDebug('{sid}',false)">Go live</button>
+              </div>
+            </div>"""
+
         rows_html.append(f"""
         <div class="srv-card {row_cls}">
           <div class="srv-card-top">
@@ -2900,6 +2959,7 @@ async def fragment_admin_servers(request: Request):
             <span class="mode-chip">{esc_py(mode_label)}</span>{maint_badge}{public_badge}
             <span class="srv-card-updated">{esc_py(_fmt_time(s.updated_at))}</span>
           </div>
+          {maint_banner_html}
           <div class="srv-card-actions">{action_html}</div>
         </div>""")
 
@@ -3001,12 +3061,65 @@ async def fragment_admin_servers(request: Request):
     }}
     function adminToggleDebug(id, enable) {{
       document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
-      if (!confirm((enable ? 'Enable' : 'Disable') + ' debug/maintenance mode for this server?' +
-          (enable ? ' Only the owner and maintainers will be able to invoke it while enabled.' : ''))) return;
+      const msg = enable
+        ? 'Enable debug/maintenance mode for this server? Only the owner and maintainers will be able to invoke it while enabled.'
+        : 'Go live? This exits maintenance mode and opens invocation to every entitled caller. Make sure verification has passed first.';
+      if (!confirm(msg)) return;
       fetch('/api/v1/servers/' + id + '/debug-mode', {{
         method: 'POST', headers: {{'Content-Type': 'application/json'}},
         body: JSON.stringify({{enabled: enable}}),
       }}).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
+        .catch(e => alert('Network error: ' + e));
+    }}
+    function adminVerifySrv(id) {{
+      // PRD-0012 C4: distinct from go-live — re-runs verification probes and
+      // reports the result inline; a failure keeps the server in maintenance.
+      document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
+      fetch('/api/v1/servers/' + id + '/verify', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}}})
+        .then(async r => {{
+          const d = await r.json().catch(() => ({{}}));
+          if (r.ok && d.verified) {{
+            alert('Verification passed. You can now go live.');
+          }} else {{
+            const reason = d.verification_report
+              ? JSON.stringify(d.verification_report)
+              : (d.detail?.message || d.detail || 'verification failed');
+            alert('Verification failed — still in maintenance.\\n' + reason);
+          }}
+          loadAdminTab('servers');
+        }})
+        .catch(e => alert('Network error: ' + e));
+    }}
+    function adminEditEndpoint(id, currentUrl) {{
+      // PRD-0012 C3: edits are never a silent overwrite — this always goes
+      // through POST /request-change, which quarantines every tool and
+      // demotes the server before re-verifying (or re-reviewing) the change.
+      document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
+      const url = prompt('New backend (upstream) URL:', currentUrl || '');
+      if (url === null) return;
+      const trimmed = url.trim();
+      if (!trimmed) {{ alert('URL is required.'); return; }}
+      const ipOnly = confirm(
+        'Did ONLY the address change (same code, e.g. IP/DNS rotation)?\\n\\n' +
+        'OK = yes, same code, address only — may auto-approve after re-verifying.\\n' +
+        'Cancel = no, this is a code/config change — goes through full reviewer re-approval.'
+      );
+      if (!confirm('Submit this change? The server will be quarantined and re-verified' +
+          (ipOnly ? ' (auto-approve if nothing else changed).' : ', then a reviewer must re-approve.'))) return;
+      fetch('/api/v1/servers/' + id + '/request-change', {{
+        method: 'POST', headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{new_upstream_url: trimmed, asserted_ip_only: ipOnly, reason: 'edit endpoint via portal'}}),
+      }}).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
+        .catch(e => alert('Network error: ' + e));
+    }}
+    function adminRebuildSrv(id) {{
+      // "Update from git & rebuild" — pulls latest from the linked repo and
+      // rebuilds/restarts the container (ops-agent), then the backend's own
+      // request-change contract re-verifies/re-reviews as needed.
+      document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
+      if (!confirm('Pull the latest commit and rebuild this server\\'s container? It will be briefly unavailable.')) return;
+      fetch('/api/v1/admin/servers/' + id + '/rebuild', {{method: 'POST'}})
+        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
         .catch(e => alert('Network error: ' + e));
     }}
     function adminViewLogs(id) {{
@@ -6125,6 +6238,10 @@ const _wiz = {{
   mode_override_reason: null,
   data_categories: [], has_write_ops: false,
   server_id: null,
+  // PRD-0012: self-hosted (you run/host the backend, URL required up front)
+  // is the default; platform-deploy (we build & deploy it for you) collects
+  // no URL — one is assigned once the platform deploys it.
+  self_host: true,
 }};
 
 const _CLONE_ACCT = '{esc_py(_CLONE_ACCT)}';
@@ -6151,7 +6268,19 @@ function showStep1() {{
       <label class="wiz-label" style="margin-top:1rem">Short description <span style="color:#f87171">*</span></label>
       <input id="s1-desc" class="wiz-input" placeholder="What does this server do? (required — the reviewer approves based on this)" value="${{_wiz.description}}">
 
-      <label class="wiz-label" style="margin-top:1rem">GitHub repository URL</label>
+      <label class="wiz-label" style="margin-top:1.25rem">Where will this run?</label>
+      <div class="mode-grid" style="margin-top:0.4rem">
+        <div class="mode-card ${{_wiz.self_host ? 'selected' : ''}}" id="hosting-self" onclick="pickHosting(true)">
+          <div class="mode-card-title">I&rsquo;ll self-host it</div>
+          <div class="mode-card-desc">You run the backend yourself. You give us the URL now; a reviewer verifies it before it goes live.</div>
+        </div>
+        <div class="mode-card ${{_wiz.self_host ? '' : 'selected'}}" id="hosting-platform" onclick="pickHosting(false)">
+          <div class="mode-card-title">Deploy it for me</div>
+          <div class="mode-card-desc">The platform builds and hosts it from your repo. No backend URL needed — one is assigned once it's deployed.</div>
+        </div>
+      </div>
+
+      <label class="wiz-label" style="margin-top:1.25rem">GitHub repository URL<span id="s1-repo-req" style="color:#f87171;display:${{_wiz.self_host ? 'none' : 'inline'}}"> *</span></label>
       <input id="s1-repo" class="wiz-input" placeholder="https://github.com/your-org/your-repo"
              value="${{_wiz.github_repo_url || ''}}">
       <div class="helper-box" id="clone-helper" style="display:none">
@@ -6160,18 +6289,20 @@ function showStep1() {{
         Grant this account <strong>read access</strong> to your repository before submitting.
       </div>
 
-      <label class="wiz-label" style="margin-top:1rem">Backend URL (where does/will this run?) <span style="color:#f87171">*</span></label>
-      <input id="s1-backend-url" class="wiz-input" placeholder="https://your-server.example.com/mcp"
-             value="${{_wiz.requested_upstream_url || ''}}">
-      <div style="font-size:11px;color:var(--muted);margin-top:0.35rem">
-        Always required — a reviewer cannot approve a server they can't locate. Informational only at
-        this stage (not validated yet); you'll confirm the live, verified URL after approval.
-        No backend at all yet? Don't submit — call get_server_scaffold instead, no review needed for that.
-      </div>
+      <div id="s1-backend-url-wrap" style="display:${{_wiz.self_host ? 'block' : 'none'}}">
+        <label class="wiz-label" style="margin-top:1rem">Backend URL (where does/will this run?) <span style="color:#f87171">*</span></label>
+        <input id="s1-backend-url" class="wiz-input" placeholder="https://your-server.example.com/mcp"
+               value="${{_wiz.requested_upstream_url || ''}}">
+        <div style="font-size:11px;color:var(--muted);margin-top:0.35rem">
+          Required for self-hosted servers — a reviewer cannot approve a server they can't locate. Informational only at
+          this stage (not validated yet); you'll confirm the live, verified URL after approval.
+          No backend at all yet? Don't submit — call get_server_scaffold instead, no review needed for that.
+        </div>
 
-      <label style="display:flex;align-items:center;gap:0.5rem;margin-top:1rem;font-size:13px;cursor:pointer">
-        <input type="checkbox" id="s1-nocode" onchange="toggleNoCode(this)"> I don&rsquo;t have a repo yet (backend already running elsewhere)
-      </label>
+        <label style="display:flex;align-items:center;gap:0.5rem;margin-top:1rem;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="s1-nocode" onchange="toggleNoCode(this)"> I don&rsquo;t have a repo yet (backend already running elsewhere)
+        </label>
+      </div>
 
       <div style="margin-top:1.5rem;display:flex;justify-content:flex-end">
         <button class="btn-primary" onclick="submitStep1()">Next &#x2192;</button>
@@ -6182,6 +6313,20 @@ function showStep1() {{
     document.getElementById('clone-helper').style.display = e.target.value.trim() ? '' : 'none';
   }});
   if (_wiz.github_repo_url) document.getElementById('clone-helper').style.display = '';
+}}
+
+function pickHosting(selfHost) {{
+  _wiz.self_host = selfHost;
+  document.getElementById('hosting-self').classList.toggle('selected', selfHost);
+  document.getElementById('hosting-platform').classList.toggle('selected', !selfHost);
+  document.getElementById('s1-backend-url-wrap').style.display = selfHost ? 'block' : 'none';
+  document.getElementById('s1-repo-req').style.display = selfHost ? 'none' : 'inline';
+  if (!selfHost) {{
+    // Platform-deploy always needs a repo to build from; the no-code path
+    // (backend already running elsewhere) only applies to self-hosting.
+    const nocode = document.getElementById('s1-nocode');
+    if (nocode) {{ nocode.checked = false; toggleNoCode(nocode); }}
+  }}
 }}
 
 function toggleNoCode(cb) {{
@@ -6195,20 +6340,24 @@ function submitStep1() {{
   const name = document.getElementById('s1-name').value.trim().toLowerCase();
   const desc = document.getElementById('s1-desc').value.trim();
   const repo = document.getElementById('s1-repo').value.trim();
-  const backendUrl = document.getElementById('s1-backend-url').value.trim();
-  const nocode = document.getElementById('s1-nocode')?.checked;
+  const selfHost = _wiz.self_host;
+  const backendUrl = selfHost ? document.getElementById('s1-backend-url').value.trim() : '';
+  const nocode = selfHost && document.getElementById('s1-nocode')?.checked;
   if (!name) {{ alert('Server name is required'); return; }}
   if (!/^[a-z0-9][a-z0-9\\-]{{1,62}}$/.test(name)) {{
     alert('Name must be 2-63 chars, lowercase letters, numbers, and hyphens only'); return;
   }}
   if (!desc) {{ alert('Description is required — the reviewer approves your server based on this.'); return; }}
-  if (!backendUrl) {{
+  if (selfHost && !backendUrl) {{
     alert('Backend URL is required — a reviewer cannot approve a server they can\\'t locate. No backend yet? Use "Get scaffold" from the self-service tools instead of this wizard.'); return;
+  }}
+  if (!selfHost && !repo) {{
+    alert('A GitHub repository URL is required for the platform to build and deploy your server.'); return;
   }}
   _wiz.name = name;
   _wiz.description = desc;
   _wiz.github_repo_url = (nocode || !repo) ? null : repo;
-  _wiz.requested_upstream_url = backendUrl;
+  _wiz.requested_upstream_url = selfHost ? backendUrl : null;
   showStep2();
 }}
 
@@ -6627,10 +6776,13 @@ function showStep4() {{
       <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr><td style="color:var(--muted);padding:0.35rem 0;width:140px">Server name</td>
             <td style="font-weight:600">${{_wiz.name}}</td></tr>
+        <tr><td style="color:var(--muted);padding:0.35rem 0">Hosting</td>
+            <td>${{_wiz.self_host ? 'Self-hosted (you run the backend)' : 'Platform-deployed (we build &amp; host it)'}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Repository</td>
             <td>${{repoLine}}</td></tr>
+        ${{_wiz.self_host ? `
         <tr><td style="color:var(--muted);padding:0.35rem 0">Backend URL</td>
-            <td>${{_wiz.requested_upstream_url}}</td></tr>
+            <td>${{_wiz.requested_upstream_url}}</td></tr>` : ''}}
         <tr><td style="color:var(--muted);padding:0.35rem 0">Auth mode</td>
             <td style="font-weight:600">${{modeLabel}}</td></tr>
         <tr><td style="color:var(--muted);padding:0.35rem 0">Data categories</td>
@@ -6666,7 +6818,10 @@ async function doSubmit() {{
     let r = await fetch('/api/v1/submissions', {{
       method: 'POST', credentials: 'include',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{ name: _wiz.name, description: _wiz.description, github_repo_url: _wiz.github_repo_url }}),
+      body: JSON.stringify({{
+        name: _wiz.name, description: _wiz.description, github_repo_url: _wiz.github_repo_url,
+        self_host: _wiz.self_host,
+      }}),
     }});
     if (!r.ok) {{
       const e = await r.json().catch(() => ({{}}));

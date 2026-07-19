@@ -103,8 +103,16 @@ function DetailCard({ sub }: { sub: Submission }) {
 
       <h3 className="review__section-title">Backend &amp; credentials</h3>
       <dl className="review__dl">
-        <dt>Upstream URL</dt>
-        <dd>{sub.upstream_url ? <code>{sub.upstream_url}</code> : 'Not provided yet — set after approval via provide-url'}</dd>
+        <dt>{sub.upstream_url ? 'Backend URL (live)' : 'Backend URL (requested)'}</dt>
+        <dd>
+          {sub.upstream_url
+            ? <code>{sub.upstream_url}</code>
+            : sub.requested_upstream_url
+              ? <code>{sub.requested_upstream_url}</code>
+              : sub.github_repo_url
+                ? <span className="review__no-data">Not stated — check the description before approving</span>
+                : 'No backend yet — no-code scaffold submission'}
+        </dd>
         {sub.service_name && <><dt>Credential / service name</dt><dd><code>{sub.service_name}</code></dd></>}
         {sub.upstream_idp_type && <><dt>Upstream identity provider</dt><dd>{sub.upstream_idp_type}</dd></>}
         {sub.upstream_idp_config && (
