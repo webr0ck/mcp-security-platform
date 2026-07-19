@@ -221,6 +221,131 @@ async def test_emit_audit_event_forwards_notices_to_wazuh_syslog():
     assert ws_kwargs["deny_reasons"] == []
 
 
+@pytest.mark.unit
+async def test_emit_audit_event_persists_notices_to_audit_events_insert():
+    """
+    V083: notices must be plumbed into the audit_events INSERT (not just the
+    stdout/SIEM stream + Wazuh secondary path), so a taint notify-only event
+    is queryable via the compliance/audit API.
+    """
+    mock_audit_pkg = ModuleType("mcp_audit_logger")
+    audit_event_obj = MagicMock()
+    audit_event_obj.event_id = "evt-notices-db"
+    audit_event_obj.event_type = MagicMock()
+    audit_event_obj.event_type.value = "tool_invocation"
+    audit_event_obj.timestamp = MagicMock()
+    audit_event_obj.timestamp.isoformat = MagicMock(return_value="2026-07-19T00:00:00+00:00")
+    audit_event_obj.platform_version = "1.0.0"
+    mock_audit_pkg.AuditEvent = MagicMock(return_value=audit_event_obj)  # type: ignore[attr-defined]
+    mock_audit_pkg.AuditEventType = MagicMock()  # type: ignore[attr-defined]
+    mock_audit_pkg.AuditOutcome = MagicMock()  # type: ignore[attr-defined]
+    mock_audit_logger_instance = MagicMock()
+    mock_audit_logger_instance.emit = MagicMock(return_value="deadbeef" * 8)
+    mock_audit_pkg.MCPAuditLogger = MagicMock(return_value=mock_audit_logger_instance)  # type: ignore[attr-defined]
+
+    inv_mod = _fresh_invocation_module({"mcp_audit_logger": mock_audit_pkg})
+    # DB write path must actually run so we can inspect the INSERT params.
+    inv_mod._SKIP_AUDIT_DB_WRITE = False
+
+    mock_settings = MagicMock()
+    mock_settings.WAZUH_SYSLOG_HOST = None  # skip the secondary path for this test
+
+    mock_conn = AsyncMock()
+    mock_conn.execute = AsyncMock(return_value=None)
+    mock_engine_ctx = AsyncMock()
+    mock_engine_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_engine_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_db_engine = MagicMock()
+    mock_db_engine.begin = MagicMock(return_value=mock_engine_ctx)
+
+    with patch.dict(sys.modules, {"mcp_audit_logger": mock_audit_pkg}), \
+         patch.object(inv_mod, "_get_audit_logger", return_value=mock_audit_logger_instance), \
+         patch("app.core.config.get_settings", return_value=mock_settings), \
+         patch("app.core.database.engine", mock_db_engine), \
+         patch.object(inv_mod, "_compute_hmac_signature", return_value=None):
+        await inv_mod._emit_audit_event(
+            tool_id="tool-1",
+            tool_name="demo-tool",
+            tool_version="1.0",
+            client_id="alice@corp",
+            outcome="allow",
+            deny_reasons=[],
+            request_id="req-notices-db-1",
+            latency_ms=0,
+            anomaly_score=0.0,
+            opa_decision_id="",
+            is_testing=False,
+            notices=["taint_floor_notice:required_integrity=1"],
+        )
+
+    mock_conn.execute.assert_called_once()
+    sql_text = mock_conn.execute.call_args[0][0]
+    insert_params = mock_conn.execute.call_args[0][1]
+
+    assert "notices" in str(sql_text), "INSERT statement must include the notices column"
+    assert "notices" in insert_params
+    import json as _json
+    assert _json.loads(insert_params["notices"]) == [
+        "taint_floor_notice:required_integrity=1"
+    ]
+
+
+@pytest.mark.unit
+async def test_emit_audit_event_persists_empty_notices_by_default():
+    """Callers that omit notices must still write an empty-list column value."""
+    mock_audit_pkg = ModuleType("mcp_audit_logger")
+    audit_event_obj = MagicMock()
+    audit_event_obj.event_id = "evt-notices-db-2"
+    audit_event_obj.event_type = MagicMock()
+    audit_event_obj.event_type.value = "tool_invocation"
+    audit_event_obj.timestamp = MagicMock()
+    audit_event_obj.timestamp.isoformat = MagicMock(return_value="2026-07-19T00:00:00+00:00")
+    audit_event_obj.platform_version = "1.0.0"
+    mock_audit_pkg.AuditEvent = MagicMock(return_value=audit_event_obj)  # type: ignore[attr-defined]
+    mock_audit_pkg.AuditEventType = MagicMock()  # type: ignore[attr-defined]
+    mock_audit_pkg.AuditOutcome = MagicMock()  # type: ignore[attr-defined]
+    mock_audit_logger_instance = MagicMock()
+    mock_audit_logger_instance.emit = MagicMock(return_value="deadbeef" * 8)
+    mock_audit_pkg.MCPAuditLogger = MagicMock(return_value=mock_audit_logger_instance)  # type: ignore[attr-defined]
+
+    inv_mod = _fresh_invocation_module({"mcp_audit_logger": mock_audit_pkg})
+    inv_mod._SKIP_AUDIT_DB_WRITE = False
+
+    mock_settings = MagicMock()
+    mock_settings.WAZUH_SYSLOG_HOST = None
+
+    mock_conn = AsyncMock()
+    mock_conn.execute = AsyncMock(return_value=None)
+    mock_engine_ctx = AsyncMock()
+    mock_engine_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_engine_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_db_engine = MagicMock()
+    mock_db_engine.begin = MagicMock(return_value=mock_engine_ctx)
+
+    with patch.dict(sys.modules, {"mcp_audit_logger": mock_audit_pkg}), \
+         patch.object(inv_mod, "_get_audit_logger", return_value=mock_audit_logger_instance), \
+         patch("app.core.config.get_settings", return_value=mock_settings), \
+         patch("app.core.database.engine", mock_db_engine), \
+         patch.object(inv_mod, "_compute_hmac_signature", return_value=None):
+        await inv_mod._emit_audit_event(
+            tool_id="tool-1",
+            tool_name="demo-tool",
+            tool_version="1.0",
+            client_id="alice@corp",
+            outcome="deny",
+            deny_reasons=["some_reason"],
+            request_id="req-notices-db-2",
+            latency_ms=0,
+            anomaly_score=0.0,
+            opa_decision_id="",
+            is_testing=False,
+        )
+
+    insert_params = mock_conn.execute.call_args[0][1]
+    import json as _json
+    assert _json.loads(insert_params["notices"]) == []
+
+
 # ===========================================================================
 # 3. End-to-end through invoke_tool: taint notify-only call site
 # ===========================================================================

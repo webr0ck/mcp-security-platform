@@ -13,8 +13,6 @@ RBAC: agents may only see their own audit events (client_id auto-filter per RBAC
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,11 +25,11 @@ router = APIRouter(prefix="/audit")
 @router.get("/events")
 async def list_audit_events(
     request: Request,
-    client_id: Optional[str] = Query(None),
-    tool_name: Optional[str] = Query(None),
-    outcome: Optional[str] = Query(None, pattern="^(allow|deny)$"),
-    from_date: Optional[str] = Query(None, alias="from"),
-    to_date: Optional[str] = Query(None, alias="to"),
+    client_id: str | None = Query(None),
+    tool_name: str | None = Query(None),
+    outcome: str | None = Query(None, pattern="^(allow|deny)$"),
+    from_date: str | None = Query(None, alias="from"),
+    to_date: str | None = Query(None, alias="to"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -48,7 +46,9 @@ async def list_audit_events(
       - agent: own events only (client_id auto-forced to calling agent's ID)
       - readonly: 403 FORBIDDEN
     """
+    import json as _json
     import logging
+
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ async def list_audit_events(
             text(
                 f"""
                 SELECT event_id, created_at, client_id, tool_name, tool_id,
-                       outcome, latency_ms, sha256_hash, anomaly_score
+                       outcome, latency_ms, sha256_hash, anomaly_score, notices
                 FROM audit_events
                 WHERE {where_clause}
                 ORDER BY created_at DESC
@@ -126,6 +126,11 @@ async def list_audit_events(
             "latency_ms": row.latency_ms,
             "sha256_hash": row.sha256_hash,
             "anomaly_score": float(row.anomaly_score) if row.anomaly_score else None,
+            # V083: advisory-only notices (e.g. taint-floor notify-only
+            # disclaimer), distinct from opa_reasons/deny_reasons.
+            "notices": row.notices if isinstance(row.notices, list) else (
+                _json.loads(row.notices) if row.notices else []
+            ),
         }
         for row in rows
     ]

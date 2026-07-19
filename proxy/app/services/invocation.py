@@ -1651,7 +1651,7 @@ async def _emit_audit_event(
                             event_type, event_ts, event_ts_iso, platform_version,
                             original_outcome, hmac_signature, hmac_key_id,
                             source_ip, principal_type, caller_roles, session_jti,
-                            opa_decision_id, principal_id
+                            opa_decision_id, principal_id, notices
                         ) VALUES (
                             :event_id, :client_id, :tool_name, :tool_id,
                             :outcome, :latency_ms, :sha256_hash,
@@ -1660,7 +1660,7 @@ async def _emit_audit_event(
                             :original_outcome, :hmac_signature, :hmac_key_id,
                             CAST(:source_ip AS INET), :principal_type,
                             CAST(:caller_roles AS TEXT[]), :session_jti,
-                            :opa_decision_id, :principal_id
+                            :opa_decision_id, :principal_id, CAST(:notices AS jsonb)
                         )
                         """
                     ),
@@ -1716,6 +1716,9 @@ async def _emit_audit_event(
                         # CR-10 (WP-A1): typed principal id (advisory column; NULL for
                         # pre-V062 rows and events emitted before this field existed).
                         "principal_id": principal_id,
+                        # V083: advisory-only notices (e.g. taint-floor notify-only
+                        # disclaimer), distinct from opa_reasons (actual deny reasons).
+                        "notices": __import__("json").dumps(notices or []),
                     },
                 )
         except Exception as db_exc:
