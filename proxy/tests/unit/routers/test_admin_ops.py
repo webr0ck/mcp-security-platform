@@ -328,9 +328,6 @@ async def test_rebuild_server_forwards_error_from_ops_agent():
          patch.object(admin_ops.settings, "OPS_AGENT_TOKEN", "secret-token"), \
          patch("app.routers.admin_ops.httpx.AsyncClient", return_value=fake_client_cm), \
          patch(
-             "app.routers.admin_ops._apply_platform_rebuild_rereview", new_callable=AsyncMock
-         ) as mock_rereview, \
-         patch(
              "app.routers.admin_ops.request_change_for_server", new_callable=AsyncMock
          ) as mock_request_change:
         with pytest.raises(HTTPException) as exc_info:
@@ -338,17 +335,16 @@ async def test_rebuild_server_forwards_error_from_ops_agent():
         assert exc_info.value.status_code == 502
         assert "boom" in str(exc_info.value.detail)
 
-    # rebuild itself failed -> neither re-review path may run.
-    mock_rereview.assert_not_called()
+    # rebuild itself failed -> the re-review must not run.
     mock_request_change.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_rebuild_server_success_forwards_git_url_and_triggers_platform_rereview():
+async def test_rebuild_server_success_forwards_git_url_and_triggers_rereview():
     """Platform-hosted (is_self_hosted=False) success path: git_url is forwarded to
-    ops-agent's /ops/rebuild-from-git, and a successful rebuild triggers the
-    self-contained platform re-review path (request_change_for_server is never
-    called for these rows — it 400s on is_self_hosted=False)."""
+    ops-agent's /ops/rebuild-from-git, and a successful rebuild routes the rebuilt
+    code through the ONE canonical re-review sequence (request_change_for_server
+    with require_self_hosted=False — no duplicated demote/quarantine in this router)."""
     from app.routers import admin_ops
     row = _platform_hosted_row()
     fake_client = AsyncMock()
@@ -366,13 +362,10 @@ async def test_rebuild_server_success_forwards_git_url_and_triggers_platform_rer
          patch.object(admin_ops.settings, "OPS_AGENT_TOKEN", "secret-token"), \
          patch("app.routers.admin_ops.httpx.AsyncClient", return_value=fake_client_cm), \
          patch(
-             "app.routers.admin_ops._apply_platform_rebuild_rereview", new_callable=AsyncMock,
+             "app.routers.admin_ops.request_change_for_server", new_callable=AsyncMock,
              return_value={"server_id": "s1", "classification": "code_change",
                            "submission_status": "awaiting_review", "tools_quarantined": 2,
                            "job_id": "job-1"},
-         ) as mock_rereview, \
-         patch(
-             "app.routers.admin_ops.request_change_for_server", new_callable=AsyncMock
          ) as mock_request_change, \
          patch(
              "app.services.admin_audit.emit_admin_config_event", new_callable=AsyncMock
@@ -391,8 +384,12 @@ async def test_rebuild_server_success_forwards_git_url_and_triggers_platform_rer
     assert call_args[1] == "http://lab-ops-agent:9000/ops/rebuild-from-git"
     assert call_kwargs["json"] == {"service": "lab-mcp-echo", "git_url": "https://github.com/example/repo.git"}
 
-    mock_rereview.assert_awaited_once_with("s1", "admin1", "https://github.com/example/repo.git")
-    mock_request_change.assert_not_called()
+    # single canonical path, bypassing only the URL-change self-hosted gate.
+    mock_request_change.assert_awaited_once_with(
+        "s1", "admin1",
+        new_github_repo_url="https://github.com/example/repo.git",
+        asserted_ip_only=False, require_self_hosted=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -416,9 +413,6 @@ async def test_rebuild_server_self_hosted_row_uses_request_change_for_server():
          patch.object(admin_ops.settings, "OPS_AGENT_TOKEN", "secret-token"), \
          patch("app.routers.admin_ops.httpx.AsyncClient", return_value=fake_client_cm), \
          patch(
-             "app.routers.admin_ops._apply_platform_rebuild_rereview", new_callable=AsyncMock
-         ) as mock_rereview, \
-         patch(
              "app.routers.admin_ops.request_change_for_server", new_callable=AsyncMock,
              return_value={"server_id": "s1", "classification": "code_change", "job_id": "job-2"},
          ) as mock_request_change, \
@@ -428,12 +422,13 @@ async def test_rebuild_server_self_hosted_row_uses_request_change_for_server():
         resp = await admin_ops.rebuild_server("s1", _make_request(roles=["platform_admin"]))
 
     assert resp.status_code == 200
+    # An is_self_hosted=True row uses the SAME canonical call (the value no longer
+    # branches the code path — require_self_hosted=False bypasses only the URL gate).
     mock_request_change.assert_awaited_once_with(
         "s1", "admin1",
         new_github_repo_url="https://github.com/example/repo.git",
-        asserted_ip_only=False,
+        asserted_ip_only=False, require_self_hosted=False,
     )
-    mock_rereview.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -414,6 +414,7 @@ async def request_change_for_server(
     new_github_repo_url: str | None = None,
     asserted_ip_only: bool = False,
     reason: str = "",
+    require_self_hosted: bool = True,
 ) -> dict:
     """
     PRD-0012 C3 — POST /api/v1/servers/{id}/request-change.
@@ -451,10 +452,17 @@ async def request_change_for_server(
         row = await _fetch_server_for_change(session, server_id)
     if row is None or row.get("deleted_at") is not None:
         raise ServerNotFoundError(f"server {server_id!r} not found")
-    if not row.get("is_self_hosted", True):
+    # The is_self_hosted gate guards the *URL-change* path (a platform-deployed
+    # server's upstream_url is platform-managed, not owner-settable). A code
+    # re-review — e.g. triggered by the ops-agent "update from git & rebuild"
+    # after it has already rebuilt a platform-hosted container — is valid for any
+    # server, so that caller passes require_self_hosted=False. This keeps ONE
+    # canonical demote+quarantine+re-scan sequence (never duplicated elsewhere).
+    if require_self_hosted and not row.get("is_self_hosted", True):
         raise RequestChangeNotEligibleError(
-            "request-change only applies to self-hosted servers; platform-deployed "
-            "servers use the /apply rebuild path instead", status_code=400,
+            "request-change (URL change) only applies to self-hosted servers; "
+            "platform-deployed servers change their backend via the build pipeline",
+            status_code=400,
         )
 
     # C1-style: validate a newly-requested URL BEFORE mutating anything — a

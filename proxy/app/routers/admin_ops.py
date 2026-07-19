@@ -40,9 +40,7 @@ or falling back to a direct podman call.
 """
 from __future__ import annotations
 
-import json
 import logging
-import uuid
 from urllib.parse import urlparse
 
 import httpx
@@ -53,12 +51,10 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.routers.server_registry import _require_owner_or_maintainer, _require_platform_admin
-from app.services import scan_queue
 from app.services.server_lifecycle import (
     RequestChangeNotEligibleError,
     ServerNotFoundError,
     request_change_for_server,
-    snapshot_tool_schema,
 )
 
 logger = logging.getLogger(__name__)
@@ -205,109 +201,6 @@ async def restart_server(server_id: str, request: Request):
     return JSONResponse(resp.json())
 
 
-async def _apply_platform_rebuild_rereview(
-    server_id: str, actor: str, github_repo_url: str,
-) -> dict:
-    """
-    Route a freshly-rebuilt platform-hosted (is_self_hosted=FALSE) server's
-    code through the same guarded re-scan + reviewer re-approval sequence
-    PRD-0012 C3 (server_lifecycle.request_change_for_server) uses for
-    self-hosted servers — but request_change_for_server itself explicitly
-    REJECTS is_self_hosted=FALSE rows with a 400 ("platform-deployed servers
-    use the /apply rebuild path instead" — see its docstring), so it cannot
-    be called directly for the exact servers this "git pull & rebuild"
-    feature targets. This is that "/apply rebuild path": the same
-    demote-and-quarantine + guarded-rescan shape, reproduced here rather
-    than in server_lifecycle.py (outside this router's ownership), and
-    scoped to is_self_hosted=FALSE via the WHERE clause below so it can
-    never CAS-demote a self-hosted row (self-hosted rows keep going through
-    request_change_for_server, unchanged, in rebuild_server below).
-
-    Mirrors request_change_for_server's code_change branch: snapshot the
-    live tool schema, CAS-demote status='approved'->'quarantined' /
-    submission_status->'awaiting_review' (guarded — a concurrent
-    reject/delete/mid-scan row is rejected, never silently overwritten),
-    quarantine every tool_registry row, enqueue a 'change_rereview_scan' job
-    (force=True — a rebuild-triggered re-review must always get a fresh
-    job), and record the same SERVER_CHANGE_REQUESTED audit event so
-    downstream consumers of that event type see a uniform trail regardless
-    of which code path produced it. scan_evaluator._evaluate_change_rereview_scan
-    itself has no is_self_hosted gate, so it processes this identically to
-    the self-hosted path.
-    """
-    async with AsyncSessionLocal() as session:
-        tool_schema_snapshot = await snapshot_tool_schema(session, server_id)
-
-        result = await session.execute(
-            text(
-                """
-                UPDATE server_registry
-                SET status = 'quarantined',
-                    submission_status = 'awaiting_review',
-                    last_good_upstream_url = upstream_url,
-                    last_good_scan_commit = scan_commit,
-                    last_good_tool_schema = CAST(:tool_schema AS jsonb),
-                    last_good_recorded_at = now(),
-                    updated_at = now()
-                WHERE server_id = :sid AND deleted_at IS NULL AND status = 'approved'
-                  AND submission_status IN ('approved', 'active') AND is_self_hosted = FALSE
-                RETURNING server_id
-                """
-            ),
-            {"sid": server_id, "tool_schema": json.dumps(tool_schema_snapshot)},
-        )
-        if result.rowcount == 0:
-            await session.rollback()
-            raise RequestChangeNotEligibleError(
-                "server is not in a live, platform-hosted state (status='approved', "
-                "submission_status in ('approved','active'), is_self_hosted=FALSE) — "
-                "rebuild re-review only applies to a currently-live platform-hosted server",
-                status_code=409,
-            )
-
-        quarantine_result = await session.execute(
-            text(
-                """
-                UPDATE tool_registry
-                SET status = 'quarantined', updated_at = now()
-                WHERE server_id = :sid AND deleted_at IS NULL AND status != 'quarantined'
-                """
-            ),
-            {"sid": server_id},
-        )
-        tools_quarantined = quarantine_result.rowcount or 0
-
-        event_id = str(uuid.uuid4())
-        await session.execute(
-            text(
-                """
-                INSERT INTO audit_events
-                (event_id, event_type, client_id, tool_name, outcome, request_id,
-                 sha256_hash, latency_ms)
-                VALUES (:eid, 'SERVER_CHANGE_REQUESTED', :actor, :server_id, 'allow', :rid, '', 0)
-                """
-            ),
-            {"eid": event_id, "actor": actor, "server_id": server_id, "rid": event_id},
-        )
-        await session.commit()
-
-    logger.info(
-        "apply_platform_rebuild_rereview demoted server_id=%s actor=%s tools_quarantined=%s",
-        server_id, actor, tools_quarantined,
-    )
-
-    job_id = await scan_queue.enqueue_scan(
-        server_id, github_repo_url, job_type="change_rereview_scan", force=True,
-    )
-    return {
-        "server_id": server_id,
-        "classification": "code_change",
-        "submission_status": "awaiting_review",
-        "tools_quarantined": tools_quarantined,
-        "job_id": job_id,
-    }
-
-
 @router.post("/api/v1/admin/servers/{server_id}/rebuild")
 async def rebuild_server(server_id: str, request: Request):
     """
@@ -351,18 +244,14 @@ async def rebuild_server(server_id: str, request: Request):
     )
 
     try:
-        if row.get("is_self_hosted", True):
-            # Unusual (a self-hosted row's upstream_url resolved to an
-            # ops-agent-reachable mcp-/lab-mcp- host) but not impossible —
-            # request_change_for_server already handles this case exactly
-            # as PRD-0012 C3 specifies.
-            change_result = await request_change_for_server(
-                server_id, actor, new_github_repo_url=github_repo_url, asserted_ip_only=False,
-            )
-        else:
-            change_result = await _apply_platform_rebuild_rereview(
-                server_id, actor, github_repo_url,
-            )
+        # ONE canonical re-review sequence (server_lifecycle.request_change_for_server) —
+        # never duplicated here. A rebuild is a code change, valid to re-review for
+        # both self-hosted and platform-hosted servers, so we pass
+        # require_self_hosted=False to bypass only the URL-change self-hosted gate.
+        change_result = await request_change_for_server(
+            server_id, actor, new_github_repo_url=github_repo_url,
+            asserted_ip_only=False, require_self_hosted=False,
+        )
     except ServerNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RequestChangeNotEligibleError as exc:
