@@ -70,7 +70,21 @@ change → full re-scan + re-review; **phased delivery, backend first**.
   **Live-verify pending**: topology change validated by the static F-001 gate only;
   the next `lab-reset`/`lab-up` will exercise the new networks live.
 
-### Phase 1 (backend) — BUILDING NOW via background agent `p1-onboarding`:
+### Phase 1 (backend) — IMPLEMENTED, IN REVIEW (`p1-onboarding`)
+Delivered: V082 migration (`is_self_hosted` + `last_good_*`), `server_lifecycle.py`
+(shared C2/C3 core), guarded `change_rereview_scan` evaluator, C1 submit-SSRF,
+C2 approve-rewrite, C3 `request-change` (+ IP-only classifier via live-schema
+match), C4 `verify` endpoint + PATCH reroute, reject-rollback. 20/20 unit tests;
+V082 applies clean; `request-change` CAS fires live (fail-closed 409).
+**6 critic traps verified closed in code.** appsec re-verify (`av-p1-onboarding`)
+in progress. **Open fixes before sign-off:** (a) platform-deployed branch gap —
+`approve` uses `has_repo and is_self_hosted` but `is_self_hosted` is TRUE until
+`apply` (post-approval), so platform-deployed is unreachable + submit now forces a
+URL it can't have → add a submit-time hosting-intent (default self-hosted); (b) 7
+ruff nits in new files; (c) any appsec finding. Then fresh-boot lab-reset (also
+live-verifies the f070803 network topology).
+
+### (prior) Phase 1 build notes — via agent `p1-onboarding`:
 - V082 `is_self_hosted` migration; C1 submit-time full SSRF; C2 approve-rewrite
   (discovery+verify → debug mode, tools released-but-owner-gated); C3
   `POST /servers/{id}/request-change` (quarantine ALL tools + demote real
