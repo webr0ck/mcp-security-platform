@@ -1091,7 +1091,12 @@ services:
       # compose.wazuh.yml / promtail above) — read-write, since ops-agent
       # must issue `podman restart` / `podman-compose up --build`, not just
       # read container state.
-      - ${PODMAN_SOCK:-/run/user/1000/podman/podman.sock}:/var/run/docker.sock
+      # Default matches the proven lab socket path used elsewhere in this file
+      # (the /run/user/501 rootless socket inside the applehv podman machine —
+      # UID 501 is the macOS user mapped into the VM). Override via PODMAN_SOCK
+      # in .env.lab on hosts where the rootless socket lives elsewhere
+      # (e.g. Linux rootless: /run/user/$(id -u)/podman/podman.sock).
+      - ${PODMAN_SOCK:-/run/user/501/podman/podman.sock}:/var/run/docker.sock
       # Compose files + build contexts needed for `podman-compose up -d
       # --build <service>`. Read-only: ops-agent must never edit compose
       # definitions, only invoke them.
@@ -1122,8 +1127,12 @@ services:
         condition: service_healthy
       lab-keycloak:
         condition: service_healthy
+      # ops-agent is an OPTIONAL lifecycle sidecar: the proxy fails-closed (503)
+      # on lifecycle endpoints when it's unreachable, so it must NEVER gate the
+      # proxy's own boot. `service_started` (ordering hint only, not health) —
+      # if the ops-agent can't come up, the rest of the platform still serves.
       lab-ops-agent:
-        condition: service_healthy
+        condition: service_started
     build:
       context: .
       dockerfile: proxy/Dockerfile
