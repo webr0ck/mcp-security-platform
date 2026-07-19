@@ -60,7 +60,14 @@ critic-hardened by a 3-lens appsec/product/architecture pass).
 IP-only endpoint change (same commit) → light re-verify + auto-approve, code
 change → full re-scan + re-review; **phased delivery, backend first**.
 
-**Phase 1 (backend) — BUILDING NOW** via background agent `p1-onboarding`:
+### Parallel backlog cleanup — BUILDING NOW (agents, safe/non-overlapping with Phase 1)
+- `rb-taint-test` — fix stale `proxy/tests/integration/test_taint_floor_invoke.py`
+  (assert notify-only behavior, not the removed `TaintFloorDenyError`).
+- `rb-isolation-drift` — investigate + fix the 2 pre-existing F-001 gate failures
+  (prometheus/scanner-worker proxy reach; `mcp-egress-net` >1 server) without
+  weakening isolation.
+
+### Phase 1 (backend) — BUILDING NOW via background agent `p1-onboarding`:
 - V082 `is_self_hosted` migration; C1 submit-time full SSRF; C2 approve-rewrite
   (discovery+verify → debug mode, tools released-but-owner-gated); C3
   `POST /servers/{id}/request-change` (quarantine ALL tools + demote real
@@ -91,10 +98,8 @@ change → full re-scan + re-review; **phased delivery, backend first**.
   from existing build context; needs a per-server repo-path mapping).
 - **`notices` field into the `audit_events` Postgres table** (today SIEM/stdout +
   wazuh only; not queryable via compliance API) — needs a migration.
-- **Stale integration test** `test_taint_floor_invoke.py` asserts a
-  `TaintFloorDenyError` that notify-only mode no longer raises — update/retire.
-- **Pre-existing isolation-gate drift**: `prometheus`/`scanner-worker` reach
-  proxy; `mcp-egress-net` >1 server. Not from this work; separate cleanup.
+- ~~Stale `test_taint_floor_invoke.py`~~ → IN PROGRESS (`rb-taint-test`).
+- ~~Pre-existing isolation-gate drift~~ → IN PROGRESS (`rb-isolation-drift`).
 - **Debug-mode staleness TTL** — surface servers stuck in maintenance N days.
 - **D3 dual-control direct-registration path** (`POST /api/v1/servers`) is
   explicitly OUT of scope for PRD-0012 C1-C4 (keeps its own logic).
