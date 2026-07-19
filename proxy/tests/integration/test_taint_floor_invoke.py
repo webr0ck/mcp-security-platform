@@ -3,8 +3,16 @@
 Runs against real Postgres + Redis (inside the proxy container):
   pytest tests/integration/test_taint_floor_invoke.py -m integration
 
-D1 (the headline "blocked action") needs no OPA/upstream — the deny fires at Step 1.6,
-before both. D3 only asserts the taint gate does NOT block a clean session.
+PRD-0010 Phase 0 moved the taint floor to NOTIFY-ONLY mode: a tainted session
+hitting a high-integrity sink is no longer denied — the call proceeds, and the
+taint is surfaced as an advisory notice on an outcome="allow" audit event
+(see app/services/invocation.py, taint_floor_decision block). The hard-deny
+path (TaintFloorDenyError) is kept in code for a future Phase 1 re-enable but
+is not currently exercised by invoke_tool.
+
+D1 (the headline "notify, don't block" case) needs no OPA/upstream — the
+notify-only branch fires at Step 1.6, before both. D3 asserts a clean
+(non-tainted) session never gets a taint notice at all.
 """
 from __future__ import annotations
 
@@ -23,8 +31,25 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-async def redis_ready():
+async def redis_ready(monkeypatch):
     # `.client` raises when uninitialized; check the backing attr instead.
+    #
+    # tests/conftest.py sets REDIS_HOST="localhost" via os.environ.setdefault()
+    # for convenience when running integration tests from the Mac host (outside
+    # the podman network). Inside the proxy container REDIS_HOST is unset in the
+    # container env (compose relies on the app's own "redis" default), so that
+    # setdefault silently wins and points redis_pool at the wrong host. Detect
+    # that in-container case here and correct it — this is a test-harness
+    # quirk unrelated to the taint-floor behavior under test.
+    if settings.REDIS_HOST == "localhost":
+        import socket
+
+        try:
+            socket.getaddrinfo("redis", settings.REDIS_PORT)
+        except OSError:
+            pass  # not resolvable (e.g. genuinely on the Mac host) — leave as-is
+        else:
+            monkeypatch.setattr(settings, "REDIS_HOST", "redis")
     if getattr(redis_pool, "_client", None) is None:
         await redis_pool.initialize()
     yield
@@ -88,8 +113,11 @@ def _req(name: str):
     }
 
 
-async def test_d1_tainted_session_blocks_high_sink(redis_ready, monkeypatch):
-    """D1: a tainted session is denied a high-sensitivity sink, with an INV-001 audit."""
+async def test_d1_tainted_session_notify_only_allows_high_sink(redis_ready, monkeypatch):
+    """D1 (PRD-0010 Phase 0): a tainted session hitting a high-integrity sink is ALLOWED,
+    not denied — the taint floor is notify-only. The call proceeds past the taint gate
+    (it may still fail later for unrelated reasons, e.g. no live upstream) and a
+    synchronous audit event records outcome="allow" with a taint_floor notice."""
     monkeypatch.setattr(settings, "TAINT_FLOOR_ENABLED", True)
     tid = str(uuid.uuid4())
     name = f"demo-high-sink-{uuid.uuid4().hex[:8]}"
@@ -101,7 +129,23 @@ async def test_d1_tainted_session_blocks_high_sink(redis_ready, monkeypatch):
     await taint_store.mark_tainted_for_principal(client_id)
     assert await taint_store.is_tainted_for_principal(client_id) is True
 
-    with pytest.raises(TaintFloorDenyError):
+    # `notices` is advisory-only and is emitted to the audit_logger (stdout/Loki
+    # stream, per INV-001) but is NOT a persisted column on audit_events — spy on
+    # the emit call (still delegating to the real implementation) to assert the
+    # taint notice was attached to the emitted AuditEvent.
+    from app.services import invocation as _invocation_mod
+
+    real_logger = _invocation_mod._get_audit_logger()
+    emitted_events = []
+    real_emit = real_logger.emit
+
+    def _spy_emit(event):
+        emitted_events.append(event)
+        return real_emit(event)
+
+    monkeypatch.setattr(real_logger, "emit", _spy_emit)
+
+    try:
         await invoke_tool(
             tool_record=_tool_record(name, tid, required_integrity=1, server_id=None),
             json_rpc_request=_req(name),
@@ -112,20 +156,39 @@ async def test_d1_tainted_session_blocks_high_sink(redis_ready, monkeypatch):
             principal_id=None,
             principal_type="human",
         )
+    except TaintFloorDenyError:
+        pytest.fail(
+            "taint floor is notify-only (PRD-0010 Phase 0) — it must not raise "
+            "TaintFloorDenyError; the deny path is dormant until Phase 1"
+        )
+    except Exception:
+        pass  # OPA deny / upstream error past the gate is acceptable for this assertion
 
-    # INV-001: the deny was audited synchronously with a taint_floor reason.
+    # The notify-only branch audits synchronously with outcome="allow" and an
+    # empty opa_reasons/deny_reasons — it must never be misread as a deny.
     async with AsyncSessionLocal() as db:
         row = (
             await db.execute(
                 text(
                     "SELECT outcome, opa_reasons FROM audit_events "
-                    "WHERE tool_name = :n AND outcome = 'deny' LIMIT 1"
+                    "WHERE tool_name = :n AND outcome = 'allow' LIMIT 1"
                 ),
                 {"n": name},
             )
         ).mappings().fetchone()
-    assert row is not None, "no deny audit row written for the taint-floor block"
-    assert "taint_floor" in str(row["opa_reasons"])
+    assert row is not None, "no allow audit row written for the notify-only taint event"
+    assert row["opa_reasons"] in ("[]", []), (
+        "notify-only taint event must carry empty deny_reasons/opa_reasons, "
+        f"got {row['opa_reasons']!r}"
+    )
+
+    taint_event = next(
+        (e for e in emitted_events if getattr(e, "tool_name", None) == name), None
+    )
+    assert taint_event is not None, "no AuditEvent emitted for the notify-only taint call"
+    assert any("taint_floor" in str(n) for n in (taint_event.notices or [])), (
+        "expected a taint_floor notice on the emitted AuditEvent.notices"
+    )
 
 
 async def test_d3_clean_session_passes_taint_gate(redis_ready, monkeypatch):
