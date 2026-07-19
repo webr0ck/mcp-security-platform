@@ -29,7 +29,7 @@ echo "DOCKER_HOST=$DOCKER_HOST"
 LAB_COMPOSE="podman-compose --env-file .env.lab -f docker-compose.yml -f docker-compose.dev.yml -f podman-compose.lab.yml -f compose.wazuh.yml"
 
 echo "== Checking lab stack =="
-if ! curl -sk -o /dev/null -w '' --max-time 5 "https://100.119.138.35:8443/health" 2>/dev/null; then
+if ! curl -sk -o /dev/null -w '' --max-time 5 "https://127.0.0.1:8443/health" 2>/dev/null; then
   echo "  gateway not responding — bringing the lab up (make -f Makefile.lab lab-up)"
   make -f Makefile.lab lab-up
 else

@@ -60,7 +60,7 @@ staticClients:
   - id: mcp-dex-generic
     secret: mcp-dex-generic-secret
     redirectURIs:
-      - https://100.119.138.35:8443/auth/callback/dex-external
+      - https://127.0.0.1:8443/auth/callback/dex-external
       - http://localhost:8000/auth/callback/dex-external
     name: MCP Generic External-OAuth Test Client (WP-A3 dynamic path)
     public: false

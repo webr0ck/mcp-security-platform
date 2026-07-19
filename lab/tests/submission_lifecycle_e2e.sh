@@ -11,11 +11,11 @@
 # an interactive `codex mcp login mcp-gateway` — see lab/tests/README-r4-codex.md.
 #
 # Usage:  bash lab/tests/submission_lifecycle_e2e.sh
-# Env:    BASE (default https://100.119.138.35:8443)
+# Env:    BASE (default https://127.0.0.1:8443)
 #         ALICE_PW (default from .env.lab DEX_ALICE_PASSWORD), CAROL_PW (labpassword)
 set -uo pipefail
 
-BASE="${BASE:-https://100.119.138.35:8443}"
+BASE="${BASE:-https://127.0.0.1:8443}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ALICE_PW="${ALICE_PW:-$(grep -E '^DEX_ALICE_PASSWORD=' "$ROOT/.env.lab" | cut -d= -f2)}"
 CAROL_PW="${CAROL_PW:-labpassword}"

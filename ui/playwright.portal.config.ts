@@ -12,7 +12,7 @@ import { defineConfig, devices } from '@playwright/test'
 //   bob    / e25JOYuj7xTqQEZP58EIXOlXf54e  (agent role)
 //   carol  / labpassword                    (auditor role)
 
-const BASE = process.env.PORTAL_BASE_URL ?? 'https://100.119.138.35:8443'
+const BASE = process.env.PORTAL_BASE_URL ?? 'https://127.0.0.1:8443'
 
 export default defineConfig({
   testDir: './e2e',

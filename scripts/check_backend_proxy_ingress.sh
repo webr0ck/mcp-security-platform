@@ -13,7 +13,7 @@
 # Usage: scripts/check_backend_proxy_ingress.sh [LAB_HOST]
 set -euo pipefail
 
-LAB_HOST="${1:-100.119.138.35}"
+LAB_HOST="${1:-127.0.0.1}"
 export PATH="/usr/local/bin:$PATH"
 if [ -z "${DOCKER_HOST:-}" ]; then
   sock="$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null || true)"

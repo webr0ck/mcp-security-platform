@@ -11,11 +11,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BASE="${BASE:-https://100.119.138.35:8443}"
+BASE="${BASE:-https://127.0.0.1:8443}"
 # :8443's ssl_verify_client is 'off' (an optional client-cert request during
 # the TLS handshake broke Windows Schannel-based MCP clients) — the actual
 # mTLS-required /api/v1/tools/ path now lives on its own listener instead.
-MTLS_BASE="${MTLS_BASE:-https://100.119.138.35:8445}"
+MTLS_BASE="${MTLS_BASE:-https://127.0.0.1:8445}"
 CERTS="$ROOT/lab/nginx/lab-certs"
 SECRETS="$ROOT/lab/nginx/secrets"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT

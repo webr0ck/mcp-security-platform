@@ -41,7 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 # ── Config ───────────────────────────────────────────────────────────────────
-BASE_URL = os.environ.get("ACCEPT_BASE_URL", "https://100.119.138.35:8443")
+BASE_URL = os.environ.get("ACCEPT_BASE_URL", "https://127.0.0.1:8443")
 KC_URL = os.environ.get("KC_URL", "http://localhost:8082")
 KC_REALM = os.environ.get("KC_REALM", "mcp")
 KC_TEST_CLIENT = os.environ.get("KC_TEST_CLIENT", "lab-test")

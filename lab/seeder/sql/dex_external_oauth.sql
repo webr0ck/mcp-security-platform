@@ -33,7 +33,7 @@ INSERT INTO oauth_provider_policy (
     '["openid", "profile", "email", "offline_access"]'::jsonb,
     '[]'::jsonb,
     'low',
-    '["https://100.119.138.35:8443/*", "http://localhost:8000/*"]'::jsonb,
+    '["https://127.0.0.1:8443/*", "http://localhost:8000/*"]'::jsonb,
     '["client_secret_post", "client_secret_basic"]'::jsonb,
     '[]'::jsonb,
     'WP-A3/Task-12: Dex as a second, non-Entra external IdP — proves the generic '
@@ -73,7 +73,7 @@ SELECT
         -- legacy static dex.py adapter.
         'token_endpoint', 'http://lab-dex:5556/dex/token',
         'scopes', jsonb_build_array('openid', 'profile', 'email', 'offline_access'),
-        'redirect_uri', 'https://100.119.138.35:8443/auth/callback/dex-external',
+        'redirect_uri', 'https://127.0.0.1:8443/auth/callback/dex-external',
         'client_auth_method', 'client_secret_post'
     ),
     ARRAY['openid', 'profile', 'email', 'offline_access'],
