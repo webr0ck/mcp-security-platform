@@ -36,6 +36,9 @@ ALLOWED_PROXY_PEERS = {
     "opa", "ollama", "redis", "db", "vault",  # backends the proxy dials
     "self-service",                           # self-service MCP server (pairwise, calls back into design-assist/submissions)
     "lab-ops-agent",                          # WS-A: server lifecycle (logs/restart/rebuild); pairwise, no host port, no gateway ingress
+    "prometheus",                             # F-001: scrapes proxy:8000 GET /metrics only, via pairwise proxy-metrics-net
+                                               # (multi-homed onto scanner-worker-metrics-net too, but that net is NOT
+                                               # shared with proxy — see docker-compose.yml proxy-metrics-net comment)
     # IdP services legitimately on gateway-net in multi-tier deploys
     "keycloak", "keycloak-seeder",
 }
@@ -47,6 +50,7 @@ PAIRWISE = {
     "vault": "vault-net",
     "self-service": "proxy-self-service-net",
     "lab-ops-agent": "proxy-ops-agent-net",
+    "prometheus": "proxy-metrics-net",
 }
 
 # ── One-shot init / seeder containers excluded from persistent peer check ─────

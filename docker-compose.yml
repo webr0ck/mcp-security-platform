@@ -106,14 +106,22 @@ networks:
     driver: bridge
     internal: true
 
-  # CR-17 / WP-D1: shared scrape channel. Prometheus, the proxy (/metrics),
-  # and scanner-worker (its own tiny prometheus_client HTTP server, since
-  # it's a bare poll loop, not an ASGI app) all join this one network — an
-  # exception to the "one pairwise net per backend" pattern used elsewhere,
-  # justified because this network carries ONLY read-only counter/gauge
-  # scrapes (no secrets, no control-plane traffic) in one direction
-  # (Prometheus -> targets).
-  metrics-net:
+  # F-001 fix: CR-17/WP-D1 originally put proxy, scanner-worker, and
+  # prometheus on one shared metrics-net, reasoning that the network "only
+  # carries read-only scrape traffic". That reasoning doesn't hold — compose
+  # network membership grants full L3/L4 reachability regardless of intended
+  # traffic shape, so a compromised scanner-worker (it processes untrusted
+  # cloned-repo content) could reach proxy:8000 directly, contradicting its
+  # own scanner-worker-db-net comment ("no ... proxy reachability even if
+  # this container is fully compromised") and the platform's ingress-only
+  # invariant (docs/ARCHITECTURE.md §4: only gateway-net may reach proxy).
+  # Split into two pairwise nets; Prometheus is multi-homed onto both
+  # (same multi-homed-scraper shape as lab-egress-proxy in the lab compose),
+  # so proxy and scanner-worker never share a network with each other.
+  proxy-metrics-net:
+    driver: bridge
+    internal: true
+  scanner-worker-metrics-net:
     driver: bridge
     internal: true
 
@@ -310,7 +318,7 @@ services:
       - proxy-ollama-net    # LLM risk scoring egress (pairwise)
       - proxy-redis-net     # rate/session/cache egress (pairwise)
       - proxy-db-net        # persistence egress (pairwise)
-      - metrics-net         # CR-17 / WP-D1: Prometheus scrapes GET /metrics here
+      - proxy-metrics-net   # CR-17 / WP-D1: Prometheus scrapes GET /metrics here (pairwise, F-001)
       - proxy-self-service-net  # self-service MCP tool routing + design-assist callback (pairwise)
     depends_on:
       db:
@@ -955,7 +963,7 @@ services:
       # lab wiring (this network is internal:true / no egress by default;
       # the lab overlay redefines it and attaches lab-egress-proxy).
       - scanner-worker-egress-net
-      - metrics-net  # CR-17 / WP-D1: Prometheus scrapes :9100/metrics here
+      - scanner-worker-metrics-net  # CR-17 / WP-D1: Prometheus scrapes :9100/metrics here (pairwise, F-001; NOT proxy-metrics-net — scanner-worker must never share a network with proxy)
     depends_on:
       db:
         condition: service_healthy
@@ -998,7 +1006,12 @@ services:
     tmpfs:
       - /tmp:size=16m,mode=1777
     networks:
-      - metrics-net       # scrapes proxy:8000 + scanner-worker:9100
+      # F-001: multi-homed onto BOTH pairwise metrics nets so it can scrape
+      # proxy and scanner-worker without those two ever sharing a network
+      # with each other (see proxy-metrics-net/scanner-worker-metrics-net
+      # comment above the networks: top-level block).
+      - proxy-metrics-net           # scrapes proxy:8000
+      - scanner-worker-metrics-net  # scrapes scanner-worker:9100
       - observability-net  # talks to alertmanager:9093; Grafana reads from here
     expose:
       - "9090"

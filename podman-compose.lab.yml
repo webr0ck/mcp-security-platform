@@ -490,7 +490,8 @@ services:
   # AZURE_CLIENT_SECRET removed (Task 2.5): credential is broker-injected via
   # credential_store (entra_client_credentials mode). Proxy injects it at call time.
   # Egress traffic to *.microsoftonline.com / *.graph.microsoft.com routes via
-  # the egress proxy on the mcp-egress-net (Task 2.4).
+  # the egress proxy on its private mcp-m365-egress-net (Task 2.4; split from
+  # a shared mcp-egress-net for F-001 — see networks: block below).
   lab-mcp-m365:
     <<: *mcp-hardening
     build: ./lab/mcp-servers/m365
@@ -524,8 +525,8 @@ services:
       HTTPS_PROXY: "http://lab-egress-proxy:3128"
       NO_PROXY: "lab-mcp-m365,lab-mock-idp,lab-mock-graph,localhost,127.0.0.1"
     networks:
-      - mcp-m365-net    # pairwise net with proxy only; replaces internal-net
-      - mcp-egress-net  # egress-only path to lab-egress-proxy
+      - mcp-m365-net          # pairwise net with proxy only; replaces internal-net
+      - mcp-m365-egress-net   # egress-only path to lab-egress-proxy (private, F-001 — not shared with other MCP servers)
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
       interval: 15s
@@ -558,8 +559,8 @@ services:
       HTTPS_PROXY: "http://lab-egress-proxy:3128"
       NO_PROXY: "lab-mcp-entra-id,lab-mock-idp,lab-mock-graph,localhost,127.0.0.1"
     networks:
-      - mcp-entra-id-net  # pairwise net with proxy only
-      - mcp-egress-net    # egress-only path to lab-egress-proxy
+      - mcp-entra-id-net        # pairwise net with proxy only
+      - mcp-entra-id-egress-net # egress-only path to lab-egress-proxy (private, F-001 — not shared with other MCP servers)
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; r=urllib.request.urlopen(urllib.request.Request('http://localhost:8000/mcp',data=json.dumps({'jsonrpc':'2.0','method':'initialize','id':1,'params':{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'hc','version':'1'}}}).encode(),headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'},method='POST')); sys.exit(0 if b'serverInfo' in r.read() else 1)\" 2>/dev/null"]
       interval: 15s
@@ -569,10 +570,13 @@ services:
     restart: unless-stopped
 
   # ── Egress proxy — allowlisting forward proxy for lab MCP servers (Task 2.4) ─
-  # Squid is the only service with mcp-egress-net (internet-reachable).
+  # Squid is the only service that is internet-reachable, and is multi-homed
+  # onto one private egress net per MCP server that needs egress (F-001: this
+  # keeps those MCP servers from ever sharing a network with each other —
+  # see the mcp-*-egress-net comment in the networks: block below).
   # lab-mcp-m365 routes its Entra/Graph calls through here via HTTPS_PROXY env.
   # All other lab MCP services are on internal-only nets — they cannot reach
-  # the internet at all (no mcp-egress-net membership).
+  # the internet at all (no mcp-*-egress-net membership).
   #
   # Security: squid.conf is mounted read-only; no platform networks attached.
   # Allowlist: lab/egress-proxy/squid.conf (auditable policy file).
@@ -587,7 +591,10 @@ services:
     volumes:
       - ./lab/egress-proxy/squid.conf:/etc/squid/squid.conf:ro
     networks:
-      - mcp-egress-net  # connects to lab MCP servers needing egress
+      - mcp-m365-egress-net        # connects lab-mcp-m365 needing egress
+      - mcp-entra-id-egress-net    # connects lab-mcp-entra-id needing egress
+      - mcp-catfacts-egress-net    # connects lab-mcp-catfacts needing egress
+      - mcp-fetch-egress-net       # connects lab-mcp-fetch needing egress
       - scanner-worker-egress-net  # CR-14: connects scanner-worker needing egress
     security_opt:
       - no-new-privileges:true
@@ -714,8 +721,8 @@ services:
       HTTPS_PROXY: "http://lab-egress-proxy:3128"
       NO_PROXY: "lab-mcp-catfacts,localhost,127.0.0.1"
     networks:
-      - mcp-catfacts-net   # pairwise net with proxy only; replaces internal-net
-      - mcp-egress-net     # egress-only path to lab-egress-proxy -> catfact.ninja
+      - mcp-catfacts-net        # pairwise net with proxy only; replaces internal-net
+      - mcp-catfacts-egress-net # egress-only path to lab-egress-proxy -> catfact.ninja (private, F-001 — not shared with other MCP servers)
     healthcheck:
       # require_proxy=True (SDK default, unlike echo's debug-canary override) means
       # /mcp 403s without an X-User-Sub header; /health is the SDK's always-open
@@ -746,8 +753,8 @@ services:
       HTTPS_PROXY: "http://lab-egress-proxy:3128"
       NO_PROXY: "lab-mcp-fetch,localhost,127.0.0.1"
     networks:
-      - mcp-fetch-net      # pairwise net with proxy only
-      - mcp-egress-net     # egress-only path to lab-egress-proxy -> example.com
+      - mcp-fetch-net        # pairwise net with proxy only
+      - mcp-fetch-egress-net # egress-only path to lab-egress-proxy -> example.com (private, F-001 — not shared with other MCP servers)
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status == 200 else 1)\" 2>/dev/null"]
       interval: 10s
@@ -1342,7 +1349,8 @@ networks:
     driver: bridge
     # internal: true — prevents lab services from reaching the internet directly.
     # (Task 2.4). Host-published ports remain accessible from the host machine.
-    # Services that need internet egress (lab-mcp-m365) must use mcp-egress-net
+    # Services that need internet egress (lab-mcp-m365, lab-mcp-entra-id,
+    # lab-mcp-catfacts, lab-mcp-fetch) must use their own private mcp-*-egress-net
     # via the allowlisting squid proxy (lab-egress-proxy).
     internal: true
   # lab-seeder (and lab-grafana, for observability-net) needs to reach
@@ -1428,10 +1436,28 @@ networks:
   notes-private-net:
     driver: bridge
     internal: true
-  # Egress path for lab-mcp-m365 to reach MS identity/Graph (Task 2.4)
-  mcp-egress-net:
+  # F-001 fix: the single shared mcp-egress-net below used to put lab-mcp-m365,
+  # lab-mcp-entra-id, lab-mcp-catfacts, and lab-mcp-fetch all on one bridge —
+  # a real lateral-movement path (ISO-F1.4): any one of those four being
+  # compromised (fetch/catfacts both make live outbound calls to real,
+  # attacker-influenceable upstreams) could reach the other three's :8000
+  # directly, bypassing proxy/OPA/entitlement entirely. Split into one
+  # private pairwise-with-squid net per MCP server; lab-egress-proxy is
+  # multi-homed onto all of them (same multi-homed-scraper shape used for
+  # proxy-metrics-net/scanner-worker-metrics-net in docker-compose.yml), so
+  # no two MCP servers ever share an egress network with each other again.
+  mcp-m365-egress-net:
     driver: bridge
     internal: false   # this net has internet access via lab-egress-proxy NAT
+  mcp-entra-id-egress-net:
+    driver: bridge
+    internal: false
+  mcp-catfacts-egress-net:
+    driver: bridge
+    internal: false
+  mcp-fetch-egress-net:
+    driver: bridge
+    internal: false
   # CR-14 / WP-B1: egress path for scanner-worker to reach configured git
   # provider hosts + vuln-feed hosts. Overrides docker-compose.yml's
   # internal:true default — same allowlisting egress-proxy pattern as
