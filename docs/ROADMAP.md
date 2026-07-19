@@ -120,16 +120,17 @@ onboarding e2e) = Phase 1 sign-off gate.
 - `bl-cleanup` — **3 backlog items**: (1) persist audit `notices` to audit_events
   (V083 + invocation.py INSERT + audit query); (2) fix `conftest.py REDIS_HOST`
   in-container; (3) close POC-tier `mcp-servers-net` isolation leak (compose.poc.yml).
+  → ✅ DONE (`717d989`, `439e4bb`, `a614978`).
 
 ---
 
 ## 🗄️ Deferred / backlog (named, not lost)
 - ~~Ops-agent rebuild → true `git pull`~~ → IN PROGRESS (`bl-gitrebuild`).
-- ~~`notices` field into `audit_events` table~~ → IN PROGRESS (`bl-cleanup`).
+- ~~`notices` field into `audit_events` table~~ → ✅ DONE (`717d989`, `bl-cleanup`).
 - ~~Stale `test_taint_floor_invoke.py`~~ → ✅ DONE (`d6424f0`).
 - ~~Pre-existing isolation-gate drift~~ → ✅ DONE (`f070803`).
-- ~~`compose.poc.yml` `mcp-servers-net` >1 MCP server~~ → IN PROGRESS (`bl-cleanup`).
-- ~~`tests/conftest.py` `REDIS_HOST` in-container~~ → IN PROGRESS (`bl-cleanup`).
+- ~~`compose.poc.yml` `mcp-servers-net` >1 MCP server~~ → ✅ DONE (`a614978`, `bl-cleanup`).
+- ~~`tests/conftest.py` `REDIS_HOST` in-container~~ → ✅ DONE (`439e4bb`, `bl-cleanup`).
 - ~~Debug-mode staleness hint~~ → folded into `p2-ui` (portal maintenance banner).
 - **D3 dual-control direct-registration path** (`POST /api/v1/servers`) is
   explicitly OUT of scope for PRD-0012 C1-C4 (keeps its own logic).
