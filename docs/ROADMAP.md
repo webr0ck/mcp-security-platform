@@ -109,31 +109,28 @@ onboarding e2e) = Phase 1 sign-off gate.
 
 ---
 
-## 📋 Planned
-
-### PRD-0012 Phase 2 — UI (after Phase 1 sign-off)
-- Portal **maintenance banner** (first-class, not buried in `⋯`) + card actions:
-  Edit endpoint/config, Update-from-git & rebuild, Retry verification, Go live.
-- Reviewer card shows real URL + code link + config + SBOM.
-- Submitter wizard: URL entered/validated at submit.
-- `changes_requested` form gains an upstream-URL field.
+## 🚧 "Finish all" push — BUILDING NOW (3 agents, non-overlapping)
+- `p2-ui` — **PRD-0012 Phase 2 UI** (portal.py + ui/): maintenance banner +
+  staleness hint, Edit/Update-from-git/Retry-verify/Go-live card actions,
+  submitter self-host-vs-platform-deploy + URL-at-submit, `changes_requested`
+  URL field, reviewer card real URL+code+SBOM.
+- `bl-gitrebuild` — **git-pull rebuild**: ops-agent clones/pulls github_repo_url
+  + rebuilds; admin_ops rebuild → triggers Phase 1 request-change (re-scan+review).
+  Platform-hosted containers only (remote self-hosted can't be rebuilt by platform).
+- `bl-cleanup` — **3 backlog items**: (1) persist audit `notices` to audit_events
+  (V083 + invocation.py INSERT + audit query); (2) fix `conftest.py REDIS_HOST`
+  in-container; (3) close POC-tier `mcp-servers-net` isolation leak (compose.poc.yml).
 
 ---
 
 ## 🗄️ Deferred / backlog (named, not lost)
-- **Ops-agent rebuild → true `git pull` per server** (today rebuild recreates
-  from existing build context; needs a per-server repo-path mapping).
-- **`notices` field into the `audit_events` Postgres table** (today SIEM/stdout +
-  wazuh only; not queryable via compliance API) — needs a migration.
+- ~~Ops-agent rebuild → true `git pull`~~ → IN PROGRESS (`bl-gitrebuild`).
+- ~~`notices` field into `audit_events` table~~ → IN PROGRESS (`bl-cleanup`).
 - ~~Stale `test_taint_floor_invoke.py`~~ → ✅ DONE (`d6424f0`).
 - ~~Pre-existing isolation-gate drift~~ → ✅ DONE (`f070803`).
-- **`compose.poc.yml` `mcp-servers-net` has >1 MCP server** (mcp-echo/notes/search)
-  — same ISO-F1.4 class as the lab leak just fixed, but in the POC tier. Not
-  fixed (out of scope of the lab fix). Follow-up.
-- **`tests/conftest.py` `REDIS_HOST` `setdefault`** breaks in-container
-  integration tests (setdefault of `localhost` wins over the app's `redis`
-  default). Pre-existing; worked around locally in the taint test. Fix centrally.
-- **Debug-mode staleness TTL** — surface servers stuck in maintenance N days.
+- ~~`compose.poc.yml` `mcp-servers-net` >1 MCP server~~ → IN PROGRESS (`bl-cleanup`).
+- ~~`tests/conftest.py` `REDIS_HOST` in-container~~ → IN PROGRESS (`bl-cleanup`).
+- ~~Debug-mode staleness hint~~ → folded into `p2-ui` (portal maintenance banner).
 - **D3 dual-control direct-registration path** (`POST /api/v1/servers`) is
   explicitly OUT of scope for PRD-0012 C1-C4 (keeps its own logic).
 - **Pre-existing repo-wide ruff debt** (`make lint` red on ~1533 findings across
