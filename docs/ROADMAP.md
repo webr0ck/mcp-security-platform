@@ -60,10 +60,10 @@ critic-hardened by a 3-lens appsec/product/architecture pass).
 IP-only endpoint change (same commit) → light re-verify + auto-approve, code
 change → full re-scan + re-review; **phased delivery, backend first**.
 
-### Parallel backlog cleanup — BUILDING NOW (agents, safe/non-overlapping with Phase 1)
-- `rb-taint-test` — fix stale `proxy/tests/integration/test_taint_floor_invoke.py`
-  (assert notify-only behavior, not the removed `TaintFloorDenyError`).
-- `rb-isolation-drift` — investigate + fix the 2 pre-existing F-001 gate failures
+### Parallel backlog cleanup
+- ✅ `rb-taint-test` — stale `test_taint_floor_invoke.py` fixed (asserts
+  notify-only allow + taint notice); 4/4 pass in-container — `d6424f0`.
+- `rb-isolation-drift` — IN PROGRESS: fix the 2 pre-existing F-001 gate failures
   (prometheus/scanner-worker proxy reach; `mcp-egress-net` >1 server) without
   weakening isolation.
 
@@ -98,8 +98,11 @@ change → full re-scan + re-review; **phased delivery, backend first**.
   from existing build context; needs a per-server repo-path mapping).
 - **`notices` field into the `audit_events` Postgres table** (today SIEM/stdout +
   wazuh only; not queryable via compliance API) — needs a migration.
-- ~~Stale `test_taint_floor_invoke.py`~~ → IN PROGRESS (`rb-taint-test`).
+- ~~Stale `test_taint_floor_invoke.py`~~ → ✅ DONE (`d6424f0`).
 - ~~Pre-existing isolation-gate drift~~ → IN PROGRESS (`rb-isolation-drift`).
+- **`tests/conftest.py` `REDIS_HOST` `setdefault`** breaks in-container
+  integration tests (setdefault of `localhost` wins over the app's `redis`
+  default). Pre-existing; worked around locally in the taint test. Fix centrally.
 - **Debug-mode staleness TTL** — surface servers stuck in maintenance N days.
 - **D3 dual-control direct-registration path** (`POST /api/v1/servers`) is
   explicitly OUT of scope for PRD-0012 C1-C4 (keeps its own logic).
