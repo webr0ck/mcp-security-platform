@@ -146,12 +146,26 @@ unchanged."
   INV-005 still blocks quarantined-tool invocation for all roles; reject rolls
   back to last-good; platform-deployed flow untouched (is_self_hosted=false path).
 
-## One decision still open for the owner
-**IP-only endpoint change vs code change** (product HIGH-2). You chose "always
-re-scan + re-review." All three critics + your self-hosted reality (Tailscale/DHCP
-IP rotation) argue for a lighter path when only the *address* moves and the git
-commit is unchanged: re-run discovery+verification (confirm the tool schema still
-matches) but skip the full code re-scan and skip blocking reviewer approval,
-auto-approving iff the discovered tool set is identical to the last-approved one.
-Code/repo changes still get the full C3 treatment. Recommend adopting this split;
-awaiting your call before implementation.
+## IP-only vs code change — ADOPTED (owner-confirmed)
+`request-change` classifies the change:
+- **IP/endpoint-only (same git commit / same scanned digest)**: still quarantines
+  tools + demotes status (C3 step 1-2, so the swapped address is never live
+  unverified), then re-runs **discovery + verification** and **auto-approves iff
+  the discovered tool set is byte-identical to the last-approved schema** — no
+  full code re-scan, no blocking reviewer step. Lands in debug mode → owner
+  verifies → go live. (Handles Tailscale/DHCP rotation without reviewer friction.)
+- **Code/repo change (commit differs, or tool schema changed)**: full C3 — re-scan
+  + reviewer re-approval.
+The classifier compares the submitter-asserted/stored commit + the post-change
+discovered tool schema against last-approved; any mismatch escalates to the full
+path (fail-safe toward more review, never less).
+
+## Delivery — PHASED (owner-confirmed)
+- **Phase 1 (this build): backend state machine + enforcement.** Migration V082,
+  C1 submit-SSRF, C2 approve-rewrite, C3 `request-change` (+ IP-only split) +
+  re-routed PATCH, C4 `verify`/go-live, reject-rollback, all enforcement on the
+  real columns, unit + integration tests, fresh-boot lab verify. Owner reviews
+  before Phase 2.
+- **Phase 2 (after review): UI.** Portal maintenance banner + card actions
+  (Edit/Update-from-git/Retry-verify/Go-live), reviewer card real-URL/code/SBOM,
+  submitter wizard URL-at-submit, `changes_requested` URL field.
