@@ -42,10 +42,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install pip-audit and proxy dependencies
-        working-directory: proxy
         run: |
           pip install uv pip-audit
-          uv pip install --system -e "."
+          uv pip install --system -e "observability/mcp-audit-logger/"
+          uv pip install --system -e "proxy/"
 
       - name: Run pip-audit on proxy dependencies
         working-directory: proxy

@@ -201,8 +201,8 @@ jobs:
       - name: Install proxy and audit logger
         run: |
           pip install uv
-          uv pip install --system -e "proxy/[dev]"
           uv pip install --system -e "observability/mcp-audit-logger/"
+          uv pip install --system -e "proxy/[dev]"
 
       - name: Run database migrations
         env:
@@ -304,7 +304,9 @@ jobs:
       - name: Build compliance-checker
         uses: docker/build-push-action@v5
         with:
-          context: ./observability/compliance-checker
+          # Repo root, not ./observability/compliance-checker — same reason
+          # as the proxy build above (needs sibling mcp-audit-logger).
+          context: .
           file: ./observability/compliance-checker/Dockerfile
           push: false
           cache-from: type=gha
