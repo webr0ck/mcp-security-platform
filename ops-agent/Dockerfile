@@ -8,6 +8,19 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# The agent shells out to `podman`/`podman-compose` against the *mounted* podman
+# socket (CONTAINER_HOST below) — it does NOT run its own container engine. We
+# only need the podman CLI in remote mode + podman-compose, not a full local
+# engine (no crun/conmon storage stack). `podman` from Debian provides the
+# remote-capable client; podman-compose is a pure-Python pip package.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends podman \
+    && rm -rf /var/lib/apt/lists/*
+
+# Talk to the bind-mounted podman socket instead of a local engine. `podman`
+# and `podman-compose` both honour CONTAINER_HOST → remote mode.
+ENV CONTAINER_HOST=unix:///var/run/docker.sock
+
 RUN groupadd -g 1001 appgroup && useradd -u 1001 -g appgroup -m appuser
 
 COPY requirements.txt .
