@@ -3,7 +3,7 @@
 # To compile-resolve: uv pip compile pyproject.toml -o requirements.txt
 # Last updated: 2026-06-04
 
-fastapi==0.115.12
+fastapi==0.139.2
 python-multipart==0.0.32
 uvicorn[standard]==0.34.3
 pydantic==2.11.5
