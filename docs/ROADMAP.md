@@ -76,13 +76,15 @@ Delivered: V082 migration (`is_self_hosted` + `last_good_*`), `server_lifecycle.
 C2 approve-rewrite, C3 `request-change` (+ IP-only classifier via live-schema
 match), C4 `verify` endpoint + PATCH reroute, reject-rollback. 20/20 unit tests;
 V082 applies clean; `request-change` CAS fires live (fail-closed 409).
-**6 critic traps verified closed in code.** appsec re-verify (`av-p1-onboarding`)
-in progress. **Open fixes before sign-off:** (a) platform-deployed branch gap —
-`approve` uses `has_repo and is_self_hosted` but `is_self_hosted` is TRUE until
-`apply` (post-approval), so platform-deployed is unreachable + submit now forces a
-URL it can't have → add a submit-time hosting-intent (default self-hosted); (b) 7
-ruff nits in new files; (c) any appsec finding. Then fresh-boot lab-reset (also
-live-verifies the f070803 network topology).
+**6 critic traps verified closed in code.** appsec audit (`av-p1-onboarding`):
+**8/9 enforcement properties HOLD** — no fail-open, no authz bypass, real-column
+enforcement followed everywhere. 1 HIGH = platform-deployed reachability
+regression (correctness/scope, not a bypass). **Fixes IN PROGRESS via
+`p1-onboarding`:** (a) add `self_host` deployment intent at submit (default
+self-hosted) so platform-deployed stays reachable + unit-tested; (b) 7 ruff nits.
+PRD residual-risks updated with the IP-only tool-schema-equality note.
+**Then:** fresh-boot `lab-reset` (applies V082 + live-verifies f070803 topology +
+onboarding e2e) = Phase 1 sign-off gate.
 
 ### (prior) Phase 1 build notes — via agent `p1-onboarding`:
 - V082 `is_self_hosted` migration; C1 submit-time full SSRF; C2 approve-rewrite

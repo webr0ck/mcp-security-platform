@@ -137,6 +137,14 @@ unchanged."
 - **No cryptographic tie** between scanned commit and the owner's actually-running
   self-hosted process (architect §4) — inherent to self-hosted; the owner asserts
   the change. Accepted.
+- **IP-only auto-approve trusts tool-schema byte-equality as a proxy for "same
+  code"** (appsec Phase-1 audit) — a live `tools/list` identical to the
+  last-approved schema skips the full code re-scan. Not cryptographic, but blast
+  radius is bounded: only an already-privileged owner/maintainer/admin can trigger
+  `request-change`, and the auto-approved result lands `debug_mode=TRUE` with
+  invocation restricted to that same owner/maintainer until an explicit go-live —
+  it grants no new privilege, only skips a review step the owner could self-serve
+  via the full path anyway. Accepted.
 
 ## Migrations / tests
 - V082: `is_self_hosted` column + backfill.
