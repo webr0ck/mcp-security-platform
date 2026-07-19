@@ -103,6 +103,15 @@ PATH_ROLE_MAP: list[tuple[str, str, set[str]]] = [
     # only needs to let a plausible owner's role through.
     ("PUT",    "/api/v1/servers/{id}/maintainers",       {"admin", "platform_admin", "server_owner", "manager", "user", "agent"}),
     ("POST",   "/api/v1/servers/{id}/debug-mode",        {"admin", "platform_admin", "server_owner", "manager", "user", "agent"}),
+    # PRD-0012 C3/C4: request-change (edit endpoint / update-from-git re-review) and
+    # verify (retry verification) are owner/maintainer/admin actions — same role set
+    # as debug-mode above, since the actual per-server ownership check lives in the
+    # handler (_require_owner_or_maintainer). Without these explicit rules they fall
+    # through to the greedy plain "POST /api/v1/servers" prefix rule below (which omits
+    # user/agent), so a self-service owner holding only user/agent could enter
+    # maintenance but not request-change or verify their own server.
+    ("POST",   "/api/v1/servers/{id}/request-change",    {"admin", "platform_admin", "server_owner", "manager", "user", "agent"}),
+    ("POST",   "/api/v1/servers/{id}/verify",            {"admin", "platform_admin", "server_owner", "manager", "user", "agent"}),
     # DELETE /{id}/entitlements/{ent_id}: use plain prefix matching (two path params not
     # supported by parameterized rule logic). The /entitlements/ infix ensures this only
     # matches entitlement DELETE operations, not other /servers/* DELETEs.
