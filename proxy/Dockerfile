@@ -8,7 +8,7 @@
 
 # ─── Base ─────────────────────────────────────────────────────────────────────
 # TODO: pin @sha256:<digest> — run: docker pull python:3.12.11-slim && docker inspect --format='{{index .RepoDigests 0}}' python:3.12.11-slim
-FROM python:3.12.11-slim AS base
+FROM python:3.14.6-slim AS base
 
 # Security: run as non-root user
 RUN groupadd --gid 1001 appgroup && \
