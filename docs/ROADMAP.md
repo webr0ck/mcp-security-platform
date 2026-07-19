@@ -50,6 +50,17 @@ Verified on a real `lab-reset` wipe: `lab-smoke` 4/4, `test-lab-functional`
 
 ---
 
+## ✅ /code-review PASSED (2026-07-19) — verdict APPROVE WITH NITS
+Cold review (independent appsec) + live verification of the whole PRD-0012 +
+finish-all batch. All 4 owner acceptance criteria independently traced;
+load-bearing invariant grep-confirmed (zero `submission_status` enforcement);
+tests are real (assert SQL, would fail if enforcement removed); **request-change
+enforcement proven LIVE** (owner call → status quarantined, all tools quarantined,
+last_good set). 2 findings fixed: (1) missing RBAC rules for request-change/verify
+(owners blocked) → added + verified live; (2) ops-agent git-URL SSRF TOCTOU →
+squid-dependency documented. NITs (asserted-ip-only by design, stale-image tag,
+reject single-key) accepted/backlogged.
+
 ## ✅ "Finish all" batch — DONE + FRESH-BOOT VERIFIED (2026-07-19)
 Fresh `lab-reset` (V083 + V082 apply clean, ops-agent rebuilt with `git`, new
 egress/workdir wiring, Phase 2 UI, convergence refactor all boot healthy):
