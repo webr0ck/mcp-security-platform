@@ -70,12 +70,13 @@ change → full re-scan + re-review; **phased delivery, backend first**.
   **Live-verify pending**: topology change validated by the static F-001 gate only;
   the next `lab-reset`/`lab-up` will exercise the new networks live.
 
-### Phase 1 (backend) — COMMITTED (`ca0ab80`), FRESH-BOOT VERIFY IN PROGRESS
-Both review fixes landed: `self_host` submit intent (default self-hosted) makes
-platform-deployed reachable + unit-tested; ruff clean. 23 PRD unit tests + 122
-relevant-subset pass. Committed as `ca0ab80`. **Now running the fresh-boot gate**
-(`lab-reset`: fresh V082 apply + f070803 topology live boot + smoke + functional)
-— last step before owner sign-off.
+### Phase 1 (backend) — ✅ DONE + FRESH-BOOT VERIFIED (`ca0ab80`) — awaiting owner sign-off
+Fresh `lab-reset` (2026-07-19): V082 applies clean on fresh DB (is_self_hosted
+backfilled TRUE ×16 + last_good_*); new f070803 network topology boots healthy;
+**lab-smoke 4/4, test-lab-functional 46/1/0, F-001 isolation gate ALL PASS**;
+request-change + verify endpoints wired and fail-closed (403 non-owner). 23 PRD
+unit tests + 122 relevant-subset pass. Security: 6 critic traps closed, appsec 8/9
+(no fail-open, no bypass). **Next: owner sign-off, then Phase 2 (UI).**
 
 ### (review notes) Phase 1 — IMPLEMENTED, appsec-verified
 Delivered: V082 migration (`is_self_hosted` + `last_good_*`), `server_lifecycle.py`
