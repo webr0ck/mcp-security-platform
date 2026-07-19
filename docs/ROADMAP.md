@@ -61,11 +61,14 @@ IP-only endpoint change (same commit) → light re-verify + auto-approve, code
 change → full re-scan + re-review; **phased delivery, backend first**.
 
 ### Parallel backlog cleanup
-- ✅ `rb-taint-test` — stale `test_taint_floor_invoke.py` fixed (asserts
-  notify-only allow + taint notice); 4/4 pass in-container — `d6424f0`.
-- `rb-isolation-drift` — IN PROGRESS: fix the 2 pre-existing F-001 gate failures
-  (prometheus/scanner-worker proxy reach; `mcp-egress-net` >1 server) without
-  weakening isolation.
+- ✅ `rb-taint-test` — stale `test_taint_floor_invoke.py` fixed; 4/4 pass — `d6424f0`.
+- ✅ `rb-isolation-drift` — both F-001 failures were REAL leaks, fixed by
+  topology split (`f070803`): scanner-worker no longer reaches proxy;
+  `metrics-net` → proxy-metrics-net + scanner-worker-metrics-net; `mcp-egress-net`
+  → 4 per-server egress nets (squid multi-homed). AT3 test fixture repointed to
+  the new egress net (`f070803` collateral fixed separately).
+  **Live-verify pending**: topology change validated by the static F-001 gate only;
+  the next `lab-reset`/`lab-up` will exercise the new networks live.
 
 ### Phase 1 (backend) — BUILDING NOW via background agent `p1-onboarding`:
 - V082 `is_self_hosted` migration; C1 submit-time full SSRF; C2 approve-rewrite
@@ -99,7 +102,10 @@ change → full re-scan + re-review; **phased delivery, backend first**.
 - **`notices` field into the `audit_events` Postgres table** (today SIEM/stdout +
   wazuh only; not queryable via compliance API) — needs a migration.
 - ~~Stale `test_taint_floor_invoke.py`~~ → ✅ DONE (`d6424f0`).
-- ~~Pre-existing isolation-gate drift~~ → IN PROGRESS (`rb-isolation-drift`).
+- ~~Pre-existing isolation-gate drift~~ → ✅ DONE (`f070803`).
+- **`compose.poc.yml` `mcp-servers-net` has >1 MCP server** (mcp-echo/notes/search)
+  — same ISO-F1.4 class as the lab leak just fixed, but in the POC tier. Not
+  fixed (out of scope of the lab fix). Follow-up.
 - **`tests/conftest.py` `REDIS_HOST` `setdefault`** breaks in-container
   integration tests (setdefault of `localhost` wins over the app's `redis`
   default). Pre-existing; worked around locally in the taint test. Fix centrally.
