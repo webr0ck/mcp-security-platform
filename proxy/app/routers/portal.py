@@ -2874,6 +2874,9 @@ async def fragment_admin_servers(request: Request):
                 f'<button onclick="adminSetMaintainers(\'{sid}\',{maint_json})">Maintainers…</button>'
                 f'<button onclick="adminToggleDebug(\'{sid}\',{"false" if debug_on else "true"})">'
                 f'{"Disable" if debug_on else "Enable"} debug mode</button>'
+                # WS-A: view container logs — only offered while in debug/maintenance
+                # mode, matching the server-side debug_mode gate on the logs endpoint.
+                + (f'<button onclick="adminViewLogs(\'{sid}\')">View logs</button>' if debug_on else '')
                 + (
                     f'<button onclick="adminSetPublic(\'{sid}\',{"false" if s.public_to_authenticated else "true"})">'
                     f'{"Make private" if s.public_to_authenticated else "Make public (all users)"}</button>'
@@ -3005,6 +3008,29 @@ async def fragment_admin_servers(request: Request):
         body: JSON.stringify({{enabled: enable}}),
       }}).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
         .catch(e => alert('Network error: ' + e));
+    }}
+    function adminViewLogs(id) {{
+      document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
+      fetch('/api/v1/admin/servers/' + id + '/logs?tail=200', {{credentials:'include'}})
+        .then(r => r.ok ? r.json() : r.json().then(d => {{ throw new Error(d.error?.message || d.detail?.message || d.detail || ('HTTP ' + r.status)); }}))
+        .then(d => {{
+          const ov = document.createElement('div');
+          ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+          ov.onclick = function(e) {{ if (e.target === ov) ov.remove(); }};
+          const box = document.createElement('div');
+          box.style.cssText = 'background:#0b0f17;color:#d6deeb;max-width:900px;width:92%;max-height:80vh;display:flex;flex-direction:column;border-radius:8px;overflow:hidden;border:1px solid #2a3550';
+          const hdr = document.createElement('div');
+          hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #2a3550;font-weight:600';
+          const ttl = document.createElement('span'); ttl.textContent = 'Logs (last 200 lines)';
+          const cls = document.createElement('button'); cls.textContent = 'Close'; cls.onclick = function() {{ ov.remove(); }};
+          hdr.appendChild(ttl); hdr.appendChild(cls);
+          const pre = document.createElement('pre');
+          pre.style.cssText = 'margin:0;padding:14px;overflow:auto;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word';
+          pre.textContent = d.logs || '(no output)';
+          box.appendChild(hdr); box.appendChild(pre); ov.appendChild(box);
+          document.body.appendChild(ov);
+        }})
+        .catch(e => alert('Could not load logs: ' + e.message));
     }}
     function srvMenuToggle(evt, id) {{
       evt.stopPropagation();
