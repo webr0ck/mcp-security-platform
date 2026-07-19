@@ -22,5 +22,5 @@ PyJWT[crypto]==2.10.1
 idna==3.10
 ecdsa==0.19.0  # TRANSITIVE via cyclonedx-python-lib — DO NOT import directly; use cryptography.ec
 pyyaml==6.0.2
-structlog==24.4.0
+structlog==26.1.0
 tenacity==9.1.2
