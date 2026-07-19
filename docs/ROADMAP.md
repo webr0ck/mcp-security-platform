@@ -50,77 +50,38 @@ Verified on a real `lab-reset` wipe: `lab-smoke` 4/4, `test-lab-functional`
 
 ---
 
-## 🚧 In progress
+## 🚧 In progress — FINAL fresh-boot verify of the whole "finish all" batch
+Everything below is committed to `main`; a `lab-reset` (fresh V083 + rebuilt
+ops-agent w/ git + new egress/workdir wiring + Phase 2 UI + convergence refactor)
+is running as the final gate. On green → `## Shipped`. **Next step for a fresh
+session:** read the boot result, run `lab-smoke` + `test-lab-functional` +
+`check_network_isolation.py`, then hand to owner for their full check.
 
-### PRD-0012 — URL-first onboarding, re-approval on change, debug-mode-first
-Spec: `docs/prd/PRD-0012-url-first-onboarding-and-debug-mode-first.md` (v2,
-critic-hardened by a 3-lens appsec/product/architecture pass).
+### PRD-0012 — URL-first onboarding, re-approval on change, debug-mode-first ✅ (Phase 1 + 2)
+Spec: `docs/prd/PRD-0012-...md` (v2, 3-critic-hardened). Owner decisions: self-hosted
+flow is default (platform-deployed preserved via `self_host=false` submit intent);
+IP-only change (same tool schema) → auto-approve, code change → full re-scan+review.
+- **Phase 1 backend** (`ca0ab80`): V082 (`is_self_hosted` + `last_good_*`),
+  `server_lifecycle.py` (C2 approve→verify→debug-mode, C3 `request-change`
+  quarantine-all + real-`status` demote + CAS + IP-only/code split), C4 `verify`,
+  PATCH reroute, reject-rolls-back-to-last-good, guarded `change_rereview_scan`.
+  **6 critic traps closed; appsec audit 8/9 hold (no fail-open, no bypass)**;
+  fresh-boot verified once already (smoke 4/4, functional 46/1/0, F-001 all pass).
+- **Phase 2 UI** (`e0e1bd0`-era + Phase-2 commit): portal maintenance banner +
+  staleness hint + View-logs/Retry-verify/Go-live; ⋯ Edit-endpoint / Update-from-git;
+  submitter self-host-vs-platform-deploy choice; `changes_requested` URL field;
+  React reviewer card shows the real URL.
 
-**Owner decisions locked:** self-hosted flow only (platform-deployed untouched);
-IP-only endpoint change (same commit) → light re-verify + auto-approve, code
-change → full re-scan + re-review; **phased delivery, backend first**.
-
-### Parallel backlog cleanup
-- ✅ `rb-taint-test` — stale `test_taint_floor_invoke.py` fixed; 4/4 pass — `d6424f0`.
-- ✅ `rb-isolation-drift` — both F-001 failures were REAL leaks, fixed by
-  topology split (`f070803`): scanner-worker no longer reaches proxy;
-  `metrics-net` → proxy-metrics-net + scanner-worker-metrics-net; `mcp-egress-net`
-  → 4 per-server egress nets (squid multi-homed). AT3 test fixture repointed to
-  the new egress net (`f070803` collateral fixed separately).
-  **Live-verify pending**: topology change validated by the static F-001 gate only;
-  the next `lab-reset`/`lab-up` will exercise the new networks live.
-
-### Phase 1 (backend) — ✅ DONE + FRESH-BOOT VERIFIED (`ca0ab80`) — awaiting owner sign-off
-Fresh `lab-reset` (2026-07-19): V082 applies clean on fresh DB (is_self_hosted
-backfilled TRUE ×16 + last_good_*); new f070803 network topology boots healthy;
-**lab-smoke 4/4, test-lab-functional 46/1/0, F-001 isolation gate ALL PASS**;
-request-change + verify endpoints wired and fail-closed (403 non-owner). 23 PRD
-unit tests + 122 relevant-subset pass. Security: 6 critic traps closed, appsec 8/9
-(no fail-open, no bypass). **Next: owner sign-off, then Phase 2 (UI).**
-
-### (review notes) Phase 1 — IMPLEMENTED, appsec-verified
-Delivered: V082 migration (`is_self_hosted` + `last_good_*`), `server_lifecycle.py`
-(shared C2/C3 core), guarded `change_rereview_scan` evaluator, C1 submit-SSRF,
-C2 approve-rewrite, C3 `request-change` (+ IP-only classifier via live-schema
-match), C4 `verify` endpoint + PATCH reroute, reject-rollback. 20/20 unit tests;
-V082 applies clean; `request-change` CAS fires live (fail-closed 409).
-**6 critic traps verified closed in code.** appsec audit (`av-p1-onboarding`):
-**8/9 enforcement properties HOLD** — no fail-open, no authz bypass, real-column
-enforcement followed everywhere. 1 HIGH = platform-deployed reachability
-regression (correctness/scope, not a bypass). **Fixes IN PROGRESS via
-`p1-onboarding`:** (a) add `self_host` deployment intent at submit (default
-self-hosted) so platform-deployed stays reachable + unit-tested; (b) 7 ruff nits.
-PRD residual-risks updated with the IP-only tool-schema-equality note.
-**Then:** fresh-boot `lab-reset` (applies V082 + live-verifies f070803 topology +
-onboarding e2e) = Phase 1 sign-off gate.
-
-### (prior) Phase 1 build notes — via agent `p1-onboarding`:
-- V082 `is_self_hosted` migration; C1 submit-time full SSRF; C2 approve-rewrite
-  (discovery+verify → debug mode, tools released-but-owner-gated); C3
-  `POST /servers/{id}/request-change` (quarantine ALL tools + demote real
-  `status` + CAS + last-good persist + IP-only/code-change split) + re-routed
-  PATCH; C4 `POST /servers/{id}/verify` + go-live; reject-rolls-back-to-last-good.
-- **Load-bearing rule** (all 3 critics): enforce on the REAL columns
-  (`server_registry.status`, `tool_registry.status`, `debug_mode`) at
-  change-request time — NOT `submission_status` (zero runtime effect).
-- **Next step when the agent reports:** review against the trap list in its
-  brief, run `appsec-reviewer` on the enforcement, `make lint` + tests, then a
-  fresh-boot lab verify. Get owner sign-off before Phase 2.
-
----
-
-## 🚧 "Finish all" push — BUILDING NOW (3 agents, non-overlapping)
-- `p2-ui` — **PRD-0012 Phase 2 UI** (portal.py + ui/): maintenance banner +
-  staleness hint, Edit/Update-from-git/Retry-verify/Go-live card actions,
-  submitter self-host-vs-platform-deploy + URL-at-submit, `changes_requested`
-  URL field, reviewer card real URL+code+SBOM.
-- `bl-gitrebuild` — **git-pull rebuild**: ops-agent clones/pulls github_repo_url
-  + rebuilds; admin_ops rebuild → triggers Phase 1 request-change (re-scan+review).
-  Platform-hosted containers only (remote self-hosted can't be rebuilt by platform).
-- `bl-cleanup` — **3 backlog items**: (1) persist audit `notices` to audit_events
-  (V083 + invocation.py INSERT + audit query); (2) fix `conftest.py REDIS_HOST`
-  in-container; (3) close POC-tier `mcp-servers-net` isolation leak (compose.poc.yml).
-  → ✅ DONE (`717d989`, `439e4bb`, `a614978`).
+### Also just landed (committed)
+- **git-pull rebuild** (`7458a98` + convergence refactor): ops-agent
+  `/ops/rebuild-from-git` clones/pulls a server's public repo + rebuilds; admin_ops
+  rebuild → the ONE canonical `request_change_for_server` re-review
+  (`require_self_hosted=False` — duplicate deleted, single source of truth).
+- **3 backlog items** (`717d989`, `439e4bb`, `a614978`): audit `notices` persisted
+  to `audit_events` (V083); `conftest.py REDIS_HOST` in-container fixed; POC-tier
+  `mcp-servers-net` isolation leak closed.
+- **F-001 real leaks** (`f070803`): scanner-worker→proxy reachability removed;
+  per-server egress nets. Live-verified on the prior fresh boot.
 
 ---
 
@@ -134,6 +95,13 @@ onboarding e2e) = Phase 1 sign-off gate.
 - ~~Debug-mode staleness hint~~ → folded into `p2-ui` (portal maintenance banner).
 - **D3 dual-control direct-registration path** (`POST /api/v1/servers`) is
   explicitly OUT of scope for PRD-0012 C1-C4 (keeps its own logic).
+- **React `SubmissionReview` SBOM parity** — the portal reviewer card shows
+  SBOM/scan detail; the React one doesn't (the `GET /admin/submissions` API
+  doesn't return SBOM fields). Secondary path; needs an API field to bind.
+- **git-rebuild image-tag assumption** — ops-agent `/ops/rebuild-from-git` tags
+  `<service>:lab` and `up -d`; a service with a differently-tagged image would
+  build but keep running the old image. Needs compose-YAML parse or a stored
+  image_tag to close (documented in the endpoint docstring).
 - **Pre-existing repo-wide ruff debt** (`make lint` red on ~1533 findings across
   untouched files) — not this work's regression; separate cleanup if wanted.
 
