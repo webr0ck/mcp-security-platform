@@ -56,10 +56,10 @@ jobs:
           cache-dependency-path: proxy/pyproject.toml
 
       - name: Install dev dependencies
-        working-directory: proxy
         run: |
           pip install uv
-          uv pip install --system -e ".[dev]"
+          uv pip install --system -e "observability/mcp-audit-logger/"
+          uv pip install --system -e "proxy/[dev]"
 
       - name: ruff lint
         working-directory: proxy
@@ -92,8 +92,11 @@ jobs:
         uses: trufflesecurity/trufflehog@v3.88.1
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
+          # base/head intentionally omitted: on a push to main, base=default_branch
+          # resolves to the SAME commit as head (main already points at this push's
+          # HEAD), so the action always saw a zero-commit range and hard-failed.
+          # Letting the action read github.event.before/after handles both
+          # push and pull_request events correctly.
           extra_args: --only-verified
 
   # ============================================================================
@@ -172,19 +175,21 @@ jobs:
           --health-timeout 3s
           --health-retries 3
 
-      opa:
-        image: openpolicyagent/opa:0.63.0-static
-        ports:
-          - "8181:8181"
-        options: >-
-          --health-cmd "curl -sf http://localhost:8181/health"
-          --health-interval 10s
-          --health-timeout 3s
-          --health-retries 5
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Start OPA
+        # Not a `services:` container: that block can't pass a command, and
+        # openpolicyagent/opa has no default CMD — it would just drop into
+        # the interactive REPL and never open :8181.
+        run: |
+          docker run -d --name opa -p 8181:8181 openpolicyagent/opa:0.63.0-static \
+            run --server --addr=0.0.0.0:8181
+          for i in $(seq 1 15); do
+            curl -sf http://localhost:8181/health && break
+            sleep 2
+          done
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -286,7 +291,9 @@ jobs:
       - name: Build proxy (production target)
         uses: docker/build-push-action@v5
         with:
-          context: ./proxy
+          # Must be repo root, not ./proxy — proxy/Dockerfile COPYs
+          # observability/mcp-audit-logger and docs/ from outside proxy/.
+          context: .
           file: ./proxy/Dockerfile
           target: production
           push: false

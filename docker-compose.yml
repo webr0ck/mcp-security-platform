@@ -273,8 +273,10 @@ services:
 
   proxy:
     build:
-      context: ./proxy
-      dockerfile: Dockerfile
+      # Context is project root so the Dockerfile can reach local packages
+      # (e.g. observability/mcp-audit-logger) and docs/ that aren't in proxy/.
+      context: .
+      dockerfile: proxy/Dockerfile
       target: production
     image: mcp-security-proxy:latest
     container_name: mcp-proxy
