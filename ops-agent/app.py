@@ -200,6 +200,18 @@ def _require_safe_git_url(url: str) -> str:
         loopback/link-local/private/metadata (SSRF guard — this agent runs
         with a mounted container-runtime socket, so it must never be able to
         reach internal-only hosts via a crafted git_url)
+
+    TOCTOU / defence-in-depth (code-review finding, 2026-07-19): this check
+    resolves DNS once here, but `git` re-resolves independently at connect time,
+    so a DNS-rebinding answer could point the actual fetch at an internal IP this
+    pre-check never saw. This is NOT the sole control: in this deployment the
+    ops-agent has egress ONLY via lab-egress-proxy (squid) on
+    ops-agent-egress-net, whose `dstdomain` allowlist (github.com / codeload /
+    objects.githubusercontent.com) blocks the CONNECT regardless of the rebound
+    IP. This function is the app-level belt; squid is the load-bearing braces.
+    If ops-agent is ever deployed WITHOUT that squid egress enforcement, this
+    check alone is insufficient — pin the resolved IP for the git subprocess
+    (as revalidate_upstream_ip_at_invoke/PinnedIPTransport do on the proxy side).
     """
     if url.startswith("-"):
         raise HTTPException(status_code=422, detail="git_url must not start with '-'")
