@@ -229,7 +229,9 @@ jobs:
       - name: Run pytest
         working-directory: proxy
         env:
-          ENVIRONMENT: test
+          # config.py's Settings.ENVIRONMENT only allows development/staging/production
+          # (matches proxy/tests/conftest.py's convention) — "test" fails Pydantic validation.
+          ENVIRONMENT: development
           DB_HOST: localhost
           DB_PORT: "5432"
           DB_NAME: mcp_security_test
