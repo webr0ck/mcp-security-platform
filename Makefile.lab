@@ -79,7 +79,7 @@ lab-init:
 	  mcp-db bash /tmp/init-db-roles.sh
 	$(LAB_COMPOSE) run --rm lab-seeder
 	@echo "Recreating containers whose env-baked credential was just (re)minted by init-db-roles.sh/lab-seeder — a plain restart does not reload podman-compose-interpolated env vars..."
-	$(LAB_COMPOSE) up -d --force-recreate --no-deps scanner-worker compliance-checker lab-mcp-grafana lab-mcp-self-service
+	$(LAB_COMPOSE) up -d --force-recreate --no-deps scanner-worker compliance-checker lab-mcp-grafana self-service
 
 ## lab-test         Run integration / e2e tests (excludes unit-only tests)
 lab-test:

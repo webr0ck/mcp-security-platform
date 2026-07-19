@@ -32,7 +32,7 @@ def test_no_header_returns_caller_identity():
 
 def test_trusted_service_can_act_on_behalf_of_real_user():
     req = _fake_request(
-        "lab-self-service", ["submission_service"], {"x-on-behalf-of": "alice-sub"}
+        "self-service", ["submission_service"], {"x-on-behalf-of": "alice-sub"}
     )
     assert submission._effective_owner(req) == "alice-sub"
 
@@ -50,15 +50,15 @@ def test_untrusted_caller_spoofing_header_is_rejected():
 def test_trusted_role_without_header_acts_as_itself():
     """Holding submission_service alone grants no ambient impersonation —
     only an explicit X-On-Behalf-Of header (plus the role) delegates."""
-    req = _fake_request("lab-self-service", ["submission_service"], {})
-    assert submission._effective_owner(req) == "lab-self-service"
+    req = _fake_request("self-service", ["submission_service"], {})
+    assert submission._effective_owner(req) == "self-service"
 
 
 if __name__ == "__main__":
     # ponytail: smallest runnable check — pytest not required to sanity-check.
     r1 = _fake_request("alice", [], {})
     assert submission._effective_owner(r1) == "alice"
-    r2 = _fake_request("lab-self-service", ["submission_service"], {"x-on-behalf-of": "alice-sub"})
+    r2 = _fake_request("self-service", ["submission_service"], {"x-on-behalf-of": "alice-sub"})
     assert submission._effective_owner(r2) == "alice-sub"
     r3 = _fake_request("mallory", ["agent"], {"x-on-behalf-of": "alice-sub"})
     try:

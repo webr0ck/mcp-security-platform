@@ -225,7 +225,7 @@ INSERT INTO tool_registry (
     'get_profile', '1.0.0',
     'List a profile''s MCP/function permissions.',
     '{"type":"object","properties":{"mcp_name":{"type":"string"},"target_profile":{"type":"string"}},"additionalProperties":false}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'low', 10, '["Reads mcp_profiles"]'::jsonb,
     'lab-seeder', null, 'A', 'none', null, null
 ),
@@ -234,7 +234,7 @@ INSERT INTO tool_registry (
     'enable_mcp', '1.0.0',
     'Enable an MCP for a profile.',
     '{"type":"object","properties":{"mcp_name":{"type":"string"},"target_profile":{"type":"string"}},"required":["mcp_name"],"additionalProperties":false}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'low', 10, '["Writes mcp_profiles"]'::jsonb,
     'lab-seeder', null, 'A', 'none', null, null
 ),
@@ -243,7 +243,7 @@ INSERT INTO tool_registry (
     'disable_mcp', '1.0.0',
     'Disable an MCP for a profile.',
     '{"type":"object","properties":{"mcp_name":{"type":"string"},"target_profile":{"type":"string"}},"required":["mcp_name"],"additionalProperties":false}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'low', 10, '["Writes mcp_profiles"]'::jsonb,
     'lab-seeder', null, 'A', 'none', null, null
 ),
@@ -252,7 +252,7 @@ INSERT INTO tool_registry (
     'enable_function', '1.0.0',
     'Enable a specific function of an MCP for a profile.',
     '{"type":"object","properties":{"mcp_name":{"type":"string"},"function_name":{"type":"string"},"target_profile":{"type":"string"}},"required":["mcp_name","function_name"],"additionalProperties":false}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'low', 10, '["Writes mcp_profiles"]'::jsonb,
     'lab-seeder', null, 'A', 'none', null, null
 ),
@@ -261,7 +261,7 @@ INSERT INTO tool_registry (
     'disable_function', '1.0.0',
     'Disable a specific function of an MCP for a profile.',
     '{"type":"object","properties":{"mcp_name":{"type":"string"},"function_name":{"type":"string"},"target_profile":{"type":"string"}},"required":["mcp_name","function_name"],"additionalProperties":false}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'low', 10, '["Writes mcp_profiles"]'::jsonb,
     'lab-seeder', null, 'A', 'none', null, null
 )
@@ -270,7 +270,7 @@ ON CONFLICT (name, version) DO UPDATE SET
     injection_mode = EXCLUDED.injection_mode,
     updated_at     = NOW();
 
--- ── MCP server onboarding tools (on lab-self-service container) ──────────────
+-- ── MCP server onboarding tools (on self-service container) ──────────────
 -- injection_mode='passthrough': proxy forwards the caller's OAuth bearer token to
 -- the upstream. The self-service server re-uses that token when calling back to the
 -- proxy submission API — so submissions are owned by the real authenticated user,
@@ -289,7 +289,7 @@ INSERT INTO tool_registry (
     'plan_mcp_server', '1.0.0',
     'Start the MCP server onboarding flow. Describe what you want to build and get guided questions.',
     '{"type":"object","properties":{"intent":{"type":"string","description":"What should the MCP server do?"}},"required":["intent"]}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'low', 5, '["Read-only guidance, no data written"]'::jsonb,
     'lab-seeder', null, null, 'passthrough', null, null
 ),
@@ -298,7 +298,7 @@ INSERT INTO tool_registry (
     'get_auth_mode_recommendation', '1.0.0',
     'Get a recommended authentication injection mode based on answers about the upstream system.',
     '{"type":"object","properties":{"has_upstream_auth":{"type":"boolean"},"same_keycloak":{"type":"boolean"},"upstream_idp_type":{"type":"string","enum":["entra","api_key","oauth"]},"per_user":{"type":"boolean"}},"required":["has_upstream_auth"]}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'low', 5, '[]'::jsonb,
     'lab-seeder', null, null, 'passthrough', null, null
 ),
@@ -307,7 +307,7 @@ INSERT INTO tool_registry (
     'submit_mcp_server', '1.0.0',
     'Create and submit an MCP server for automated scan and security team review.',
     '{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string","description":"Required — what the server does. A reviewer approves based on this alone."},"injection_mode":{"type":"string","description":"Required — the auth TYPE (never the secret itself)."},"data_categories":{"type":"array","items":{"type":"string"}},"has_write_ops":{"type":"boolean"},"upstream_url":{"type":"string","description":"Required — where the backend runs or will run. No server yet? Use get_server_scaffold instead; it needs no submission."},"github_repo_url":{"type":"string"}},"required":["name","description","injection_mode","data_categories","has_write_ops","upstream_url"]}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'medium', 30, '["Creates records in server_registry","Triggers git clone and security scan of provided repo"]'::jsonb,
     'lab-seeder', null, null, 'passthrough', null, null
 ),
@@ -316,7 +316,7 @@ INSERT INTO tool_registry (
     'check_submission_status', '1.0.0',
     'Poll the status of an MCP server submission including scan results and reviewer notes.',
     '{"type":"object","properties":{"server_id":{"type":"string","description":"UUID returned by submit_mcp_server"}},"required":["server_id"]}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'low', 5, '[]'::jsonb,
     'lab-seeder', null, null, 'passthrough', null, null
 ),
@@ -325,7 +325,7 @@ INSERT INTO tool_registry (
     'get_server_scaffold', '1.0.0',
     'Get starter scaffold code (server.py, requirements.txt, Dockerfile, README) for an MCP server auth mode.',
     '{"type":"object","properties":{"injection_mode":{"type":"string","description":"Auth mode for the scaffold"}},"required":["injection_mode"]}'::jsonb,
-    'http://lab-mcp-self-service:8000/mcp',
+    'http://self-service:8000/mcp',
     'active', 'low', 5, '[]'::jsonb,
     'lab-seeder', null, null, 'passthrough', null, null
 )
@@ -476,7 +476,7 @@ INSERT INTO tool_registry (
     'wazuh-siem', '1.0.0',
     'Wazuh SIEM: list alerts, agents, rules, and trigger active responses. Service-account auth (Wazuh API JWT).',
     '{"type":"object","properties":{"tool_name":{"type":"string","enum":["wazuh_cluster_health","wazuh_list_agents","wazuh_get_agent_detail","wazuh_list_alerts","wazuh_search_alerts","wazuh_get_rules","wazuh_list_decoders","wazuh_run_active_response","wazuh_list_ai_alerts"]},"arguments":{"type":"object"}},"required":["tool_name"],"additionalProperties":false}'::jsonb,
-    'http://lab-mcp-wazuh:8000/mcp',
+    'http://lab-mcp-wazuh:8000/mcp/',
     'disabled', 'high', 75,
     '["Direct access to security event data","wazuh_run_active_response can modify system state","Requires admin Wazuh API credentials","Active response disabled by default (ALLOW_ACTIVE_RESPONSE=false)"]'::jsonb,
     'lab-seeder', 'wazuh', 'B', 'service', 'Authorization', 'Bearer '

@@ -241,6 +241,16 @@ first `/mcp` request triggers `_ensure_self_service_entitlement()`. The
 not deleted) — retiring it outright is a separate cleanup, not required for
 correct behavior.
 
+**Update (2026-07-19):** that cleanup is done. Self-service is now one
+default server with one name/client_id (`self-service`) everywhere, lab
+included — the lab compose container was renamed from `lab-mcp-self-service`
+to `self-service` (`podman-compose.lab.yml`), `lab/seeder` seeds its API key
+and entitlements under `client_id='self-service'`, and migration
+`V084__retire_legacy_lab_self_service.sql` drops the legacy `lab-self-service`
+server_registry row (repointing any tool rows still linked to it first, and
+fixing forward the `public_to_authenticated` flag `V053` had set on the wrong
+row by name). A fresh `lab-reset` no longer creates the legacy row at all.
+
 ### 10a. The `required_roles` metadata convention (Part C)
 
 A `tool_registry` row can restrict its own visibility in `tools/list` to

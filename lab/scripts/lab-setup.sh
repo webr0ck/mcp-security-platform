@@ -278,7 +278,7 @@ fi
 # equivalent manual `docker network inspect` + UPDATE for non-lab installs).
 # The network is already created by `compose up` in Step 4 above (podman/
 # podman-compose create all declared networks up front, independent of which
-# containers manage to start — lab-mcp-self-service itself may still be down
+# containers manage to start — self-service itself may still be down
 # at this point since its SELF_SERVICE_API_KEY isn't seeded until Step 10), so
 # the subnet is knowable here.
 log "Step 5.5: Fixing self-service upstream_allowlist_entry CIDR placeholder"
@@ -449,12 +449,12 @@ ${LAB_COMPOSE} run --rm lab-seeder 2>&1 | tee -a "${LOG_FILE}" || {
 log_ok "Seeder complete"
 
 # The seeder writes fresh tokens (GRAFANA_SERVICE_ACCOUNT_TOKEN, GITEA_ADMIN_TOKEN,
-# SELF_SERVICE_API_KEY) to .env.lab, but lab-mcp-grafana/lab-mcp-gitea/lab-mcp-self-service
+# SELF_SERVICE_API_KEY) to .env.lab, but lab-mcp-grafana/lab-mcp-gitea/self-service
 # each read a STATIC credential from their own container env at process start — a
 # per-request broker-injected header isn't enough for these three (unlike netbox-query,
 # which has no static token and needs no recreate). `restart` reuses the existing
 # container's already-baked env; only recreating picks up the new .env.lab value.
-# lab-mcp-self-service missing from this list was the root cause of the
+# self-service missing from this list was the root cause of the
 # 2026-07-07 remote-check findings (get_server_scaffold -> scaffold_unavailable,
 # submit_mcp_server -> create_failed/unauthenticated): its baked SELF_SERVICE_API_KEY
 # no longer matched the DB row the seeder had just (re)written, so every callback
@@ -469,8 +469,8 @@ set -a
 source "${ENV_LAB}"
 set +a
 
-log "  Recreating lab-mcp-grafana, lab-mcp-gitea, lab-mcp-self-service with refreshed tokens..."
-${LAB_COMPOSE} up -d --force-recreate --no-deps lab-mcp-grafana lab-mcp-gitea lab-mcp-self-service 2>&1 | tee -a "${LOG_FILE}"
+log "  Recreating lab-mcp-grafana, lab-mcp-gitea, self-service with refreshed tokens..."
+${LAB_COMPOSE} up -d --force-recreate --no-deps lab-mcp-grafana lab-mcp-gitea self-service 2>&1 | tee -a "${LOG_FILE}"
 log_ok "MCP servers recreated with refreshed credentials"
 
 # ── Step 11: Smoke tests ──────────────────────────────────────────────────────

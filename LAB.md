@@ -240,7 +240,7 @@ All nine lab MCP servers are registered in `mcps.yaml` and seeded into the proxy
 | `lab-netbox` | `http://mcp-netbox:8000/mcp` | `127.0.0.1:8101` | Shared service API key injection (approach B) |
 | `lab-gitea` | `http://lab-mcp-gitea:8000/mcp` | `127.0.0.1:8102` | Broker-injected token (approach B) |
 | `lab-m365` | `http://lab-mcp-m365:8000/mcp` | `127.0.0.1:8103` | Entra client credentials via broker; egress via Squid |
-| `lab-self-service` | `http://lab-mcp-self-service:8000/mcp` | `127.0.0.1:8108` | Proxy profile API (approach A, user-sub) |
+| `self-service` | `http://self-service:8000/mcp` | `127.0.0.1:8108` | Proxy profile API (approach A, user-sub) — one default server, same name in every environment |
 | `lab-rag-assistant` | `http://lab-rag-assistant:8000/mcp` | `127.0.0.1:8104` | No credential; serves `docs/` read-only |
 
 Host ports are bound to `127.0.0.1` only — MCP server containers are not directly reachable from the LAN; all external access goes through the proxy.

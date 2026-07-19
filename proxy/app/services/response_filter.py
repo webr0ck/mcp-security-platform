@@ -23,8 +23,9 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
-# Blocking mode — when True, matching responses are replaced with an error.
-# When False (default), matching responses are logged and allowed through.
+# Blocking mode — when True (default), matching responses are replaced with an error.
+# Set RESPONSE_FILTER_BLOCK=false to fall back to detection-only (logged + audited,
+# allowed through).
 BLOCK_ON_MATCH = os.environ.get("RESPONSE_FILTER_BLOCK", "true").lower() == "true"
 
 # ── Injection pattern library ─────────────────────────────────────────────────

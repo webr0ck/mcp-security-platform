@@ -102,8 +102,8 @@ def _client_id(request: Request) -> str:
     return cid
 
 
-# T2 trust-bridge fix: lab-mcp-self-service authenticates to this API with its
-# OWN service credential (client_id="lab-self-service", an api_key auth_method
+# T2 trust-bridge fix: the self-service server authenticates to this API with its
+# OWN service credential (client_id="self-service", an api_key auth_method
 # — see seed.py::seed_self_service_api_key) — it does NOT, and per
 # docs/spec/02-credential-broker.md §3.2 MUST NOT, receive a forwarded copy of
 # the real caller's session token (passthrough only forwards a client-supplied
@@ -115,7 +115,7 @@ def _client_id(request: Request) -> str:
 # header, but ONLY from a caller that (a) authenticated itself first via the
 # platform's normal HMAC-hashed API-key/OIDC/mTLS resolution in
 # middleware/auth.py, AND (b) holds the dedicated `submission_service` role —
-# a small, DB-backed allowlist granted only to lab-self-service (seed.py),
+# a small, DB-backed allowlist granted only to self-service (seed.py),
 # mirroring the identical cross-principal delegation already used by
 # routers/profiles.py (_assert_may_write / profile_service role) for the same
 # "proxy is the trust anchor, self-service server is not" problem. This is

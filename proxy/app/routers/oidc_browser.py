@@ -739,7 +739,18 @@ async def oidc_logout(
                     logger.warning("Failed to write Redis JTI revocation marker: %s", exc)
 
     response = JSONResponse(content={"message": "Logged out."})
-    response.delete_cookie(settings.SESSION_COOKIE_NAME)
+    # delete_cookie must be called with the SAME domain/secure/samesite the
+    # cookie was originally set with (oidc_callback above) — a browser treats
+    # mismatched attributes as a different cookie and silently keeps the
+    # original session cookie alive, which is why "logout" appeared to do
+    # nothing while the session stayed valid.
+    response.delete_cookie(
+        settings.SESSION_COOKIE_NAME,
+        httponly=True,
+        secure=settings.SESSION_COOKIE_SECURE,
+        samesite="lax",
+        domain=settings.SESSION_COOKIE_DOMAIN if settings.SESSION_COOKIE_DOMAIN != "localhost" else None,
+    )
     return response
 
 

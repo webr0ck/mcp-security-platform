@@ -25,12 +25,13 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.services.auth_modes import AUTH_MODES
+from app.services.oauth_policy import HIGH_RISK_SCOPES, _is_wildcard_consent_scope
 
 
 def _injection_mode_filter_options() -> str:
@@ -1065,6 +1066,7 @@ _JS_COMMON = """
 _TAB_MAP_PY = {
     "identity":    "Identity (OIDC)",
     "servers":     "MCP Servers",
+    "tools":       "Tools",
     "credentials": "Credentials",
     "limits":      "Request Limits",
     "dashboard":   "Posture",
@@ -1081,7 +1083,7 @@ _VALID_TABS = frozenset(_TAB_MAP_PY)
 
 _ADMIN_GROUPS: list[dict] = [
     {"id": "security", "label": "Security", "panels": ["dashboard", "detections"]},
-    {"id": "servers",  "label": "Servers",   "panels": ["servers", "submissions", "sbom", "credentials"]},
+    {"id": "servers",  "label": "Servers",   "panels": ["servers", "tools", "submissions", "sbom", "credentials"]},
     {"id": "access",   "label": "Access",    "panels": ["access", "limits"]},
     {"id": "settings", "label": "Settings",  "panels": ["identity", "prompts", "llm", "git"]},
     {"id": "profile",  "label": "Profile",   "panels": ["profile"]},
@@ -1239,7 +1241,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
         <div style="font-weight:600;font-size:13px;margin-bottom:6px">The admin nav is now grouped into 5 sections</div>
         <div style="font-size:12px;color:var(--adm-muted);display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:4px 16px">
           <div>Dashboard (now Posture), Detections &rarr; <b>Security</b></div>
-          <div>MCP Servers, Submissions, SBOM, Credentials &rarr; <b>Servers</b></div>
+          <div>MCP Servers, Tools, Submissions, SBOM, Credentials &rarr; <b>Servers</b></div>
           <div>Access, Request Limits &rarr; <b>Access</b></div>
           <div>Identity, Prompts, LLM, Git &rarr; <b>Settings</b></div>
         </div>
@@ -1263,6 +1265,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
   const _TAB_MAP = {{
     identity:    'Identity (OIDC)',
     servers:     'MCP Servers',
+    tools:       'Tools',
     credentials: 'Credentials',
     limits:      'Request Limits',
     dashboard:   'Posture',
@@ -1277,7 +1280,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
   }};
   const _ADM_GROUPS = [
     {{id:'security', label:'Security', panels:['dashboard','detections']}},
-    {{id:'servers',  label:'Servers',  panels:['servers','submissions','sbom','credentials']}},
+    {{id:'servers',  label:'Servers',  panels:['servers','tools','submissions','sbom','credentials']}},
     {{id:'access',   label:'Access',   panels:['access','limits']}},
     {{id:'settings', label:'Settings', panels:['identity','prompts','llm','git']}},
     {{id:'profile',  label:'Profile',  panels:['profile']}},
@@ -2770,8 +2773,10 @@ async def fragment_admin_servers(request: Request):
                        injection_mode, updated_at, maintainers, debug_mode,
                        public_to_authenticated, has_write_ops,
                        debug_enabled_at, debug_enabled_by, verification_report,
-                       is_self_hosted, github_repo_url
+                       is_self_hosted, github_repo_url,
+                       connection_failure_count, last_connection_error, last_connection_error_at
                 FROM server_registry
+                WHERE deleted_at IS NULL
                 ORDER BY name
             """))
             servers = result.fetchall()
@@ -2780,6 +2785,32 @@ async def fragment_admin_servers(request: Request):
             # Pending/quarantined counts for attention band
             pending_names    = [s.name for s in servers if (s.status or "") == "pending"]
             quarantined_names = [s.name for s in servers if (s.status or "") == "quarantined"]
+
+            # Per-server risk/attention rollup: a server card previously showed
+            # nothing about its tools at all — a HIGH-risk tool sitting
+            # status='disabled' was invisible unless you separately opened the
+            # global Tools tab and happened to scroll to it (reported live:
+            # "wazuh-siem ... disabled ... HIGH ... no way to enable it" while
+            # its server card just said "Approved"). Aggregate max risk_level
+            # and a not-active count per server so the card can surface both.
+            tool_rollup = await session.execute(text("""
+                SELECT server_id,
+                       count(*) FILTER (WHERE status IN ('disabled', 'quarantined')) AS not_active_count,
+                       max(CASE risk_level
+                           WHEN 'critical' THEN 4 WHEN 'high' THEN 3
+                           WHEN 'medium' THEN 2 ELSE 1 END) AS risk_rank
+                FROM tool_registry
+                WHERE deleted_at IS NULL AND server_id IS NOT NULL
+                GROUP BY server_id
+            """))
+            _rank_to_label = {4: "critical", 3: "high", 2: "medium", 1: "low"}
+            tool_stats = {
+                str(r.server_id): {
+                    "not_active": r.not_active_count,
+                    "risk": _rank_to_label.get(r.risk_rank, "low"),
+                }
+                for r in tool_rollup.fetchall()
+            }
     except Exception as exc:
         logger.error("portal admin/servers DB error: %s", exc)
         return HTMLResponse(_error_fragment("Database error loading server registry."))
@@ -2844,7 +2875,20 @@ async def fragment_admin_servers(request: Request):
                       "api_key": "API key", "none": "None", "header": "Header"}.get(mode, mode)
 
         sid = esc_py(str(s.server_id))
+        _stats = tool_stats.get(str(s.server_id), {"not_active": 0, "risk": "low"})
+        risk_badge = _badge(_stats["risk"].upper(), f"badge-risk-{_stats['risk']}")
+        attention_link = (
+            f' <a href="#" onclick="adminManageServerTools(\'{sid}\');return false" '
+            f'style="color:#fbbf24;font-size:11px;font-weight:600;text-decoration:none" '
+            f'title="Open this server\'s tools in the Tools tab">'
+            f'&#x26A0; {_stats["not_active"]} tool{"s" if _stats["not_active"] != 1 else ""} disabled/quarantined</a>'
+            if _stats["not_active"] else ''
+        )
         maint_badge = (
+            ' <span class="pill" style="background:#7f1d1d;color:#fca5a5;border-color:#991b1b" '
+            'title="Auto-flagged after repeated connection failures — see the banner below">'
+            '&#x274C; doesn\'t work</span>'
+            if s.debug_mode and getattr(s, "debug_enabled_by", None) == "system:auto-health-check" else
             ' <span class="pill pill-quarantined" title="Only the owner and maintainers can invoke this server right now">'
             '&#x1F527; maintenance</span>' if s.debug_mode else ''
         )
@@ -2936,17 +2980,44 @@ async def fragment_admin_servers(request: Request):
                     verify_note = ' <span style="color:#4ade80">&#x2713; last verification passed</span>'
                 elif _vr.get("healthcheck") is False:
                     verify_note = ' <span style="color:#f87171">&#x2717; last verification failed — see logs</span>'
-            maint_banner_html = f"""
-            <div class="srv-maint-banner" style="margin-top:0.5rem;background:#1c1408;border:1px solid #78350f;
-                        border-radius:8px;padding:0.6rem 0.85rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
-              <span style="font-size:13px;color:#fbbf24;font-weight:600">&#x1F527; In maintenance{esc_py(staleness)}</span>
-              <span style="font-size:12px;color:#d1a35c;flex:1">Verify (view logs / retry verification), then go live.{verify_note}</span>
-              <div style="display:flex;gap:6px">
-                <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminViewLogs('{sid}')">View logs</button>
-                <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminVerifySrv('{sid}')">Retry verification</button>
-                <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminToggleDebug('{sid}',false)">Go live</button>
-              </div>
-            </div>"""
+
+            # Auto-flagged vs admin-enabled maintenance: debug_enabled_by is set
+            # to this sentinel only by invocation.py's connection-health tracker
+            # (N consecutive connection-class failures — unreachable upstream,
+            # DNS/SSRF revalidation failure, MCP handshake failure, or the
+            # upstream tool itself reporting isError:true), never by a human
+            # admin action, so it's unambiguous. Render distinctly (red, "doesn't
+            # work") rather than the neutral "an admin is debugging this" banner.
+            _auto_flagged = (getattr(s, "debug_enabled_by", None) == "system:auto-health-check")
+            if _auto_flagged:
+                _last_err = getattr(s, "last_connection_error", None)
+                _fail_count = getattr(s, "connection_failure_count", 0) or 0
+                maint_banner_html = f"""
+                <div class="srv-maint-banner" style="margin-top:0.5rem;background:#1a0000;border:1px solid #7f1d1d;
+                            border-radius:8px;padding:0.6rem 0.85rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+                  <span style="font-size:13px;color:#f87171;font-weight:600">&#x274C; Doesn't work — auto-flagged{esc_py(staleness)}</span>
+                  <span style="font-size:12px;color:#fca5a5;flex:1">
+                    {esc_py(_fail_count)} consecutive connection failure{"s" if _fail_count != 1 else ""}
+                    {(" — " + esc_py(_last_err)) if _last_err else ""}
+                  </span>
+                  <div style="display:flex;gap:6px">
+                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminViewLogs('{sid}')">View logs</button>
+                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminVerifySrv('{sid}')">Retry verification</button>
+                    <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminToggleDebug('{sid}',false)">Go live</button>
+                  </div>
+                </div>"""
+            else:
+                maint_banner_html = f"""
+                <div class="srv-maint-banner" style="margin-top:0.5rem;background:#1c1408;border:1px solid #78350f;
+                            border-radius:8px;padding:0.6rem 0.85rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+                  <span style="font-size:13px;color:#fbbf24;font-weight:600">&#x1F527; In maintenance{esc_py(staleness)}</span>
+                  <span style="font-size:12px;color:#d1a35c;flex:1">Verify (view logs / retry verification), then go live.{verify_note}</span>
+                  <div style="display:flex;gap:6px">
+                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminViewLogs('{sid}')">View logs</button>
+                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminVerifySrv('{sid}')">Retry verification</button>
+                    <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminToggleDebug('{sid}',false)">Go live</button>
+                  </div>
+                </div>"""
 
         rows_html.append(f"""
         <div class="srv-card {row_cls}">
@@ -2956,7 +3027,7 @@ async def fragment_admin_servers(request: Request):
           </div>
           <div class="srv-card-meta">{esc_py(s.upstream_url or "—")} &middot; owner: {esc_py(s.owner_sub or "—")}</div>
           <div class="srv-card-badges">
-            <span class="mode-chip">{esc_py(mode_label)}</span>{maint_badge}{public_badge}
+            <span class="mode-chip">{esc_py(mode_label)}</span>{risk_badge}{maint_badge}{public_badge}{attention_link}
             <span class="srv-card-updated">{esc_py(_fmt_time(s.updated_at))}</span>
           </div>
           {maint_banner_html}
@@ -3144,6 +3215,27 @@ async def fragment_admin_servers(request: Request):
           document.body.appendChild(ov);
         }})
         .catch(e => alert('Could not load logs: ' + e.message));
+    }}
+    function adminManageServerTools(sid) {{
+      document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
+      // Inlines loadAdminTab's nav/breadcrumb-state logic instead of calling
+      // it directly — loadAdminTab also fires its OWN unfiltered fetch to
+      // the same #adm-content target, and firing a second (filtered) fetch
+      // right after it is a race: whichever response lands second wins the
+      // swap, so the unfiltered list could silently overwrite the filtered
+      // one depending on response timing. One fetch only, always filtered.
+      const group = _admGroupFor('tools');
+      const bc = document.getElementById('adm-breadcrumb-page');
+      if (bc) bc.textContent = _TAB_MAP['tools'] || 'tools';
+      document.querySelectorAll('.adm-nav-item').forEach(b => {{
+        const match = b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + group.panels[0] + "'");
+        b.classList.toggle('active', match);
+        const dot = b.querySelector('.adm-nav-dot');
+        if (dot) dot.classList.toggle('active', match);
+      }});
+      _renderTabsBar(group, 'tools');
+      htmx.ajax('GET', '/portal/fragments/admin/tools?server_id=' + sid, {{target: '#adm-content', swap: 'innerHTML'}});
+      history.pushState({{admTab: 'tools'}}, '', '/portal/admin/tools');
     }}
     function srvMenuToggle(evt, id) {{
       evt.stopPropagation();
@@ -4010,8 +4102,11 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
 # ---------------------------------------------------------------------------
 
 @router.get("/fragments/admin/tools", response_class=HTMLResponse)
-async def fragment_admin_tools(request: Request):
-    """Admin tools management sub-tab."""
+async def fragment_admin_tools(request: Request, server_id: Optional[str] = Query(None)):
+    """Admin tools management sub-tab. Optional server_id filters to one
+    server's tools — the deep link the MCP Servers tab uses so a reviewer
+    who sees a disabled/high-risk tool on a server card lands directly on
+    the row that needs action instead of a global, unfiltered list."""
     _require_admin(request)
 
     try:
@@ -4019,16 +4114,28 @@ async def fragment_admin_tools(request: Request):
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
-                SELECT tool_id, name, version, status, risk_level, risk_score,
-                       injection_mode, upstream_url, tags, created_at
-                FROM tool_registry
-                WHERE deleted_at IS NULL
-                ORDER BY name
-            """))
+                SELECT t.tool_id, t.name, t.version, t.status, t.risk_level, t.risk_score,
+                       t.injection_mode, t.upstream_url, t.tags, t.created_at, s.name AS server_name
+                FROM tool_registry t
+                LEFT JOIN server_registry s ON s.server_id = t.server_id
+                WHERE t.deleted_at IS NULL
+                  AND (CAST(:sid AS uuid) IS NULL OR t.server_id = CAST(:sid AS uuid))
+                ORDER BY t.name
+            """), {"sid": server_id})
             tools = result.fetchall()
     except Exception as exc:
         logger.error("portal admin/tools DB error: %s", exc)
         return HTMLResponse(_error_fragment("Database error loading tools."))
+
+    filter_banner = ""
+    if server_id:
+        srv_label = esc_py(tools[0].server_name) if tools and tools[0].server_name else server_id
+        filter_banner = (
+            f'<div style="margin-bottom:0.75rem;font-size:12px;color:var(--muted)">'
+            f'Filtered to server <strong style="color:var(--text)">{srv_label}</strong> &middot; '
+            f'<a href="#" onclick="loadAdminTab(\'tools\');return false" style="color:var(--cyan)">'
+            f'&times; clear filter</a></div>'
+        )
 
     rows = []
     for t in tools:
@@ -4175,6 +4282,7 @@ async def fragment_admin_tools(request: Request):
 
     return HTMLResponse(f"""
     <div class="section-title">&#x1F527; Registered Tools <span class="count">{len(tools)}</span></div>
+    {filter_banner}
     {table_html}
     {register_form}
     """)
@@ -5692,6 +5800,18 @@ async def fragment_admin_submissions(request: Request):
                     f'padding:0.4rem 0.6rem">{"".join(cfg_items)}</div>'
                 )
 
+        # High-risk OAuth scopes (write/admin/mail/files/offline_access, or any
+        # wildcard-consent scope like Microsoft Graph's "<resource>/.default")
+        # require the reviewer to explicitly acknowledge them — the approve
+        # endpoint rejects with 422 OAUTH_POLICY_VIOLATION otherwise (fail-closed,
+        # see oauth_policy.validate_requested_config). Surface the requirement
+        # here so Approve doesn't silently fail leaving the submission stuck in
+        # awaiting_review with no visible reason.
+        requested_scopes = list((raw_cfg or {}).get("scopes") or []) if isinstance(raw_cfg, dict) else []
+        high_risk_hits = sorted(
+            {s for s in requested_scopes if s in HIGH_RISK_SCOPES or _is_wildcard_consent_scope(s)}
+        )
+
         review_action = ""
         if st == "awaiting_review":
             approve_note = (
@@ -5700,6 +5820,17 @@ async def fragment_admin_submissions(request: Request):
                 'the submitter must build it and resubmit with a repo to actually go live.</div>'
                 if not r.github_repo_url else ""
             )
+            high_risk_html = ""
+            if high_risk_hits:
+                high_risk_html = (
+                    '<label style="display:flex;gap:0.4rem;align-items:center;margin-top:0.5rem;'
+                    'font-size:11.5px;color:#fbbf24;background:#2a1a03;border:1px solid #78350f;'
+                    'border-radius:6px;padding:0.4rem 0.6rem">'
+                    f'<input type="checkbox" id="hra-{esc_py(sid)}"> '
+                    f'&#x26A0; Requested scope(s) <b>{esc_py(", ".join(high_risk_hits))}</b> are high-risk '
+                    '(broad/wildcard access) — check this box to acknowledge and allow Approve to proceed.'
+                    '</label>'
+                )
             review_action = f"""
             <div style="display:flex;gap:0.5rem;margin-top:0.75rem;align-items:center">
               <textarea id="notes-{esc_py(sid)}" placeholder="Review notes (optional)"
@@ -5714,6 +5845,7 @@ async def fragment_admin_submissions(request: Request):
                         onclick="reviewAction('{esc_py(sid)}','reject')">Reject</button>
               </div>
             </div>
+            {high_risk_html}
             {approve_note}"""
 
         github_link = ""
@@ -5852,11 +5984,20 @@ async def fragment_admin_submissions(request: Request):
     <script>
     async function reviewAction(sid, action) {{
       const notes = document.getElementById('notes-' + sid)?.value || '';
+      const payload = {{notes}};
+      if (action === 'approve') {{
+        // Only present when the submission has high-risk scopes (see
+        // portal fragment above) — send its checked state so the backend's
+        // fail-closed high-risk-scope gate (oauth_policy.py) can actually be
+        // satisfied instead of always defaulting to false and 422'ing.
+        const hra = document.getElementById('hra-' + sid);
+        if (hra) payload.high_risk_scopes_approved = hra.checked;
+      }}
       const r = await fetch('/api/v1/admin/submissions/' + sid + '/' + action, {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
         credentials: 'include',
-        body: JSON.stringify({{notes}}),
+        body: JSON.stringify(payload),
       }});
       if (r.ok) {{
         htmx.ajax('GET', '/portal/fragments/admin/submissions', {{target:'#adm-content', swap:'innerHTML'}});

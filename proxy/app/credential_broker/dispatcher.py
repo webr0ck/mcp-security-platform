@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -327,6 +328,8 @@ async def dispatch_credential_injection(
                 tool_record=tool_record,
                 inject_header=inject_header,
                 inject_prefix=inject_prefix,
+                principal_id=principal_id,
+                caller_client_id=client_id,
             )
 
         case InjectionMode.ENTRA_USER_TOKEN:
@@ -786,10 +789,50 @@ async def _inject_kc_token_exchange(
     return {inject_header: f"{inject_prefix} {exchanged}".strip()}
 
 
+_UPN_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+async def _lookup_m365_caller_upn(
+    db_pool, principal_id: str | None, caller_client_id: str | None
+) -> str | None:
+    """Best-effort: does THIS caller have their own m365-graph-delegated
+    enrollment with a captured UPN (V085)? If so, app-only Graph calls (which
+    have no signed-in-user context of their own) can target that caller's
+    own mailbox instead of one shared, hand-configured M365_USER for
+    everyone. Returns None on no match, a malformed stored value, or any
+    lookup failure — this must never block or fail the app-only token fetch
+    itself, and a bad value must never reach the injected header."""
+    candidates = [c for c in (principal_id, caller_client_id) if c]
+    if not candidates or db_pool is None:
+        return None
+    try:
+        from sqlalchemy import text
+        async with db_pool() as session:
+            row = (await session.execute(
+                text(
+                    "SELECT upn FROM credential_store "
+                    "WHERE service='m365' AND owner_type='user' "
+                    "AND user_sub = ANY(:subs) AND upn IS NOT NULL "
+                    "LIMIT 1"
+                ),
+                {"subs": candidates},
+            )).fetchone()
+        upn = row.upn if row else None
+        if upn and not _UPN_RE.match(upn):
+            logger.warning("m365_caller_upn_malformed: rejecting stored value not shaped like a UPN")
+            return None
+        return upn
+    except Exception as exc:
+        logger.warning("m365_caller_upn_lookup_failed: %s", exc)
+        return None
+
+
 async def _inject_entra_client_credentials(
     tool_record: dict[str, Any],
     inject_header: str,
     inject_prefix: str,
+    principal_id: str | None = None,
+    caller_client_id: str | None = None,
 ) -> dict[str, str]:
     """
     Obtain an app-only Microsoft Graph access token via Azure AD client_credentials grant.
@@ -889,7 +932,14 @@ async def _inject_entra_client_credentials(
                     tenant_id,
                     client_id,
                 )
-                return {inject_header: f"{inject_prefix} {cached_token}".strip()}
+                headers = {
+                    inject_header: f"{inject_prefix} {cached_token}".strip(),
+                    "X-Entra-Auth-Mode": "app-only",
+                }
+                caller_upn = await _lookup_m365_caller_upn(broker_instance.db_pool, principal_id, caller_client_id)
+                if caller_upn:
+                    headers["X-M365-Caller-Upn"] = caller_upn
+                return headers
     except Exception as cache_exc:
         # Redis unavailable: fall through to fresh fetch. Auth still works; just no caching.
         logger.warning(
@@ -955,7 +1005,14 @@ async def _inject_entra_client_credentials(
             write_exc,
         )
 
-    return {inject_header: f"{inject_prefix} {access_token}".strip()}
+    headers = {
+        inject_header: f"{inject_prefix} {access_token}".strip(),
+        "X-Entra-Auth-Mode": "app-only",
+    }
+    caller_upn = await _lookup_m365_caller_upn(broker_instance.db_pool, principal_id, caller_client_id)
+    if caller_upn:
+        headers["X-M365-Caller-Upn"] = caller_upn
+    return headers
 
 
 async def _inject_entra_user_token(
@@ -1027,7 +1084,19 @@ async def _inject_entra_user_token(
             f"service={service_name}; refusing to forward unauthenticated request"
         )
 
-    return {inject_header: f"{inject_prefix} {result.token}".strip()}
+    # X-Entra-Auth-Mode: an app-only (entra_client_credentials) token and a
+    # delegated (entra_user_token) token both arrive at the backend as an
+    # identical "Authorization: Bearer <token>" header (same inject_header/
+    # inject_prefix) — a backend cannot tell them apart from presence alone.
+    # m365/server.py's _is_delegated() used exactly that (wrong) signal and
+    # so treated every app-only call as delegated too, always using /me
+    # instead of ever falling back to /users/{id} (root cause of get_me
+    # always 400ing under app-only auth, found live). Explicit marker so a
+    # backend can ask "which mode is this, actually?" instead of guessing.
+    return {
+        inject_header: f"{inject_prefix} {result.token}".strip(),
+        "X-Entra-Auth-Mode": "delegated",
+    }
 
 
 async def _inject_external_oauth_user_token(

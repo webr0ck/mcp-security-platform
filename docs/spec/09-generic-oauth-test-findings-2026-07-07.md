@@ -1,4 +1,7 @@
-# Generic OAuth 2.0 Test Findings, 2026-07-07
+# Lessons: Generic OAuth 2.0 — Six Test Findings and Their Fixes
+
+> A worked example of the kind of issue you find wiring a real generic-OAuth
+> substrate, and how each was resolved. Dated evidence retained below.
 
 ## Remediation status (2026-07-07, same day)
 

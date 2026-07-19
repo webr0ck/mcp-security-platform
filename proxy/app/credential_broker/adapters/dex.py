@@ -35,11 +35,16 @@ class DexAdapter:
         self._token_url = f"{_internal}/token"
         self._auth_url = f"{issuer_url}/auth"
 
-    def build_auth_url(self, state: str, code_challenge: str | None = None) -> str:
+    def build_auth_url(
+        self, state: str, code_challenge: str | None = None, redirect_uri: str | None = None
+    ) -> str:
+        """redirect_uri override: see M365Adapter.build_auth_url for why (the
+        same host-derivation applies to every Approach-A adapter, called
+        through the same shared oauth.py consent/callback handlers)."""
         params = {
             "client_id": self._client_id,
             "response_type": "code",
-            "redirect_uri": self._redirect_uri,
+            "redirect_uri": redirect_uri or self._redirect_uri,
             "scope": " ".join(self._scopes),
             "state": state,
             # NOTE: response_mode is an MSAL/Entra extension — NOT part of
@@ -53,7 +58,7 @@ class DexAdapter:
         return f"{self._auth_url}?{urlencode(params)}"
 
     async def exchange_code(
-        self, code: str, code_verifier: str | None = None
+        self, code: str, code_verifier: str | None = None, redirect_uri: str | None = None
     ) -> tuple[str, str, int]:
         """Exchange authorization_code for (access_token, refresh_token, expires_in)."""
         payload = {
@@ -61,7 +66,7 @@ class DexAdapter:
             "client_id": self._client_id,
             "client_secret": self._client_secret,
             "code": code,
-            "redirect_uri": self._redirect_uri,
+            "redirect_uri": redirect_uri or self._redirect_uri,
             "scope": " ".join(self._scopes),
         }
         if code_verifier:  # CB-011: PKCE

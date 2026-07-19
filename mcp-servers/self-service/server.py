@@ -22,7 +22,7 @@ unless they hold admin role (signaled via X-User-Role header).
 Authentication to the proxy profile API:
   This server authenticates with an API key (SELF_SERVICE_API_KEY env var).
   The key is seeded by lab/seeder/seed.py into the proxy's api_keys table
-  under the service identity "lab-self-service".
+  under the service identity "self-service".
   The proxy then enforces RBAC: the self-service server may only modify a
   principal's profile if the X-User-Sub header (set by the proxy when routing
   tool calls) matches the target principal, or the caller has admin role.
@@ -59,7 +59,7 @@ PROXY_PROFILE_API_URL = os.environ.get(
 PROXY_BASE_URL = os.environ.get("PROXY_BASE_URL", "http://mcp-proxy:8000")
 
 # Service API key for authenticating to the proxy profile API.
-# Seeded by lab/seeder/seed.py into api_keys table as service "lab-self-service".
+# Seeded by lab/seeder/seed.py into api_keys table as service "self-service".
 # Must be set — no default. Compose fail-fast enforces this at startup.
 SELF_SERVICE_API_KEY = os.environ.get("SELF_SERVICE_API_KEY", "")
 if not SELF_SERVICE_API_KEY:
@@ -138,11 +138,11 @@ def _oauth_headers() -> dict[str, str]:
     docs/spec/02-credential-broker.md §3.2), so _ctx_user_token is normally
     empty and a prior version of this function silently fell back to the
     service key with no way for the proxy to learn the real user — every
-    submission was attributed to "lab-self-service".
+    submission was attributed to "self-service".
 
     Fix: attach X-On-Behalf-Of: <caller sub>. The proxy's submissions router
     only honours this header from a caller holding the dedicated
-    `submission_service` role (granted to lab-self-service only, see
+    `submission_service` role (granted to self-service only, see
     lab/seeder/seed.py) — the real caller's sub is trustworthy here because
     it came from X-User-Sub, which the proxy itself injected into this
     server's request (the proxy is the trust anchor for identity, this

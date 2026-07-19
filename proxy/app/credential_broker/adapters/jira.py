@@ -53,12 +53,15 @@ class JiraAdapter:
         self._redirect_uri = redirect_uri
         self._scopes = scopes
 
-    def build_auth_url(self, state: str, code_challenge: str | None = None) -> str:
+    def build_auth_url(
+        self, state: str, code_challenge: str | None = None, redirect_uri: str | None = None
+    ) -> str:
+        """redirect_uri override: see M365Adapter.build_auth_url for why."""
         params = {
             "audience": "api.atlassian.com",
             "client_id": self._client_id,
             "response_type": "code",
-            "redirect_uri": self._redirect_uri,
+            "redirect_uri": redirect_uri or self._redirect_uri,
             "scope": " ".join(self._scopes),
             "state": state,
             # prompt=consent per Atlassian's docs — otherwise a returning user
@@ -72,14 +75,14 @@ class JiraAdapter:
         return f"{_AUTHORIZE_URL}?{urlencode(params)}"
 
     async def exchange_code(
-        self, code: str, code_verifier: str | None = None
+        self, code: str, code_verifier: str | None = None, redirect_uri: str | None = None
     ) -> tuple[str, str, int]:
         payload = {
             "grant_type": "authorization_code",
             "client_id": self._client_id,
             "client_secret": self._client_secret,
             "code": code,
-            "redirect_uri": self._redirect_uri,
+            "redirect_uri": redirect_uri or self._redirect_uri,
         }
         if code_verifier:  # CB-011: PKCE
             payload["code_verifier"] = code_verifier

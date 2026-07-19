@@ -45,7 +45,7 @@ SERVERS: list[dict[str, Any]] = [
     {"key": "lab-echo", "host_port": 8105, "internal_url": "http://lab-mcp-echo:8000/mcp"},
     {"key": "lab-notes", "host_port": 8106, "internal_url": "http://lab-mcp-notes:8000/mcp"},
     {"key": "lab-search", "host_port": 8107, "internal_url": "http://lab-mcp-search:8000/mcp"},
-    {"key": "lab-self-service", "host_port": 8108, "internal_url": "http://lab-mcp-self-service:8000/mcp"},
+    {"key": "self-service", "host_port": 8108, "internal_url": "http://self-service:8000/mcp"},
 ]
 
 # ---------------------------------------------------------------------------

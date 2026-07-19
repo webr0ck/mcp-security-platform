@@ -912,7 +912,7 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
         url_row = await db.execute(
             text(
                 "SELECT upstream_url, owner_sub, adapter_name, upstream_allowlist_entry, "
-                "       injection_mode, upstream_idp_config "
+                "       injection_mode, upstream_idp_config, submission_status "
                 "FROM server_registry "
                 "WHERE server_id = :id AND deleted_at IS NULL"
             ),
@@ -921,6 +921,23 @@ async def approve_server(server_id: str, body: ApproveBody, request: Request):
         url_record = url_row.fetchone()
     if url_record is None:
         raise HTTPException(status_code=404, detail="Server not found")
+    # This D3 direct-registration path only ever touches `status`, never
+    # `submission_status` — approving a server that's actually mid-flow in
+    # the self-service submission pipeline (submission_status != 'draft')
+    # here would flip `status='approved'` (what the servers-list UI reads)
+    # while `submission_status` stays 'awaiting_review' etc. (what the
+    # submissions admin page reads), and would skip that pipeline's
+    # high-risk-scope reviewer gate entirely. Found 2026-07-19: exactly this
+    # happened for codex-2026-07-19-entra-id-directory.
+    if url_record[6] != "draft":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This server is under self-service submission review "
+                f"(submission_status={url_record[6]!r}) — approve it via "
+                "POST /api/v1/admin/submissions/{id}/approve instead."
+            ),
+        )
     from app.core.config import get_settings as _get_settings
     _approval_settings = _get_settings()
     _approval_allowlist = _approval_settings.upstream_private_cidr_allowlist_parsed

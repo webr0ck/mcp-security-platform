@@ -62,7 +62,7 @@ services:
   # lab-mcp-entra-id:
   #   ports:
   #     - "127.0.0.1:8107:8000"
-  # lab-mcp-self-service:
+  # self-service:
   #   ports:
   #     - "127.0.0.1:8108:8000"
   # lab-mcp-lab-tickets:

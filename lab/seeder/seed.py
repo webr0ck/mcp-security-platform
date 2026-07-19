@@ -1112,15 +1112,17 @@ async def seed_m365_client_credentials(conn: asyncpg.Connection, master_hex: str
 
 async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     """
-    Generate a service API key for lab-mcp-self-service.
+    Generate a service API key for the self-service MCP server (one default
+    server, same name/client_id in every environment — see
+    docs/mcp-server-onboarding.md §10).
 
     The key is stored in the proxy's api_keys table under client_id
-    'lab-self-service' with role 'agent'. The seeder generates a random
+    'self-service' with role 'agent'. The seeder generates a random
     hex key, hashes it via the same hash_api_key path used by the proxy,
     and writes the raw key to .env.lab as SELF_SERVICE_API_KEY.
 
     Idempotent (2026-07-18 fix): if SELF_SERVICE_API_KEY is already set in the
-    environment (from .env.lab, which the running lab-mcp-self-service container
+    environment (from .env.lab, which the running self-service container
     baked in at process start), that exact key is REUSED and the DB row is only
     (re)installed if missing — the key is NOT rotated. This means a standalone
     reseed (`podman-compose run --rm lab-seeder`, e.g. to add a single fixture
@@ -1128,8 +1130,8 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
 
     Only a true first boot (no SELF_SERVICE_API_KEY in the environment) mints a
     fresh key; the caller writes it to .env.lab. lab-setup.sh's Step 10 still
-    force-recreates lab-mcp-self-service after the seeder, which remains correct
-    for that first-boot case.
+    force-recreates the self-service container after the seeder, which remains
+    correct for that first-boot case.
 
     History: before this fix the function rotated the key on every call (the raw
     key can't be recovered from the stored hash), which silently 401'd every
@@ -1143,7 +1145,7 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
     import secrets
 
     # Idempotent: REUSE the key already in .env.lab (which the running
-    # lab-mcp-self-service container baked in at process start) instead of
+    # self-service container baked in at process start) instead of
     # minting a new one every seed. A standalone reseed used to rotate the key
     # out from under the running container -> 401 drift (2026-07-18 finding).
     # Only mint a fresh key when none exists yet (true first boot).
@@ -1165,7 +1167,7 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
         already_active = await conn.fetchrow(
             """
             SELECT 1 FROM api_keys
-            WHERE client_id = 'lab-self-service' AND key_hash = $1 AND revoked_at IS NULL
+            WHERE client_id = 'self-service' AND key_hash = $1 AND revoked_at IS NULL
             """,
             key_hash,
         )
@@ -1173,23 +1175,23 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
             await conn.execute(
                 """
                 UPDATE api_keys SET revoked_at = NOW()
-                WHERE client_id = 'lab-self-service' AND revoked_at IS NULL
+                WHERE client_id = 'self-service' AND revoked_at IS NULL
                 """,
             )
             await conn.execute(
                 """
                 INSERT INTO api_keys (client_id, key_hash, created_at, created_by)
-                VALUES ('lab-self-service', $1, NOW(), 'seeder')
+                VALUES ('self-service', $1, NOW(), 'seeder')
                 """,
                 key_hash,
             )
         # 'agent' for basic access; 'profile_service' for cross-user profile
-        # reads/writes (caller_id='lab-self-service' != principal, so the
+        # reads/writes (caller_id='self-service' != principal, so the
         # profiles router needs a role grant — scoped narrowly to avoid blanket
         # admin. See proxy/app/routers/profiles.py:_PROFILE_SERVICE_ROLES).
         # 'submission_service' is the identical pattern for the submissions
         # router's owner_sub attribution (T2 trust-bridge fix) — lets
-        # lab-self-service present X-On-Behalf-Of: <real user sub> so
+        # self-service present X-On-Behalf-Of: <real user sub> so
         # submit_mcp_server attributes ownership to the real caller instead
         # of the service account. See routers/submission.py:_ON_BEHALF_OF_ROLES.
         for role in ("agent", "profile_service", "submission_service"):
@@ -1200,12 +1202,12 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
             await conn.execute(
                 """
                 INSERT INTO role_assignments (client_id, role, granted_by)
-                SELECT 'lab-self-service', $1, 'seeder'
+                SELECT 'self-service', $1, 'seeder'
                 WHERE NOT EXISTS (
                     SELECT 1 FROM (
                         SELECT DISTINCT ON (role) role, revoked
                         FROM role_assignments
-                        WHERE client_id = 'lab-self-service'
+                        WHERE client_id = 'self-service'
                         ORDER BY role, created_at DESC
                     ) latest
                     WHERE latest.role = $1 AND latest.revoked = false
@@ -1213,10 +1215,10 @@ async def seed_self_service_api_key(conn: asyncpg.Connection) -> Optional[str]:
                 """,
                 role,
             )
-        log.info("lab-self-service API key seeded (client_id=lab-self-service roles=agent,profile_service,submission_service)")
+        log.info("self-service API key seeded (client_id=self-service roles=agent,profile_service,submission_service)")
         return raw_key
     except Exception as exc:
-        log.error("lab-self-service API key seeding failed: %s", exc)
+        log.error("self-service API key seeding failed: %s", exc)
         return None
 
 
@@ -1592,7 +1594,7 @@ async def main() -> None:
         await conn_m365c.close()
 
     # 8. Seed self-service MCP API key (Task 2.2b / Task 2.5)
-    log.info("Seeding lab-self-service API key...")
+    log.info("Seeding self-service API key...")
     conn3 = await wait_for_postgres(max_wait=10)
     self_service_key = await seed_self_service_api_key(conn3)
     await conn3.close()
@@ -1618,6 +1620,29 @@ async def main() -> None:
             except Exception as exc:
                 log.error("Gitea credential_store write failed: %s", exc)
                 results["gitea_cred_store"] = f"FAILED: {exc}"
+
+    # 8b. Wazuh service credential (compose.wazuh.yml overlay — always included
+    # by lab-up's LAB_COMPOSE). Unlike Grafana/Gitea, this isn't dynamically
+    # provisioned via an API call: WAZUH_API_PASSWORD is already known at seed
+    # time (it's the same value used to configure lab-wazuh-manager's own
+    # admin account in compose.wazuh.yml), so just store it directly. This was
+    # simply never wired in — the wazuh-siem tool has sat with no service
+    # credential in every environment since the tool was added, always
+    # 500'ing "service credential not provisioned by an administrator" on
+    # first real invocation, reported live.
+    wazuh_password = os.environ.get("WAZUH_API_PASSWORD", "")
+    if wazuh_password and master_hex and results.get("tools_sql") == "OK":
+        log.info("Storing Wazuh service credential...")
+        try:
+            conn3 = await wait_for_postgres(max_wait=10)
+            await store_service_credential(conn3, master_hex, "wazuh", "wazuh-siem", wazuh_password)
+            await conn3.close()
+            results["wazuh_cred_store"] = "OK"
+        except Exception as exc:
+            log.error("Wazuh credential_store write failed: %s", exc)
+            results["wazuh_cred_store"] = f"FAILED: {exc}"
+    else:
+        results["wazuh_cred_store"] = "SKIPPED (WAZUH_API_PASSWORD not set)"
 
     await conn.close()
 

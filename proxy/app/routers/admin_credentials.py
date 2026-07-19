@@ -143,7 +143,10 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                text("SELECT tool_id, name, service_name FROM tool_registry WHERE tool_id = :tid AND deleted_at IS NULL"),
+                text(
+                    "SELECT tool_id, name, service_name, entra_tenant_id, entra_client_id "
+                    "FROM tool_registry WHERE tool_id = :tid AND deleted_at IS NULL"
+                ),
                 {"tid": tool_id},
             )
             tool = result.fetchone()
@@ -170,6 +173,24 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
             raise HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": "RFC 7617 forbids ':' in the username."})
         import json as _json
         plaintext = _json.dumps({"username": body.username, "secret": body.secret})
+    elif body.credential_type == "entra_client_secret":
+        # dispatcher.py's _inject_entra_client_credentials reads tenant_id/client_id/
+        # client_secret as ONE JSON blob from credential_store — never a bare secret
+        # string. tenant_id/client_id are set separately via PUT .../injection-mode
+        # (plaintext tool_registry columns, not secret); require both to already be
+        # set so this can't silently store a blob the dispatcher can never use.
+        if not tool.entra_tenant_id or not tool.entra_client_id:
+            raise HTTPException(status_code=400, detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Set entra_tenant_id and entra_client_id via PUT "
+                           f"/admin/credentials/{tool_id}/injection-mode before uploading the client secret.",
+            })
+        import json as _json
+        plaintext = _json.dumps({
+            "tenant_id": tool.entra_tenant_id,
+            "client_id": tool.entra_client_id,
+            "client_secret": body.secret,
+        })
     else:
         plaintext = body.secret
 

@@ -22,6 +22,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -97,8 +98,52 @@ def _injected_token() -> str:
     return ""
 
 
+_UPN_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def _caller_upn() -> str:
+    """Return the calling principal's own UPN, when the proxy resolved one
+    (X-M365-Caller-Upn — injected only in app-only/entra_client_credentials
+    mode, when this caller has their own m365-graph-delegated enrollment on
+    record; see dispatcher.py::_lookup_m365_caller_upn). Empty otherwise.
+
+    Trust model: identical to every other proxy-injected identity header this
+    server already relies on (X-User-Sub etc) — this server is network-
+    isolated behind the proxy's pairwise net and never receives direct
+    traffic (SEC-05 ingress hardening); the proxy, not this server, is the
+    trust anchor for identity. Regardless of that boundary, strictly validate
+    the shape here before it's interpolated into a Graph URL path — a
+    malformed or malicious value must never reach the upstream request.
+    """
+    req = _http_request()
+    if req is None:
+        return ""
+    raw = req.headers.get("x-m365-caller-upn", "").strip()
+    if raw and not _UPN_RE.match(raw):
+        logger.warning("Rejecting malformed X-M365-Caller-Upn header (not a valid UPN shape)")
+        return ""
+    return raw
+
+
 def _is_delegated() -> bool:
-    """True when a gateway-injected per-user token is in play for this request."""
+    """True when a gateway-injected per-user (delegated) token is in play for
+    this request — NOT merely "is there an Authorization header", since an
+    app-only (entra_client_credentials) call injects one too, with the exact
+    same header/prefix. Checking token presence alone made every app-only
+    call look delegated, so get_me always tried /me and always 400'd under
+    app-only auth regardless of M365_USER/per-caller UPN (found live). The
+    proxy sets X-Entra-Auth-Mode explicitly per dispatch case — see
+    dispatcher.py's _inject_entra_user_token ("delegated") vs
+    _inject_entra_client_credentials ("app-only") — so trust that instead.
+    """
+    req = _http_request()
+    if req is not None:
+        mode = req.headers.get("x-entra-auth-mode", "")
+        if mode:
+            return mode == "delegated"
+    # No explicit mode header (e.g. a direct test call bypassing the proxy) —
+    # fall back to the old heuristic rather than silently treating everything
+    # as app-only, which would be a behavior change for anyone relying on it.
     return bool(_injected_token())
 
 AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID") or os.environ.get("ENTRA_TENANT_ID", "")
@@ -132,11 +177,19 @@ def _me(path: str = "") -> str:
 
     - Delegated (gateway-injected user token): use /me — the token carries the
       signed-in user's context, so /me is valid and resolves to that human.
-    - App-only fallback: /me is invalid (no user); target /users/{M365_USER} if
-      configured, else /me (which will 400 — surfaces the misconfig clearly).
+    - App-only, per-caller UPN known: the proxy resolved THIS caller's own UPN
+      from their own m365-graph-delegated enrollment (X-M365-Caller-Upn) —
+      target /users/{their UPN}, so different callers each see their own
+      profile rather than one shared mailbox.
+    - App-only, no per-caller UPN: fall back to the single hand-configured
+      M365_USER mailbox if set, else /me (which will 400 — surfaces the
+      misconfig clearly).
     """
     if _is_delegated():
         return f"/me{path}"
+    caller_upn = _caller_upn()
+    if caller_upn:
+        return f"/users/{caller_upn}{path}"
     if M365_USER:
         return f"/users/{M365_USER}{path}"
     return f"/me{path}"

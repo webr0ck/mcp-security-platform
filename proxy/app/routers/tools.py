@@ -554,7 +554,7 @@ async def update_tool(
     roles: list[str] = getattr(request.state, "client_roles", [])
     client_id: str = getattr(request.state, "client_id", "unknown")
 
-    if "admin" not in roles:
+    if not any(r in {"admin", "platform_admin"} for r in roles):
         raise HTTPException(403, {"code": "FORBIDDEN", "message": "Requires admin role."})
 
     try:
@@ -1015,7 +1015,7 @@ async def delete_tool(
     roles: list[str] = getattr(request.state, "client_roles", [])
     client_id: str = getattr(request.state, "client_id", "unknown")
 
-    if "admin" not in roles:
+    if not any(r in {"admin", "platform_admin"} for r in roles):
         raise HTTPException(403, {"code": "FORBIDDEN", "message": "Requires admin role."})
 
     try:
@@ -1139,7 +1139,7 @@ async def rerun_audit(
     roles: list[str] = getattr(request.state, "client_roles", [])
     client_id: str = getattr(request.state, "client_id", "unknown")
 
-    if "admin" not in roles:
+    if not any(r in {"admin", "platform_admin"} for r in roles):
         raise HTTPException(403, {"code": "FORBIDDEN", "message": "Requires admin role."})
 
     # Verify tool exists
@@ -1494,7 +1494,7 @@ async def invoke_tool(
             """
             SELECT tool_id, name, version, status, risk_level, upstream_url,
                    injection_mode, service_name, inject_header, inject_prefix,
-                   kc_client_id, kc_token_audience, server_id
+                   kc_client_id, kc_token_audience, server_id, credential_id
             FROM tool_registry
             WHERE tool_id = :tool_id AND deleted_at IS NULL
             LIMIT 1
@@ -1524,6 +1524,11 @@ async def invoke_tool(
         "kc_client_id": tool_row.kc_client_id,
         "kc_token_audience": tool_row.kc_token_audience,
         "server_id": str(tool_row.server_id) if tool_row.server_id else None,
+        # credential_id: required by entra_client_credentials / external_oauth_client_credentials
+        # modes (dispatcher.py) — missing here meant those modes always 500'd
+        # with "no credential_id" through this REST path even when the DB row
+        # had one, while the /mcp path (SELECT *) worked fine. Found 2026-07-19.
+        "credential_id": str(tool_row.credential_id) if tool_row.credential_id else None,
     }
 
     # ENTITLEMENT CHECK (discovery == invoke invariant)

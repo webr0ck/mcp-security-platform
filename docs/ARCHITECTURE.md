@@ -474,7 +474,7 @@ leaves the declared-dep inventory as the fallback) and display-only — never a 
   are denied first) AND `public_to_authenticated=true` AND `has_write_ops=false`. Write-op safety is
   double-enforced — a DB `CHECK (NOT (public_to_authenticated AND has_write_ops))` (`V053`) makes the
   unsafe state unrepresentable, and the resolver re-checks. Discovery keeps parity
-  (`list_entitled_servers` includes public read-only servers). Only `lab-self-service` is seeded
+  (`list_entitled_servers` includes public read-only servers). Only `self-service` is seeded
   public. Admin toggle: `POST /api/v1/admin/servers/{id}/public` (409 on a write-op server), audited.
   *Follow-on: thread `reason='public_server'` into the invoke audit event (today it is on the
   discovery/catalog response + an INFO log).*
@@ -495,8 +495,8 @@ leaves the declared-dep inventory as the fallback) and display-only — never a 
   `tools/list` from `tools/call` in the window count) is **not yet fixed**; tracked as an open
   follow-on, not a roadmap item to lose track of.
 - **On-behalf-of trust bridge for self-service submission ownership (lab, 2026-07-11 — T2)**:
-  `lab-mcp-self-service`'s `submit_mcp_server` tool always calls the submissions API
-  (`routers/submission.py`) with its own service credential (`client_id="lab-self-service"`,
+  the self-service server's `submit_mcp_server` tool always calls the submissions API
+  (`routers/submission.py`) with its own service credential (`client_id="self-service"`,
   `auth_method=api_key`) — it never receives the real caller's session token, because
   `injection_mode=passthrough` only forwards a client-supplied `X-Downstream-Authorization` header
   (§5.3 / `docs/spec/02-credential-broker.md` §3.2), which no normal MCP client sends. Without a
@@ -505,7 +505,7 @@ leaves the declared-dep inventory as the fallback) and display-only — never a 
   `X-On-Behalf-Of: <sub>` header, honoured **only** from a caller already authenticated via the
   normal HMAC-hashed API-key/OIDC/mTLS resolution in `middleware/auth.py` **and** holding the
   dedicated `submission_service` role — a small DB-backed allowlist (`role_assignments`) granted
-  only to `lab-self-service` (`lab/seeder/seed.py`). This mirrors the identical cross-principal
+  only to `self-service` (`lab/seeder/seed.py`). This mirrors the identical cross-principal
   delegation `routers/profiles.py` already uses (`profile_service` role /
   `_assert_may_write`/`_assert_may_read`) for the same "proxy is the trust anchor, the downstream
   MCP server is not" problem — no new crypto primitive was introduced; the trust already comes from

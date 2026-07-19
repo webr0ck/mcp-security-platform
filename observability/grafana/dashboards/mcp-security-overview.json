@@ -146,7 +146,7 @@
       "targets": [
         {
           "datasource": { "type": "loki", "uid": "${datasource}" },
-          "expr": "count_over_time({job=\"lab-mcp-self-service\"} |= \"MCP_ENABLED\" [24h]) + count_over_time({job=\"lab-mcp-self-service\"} |= \"MCP_DISABLED\" [24h])",
+          "expr": "count_over_time({job=\"self-service\"} |= \"MCP_ENABLED\" [24h]) + count_over_time({job=\"self-service\"} |= \"MCP_DISABLED\" [24h])",
           "legendFormat": "Profile Changes",
           "refId": "A"
         }
@@ -284,7 +284,7 @@
       "targets": [
         {
           "datasource": { "type": "loki", "uid": "${datasource}" },
-          "expr": "{job=\"lab-mcp-self-service\"} | json",
+          "expr": "{job=\"self-service\"} | json",
           "legendFormat": "",
           "refId": "A"
         }

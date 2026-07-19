@@ -69,3 +69,14 @@ lab/nginx/lab-certs/step-ca-root.crt
 .playwright-mcp/page-*
 .playwright-mcp/console-2026-07-05*
 .playwright-mcp/
+
+# WIP UI artifacts — must not go public (failing-test PNGs, unpolished design sub-project)
+ui/test-results/
+ui/design-proposals/
+
+# Generated / tool-scratch output — regenerable, never committed
+graphify-out/
+.understand-anything/
+.ops-agent-git-workdirs/
+.superpowers/
+dep-audit-report.json

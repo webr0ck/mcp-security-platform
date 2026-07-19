@@ -30,9 +30,8 @@ FROM (VALUES
     ('lab-tickets',      'http://lab-mcp-lab-tickets:8000/mcp',   'kc_token_exchange',        false),
     ('lab-dex-cal',      'http://lab-dex:5556/mcp',               'user',                     true),
     ('lab-rag',          'http://lab-rag-assistant:8000/mcp',     'none',                     false),
-    ('lab-self-service', 'http://lab-mcp-self-service:8000/mcp',  'none',                     false),
     ('lab-netbox-mcp',   'http://mcp-netbox:8000/mcp',            'user',                     true),
-    ('lab-wazuh',        'http://lab-mcp-wazuh:8000/mcp',         'service',                  true),
+    ('lab-wazuh',        'http://lab-mcp-wazuh:8000/mcp/',        'service',                  true),
     -- T5: real, no-auth, live third-party upstream (catfact.ninja) via lab-egress-proxy.
     ('lab-catfacts',     'http://lab-mcp-catfacts:8000/mcp',      'none',                     false),
     -- T3: vendored upstream MCP reference "fetch" server (modelcontextprotocol/servers,
@@ -48,6 +47,18 @@ ON CONFLICT (name) DO UPDATE
         trust_tier               = EXCLUDED.trust_tier,
         trust_tier_label         = EXCLUDED.trust_tier_label,
         updated_at               = now();
+
+-- self-service (V052__self_service_default_seed.sql) is seeded with a
+-- production deploy-time placeholder upstream_allowlist_entry — the lab's
+-- self-service container resolves to the same private podman bridge as every
+-- other lab MCP, so give it the real lab CIDR here (self-service is the one
+-- default server used in every environment, not a lab-only concept, but the
+-- CIDR override is lab-specific like every other row above).
+UPDATE server_registry
+   SET upstream_allowlist_entry = '10.89.0.0/16',
+       url_allowlist_checked    = false,
+       updated_at               = now()
+ WHERE name = 'self-service';
 
 -- Link each tool to its server by matching upstream_url (only fills NULLs)
 UPDATE tool_registry t
@@ -77,7 +88,7 @@ ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING;
 
 -- Grant the lab API key (Claude Code SELF_SERVICE_API_KEY) an entitlement on each onboarded server
 INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by, entitlement_version)
-SELECT s.server_id, 'human:apikey:lab-self-service', 'human', 'lab-seeder', 1
+SELECT s.server_id, 'human:apikey:self-service', 'human', 'lab-seeder', 1
 FROM server_registry s
 WHERE s.upstream_allowlist_entry = '10.89.0.0/16'
 ON CONFLICT (server_id, principal_id, principal_type) DO NOTHING;

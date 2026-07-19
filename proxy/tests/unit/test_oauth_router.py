@@ -48,10 +48,14 @@ class _FakeRedis:
 
 
 class _FakeAdapter:
-    def build_auth_url(self, state: str, code_challenge: str | None = None) -> str:
+    def build_auth_url(
+        self, state: str, code_challenge: str | None = None, redirect_uri: str | None = None
+    ) -> str:
         return f"https://idp.example/auth?state={state}&code_challenge={code_challenge}"
 
-    async def exchange_code(self, code: str, code_verifier: str | None = None):
+    async def exchange_code(
+        self, code: str, code_verifier: str | None = None, redirect_uri: str | None = None
+    ):
         assert code_verifier, "PKCE code_verifier must be passed to exchange_code"
         return ("access-tok", "refresh-tok", 3600)
 

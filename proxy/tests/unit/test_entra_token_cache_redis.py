@@ -111,7 +111,7 @@ async def test_redis_cache_hit_skips_entra_request():
             inject_prefix="Bearer",
         )
 
-    assert result == {"Authorization": "Bearer cached-entra-token"}
+    assert result == {"Authorization": "Bearer cached-entra-token", "X-Entra-Auth-Mode": "app-only"}
     # Must NOT have called the Entra token endpoint
     mock_httpx.assert_not_called()
 
@@ -146,7 +146,7 @@ async def test_redis_cache_miss_triggers_fresh_fetch():
             inject_prefix="Bearer",
         )
 
-    assert result == {"Authorization": "Bearer fresh-token-001"}
+    assert result == {"Authorization": "Bearer fresh-token-001", "X-Entra-Auth-Mode": "app-only"}
     # Token must be written to Redis with correct TTL
     expected_ttl = max(1, 3600 - _ENTRA_TOKEN_CACHE_MARGIN_SECONDS)
     redis_mock.setex.assert_awaited_once_with(
@@ -189,7 +189,7 @@ async def test_redis_read_failure_falls_through_to_fresh_fetch():
         )
 
     # Auth still works — we get a token even with Redis down
-    assert result == {"Authorization": "Bearer fresh-redis-down-token"}
+    assert result == {"Authorization": "Bearer fresh-redis-down-token", "X-Entra-Auth-Mode": "app-only"}
     # GET was attempted
     redis_mock.get.assert_awaited_once()
 
@@ -226,7 +226,7 @@ async def test_redis_write_failure_does_not_prevent_token_return():
             inject_prefix="Bearer",
         )
 
-    assert result == {"Authorization": "Bearer fresh-write-fail-token"}
+    assert result == {"Authorization": "Bearer fresh-write-fail-token", "X-Entra-Auth-Mode": "app-only"}
 
 
 # ---------------------------------------------------------------------------

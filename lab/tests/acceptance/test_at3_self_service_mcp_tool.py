@@ -1,14 +1,16 @@
 """AT3b — self-service ownership regression, driven through the REAL MCP tool
-(submit_mcp_server on lab-mcp-self-service), not the submissions REST API
+(submit_mcp_server on the self-service server), not the submissions REST API
 directly.
 
 Root cause (see T2 commit 66dcb8f, proxy/app/routers/submission.py
-_effective_owner): lab-mcp-self-service used to call the submissions API with
-its own service credential (client_id=lab-self-service). There was no channel
+_effective_owner): the self-service MCP server used to call the submissions
+API with its own service credential (client_id=self-service, formerly
+lab-self-service before the server was unified into one default across every
+environment — docs/mcp-server-onboarding.md §10). There was no channel
 for the submissions API to learn the real calling user, so every submission
 made through the MCP tool — as opposed to a caller hitting the REST API with
 their own session token — landed with server_registry.owner_sub =
-'lab-self-service' instead of the real submitter. AT3 (test_at3_onboarding.py)
+'self-service' instead of the real submitter. AT3 (test_at3_onboarding.py)
 only ever drove the REST API directly with alice's own token, so it could
 never have caught this: it was never possible for that path to observe the
 service-account misattribution in the first place.
@@ -61,6 +63,14 @@ def _bob_granted_submit_mcp_server():
 
 
 def test_submit_mcp_server_via_gateway_attributes_real_caller_as_owner(bob_token):
+    # This test's own fixture never went through submit_for_review, so it's
+    # invisible to run_full_acceptance.sh's at3-clean-%/at3-malicious-% cleanup
+    # step and every run left a permanent draft/pending row behind — one
+    # surfaced live in the portal's MCP Servers tab, where an admin trying to
+    # "Approve" it hit the D3 dual-control consent-token check (this row was
+    # never registered through that flow, so no token exists for it) with a
+    # confusing owner_consent_required error. Soft-delete unconditionally at
+    # the end of this test, success or failure — never leave it live.
     name = f"at3b-selfservice-{uuid.uuid4().hex[:8]}"
     headers = mcp_session_headers(bob_token)
     # self-service is a multi-method registry tool like grafana-query/netbox-query
@@ -68,34 +78,38 @@ def test_submit_mcp_server_via_gateway_attributes_real_caller_as_owner(bob_token
     # "tools/call", arguments: {name, arguments}}, not a flat {tool_name,
     # arguments} shape (that shape silently returns the upstream's tools/list
     # instead of calling anything, confirmed by hand against the live gateway).
-    submit_args = {
-        "name": name,
-        "description": "AT3b ownership regression fixture",
-        "injection_mode": "none",
-        "data_categories": ["public"],
-        "has_write_ops": False,
-        "upstream_url": "http://at3b-placeholder:8000/mcp",
-    }
-    r = httpx.post(f"{BASE_URL}/mcp", headers=headers, verify=False, timeout=30,
-        json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-              "params": {"name": "invoke_tool",
-                         "arguments": {"tool_name": "submit_mcp_server", "method": "tools/call",
-                                      "arguments": {"name": "submit_mcp_server", "arguments": submit_args}}}})
-    assert r.status_code == 200, f"submit_mcp_server call failed: {r.status_code} {r.text}"
-    body = r.json()
-    assert "error" not in body, f"JSON-RPC error on submit_mcp_server: {body}"
-    blob = json.dumps(body).lower()
-    for bad in ("not entitled", "access denied", "not found in registry"):
-        assert bad not in blob, f"gate-chain failure leaked through: {blob[:400]}"
+    try:
+        submit_args = {
+            "name": name,
+            "description": "AT3b ownership regression fixture",
+            "injection_mode": "none",
+            "data_categories": ["public"],
+            "has_write_ops": False,
+            "upstream_url": "http://at3b-placeholder:8000/mcp",
+        }
+        r = httpx.post(f"{BASE_URL}/mcp", headers=headers, verify=False, timeout=30,
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                  "params": {"name": "invoke_tool",
+                             "arguments": {"tool_name": "submit_mcp_server", "method": "tools/call",
+                                          "arguments": {"name": "submit_mcp_server", "arguments": submit_args}}}})
+        assert r.status_code == 200, f"submit_mcp_server call failed: {r.status_code} {r.text}"
+        body = r.json()
+        assert "error" not in body, f"JSON-RPC error on submit_mcp_server: {body}"
+        blob = json.dumps(body).lower()
+        for bad in ("not entitled", "access denied", "not found in registry"):
+            assert bad not in blob, f"gate-chain failure leaked through: {blob[:400]}"
 
-    server_id = db_query(f"SELECT server_id::text FROM server_registry WHERE name='{name}'")
-    assert server_id, f"no server_registry row created for {name!r}: {body}"
+        server_id = db_query(f"SELECT server_id::text FROM server_registry WHERE name='{name}'")
+        assert server_id, f"no server_registry row created for {name!r}: {body}"
 
-    owner_sub = db_query(f"SELECT owner_sub FROM server_registry WHERE server_id='{server_id}'")
-    assert owner_sub != "lab-self-service", (
-        "REGRESSION: submit_mcp_server via the real gateway attributed ownership to the "
-        "self-service tool's own service account instead of the real caller (bob) -- this is "
-        "exactly the bug T2 fixed via X-On-Behalf-Of + submission_service role in "
-        "proxy/app/routers/submission.py:_effective_owner."
-    )
-    assert owner_sub == "bob@corp", f"expected owner_sub='bob@corp', got {owner_sub!r}"
+        owner_sub = db_query(f"SELECT owner_sub FROM server_registry WHERE server_id='{server_id}'")
+        assert owner_sub != "self-service", (
+            "REGRESSION: submit_mcp_server via the real gateway attributed ownership to the "
+            "self-service tool's own service account instead of the real caller (bob) -- this is "
+            "exactly the bug T2 fixed via X-On-Behalf-Of + submission_service role in "
+            "proxy/app/routers/submission.py:_effective_owner."
+        )
+        assert owner_sub == "bob@corp", f"expected owner_sub='bob@corp', got {owner_sub!r}"
+    finally:
+        db_query(f"UPDATE server_registry SET deleted_at=now() "
+                 f"WHERE name='{name}' AND deleted_at IS NULL")

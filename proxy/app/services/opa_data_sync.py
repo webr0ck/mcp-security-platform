@@ -7,7 +7,10 @@ Runs a background 60s reconciliation loop to keep OPA grants in sync with DB.
 
 Design (Task 4.4b — SELF-F6):
   - Startup: fetch grants from client_grants, push to OPA immediately (fail-logged)
-  - Mutation: before DB commit, call push_grants() (fail-closed, rolls back on error)
+  - Mutation: push_grants() runs on grant/revoke changes (fail-closed → 503 on OPA
+    push failure). Note the revoke path (delete_grant) commits the DB delete *first*,
+    then pushes — a push failure returns 503 without rolling back the delete, so OPA
+    keeps the stale grant until the next push or the 60s reconcile.
   - Reconcile: every 60s, fetch and push again (fail-logged, continues on error)
   - Idempotent: pushing the same grant dict multiple times is safe
 
@@ -141,7 +144,7 @@ class OPADataSync:
 
         Called by:
           - Startup: in lifespan initialization
-          - Mutation: before DB commit in grant/revoke transactions
+          - Mutation: on grant/revoke changes (revoke commits the DB delete before pushing)
           - Reconcile: periodically (60s loop)
           - Admin endpoint: POST /api/v1/admin/sync-grants
         """

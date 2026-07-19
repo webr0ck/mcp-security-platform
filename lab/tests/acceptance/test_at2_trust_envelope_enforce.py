@@ -75,7 +75,7 @@ def _recreate_proxy_and_wait(timeout_s: int = 90) -> None:
     recompute the whole dependency graph and cascade-recreate OTHER services
     whose config hash it decides changed too — observed live: mcp-gateway,
     mcp-scanner-worker, and (via a still-not-fully-root-caused mTLS/identity
-    side effect) enough of the trust chain that lab-mcp-self-service's calls
+    side effect) enough of the trust chain that self-service's calls
     into the submissions API started failing "unauthenticated: No valid
     identity could be resolved". run_full_acceptance.sh's own AT3 gitea
     fixture setup avoids exactly this by always passing `--no-deps` when it

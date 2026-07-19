@@ -61,9 +61,13 @@ ACCEPT_RESULTS_DIR="$RESULTS_DIR" python3 -m pytest lab/tests/acceptance/ \
 PYTEST_EXIT=${PIPESTATUS[0]:-$?}
 set -e
 
-echo "== Cleanup: soft-deleting AT3 submissions this run created =="
+echo "== Cleanup: soft-deleting AT3/AT4 submissions this run created =="
+# AT4 (test_at4_apply_deploy_verify.py) also runs as part of this suite and
+# creates its own uuid-suffixed 'at4-clean-*' fixture, same pattern as AT3 —
+# it was missing here, which left stray-but-real (not soft-deleted) rows
+# visible in the portal admin servers list after every run.
 podman exec mcp-db psql -U mcp_app -d mcp_security -c \
-  "UPDATE server_registry SET deleted_at=now() WHERE (name LIKE 'at3-malicious-%' OR name LIKE 'at3-clean-%') AND deleted_at IS NULL;" \
+  "UPDATE server_registry SET deleted_at=now() WHERE (name LIKE 'at3-malicious-%' OR name LIKE 'at3-clean-%' OR name LIKE 'at4-clean-%') AND deleted_at IS NULL;" \
   || echo "  (cleanup best-effort — non-fatal if it fails)"
 
 echo "== Generating REPORT.md =="

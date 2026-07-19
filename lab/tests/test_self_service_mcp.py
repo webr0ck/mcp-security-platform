@@ -241,7 +241,7 @@ class TestDirectServerAccess:
         """Smoke test: server should not import asyncpg (no DB dependency)."""
         import subprocess
         result = subprocess.run(
-            ["podman", "exec", "lab-mcp-self-service",
+            ["podman", "exec", "self-service",
              "python", "-c", "import asyncpg; print('asyncpg available')"],
             capture_output=True, text=True,
         )

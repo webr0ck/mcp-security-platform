@@ -298,6 +298,74 @@ async def _get_recent_calls_for_opa(client_id: str) -> list[dict]:
     return await get_anomaly_window_with_timestamps(client_id)
 
 
+# Consecutive connection-class failures before a server is auto-flagged as
+# broken (debug_mode=true, debug_enabled_by='system:auto-health-check') — a
+# small threshold so one transient network blip never yanks a working server
+# into maintenance, but a persistent problem (unreachable upstream, DNS/SSRF
+# revalidation failure, MCP handshake failure, or the upstream tool itself
+# reporting isError:true) gets flagged and surfaced in the UI without a human
+# having to notice a string of failed invocations first.
+_CONNECTION_FAILURE_THRESHOLD = 3
+
+
+async def _record_connection_result(
+    server_id: str, upstream_url: str, *, success: bool, error: str | None = None
+) -> None:
+    """Best-effort, fire-and-forget — mirrors the wazuh-syslog secondary-audit
+    pattern in this file (never affects the response, never raises). Tracks
+    consecutive connection-class failures per server and auto-flips
+    debug_mode after _CONNECTION_FAILURE_THRESHOLD in a row. Does NOT
+    auto-clear debug_mode on a later success — recovery is a deliberate
+    "Go live" admin action (existing PRD-0012 flow), not automatic, to avoid
+    flapping a server in and out of maintenance."""
+    if not server_id:
+        return  # unlinked tool — nothing to flag
+    try:
+        from sqlalchemy import text
+        from app.core.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            if success:
+                await db.execute(
+                    text(
+                        "UPDATE server_registry SET connection_failure_count = 0 "
+                        "WHERE server_id = :sid AND connection_failure_count > 0"
+                    ),
+                    {"sid": server_id},
+                )
+                await db.commit()
+                return
+
+            row = (await db.execute(
+                text(
+                    "UPDATE server_registry "
+                    "SET connection_failure_count = connection_failure_count + 1, "
+                    "    last_connection_error = :err, "
+                    "    last_connection_error_at = now() "
+                    "WHERE server_id = :sid "
+                    "RETURNING connection_failure_count, debug_mode"
+                ),
+                {"sid": server_id, "err": (error or "")[:500]},
+            )).fetchone()
+            if row is not None and row.connection_failure_count >= _CONNECTION_FAILURE_THRESHOLD and not row.debug_mode:
+                await db.execute(
+                    text(
+                        "UPDATE server_registry "
+                        "SET debug_mode = true, debug_enabled_at = now(), "
+                        "    debug_enabled_by = 'system:auto-health-check' "
+                        "WHERE server_id = :sid"
+                    ),
+                    {"sid": server_id},
+                )
+                logger.warning(
+                    "server_auto_flagged_broken",
+                    extra={"server_id": server_id, "upstream_url": upstream_url, "error": error},
+                )
+            await db.commit()
+    except Exception as exc:
+        logger.warning("connection_result_recording_failed: %s", exc)
+
+
 async def invoke_tool(
     tool_record: dict[str, Any],
     json_rpc_request: dict[str, Any],
@@ -876,6 +944,7 @@ async def invoke_tool(
             allowed_cidr=_registered_allowlist_entry,
         )
     except SSRFError as exc:
+        await _record_connection_result(tool_server_id, upstream_url, success=False, error=str(exc))
         raise ValueError(f"SSRF blocked upstream URL at invoke time: {exc}") from exc
 
     # -------------------------------------------------------------------------
@@ -1025,6 +1094,9 @@ async def invoke_tool(
             principal_id=principal_id,
             roles=client_roles,
             session_jti=session_jti,
+        )
+        await _record_connection_result(
+            tool_server_id, upstream_url, success=False, error=str(_rebind_exc)
         )
         raise ValueError(
             f"Upstream revalidation failed (DNS-rebind protection): {_rebind_exc}"
@@ -1231,6 +1303,28 @@ async def invoke_tool(
             "decision": "allow",
         },
     )
+
+    # Connection-health tracking (best-effort, never affects the response —
+    # see _record_connection_result docstring). upstream_challenge is a policy
+    # outcome (downstream auth required), not a connection failure, so it's
+    # excluded here entirely. A successful round-trip whose tool result
+    # itself reports isError:true (e.g. an upstream dependency like a SIEM
+    # manager being down, surfaced through a working MCP connection) counts
+    # as a connection-class failure too — that's the case that motivated
+    # this feature.
+    if upstream_challenge is None:
+        _is_error_result = (
+            isinstance(upstream_response, dict)
+            and bool((upstream_response.get("result") or {}).get("isError"))
+        )
+        _connection_ok = bool(upstream_response) and not upstream_error and not _is_error_result
+        _conn_err_msg = (
+            str(upstream_error) if upstream_error
+            else ("upstream tool reported isError:true" if _is_error_result else None)
+        )
+        await _record_connection_result(
+            tool_server_id, upstream_url, success=_connection_ok, error=_conn_err_msg
+        )
 
     # -------------------------------------------------------------------------
     # Step 6: Return proxied response

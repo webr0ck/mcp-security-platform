@@ -154,3 +154,59 @@ async def test_broker_resolve_a_checks_enrollment_before_kms():
 
     # The KMS/Vault master secret must NOT have been touched for an unenrolled caller.
     broker._get_master_secret.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_broker_resolve_a_converts_dead_refresh_token_to_enrollment_required():
+    """A refresh_token grant returning HTTP 400 (RFC 6749 invalid_grant — expired/
+    revoked/consent-withdrawn) must surface as CredentialNotEnrolledError, the
+    same actionable "please log in" signal as never having enrolled at all.
+
+    Regression guard: this used to propagate as a bare TokenExchangeError all
+    the way past dispatcher.py's `except CredentialNotEnrolledError` conversion
+    into a generic CredentialInjectionError with no enrollment link — reported
+    live as m365 delegated calls failing silently instead of prompting re-auth.
+    """
+    from app.credential_broker.broker import CredentialBroker, CredentialNotEnrolledError
+    from app.credential_broker.adapters.base import TokenExchangeError
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.execute = AsyncMock(
+        return_value=MagicMock(fetchone=MagicMock(return_value=MagicMock(encrypted_blob=b"ciphertext")))
+    )
+    mock_session.commit = AsyncMock()
+    mock_factory = MagicMock(return_value=mock_session)
+
+    mock_adapter = AsyncMock()
+    mock_adapter.refresh = AsyncMock(side_effect=TokenExchangeError("m365", 400))
+
+    broker = CredentialBroker.__new__(CredentialBroker)
+    broker._session = AsyncMock()
+    broker._approach_b_adapters = {}
+    broker._approach_a_adapters = {"m365": mock_adapter}
+    broker._kms = AsyncMock()
+    broker._db_factory = mock_factory
+    broker._master_secret = None
+    broker._master_secret_fetched_at = None
+    broker._get_master_secret = AsyncMock(return_value=b"\x00" * 32)
+
+    import app.credential_broker.broker as broker_mod
+    monkeypatch_decrypt = MagicMock(return_value="stale-refresh-token")
+    orig_decrypt = broker_mod.decrypt
+    broker_mod.decrypt = monkeypatch_decrypt
+    try:
+        with pytest.raises(CredentialNotEnrolledError):
+            await broker.resolve(
+                user_sub="alice@corp",
+                service="m365",
+                session_id="sess-1",
+                approach="A",
+                principal_id="human:keycloak:alice@corp",
+                principal_type="human",
+            )
+    finally:
+        broker_mod.decrypt = orig_decrypt
+
+    mock_adapter.refresh.assert_awaited_once_with("stale-refresh-token")

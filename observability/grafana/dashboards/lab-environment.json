@@ -31,7 +31,7 @@
           {"selected": false, "text": "echo", "value": "lab-mcp-echo"},
           {"selected": false, "text": "notes", "value": "lab-mcp-notes"},
           {"selected": false, "text": "search", "value": "lab-mcp-search"},
-          {"selected": false, "text": "self-service", "value": "lab-mcp-self-service"}
+          {"selected": false, "text": "self-service", "value": "self-service"}
         ],
         "includeAll": true,
         "multi": false,
@@ -118,7 +118,7 @@
       "datasource": { "type": "loki", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "count_over_time({job=\"lab-mcp-self-service\"} |= \"MCP_ENABLED\" [1h]) + count_over_time({job=\"lab-mcp-self-service\"} |= \"MCP_DISABLED\" [1h]) + count_over_time({job=\"lab-mcp-self-service\"} |= \"FUNCTION_ENABLED\" [1h]) + count_over_time({job=\"lab-mcp-self-service\"} |= \"FUNCTION_DISABLED\" [1h])",
+          "expr": "count_over_time({job=\"self-service\"} |= \"MCP_ENABLED\" [1h]) + count_over_time({job=\"self-service\"} |= \"MCP_DISABLED\" [1h]) + count_over_time({job=\"self-service\"} |= \"FUNCTION_ENABLED\" [1h]) + count_over_time({job=\"self-service\"} |= \"FUNCTION_DISABLED\" [1h])",
           "legendFormat": "Profile changes",
           "refId": "A"
         }
@@ -170,7 +170,7 @@
           "refId": "C"
         },
         {
-          "expr": "sum(count_over_time({job=\"lab-mcp-self-service\"} [$__interval]))",
+          "expr": "sum(count_over_time({job=\"self-service\"} [$__interval]))",
           "legendFormat": "self-service",
           "refId": "D"
         }
@@ -265,7 +265,7 @@
       "datasource": { "type": "loki", "uid": "${datasource}" },
       "targets": [
         {
-          "expr": "{job=\"lab-mcp-self-service\"} | json",
+          "expr": "{job=\"self-service\"} | json",
           "legendFormat": "",
           "refId": "A"
         }

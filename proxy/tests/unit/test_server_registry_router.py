@@ -73,3 +73,34 @@ def test_serialize_converts_datetime():
     assert isinstance(out["created_at"], str)
     assert "2026" in out["created_at"]
     assert out["name"] == "srv"
+
+
+@pytest.mark.asyncio
+async def test_approve_server_rejects_when_under_submission_review():
+    """The D3 direct-registration approve endpoint must never approve a server
+    that's mid-flow in the self-service submission pipeline (submission_status
+    != 'draft') — that flips status='approved' (what the servers-list UI
+    reads) while submission_status stays e.g. 'awaiting_review' (what the
+    submissions admin page reads), silently skipping that pipeline's
+    high-risk-scope reviewer gate. Found 2026-07-19 on a live server."""
+    from unittest.mock import AsyncMock, patch
+    from fastapi import HTTPException
+    from app.routers.server_registry import approve_server, ApproveBody
+
+    row = ("http://upstream", "owner-sub", None, None, "none", None, "awaiting_review")
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.execute = AsyncMock(return_value=MagicMock(
+        fetchone=MagicMock(return_value=row)
+    ))
+
+    with patch("app.routers.server_registry.AsyncSessionLocal", return_value=mock_session):
+        with pytest.raises(HTTPException) as exc_info:
+            await approve_server(
+                "srv-1", ApproveBody(consent_token="tok"), _make_request()
+            )
+    assert exc_info.value.status_code == 409
+    assert "submission" in exc_info.value.detail.lower()
+    # Must fail before ever touching the consent token / SSRF / healthcheck.
+    assert mock_session.execute.await_count == 1

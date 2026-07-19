@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import secrets
 from datetime import datetime, timezone
 from html import escape as html_escape
@@ -15,6 +16,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 
 from app.core.config import get_settings
+from app.core.public_url import derive_public_base_url
+from app.credential_broker.adapters.base import TokenExchangeError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["oauth-enrollment"])
@@ -598,6 +601,20 @@ async def enroll_consent(
     principal_id = getattr(request.state, "principal_id", None)
     principal_type = getattr(request.state, "principal_type", None)
 
+    # Derive the callback URL from THIS request's host (LAN IP, Tailscale,
+    # localhost, ...) rather than a static configured value — Microsoft
+    # redirects back to exactly whatever redirect_uri is sent below, so a
+    # static value that doesn't match the host the user actually reached the
+    # proxy on sends them to an unreachable/wrong address at callback time
+    # (reported live: enrolled via a Tailscale IP, Microsoft bounced back to
+    # a static LAN IP instead). Persisted alongside the flow state so the
+    # callback step below reuses the IDENTICAL value — Azure rejects a
+    # mismatch between the authorize and token-exchange redirect_uri.
+    # NOTE: the resulting host must still be pre-registered in the Azure App
+    # Registration's redirect URI allowlist; this only fixes which registered
+    # host we ask Microsoft to use, not Azure's own allowlist enforcement.
+    redirect_uri = f"{derive_public_base_url(request)}/auth/callback/{service}"
+
     await redis.setex(
         f"{_PENDING_PREFIX}{nonce}",
         _PENDING_TTL_SECONDS,
@@ -608,6 +625,7 @@ async def enroll_consent(
             "scopes": consented_scopes,  # C6: store consent-time scopes with the flow
             "principal_id": principal_id,
             "principal_type": principal_type,
+            "redirect_uri": redirect_uri,
         }),
     )
 
@@ -639,7 +657,7 @@ async def enroll_consent(
         extra={"client_id": client_id, "service": service},
     )
 
-    auth_url = adapter.build_auth_url(state=nonce, code_challenge=code_challenge)
+    auth_url = adapter.build_auth_url(state=nonce, code_challenge=code_challenge, redirect_uri=redirect_uri)
     return RedirectResponse(url=auth_url, status_code=302)
 
 
@@ -760,8 +778,45 @@ async def callback(service: str, code: str, state: str, request: Request) -> HTM
     # between consent and callback, the stored scopes will reflect the consent-time value.
     # Re-enrollment (a new GET/POST /consent) is required to pick up any scope changes.
     consented_scopes: str = flow.get("scopes", "")  # "" for pre-R5 records (backward compat)
+    # Reuse the EXACT redirect_uri computed at consent time (see enroll_consent
+    # above) — falls back to None (adapter's static configured default) for a
+    # flow record from before this field existed.
+    flow_redirect_uri: str | None = flow.get("redirect_uri")
 
-    access_token, refresh_token, _ = await adapter.exchange_code(code, code_verifier=code_verifier)
+    try:
+        access_token, refresh_token, _ = await adapter.exchange_code(
+            code, code_verifier=code_verifier, redirect_uri=flow_redirect_uri
+        )
+    except TokenExchangeError as exc:
+        # Was previously uncaught here — propagated past FastAPI's own
+        # exception handling straight into a raw 500 "unexpected error",
+        # discarding the one thing that would tell an admin what's actually
+        # wrong (401 invalid_client → bad/expired IdP client secret; 400
+        # invalid_grant → the authorization code was already used or the
+        # redirect_uri didn't match what was sent to the authorize endpoint).
+        # CB-010: still never surface exc.response.text (may echo secrets).
+        logger.error(
+            "oauth_callback_token_exchange_failed",
+            extra={"client_id": client_id, "service": service, "status_code": exc.status_code},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "OAUTH_TOKEN_EXCHANGE_FAILED",
+                "message": (
+                    f"{service} token endpoint rejected the authorization code exchange "
+                    f"(HTTP {exc.status_code}). "
+                    + (
+                        "This usually means the platform's configured IdP client "
+                        "credentials (client_id/client_secret) for this service are "
+                        "invalid or expired — an admin needs to verify/rotate them."
+                        if exc.status_code in (401, 403)
+                        else "Retry enrollment — the authorization code may have expired "
+                             "or already been used."
+                    )
+                ),
+            },
+        ) from exc
 
     from app.credential_broker.kms import VaultKMSClient
     from app.credential_broker.approaches.approach_a import encrypt
@@ -818,6 +873,34 @@ async def callback(service: str, code: str, state: str, request: Request) -> HTM
             },
         )
         await db.commit()
+
+        if service == "m365":
+            # Per-caller UPN capture (V085): a one-time Graph /me call with
+            # THIS caller's fresh delegated token, so app-only get_me can
+            # later resolve /users/{upn} for this specific principal instead
+            # of one shared, hand-configured M365_USER mailbox for everyone.
+            # Best-effort: enrollment must still succeed if this fails (e.g.
+            # scopes don't include User.Read, or Graph is briefly unreachable).
+            try:
+                import httpx as _httpx
+                graph_base = (os.environ.get("M365_GRAPH_BASE") or "https://graph.microsoft.com/v1.0").rstrip("/")
+                async with _httpx.AsyncClient(timeout=10.0) as _client:
+                    _me_resp = await _client.get(
+                        f"{graph_base}/me", headers={"Authorization": f"Bearer {access_token}"}
+                    )
+                if _me_resp.status_code == 200:
+                    upn = (_me_resp.json() or {}).get("userPrincipalName") or (_me_resp.json() or {}).get("mail")
+                    if upn:
+                        await db.execute(
+                            text(
+                                "UPDATE credential_store SET upn=:upn "
+                                "WHERE user_sub=:sub AND service=:svc AND owner_type='user'"
+                            ),
+                            {"upn": upn, "sub": principal_id, "svc": service},
+                        )
+                        await db.commit()
+            except Exception as exc:
+                logger.warning("m365_upn_capture_failed", extra={"client_id": client_id, "error": str(exc)})
 
     await _run_post_enrollment_discovery(service=service, access_token=access_token)
 

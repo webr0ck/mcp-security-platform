@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.credential_broker.adapters.base import TokenExchangeError
 from app.credential_broker.kms import VaultKMSClient
 from app.credential_broker.models import CredentialResult
 from app.credential_broker.session import SessionStore
@@ -202,7 +203,23 @@ class CredentialBroker:
                 )
             if adapter is None:
                 raise CredentialNotEnrolledError(user_sub=user_sub, service=service)
-            access_token, new_refresh, expires_in = await adapter.refresh(refresh_token)
+            try:
+                access_token, new_refresh, expires_in = await adapter.refresh(refresh_token)
+            except TokenExchangeError as exc:
+                # A refresh_token grant returning 400 is, per RFC 6749 §5.2,
+                # invalid_grant — the stored refresh token is expired, revoked,
+                # or its consent was withdrawn at the IdP. That is functionally
+                # identical to "never enrolled": the only fix is for the user to
+                # re-authenticate. Previously this propagated as a bare
+                # TokenExchangeError all the way to a generic internal-error
+                # response with no enrollment link — reported live as m365
+                # delegated calls failing without the "please login" prompt
+                # users used to get. Converting to CredentialNotEnrolledError
+                # reuses the exact path dispatcher.py already has for turning
+                # "not enrolled" into an actionable enrollment_url.
+                if exc.status_code == 400:
+                    raise CredentialNotEnrolledError(user_sub=user_sub, service=service) from exc
+                raise
 
             new_encrypted = encrypt(
                 new_refresh,

@@ -52,7 +52,7 @@ router = APIRouter(prefix="/api/v1/profiles", tags=["Profiles"])
 # Roles that can manage the platform (named profiles, tool registry, etc.)
 _ADMIN_ROLES = frozenset({"admin", "platform_admin"})
 # Narrow role for service accounts that proxy profile calls on behalf of users
-# (e.g. lab-self-service). Grants cross-user profile read/write ONLY — not
+# (e.g. self-service). Grants cross-user profile read/write ONLY — not
 # named-profile management or any other admin capability.
 _PROFILE_SERVICE_ROLES = frozenset({"profile_service"})
 # Roles that may WRITE to ANOTHER principal's MCP profile.

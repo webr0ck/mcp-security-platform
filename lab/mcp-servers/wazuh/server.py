@@ -205,7 +205,7 @@ def wazuh_cluster_health() -> dict:
         }
     except Exception as exc:
         logger.error("wazuh_cluster_health failed: %s", exc)
-        return {"error": str(exc)}
+        raise RuntimeError(f"wazuh_cluster_health failed: {exc}") from exc
 
 
 @mcp.tool()
@@ -241,7 +241,7 @@ def wazuh_list_agents(
         }
     except Exception as exc:
         logger.error("wazuh_list_agents failed: %s", exc)
-        return {"error": str(exc)}
+        raise RuntimeError(f"wazuh_list_agents failed: {exc}") from exc
 
 
 @mcp.tool()
@@ -255,16 +255,16 @@ def wazuh_get_agent_detail(agent_id: str) -> dict:
     Returns dict with agent fields: id, name, ip, os, version, status, lastKeepAlive.
     """
     if not _validate_agent_id(agent_id):
-        return {"error": f"invalid agent_id {agent_id!r} — must be a numeric string (e.g. '001')"}
+        raise ValueError(f"invalid agent_id {agent_id!r} — must be a numeric string (e.g. '001')")
     try:
         resp = _api("GET", f"/agents/{agent_id}")
         items = resp.get("data", {}).get("affected_items", [])
         if not items:
-            return {"error": f"agent {agent_id!r} not found"}
+            raise ValueError(f"agent {agent_id!r} not found")
         return _strip_sensitive(items[0], _SENSITIVE_KEYS)
     except Exception as exc:
         logger.error("wazuh_get_agent_detail failed: %s", exc)
-        return {"error": str(exc)}
+        raise RuntimeError(f"wazuh_get_agent_detail failed: {exc}") from exc
 
 
 @mcp.tool()
@@ -300,7 +300,7 @@ def wazuh_list_alerts(
         }
     except Exception as exc:
         logger.error("wazuh_list_alerts failed: %s", exc)
-        return {"error": str(exc)}
+        raise RuntimeError(f"wazuh_list_alerts failed: {exc}") from exc
 
 
 @mcp.tool()
@@ -325,7 +325,7 @@ def wazuh_search_alerts(
     """
     limit = max(1, min(limit, MAX_LIMIT))
     if len(query) > 256:
-        return {"error": "query exceeds 256-character limit"}
+        raise ValueError("query exceeds 256-character limit")
 
     try:
         resp = _api(
@@ -342,7 +342,7 @@ def wazuh_search_alerts(
         }
     except Exception as exc:
         logger.error("wazuh_search_alerts failed: %s", exc)
-        return {"error": str(exc)}
+        raise RuntimeError(f"wazuh_search_alerts failed: {exc}") from exc
 
 
 @mcp.tool()
@@ -377,7 +377,7 @@ def wazuh_get_rules(
         }
     except Exception as exc:
         logger.error("wazuh_get_rules failed: %s", exc)
-        return {"error": str(exc)}
+        raise RuntimeError(f"wazuh_get_rules failed: {exc}") from exc
 
 
 @mcp.tool()
@@ -405,7 +405,7 @@ def wazuh_list_decoders(filename: str = "", limit: int = DEFAULT_LIMIT) -> dict:
         }
     except Exception as exc:
         logger.error("wazuh_list_decoders failed: %s", exc)
-        return {"error": str(exc)}
+        raise RuntimeError(f"wazuh_list_decoders failed: {exc}") from exc
 
 
 @mcp.tool()
@@ -432,28 +432,25 @@ def wazuh_run_active_response(
     Returns dict with keys: agent_id, command, status, response.
     """
     if not ALLOW_ACTIVE_RESPONSE:
-        return {
-            "error": "active response disabled",
-            "detail": "Set ALLOW_ACTIVE_RESPONSE=true to enable this tool.",
-        }
+        raise RuntimeError(
+            "active response disabled — set ALLOW_ACTIVE_RESPONSE=true to enable this tool"
+        )
 
     # Validate agent_id (HIGH-2: prevent path traversal on Wazuh API)
     if not _validate_agent_id(agent_id):
-        return {"error": f"invalid agent_id {agent_id!r} — must be a numeric string (e.g. '001')"}
+        raise ValueError(f"invalid agent_id {agent_id!r} — must be a numeric string (e.g. '001')")
 
     # Validate command name
     if not command or not command.replace("-", "").replace("_", "").isalnum():
-        return {"error": "invalid command name — alphanumeric, hyphens and underscores only"}
+        raise ValueError("invalid command name — alphanumeric, hyphens and underscores only")
 
     # Validate each argument element (MEDIUM-1: prevent injection via argument list)
     args_list = arguments or []
     if len(args_list) > _MAX_AR_ARGS:
-        return {"error": f"too many arguments — maximum is {_MAX_AR_ARGS}"}
+        raise ValueError(f"too many arguments — maximum is {_MAX_AR_ARGS}")
     for arg in args_list:
         if not _ARG_SAFE_RE.match(str(arg)):
-            return {
-                "error": f"invalid argument {arg!r} — must match [a-zA-Z0-9._-]{{1,128}}"
-            }
+            raise ValueError(f"invalid argument {arg!r} — must match [a-zA-Z0-9._-]{{1,128}}")
 
     payload: dict[str, Any] = {
         "command": command,
@@ -471,7 +468,7 @@ def wazuh_run_active_response(
         }
     except Exception as exc:
         logger.error("wazuh_run_active_response failed: %s", exc)
-        return {"error": str(exc)}
+        raise RuntimeError(f"wazuh_run_active_response failed: {exc}") from exc
 
 
 @mcp.tool()
@@ -534,7 +531,7 @@ def wazuh_list_ai_alerts(limit: int = DEFAULT_LIMIT) -> dict:
         }
     except Exception as exc:
         logger.error("wazuh_list_ai_alerts failed: %s", exc)
-        return {"error": str(exc)}
+        raise RuntimeError(f"wazuh_list_ai_alerts failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
