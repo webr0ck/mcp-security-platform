@@ -23,7 +23,7 @@ dependencies = [
     "alembic==1.15.2",
 
     # Redis
-    "redis[asyncio]==5.2.1",
+    "redis[asyncio]==8.0.1",
 
     # HTTP client (for OPA, Ollama, upstream MCP servers)
     "httpx==0.28.1",
