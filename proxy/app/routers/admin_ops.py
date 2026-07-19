@@ -11,11 +11,15 @@ Endpoints:
   POST /api/v1/admin/servers/{id}/restart
   POST /api/v1/admin/servers/{id}/rebuild
 
-Authz:
-  - logs (read-only, debug_mode-gated): platform_admin OR this server's own
-    owner/maintainer (reusing the _require_owner_or_maintainer pattern from
-    server_registry.py — a caller must actually be *this* server's owner_sub
-    or a listed maintainer, not merely hold a role called "server_owner").
+Authz: all three endpoints live under the /api/v1/admin/ prefix, which the
+RBAC middleware (middleware/rbac.py) already restricts to admin roles — so in
+practice every lifecycle op here is admin-only, and a non-admin owner/maintainer
+is rejected at the middleware before this router runs (verified live). We
+therefore require platform_admin explicitly here too (defense-in-depth, and so
+the code matches the effective authz rather than implying a broader access):
+  - logs (read-only): platform_admin + debug_mode=TRUE. Tying it to debug_mode
+    means logs are only exposed while the server is deliberately flagged for
+    debugging, not on demand.
   - restart/rebuild (destructive lifecycle): platform_admin ONLY. Two
     automated security reviews (2026-07-18) flagged deriving the target
     container from the mutable upstream_url as a confused-deputy/IDOR risk;
@@ -159,7 +163,7 @@ def _forward_error(resp: httpx.Response) -> None:
 async def get_server_logs(
     server_id: str, request: Request, tail: int = Query(200, ge=1, le=_MAX_TAIL)
 ):
-    row = await _require_authz(server_id, request)
+    row = await _require_authz(server_id, request, admin_only=True)
     _require_debug_mode(row)
     container = _derive_container_name(row["upstream_url"])
 

@@ -370,3 +370,16 @@ async def test_rebuild_server_rejects_non_admin_owner():
             "s1", _make_request(roles=["server_owner"], client_id="alice")
         )
     assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_server_logs_rejects_non_admin():
+    """logs sits under /api/v1/admin/ and is platform_admin-only in practice;
+    the router-level admin_only check rejects a non-admin owner before any DB
+    lookup (mirrors what middleware/rbac.py enforces on the prefix)."""
+    from app.routers import admin_ops
+    with pytest.raises(HTTPException) as exc_info:
+        await admin_ops.get_server_logs(
+            "s1", _make_request(roles=["server_owner"], client_id="alice"), tail=10
+        )
+    assert exc_info.value.status_code == 403

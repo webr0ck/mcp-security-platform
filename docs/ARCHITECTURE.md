@@ -412,8 +412,11 @@ and refusing any container name outside the `mcp-`/`lab-mcp-` allowlist (fail-cl
 The proxy side (`routers/admin_ops.py`) never touches the socket: it authorizes,
 derives the target container **server-side** from `server_registry.upstream_url`
 (never from client input — see INV note on the confused-deputy review below),
-and forwards. **restart/rebuild are platform_admin-only**; **logs** are
-owner/maintainer + `debug_mode`-gated. Fail-closed: if the ops-agent is unset or
+and forwards. All three endpoints sit under the admin-gated `/api/v1/admin/`
+prefix, so they are **platform_admin-only** in practice (a non-admin
+owner/maintainer is rejected by `middleware/rbac.py` before this router runs —
+verified live); **logs** additionally require `debug_mode=TRUE` on the server.
+Fail-closed: if the ops-agent is unset or
 unreachable every endpoint returns 503, never a direct podman fallback. `rebuild`
 today recreates the image from its existing build context; a per-server
 `git pull`-of-latest is roadmap (needs a repo-path mapping per server). See
