@@ -92,8 +92,14 @@ def entra_directory_fixture_container(real_entra_creds):
         "-v", f"{server_py}:/app/server.py:ro",
         "localhost/lab-mcp-entra-directory:lab", "python", "server.py",
     ], check=True, capture_output=True, text=True)
+    # Attach to an egress net that carries lab-egress-proxy (squid) so the test
+    # server can reach the real Graph API. The old single mcp-egress-net was split
+    # into per-server private egress nets (F-001, commit f070803); squid is
+    # multi-homed on all of them. Use the entra-id one (semantic match). This is a
+    # transient test container, not a compose-defined MCP server, so it isn't
+    # subject to the static F-001 "one MCP server per network" gate.
     subprocess.run(["podman", "network", "connect",
-                     "mcp-security-platform_mcp-egress-net", name], capture_output=True)
+                     "mcp-security-platform_mcp-entra-id-egress-net", name], capture_output=True)
     for _ in range(15):
         r = subprocess.run(["podman", "exec", "mcp-proxy", "curl", "-s", "-o", "/dev/null",
                              "-w", "%{http_code}", f"http://{name}:8000/mcp"],
