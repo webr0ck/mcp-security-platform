@@ -36,7 +36,7 @@ dependencies = [
 
     # Security
     "cryptography==44.0.3",
-    "PyJWT[crypto]==2.10.1",              # JWT / OIDC — replaces python-jose (unmaintained, CVE: algorithm confusion, DoS, non-constant-time HMAC)
+    "PyJWT[crypto]==2.13.0",              # JWT / OIDC — replaces python-jose (unmaintained, CVE: algorithm confusion, DoS, non-constant-time HMAC)
     "idna==3.10",                          # CVE-2026-45409 ReDoS (transitive via httpx/anyio — pinned explicitly)
     "ecdsa==0.19.0",                       # GHSA-wj6h-64fc-37mp Minerva timing attack on P-256 (transitive via cyclonedx-python-lib — pinned explicitly)
 
