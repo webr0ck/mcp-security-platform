@@ -19,7 +19,6 @@ See docs/ARCHITECTURE.md data flow 5.1 for the step-by-step sequence.
 """
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import logging
@@ -1196,13 +1195,18 @@ async def invoke_tool(
         # needed because there is no hostname to re-resolve).
         _transport = httpx.AsyncHTTPTransport()
 
+    _span_cm = telemetry.tracer.start_as_current_span("tool.invoke")
     try:
-        _span_cm = telemetry.tracer.start_as_current_span("tool.invoke")
+        _span = _span_cm.__enter__()
     except Exception:
+        # Fail OPEN here — the one deliberate exception to this repo's fail-closed
+        # invariant. Telemetry is observability, not enforcement; a misbehaving
+        # tracer/exporter must never block a tool call.
         logger.warning("Telemetry span creation failed; continuing without tracing", exc_info=True)
-        _span_cm = contextlib.nullcontext(_NullSpan())
+        _span_cm = None
+        _span = _NullSpan()
 
-    with _span_cm as _span:
+    try:
         _span.set_attribute("principal.type", principal_type or "unknown")
         _span.set_attribute("principal.id", principal_id or "unknown")
         _span.set_attribute("client.id", client_id)
@@ -1299,6 +1303,9 @@ async def invoke_tool(
 
         _span.set_attribute("outcome", audit_outcome)
         _span.set_attribute("latency_ms", latency_ms)
+    finally:
+        if _span_cm is not None:
+            _span_cm.__exit__(None, None, None)
 
     audit_id = await _emit_audit_event(
         tool_id=str(tool_id),

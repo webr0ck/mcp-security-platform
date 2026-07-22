@@ -100,3 +100,68 @@ async def test_invoke_tool_span_tags_principal_type(principal_type, client_id):
     span_attrs = captured_spans[-1]
     assert span_attrs["principal.type"] == principal_type
     assert span_attrs["client.id"] == client_id
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_invoke_tool_fails_open_when_span_entry_raises():
+    """A tracer that raises on __enter__ (not on start_as_current_span() itself)
+    must not break invoke_tool(). This is the exact bug the fail-open guard
+    missed: start_as_current_span() only builds a contextmanager wrapper —
+    real span-creation work happens at __enter__ time, inside the old bare
+    `with` statement, uncaught."""
+    stubs = _make_sys_stubs()
+
+    with patch.dict(sys.modules, stubs):
+        from app.services import invocation as _inv_mod
+        invoke_tool = _inv_mod.invoke_tool
+
+    mock_response = MagicMock()
+    mock_response.json = MagicMock(return_value={"jsonrpc": "2.0", "result": {}, "id": 1})
+    mock_response.status_code = 200
+    mock_response.content = b'{"jsonrpc": "2.0", "result": {}, "id": 1}'
+    mock_response.headers = {"content-type": "application/json"}
+
+    class _BrokenSpanCM:
+        """start_as_current_span() returns this fine; failure happens on entry."""
+
+        def __enter__(self):
+            raise RuntimeError("boom")
+
+        def __exit__(self, *a):
+            return False
+
+    fake_tracer = MagicMock()
+    fake_tracer.start_as_current_span.return_value = _BrokenSpanCM()
+    fake_telemetry = MagicMock()
+    fake_telemetry.tracer = fake_tracer
+
+    with patch.dict(sys.modules, stubs), \
+         patch("app.services.invocation.telemetry", fake_telemetry), \
+         patch("app.core.config.settings.TAINT_FLOOR_ENABLED", False), \
+         patch("app.credential_broker.dispatcher.dispatch_credential_injection",
+               AsyncMock(return_value={})), \
+         patch("app.services.invocation._get_or_create_session",
+               AsyncMock(return_value="mcp-session-cached")), \
+         patch("app.services.invocation.httpx.AsyncClient") as mock_cls:
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value.__aenter__.return_value = mock_http
+
+        result = await invoke_tool(
+            tool_record={"tool_id": "tool-1", "name": "echo", "version": "1.0",
+                         "status": "active", "upstream_url": "http://grafana:3000/mcp"},
+            json_rpc_request={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": "echo", "arguments": {}}},
+            client_id="kc-realm:alice",
+            client_roles=["user"],
+            is_testing=True,
+            request_id="req-2",
+            principal_id="human:kc-realm:alice",
+            principal_type="human",
+        )
+
+    # invoke_tool must complete normally despite the broken tracer — no
+    # RuntimeError("boom") propagates, and the tool call itself still succeeds.
+    assert result["jsonrpc"] == "2.0"
+    assert "error" not in result
