@@ -26,10 +26,11 @@ class Telemetry:
 
         resource = Resource.create({"service.name": _SERVICE_NAME})
         provider = TracerProvider(resource=resource)
-        exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
+        insecure = endpoint.startswith("http://")
+        exporter = OTLPSpanExporter(endpoint=endpoint, insecure=insecure)
         provider.add_span_processor(BatchSpanProcessor(exporter))
         self._provider = provider
-        self._tracer = provider.get_tracer(_SERVICE_NAME)
+        self._tracer = provider.get_tracer(__name__)
 
     def shutdown(self) -> None:
         if self._provider is not None:
