@@ -165,3 +165,91 @@ async def test_invoke_tool_fails_open_when_span_entry_raises():
     # RuntimeError("boom") propagates, and the tool call itself still succeeds.
     assert result["jsonrpc"] == "2.0"
     assert "error" not in result
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_invoke_tool_redacts_captured_params_in_span():
+    """When OTEL_CAPTURE_PARAMS=True, tool arguments land on the span only
+    after passing through mcp_audit_logger.redaction.redact_dict. This is
+    the only thing standing between a sensitive tool argument and the OTLP
+    collector, so prove the raw secret never reaches the span attribute."""
+    # invocation.py does `from mcp_audit_logger.redaction import redact_dict`
+    # as a submodule import; the mock "mcp_audit_logger" package in
+    # _make_sys_stubs() has no __path__, so that submodule import only
+    # resolves if "mcp_audit_logger.redaction" is separately present in
+    # sys.modules. Import the REAL redaction module (it's an installed
+    # package, not stubbed) and pin it under that key so redact_dict runs
+    # for real — that's the whole point of this test.
+    import mcp_audit_logger.redaction as _real_redaction
+
+    stubs = _make_sys_stubs()
+    stubs["mcp_audit_logger.redaction"] = _real_redaction
+
+    with patch.dict(sys.modules, stubs):
+        from app.services import invocation as _inv_mod
+        invoke_tool = _inv_mod.invoke_tool
+
+    mock_response = MagicMock()
+    mock_response.json = MagicMock(return_value={"jsonrpc": "2.0", "result": {}, "id": 1})
+    mock_response.status_code = 200
+    mock_response.content = b'{"jsonrpc": "2.0", "result": {}, "id": 1}'
+    mock_response.headers = {"content-type": "application/json"}
+
+    captured_spans = []
+
+    class _FakeSpan:
+        def __init__(self):
+            self.attributes = {}
+
+        def set_attribute(self, key, value):
+            self.attributes[key] = value
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            captured_spans.append(self.attributes)
+            return False
+
+    fake_tracer = MagicMock()
+    fake_tracer.start_as_current_span.return_value = _FakeSpan()
+    fake_telemetry = MagicMock()
+    fake_telemetry.tracer = fake_tracer
+
+    # Realistic secret shape the redactor recognizes (AWS access key ID
+    # pattern, observability/mcp-audit-logger/mcp_audit_logger/redaction.py).
+    secret_value = "AKIAIOSFODNN7EXAMPLE"
+
+    with patch.dict(sys.modules, stubs), \
+         patch("app.services.invocation.telemetry", fake_telemetry), \
+         patch("app.core.config.settings.OTEL_CAPTURE_PARAMS", True), \
+         patch("app.core.config.settings.TAINT_FLOOR_ENABLED", False), \
+         patch("app.credential_broker.dispatcher.dispatch_credential_injection",
+               AsyncMock(return_value={})), \
+         patch("app.services.invocation._get_or_create_session",
+               AsyncMock(return_value="mcp-session-cached")), \
+         patch("app.services.invocation.httpx.AsyncClient") as mock_cls:
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value.__aenter__.return_value = mock_http
+
+        await invoke_tool(
+            tool_record={"tool_id": "tool-1", "name": "echo", "version": "1.0",
+                         "status": "active", "upstream_url": "http://grafana:3000/mcp"},
+            json_rpc_request={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": "echo",
+                                          "arguments": {"aws_key": secret_value}}},
+            client_id="kc-realm:alice",
+            client_roles=["user"],
+            is_testing=True,
+            request_id="req-3",
+            principal_id="human:kc-realm:alice",
+            principal_type="human",
+        )
+
+    assert captured_spans, "expected at least one span to be recorded"
+    span_attrs = captured_spans[-1]
+    assert "tool.params" in span_attrs
+    assert secret_value not in span_attrs["tool.params"]
+    assert "REDACTED" in span_attrs["tool.params"]
