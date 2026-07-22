@@ -86,6 +86,9 @@ networks:
   proxy-self-service-net:
     driver: bridge
     internal: true
+  proxy-otel-net:
+    driver: bridge
+    internal: true
 
   # CR-14 / WP-B1: pairwise scanner-worker<->db channel. scanner-worker
   # connects as scanner_worker_app (INSERT-only on scan_raw_results,
@@ -322,6 +325,7 @@ services:
       - proxy-db-net        # persistence egress (pairwise)
       - proxy-metrics-net   # CR-17 / WP-D1: Prometheus scrapes GET /metrics here (pairwise, F-001)
       - proxy-self-service-net  # self-service MCP tool routing + design-assist callback (pairwise)
+      - proxy-otel-net      # OTLP trace export egress to otel-collector (pairwise)
     depends_on:
       db:
         condition: service_healthy
@@ -682,6 +686,31 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0
+    container_name: mcp-otel-collector
+    <<: [*restart-always, *security-hardening]
+    command: ["--config=/etc/otel-collector/config.yml"]
+    volumes:
+      - ./observability/otel-collector/config.yml:/etc/otel-collector/config.yml:ro
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    networks:
+      # observability-net kept for parity with the other observability
+      # containers (loki/promtail/grafana) even though no exporter dials out
+      # on it yet — see config.yml's ponytail note (no trace backend deployed).
+      - observability-net
+      - proxy-otel-net      # receives OTLP from proxy (pairwise, F-001)
+    expose:
+      - "4317"
+    logging: *default-logging
+    healthcheck:
+      # otel/opentelemetry-collector-contrib is a distroless image (no shell,
+      # curl, or wget) — same situation as mcp-opa below. Health is verified
+      # externally (podman ps status / the proxy's OTLP export retrying on
+      # connection failure), not via a container-level HTTP probe.
+      test: ["NONE"]
 
   promtail:
     image: grafana/promtail:3.0.0

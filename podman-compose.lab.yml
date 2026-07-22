@@ -1289,6 +1289,11 @@ services:
     ports:
       - "3000:3000"
 
+  # ── OTel Collector: expose OTLP gRPC for local trace debugging ────────────
+  otel-collector:
+    ports:
+      - "4317:4317"
+
   # ── Seed script — runs once, populates Vault, Grafana, NetBox, Gitea ─────────
   lab-seeder:
     build: ./lab/seeder

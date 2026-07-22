@@ -1,0 +1,29 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+
+exporters:
+  # ponytail: no trace backend (e.g. Tempo) is deployed in this stack yet.
+  # Loki is a log store and its exporter does not implement a traces
+  # consumer, so "otlp -> loki" (as sketched in the task brief) fails to
+  # start. debug logs received spans to stdout so the pipeline is real and
+  # verifiable today; swap in a proper trace-storage exporter when one exists.
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
