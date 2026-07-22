@@ -616,6 +616,25 @@ an "overridden" badge. Mutations flow through the HMAC-signed admin audit chain.
 - Events flow stdout → Promtail → Loki → Grafana; Alertmanager for alerting; MinIO for archival
   (Object-Lock **GOVERNANCE** retention — note: not tamper-proof WORM, see ROADMAP).
 - A daily `compliance-checker` samples the audit trail for integrity.
+- **2026-07-21: OTel trace stream (tool-invocation telemetry)**. Every tool
+  invocation on both the REST (`/api/v1/tools/{id}/invoke`) and `/mcp` paths —
+  the single choke point in `proxy/app/services/invocation.py` — is wrapped in
+  an OTel span named `tool.invoke`, tagged with `principal.type`,
+  `principal.id`, `client.id`, `tool.name`, `tool.id`, `request.id`, `outcome`,
+  and `latency_ms`. The tracer is a no-op unless `OTEL_EXPORTER_OTLP_ENDPOINT`
+  is set (fail-open by design — span creation/export failures are logged and
+  swallowed, never block a tool call), and it is set by default in the lab
+  tier (`.env.lab.example`), exporting via OTLP/gRPC to a local
+  `otel-collector` container on the dedicated pairwise `proxy-otel-net`
+  (F-001: no other service shares that network). The collector currently logs
+  received spans to its own stdout via the `debug` exporter — no trace-storage
+  backend (e.g. Tempo) is deployed yet, and Loki's exporter does not implement
+  OTLP trace ingestion. This trace stream is **additive** to, and does not
+  replace, the stdout-JSON audit log above, which remains the hash-verified
+  (HMAC-signed in production) audit trail of record; traces are for
+  request-scoped latency/outcome debugging, not compliance evidence. See
+  `docs/superpowers/specs/2026-07-21-otel-tool-invocation-telemetry-design.md`
+  for the full design.
 - **2026-07 (CR-17/WP-D1): `/metrics`** (Prometheus format, `prometheus_client`) is exposed on the
   proxy, `scanner-worker`, and `build-worker` — authz allow/deny decisions, OPA/Vault reachability,
   credential-broker failures, audit-emit failures, scan-queue depth by status, dead-letter count,
