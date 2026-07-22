@@ -6,7 +6,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
-from app.core.config import settings
+from app.core.config import get_settings
 
 _SERVICE_NAME = "mcp-security-proxy"
 
@@ -19,7 +19,10 @@ class Telemetry:
         self._provider: TracerProvider | None = None
 
     def initialize(self) -> None:
-        endpoint = settings.OTEL_EXPORTER_OTLP_ENDPOINT
+        # get_settings() is lru_cache-backed and re-fetched here (not bound at
+        # import time) because tests call get_settings.cache_clear(), which
+        # would otherwise leave a module-level `settings` reference stale.
+        endpoint = get_settings().OTEL_EXPORTER_OTLP_ENDPOINT
         if not endpoint:
             self._tracer = trace.NoOpTracer()
             return
