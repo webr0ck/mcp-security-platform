@@ -299,6 +299,17 @@ class Settings(BaseSettings):
         return f"http://{self.LOKI_HOST}:{self.LOKI_PORT}"
 
     # =========================================================================
+    # OpenTelemetry tracing (Optional)
+    # =========================================================================
+    # Empty = tracing disabled (no-op tracer provider). Set to the OTLP
+    # collector endpoint (e.g. "http://otel-collector:4317") to enable export.
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = ""
+    # When True, tool call parameters are captured as span attributes
+    # (redacted via mcp_audit_logger.redaction.redact_dict first — INV-002
+    # parity). Default False: span attribute capture is metadata-only.
+    OTEL_CAPTURE_PARAMS: bool = False
+
+    # =========================================================================
     # Jira Integration (Optional)
     # =========================================================================
     JIRA_ENABLED: bool = False
