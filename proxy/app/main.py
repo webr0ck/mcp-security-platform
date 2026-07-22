@@ -29,6 +29,7 @@ from app.core.database import check_database_health
 from app.core.log_filter import RedactingFilter
 from app.core.hardening import apply_process_hardening
 from app.core.redis_client import redis_pool
+from app.core.telemetry import telemetry
 from app.core.asyncpg_pool import asyncpg_pool
 from app.credential_broker.factory import build_broker
 
@@ -72,6 +73,10 @@ async def lifespan(app: FastAPI):
     # Step 0: Process hardening (mlock + no-core-dump + log-level enforcement)
     apply_process_hardening(settings.ENVIRONMENT)
     logger.info("Process hardening applied")
+
+    # Step 0.5: Initialize telemetry before any instrumented code runs
+    telemetry.initialize()
+    logger.info("Telemetry initialized", extra={"otel_enabled": bool(settings.OTEL_EXPORTER_OTLP_ENDPOINT)})
 
     if settings.OIDC_ENABLED and not settings.OIDC_AUDIENCE:
         logger.warning(
@@ -241,6 +246,11 @@ async def lifespan(app: FastAPI):
         logger.info("Credential broker master secret zeroed")
 
     logger.info("MCP Security Proxy shutting down")
+
+    # Shutdown — telemetry before pool closure
+    telemetry.shutdown()
+    logger.info("Telemetry shut down")
+
     await redis_pool.close()
     logger.info("Redis pool closed")
 
