@@ -19,6 +19,7 @@ See docs/ARCHITECTURE.md data flow 5.1 for the step-by-step sequence.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -53,6 +54,13 @@ _MAX_UPSTREAM_BODY_BYTES = 4 * 1024 * 1024  # 4 MiB
 
 
 _PROFILE_CACHE_TTL_SECONDS = 300  # 5 minutes — mirrors role cache TTL in auth.py
+
+
+class _NullSpan:
+    """Fallback used only if span creation itself raises — set_attribute becomes a no-op."""
+
+    def set_attribute(self, key, value):
+        pass
 
 
 async def _lookup_profile_with_cache(
@@ -1188,7 +1196,13 @@ async def invoke_tool(
         # needed because there is no hostname to re-resolve).
         _transport = httpx.AsyncHTTPTransport()
 
-    with telemetry.tracer.start_as_current_span("tool.invoke") as _span:
+    try:
+        _span_cm = telemetry.tracer.start_as_current_span("tool.invoke")
+    except Exception:
+        logger.warning("Telemetry span creation failed; continuing without tracing", exc_info=True)
+        _span_cm = contextlib.nullcontext(_NullSpan())
+
+    with _span_cm as _span:
         _span.set_attribute("principal.type", principal_type or "unknown")
         _span.set_attribute("principal.id", principal_id or "unknown")
         _span.set_attribute("client.id", client_id)
