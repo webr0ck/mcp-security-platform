@@ -92,6 +92,25 @@ def _load_gw_secret() -> str:
 _GW_SECRET = _load_gw_secret()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _init_telemetry_for_tests():
+    """
+    invoke_tool() (proxy/app/services/invocation.py) wraps the upstream-call
+    region in an OTel span via the module-level `telemetry` singleton. In a
+    real process this is initialized by app.main's lifespan (telemetry.initialize()
+    before any instrumented code runs) — but many unit/security tests call
+    invoke_tool() directly, bypassing the lifespan entirely. Without this,
+    telemetry.tracer raises RuntimeError("Telemetry not initialized").
+
+    OTEL_EXPORTER_OTLP_ENDPOINT is unset in the test environment (see
+    _SETTINGS_DEFAULTS above), so this just wires up a NoOpTracer — no real
+    exporter, no network calls, no cross-test leakage.
+    """
+    from app.core.telemetry import telemetry
+
+    telemetry.initialize()
+
+
 @pytest.fixture(autouse=True)
 def _trust_proxy_for_tests(request):
     """

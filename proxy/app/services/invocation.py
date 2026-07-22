@@ -31,6 +31,7 @@ import httpx
 
 from app.credential_broker.broker import CredentialBroker
 from app.credential_broker.registry import Registry
+from app.core.telemetry import telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -1187,85 +1188,103 @@ async def invoke_tool(
         # needed because there is no hostname to re-resolve).
         _transport = httpx.AsyncHTTPTransport()
 
-    try:
-        # Attempt to reuse a cached MCP-Session-Id before opening an HTTP client.
-        # On cache hit we skip the 2-request initialize handshake entirely (Bug 1 fix).
-        session_id = await _get_or_create_session(upstream_url, client_id, handshake_headers)
+    with telemetry.tracer.start_as_current_span("tool.invoke") as _span:
+        _span.set_attribute("principal.type", principal_type or "unknown")
+        _span.set_attribute("principal.id", principal_id or "unknown")
+        _span.set_attribute("client.id", client_id)
+        _span.set_attribute("tool.name", tool_name)
+        _span.set_attribute("tool.id", str(tool_id) if tool_id is not None else "")
+        _span.set_attribute("request.id", request_id)
 
-        async with httpx.AsyncClient(transport=_transport, timeout=30.0) as client:
-            # If no cached session was available, run the full initialize handshake.
-            if session_id is None:
-                try:
-                    session_id = await _mcp_initialize(client, upstream_url, handshake_headers)
-                    if session_id:
-                        await _store_session(upstream_url, client_id, session_id)
-                except Exception as exc:
-                    init_failed = True
-                    upstream_error = exc
-                    logger.error("MCP initialize handshake failed: %s", exc)
-                    session_id = None
+        from app.core.config import settings as _otel_settings
+        if _otel_settings.OTEL_CAPTURE_PARAMS:
+            from mcp_audit_logger.redaction import redact_dict
+            _params = json_rpc_request.get("params", {}).get("arguments", {})
+            for _k, _v in redact_dict({"tool.params": _params}).items():
+                _span.set_attribute(_k, str(_v))
 
-            if not init_failed:
-                forward_headers = dict(forward_base_headers)
-                if session_id:
-                    forward_headers["Mcp-Session-Id"] = session_id
+        try:
+            # Attempt to reuse a cached MCP-Session-Id before opening an HTTP client.
+            # On cache hit we skip the 2-request initialize handshake entirely (Bug 1 fix).
+            session_id = await _get_or_create_session(upstream_url, client_id, handshake_headers)
 
-                resp = await client.post(upstream_url, json=json_rpc_request, headers=forward_headers)
-
-                # Case-3 (3b) relay: a protected-resource upstream answers an
-                # un(der)-authenticated call with 401 + WWW-Authenticate. Do NOT
-                # swallow it as a JSON parse error — capture the challenge so the
-                # client can perform the downstream (e.g. Entra) OAuth itself.
-                if resp.status_code == 401:
-                    upstream_challenge = {
-                        "www_authenticate": resp.headers.get("www-authenticate", ""),
-                        "status": 401,
-                    }
+            async with httpx.AsyncClient(transport=_transport, timeout=30.0) as client:
+                # If no cached session was available, run the full initialize handshake.
+                if session_id is None:
                     try:
-                        upstream_challenge["body"] = json.loads(resp.content[:_MAX_UPSTREAM_BODY_BYTES])
-                    except Exception:
-                        upstream_challenge["body"] = None
-                else:
-                    # Defense against unbounded streaming from a malicious upstream.
-                    body = resp.content[:_MAX_UPSTREAM_BODY_BYTES]
-                    content_type = resp.headers.get("content-type", "")
-                    if "text/event-stream" in content_type:
-                        for line in body.decode("utf-8", errors="replace").splitlines():
-                            if line.startswith("data:"):
-                                upstream_response = json.loads(line[5:].strip())
-                                break
+                        session_id = await _mcp_initialize(client, upstream_url, handshake_headers)
+                        if session_id:
+                            await _store_session(upstream_url, client_id, session_id)
+                    except Exception as exc:
+                        init_failed = True
+                        upstream_error = exc
+                        logger.error("MCP initialize handshake failed: %s", exc)
+                        session_id = None
+
+                if not init_failed:
+                    forward_headers = dict(forward_base_headers)
+                    if session_id:
+                        forward_headers["Mcp-Session-Id"] = session_id
+
+                    resp = await client.post(upstream_url, json=json_rpc_request, headers=forward_headers)
+
+                    # Case-3 (3b) relay: a protected-resource upstream answers an
+                    # un(der)-authenticated call with 401 + WWW-Authenticate. Do NOT
+                    # swallow it as a JSON parse error — capture the challenge so the
+                    # client can perform the downstream (e.g. Entra) OAuth itself.
+                    if resp.status_code == 401:
+                        upstream_challenge = {
+                            "www_authenticate": resp.headers.get("www-authenticate", ""),
+                            "status": 401,
+                        }
+                        try:
+                            upstream_challenge["body"] = json.loads(resp.content[:_MAX_UPSTREAM_BODY_BYTES])
+                        except Exception:
+                            upstream_challenge["body"] = None
                     else:
-                        upstream_response = json.loads(body)
-    except Exception as exc:
-        upstream_error = exc
-        logger.error("Upstream MCP server error: %s", exc)
-    finally:
-        if credential is not None:
-            credential.zero()
+                        # Defense against unbounded streaming from a malicious upstream.
+                        body = resp.content[:_MAX_UPSTREAM_BODY_BYTES]
+                        content_type = resp.headers.get("content-type", "")
+                        if "text/event-stream" in content_type:
+                            for line in body.decode("utf-8", errors="replace").splitlines():
+                                if line.startswith("data:"):
+                                    upstream_response = json.loads(line[5:].strip())
+                                    break
+                        else:
+                            upstream_response = json.loads(body)
+        except Exception as exc:
+            upstream_error = exc
+            logger.error("Upstream MCP server error: %s", exc)
+        finally:
+            if credential is not None:
+                credential.zero()
 
-    end_ts = datetime.now(timezone.utc)
-    latency_ms = int((end_ts - start_ts).total_seconds() * 1000)
+        end_ts = datetime.now(timezone.utc)
+        latency_ms = int((end_ts - start_ts).total_seconds() * 1000)
 
-    # -------------------------------------------------------------------------
-    # Step 5: Emit audit event synchronously (INV-001).
-    # If the upstream call (or init handshake) failed, the policy decision
-    # was "allow" but the tool did not actually execute. Record outcome="error"
-    # with a reason so audit reviewers can distinguish this from a genuine
-    # successful invocation.
-    # -------------------------------------------------------------------------
-    if upstream_challenge is not None:
-        # Auth challenge from a foreign-IDP upstream — not a successful execution,
-        # not an internal error. Audit as a deny with a clear reason.
-        audit_outcome = "deny"
-        audit_reasons = ["downstream_auth_required"]
-    elif upstream_error is not None:
-        audit_outcome = "error"
-        audit_reasons = [
-            "upstream_init_failed" if init_failed else "upstream_invocation_failed",
-        ]
-    else:
-        audit_outcome = "allow"
-        audit_reasons = []
+        # -------------------------------------------------------------------------
+        # Step 5: Emit audit event synchronously (INV-001).
+        # If the upstream call (or init handshake) failed, the policy decision
+        # was "allow" but the tool did not actually execute. Record outcome="error"
+        # with a reason so audit reviewers can distinguish this from a genuine
+        # successful invocation.
+        # -------------------------------------------------------------------------
+        if upstream_challenge is not None:
+            # Auth challenge from a foreign-IDP upstream — not a successful execution,
+            # not an internal error. Audit as a deny with a clear reason.
+            audit_outcome = "deny"
+            audit_reasons = ["downstream_auth_required"]
+        elif upstream_error is not None:
+            audit_outcome = "error"
+            audit_reasons = [
+                "upstream_init_failed" if init_failed else "upstream_invocation_failed",
+            ]
+        else:
+            audit_outcome = "allow"
+            audit_reasons = []
+
+        _span.set_attribute("outcome", audit_outcome)
+        _span.set_attribute("latency_ms", latency_ms)
 
     audit_id = await _emit_audit_event(
         tool_id=str(tool_id),
