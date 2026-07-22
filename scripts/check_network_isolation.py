@@ -39,6 +39,7 @@ ALLOWED_PROXY_PEERS = {
     "prometheus",                             # F-001: scrapes proxy:8000 GET /metrics only, via pairwise proxy-metrics-net
                                                # (multi-homed onto scanner-worker-metrics-net too, but that net is NOT
                                                # shared with proxy — see docker-compose.yml proxy-metrics-net comment)
+    "otel-collector",                         # OTLP trace export target, via pairwise proxy-otel-net (task 5)
     # IdP services legitimately on gateway-net in multi-tier deploys
     "keycloak", "keycloak-seeder",
 }
@@ -51,6 +52,7 @@ PAIRWISE = {
     "self-service": "proxy-self-service-net",
     "lab-ops-agent": "proxy-ops-agent-net",
     "prometheus": "proxy-metrics-net",
+    "otel-collector": "proxy-otel-net",
 }
 
 # ── One-shot init / seeder containers excluded from persistent peer check ─────
