@@ -1,3 +1,7 @@
+# ponytail: vendored copy of proxy/app/services/trust_verifier.py — that file is the
+# source of truth. Kept in sync by hand (both are small + RFC-pinned). Upgrade path to
+# kill drift: make the proxy import this wheel instead of holding its own copy. The
+# tests/test_roundtrip.py self-check fails loudly if this diverges from the format.
 """Independent trust-envelope verifier (PRD-0001 M4 / RFC-0001 §6.3).
 
 A process that did NOT produce the envelope verifies it (D4/D5/D6).
@@ -26,7 +30,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from app.services.jcs import jcs_signed_input, jcs_tool_result
+from mcp_trust_verifier.jcs import jcs_signed_input, jcs_tool_result
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,20 @@ class TrustVerifier:
         self._sub_ca_cert = sub_ca_cert
         self._max_age = max_envelope_age_seconds
         self._skew = clock_skew_seconds
+
+    @classmethod
+    def from_pem(cls, sub_ca_pem: bytes | str, **kwargs) -> "TrustVerifier":
+        """Construct a verifier from the pinned sub-CA cert (PEM bytes/str or a path).
+
+        The consumer's single input for cross-boundary verification: the anchor it
+        pins. Everything else (freshness window, skew) has RFC defaults.
+        """
+        if isinstance(sub_ca_pem, str) and "-----BEGIN" not in sub_ca_pem:
+            from pathlib import Path
+            sub_ca_pem = Path(sub_ca_pem).read_bytes()
+        if isinstance(sub_ca_pem, str):
+            sub_ca_pem = sub_ca_pem.encode()
+        return cls(x509.load_pem_x509_certificate(sub_ca_pem), **kwargs)
 
     def verify(
         self,

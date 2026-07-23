@@ -137,6 +137,16 @@ class TrustLabeler:
                 "nonce": nonce,
                 "signed_at": signed_at,
             },
+            # A6: unsigned call-context hints. A downstream consumer that reaches the
+            # gateway does NOT independently know the upstream server_id, which is signed
+            # but not otherwise carried — without this it cannot reconstruct the signed
+            # input. Safe because verified transitively: the signature covers these exact
+            # values, so a tampered hint just fails signature verification.
+            "call_context": {
+                "server_id": server_id,
+                "result_id": result_id,
+                "tool_name": tool_name,
+            },
             "sig": {
                 "alg": "ES256",
                 "x5c": x5c,
