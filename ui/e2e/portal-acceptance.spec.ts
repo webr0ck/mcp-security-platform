@@ -119,8 +119,10 @@ test.describe('AC-02 Admin navigation (alice)', () => {
     const ctx = await authedCtx(browser, 'alice')
     const page = await ctx.newPage()
     await page.goto('/portal')
-    for (const tab of ['MCP Servers', 'Submissions', 'Credentials', 'Dashboard', 'Detections']) {
-      await expect(page.getByRole('button', { name: tab })).toBeVisible()
+    // Nav was regrouped into 5 top-level sections (2026-07-07); see
+    // proxy/app/routers/portal.py's _ADMIN_GROUPS for the canonical list.
+    for (const group of ['Security', 'Servers', 'Access', 'Settings']) {
+      await expect(page.getByRole('button', { name: group, exact: true })).toBeVisible()
     }
     await ctx.close()
   })
@@ -188,12 +190,12 @@ test.describe('AC-03 Agent portal (bob)', () => {
     const page = await ctx.newPage()
     await page.goto('/portal')
     await page.waitForLoadState('networkidle')
+    // Self-service page is a 4-tab persona view (Home/Catalog/Submit/Profile,
+    // 2026-07-07 redesign); the CTA lives inside the Submit tab's panel,
+    // display:none until that tab is activated (ssShowTab('submit')).
+    await page.getByRole('button', { name: 'Submit', exact: true }).click()
     const cta = page.locator('a[href*="/portal/submit"]').first()
-    if (await cta.count() > 0) {
-      await cta.click()
-    } else {
-      await page.getByText('Submit MCP Server').first().click()
-    }
+    await cta.click()
     await expect(page).toHaveURL(/\/portal\/submit/, { timeout: 8_000 })
     await ctx.close()
   })
@@ -421,9 +423,13 @@ test.describe('AC-07 Role isolation', () => {
 // ── AC-08: GitHub URL security ────────────────────────────────────────────────
 
 test.describe('AC-08 GitHub URL validation', () => {
+  // Draft-creation only runs a cheap structural guard (https, no embedded
+  // creds, no control chars) — see proxy/app/routers/submission.py's
+  // _validate_github_url / _SAFE_REPO_URL_RE docstring. The provider-host
+  // allowlist + SSRF check is intentionally async (submission scanner), so a
+  // structurally-valid non-GitHub host like evil.com is NOT rejected here.
   const REJECT_URLS = [
     'file:///etc/passwd',
-    'https://evil.com/repo',
     'http://github.com/user/repo',
     'https://github.com/-bad/repo',
     'https://github.com/user/repo; rm -rf /',
@@ -448,6 +454,16 @@ test.describe('AC-08 GitHub URL validation', () => {
     const ctx = await authedCtx(browser, 'alice')
     const resp = await ctx.request.post('/api/v1/submissions', {
       data: { name: `sec-ok-${SUFFIX}`, description: 'valid url', github_repo_url: 'https://github.com/myorg/my-server' },
+    })
+    expect(resp.status()).toBe(201)
+    await ctx.close()
+  })
+
+  test('structurally-valid non-GitHub host (e.g. evil.com) passes draft creation — host allowlist enforced async', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+    const resp = await ctx.request.post('/api/v1/submissions', {
+      data: { name: `sec-host-${SUFFIX}`, description: 'non-github host', github_repo_url: 'https://evil.com/repo' },
     })
     expect(resp.status()).toBe(201)
     await ctx.close()

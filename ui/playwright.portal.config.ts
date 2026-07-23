@@ -12,7 +12,12 @@ import { defineConfig, devices } from '@playwright/test'
 //   bob    / e25JOYuj7xTqQEZP58EIXOlXf54e  (agent role)
 //   carol  / labpassword                    (auditor role)
 
-const BASE = process.env.PORTAL_BASE_URL ?? 'https://127.0.0.1:8443'
+// Must match the Keycloak client's registered redirect_uri / this lab's PUBLIC_URL
+// (see lab/keycloak/realm-mcp.json) — login cookies are scoped to that host, and
+// while page.goto() navigations get redirected there transparently, ctx.request()
+// API calls do not, so a mismatched default here silently 401s every API-based
+// acceptance test without ever exercising a redirect to fix it up.
+const BASE = process.env.PORTAL_BASE_URL ?? 'https://100.119.138.35:8443'
 
 export default defineConfig({
   testDir: './e2e',
