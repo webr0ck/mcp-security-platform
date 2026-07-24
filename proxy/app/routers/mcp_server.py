@@ -982,6 +982,9 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
     )
     # M4 W4.2: passive inline observer — verify the envelope we just built.
     # Never blocks or raises; advisory only (D4/D5/D6 demo scenarios).
+    # A2: the ENFORCE deny path below is GATED by TRUST_OBSERVER_ENABLED — enforce only
+    # fires when the observer is also on. A deployment that wants denial must enable both
+    # TRUST_OBSERVER_ENABLED and TRUST_ENVELOPE_ENFORCE (and TRUST_ENVELOPE_ENABLED to sign).
     from app.core.config import get_settings as _gs
     if _gs().TRUST_OBSERVER_ENABLED:
         from app.services.trust_observer import observe_result as _observe
@@ -993,12 +996,13 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             server_id=_server_id,
             result_id=request_id,
         )
-        # TRUST_ENVELOPE_ENFORCE (opt-in, default off): promote a subset of
-        # fail-closed verifier reasons from advisory-log to a real deny. Scoped
-        # to the reasons that indicate the envelope itself is untrustworthy
-        # (forged/absent/broken chain), not transient/config reasons.
+        # TRUST_ENVELOPE_ENFORCE (opt-in, default off): promote fail-closed verifier
+        # reasons from advisory-log to a real deny. Covers envelope-level untrustworthiness
+        # (forged/absent/broken chain) AND content-level tamper (content_hash_mismatch) —
+        # a modified body in flight is at least as serious as a bad chain, so it must deny
+        # too (A1 fix: previously omitted, so a detected tamper was logged then returned).
         if _gs().TRUST_ENVELOPE_ENFORCE and not _verdict.accepted and (_verdict.reason or "").startswith(
-            ("signature_invalid", "no_envelope", "chain_validation_failed")
+            ("signature_invalid", "no_envelope", "chain_validation_failed", "content_hash_mismatch")
         ):
             return _err(
                 req_id, -32603,
