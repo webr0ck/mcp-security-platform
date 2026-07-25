@@ -12,7 +12,7 @@
 | 1 | **F6/F7/F1 — fail-open, escalation, key mismatch** | ✅ **done** | live repro flips to denied; 46/1/0; 3 mutations caught |
 | 2 | F2/F3/F4 — self-lockout guard, deny-message remediation | ✅ **done** | 400 on self-lockout; remediation live; 3 mutations caught |
 | 3 | F8 — single `list_authorized_tools` across all 4 discovery surfaces | ⏳ pending | cross-surface contract tests |
-| 4 | F5 — test state hygiene (F3 folded into Stage 2) | ⏳ pending | suites reproducible from clean state |
+| 4 | F5 — test state hygiene (F3 folded into Stage 2) | ✅ **done** | acceptance 36/0/0 twice; functional 46/1 twice |
 | 5 | A5/A7 — unify deny mapping, health honesty | ⏳ pending | unit + functional |
 | 6 | A1/A3/A2 — delete dead UI, extract portal assets | ⏳ pending | portal acceptance green |
 | 7 | B1/B2 — toast/confirm, accessibility | ⏳ pending | portal acceptance + a11y pass |
@@ -328,3 +328,58 @@ exactly** (+15 tests) · portal acceptance 34 passed, 1 pre-existing flaky.
 
 Mutations caught: (a) guard ignoring `changed_by` (would block legitimate admin action),
 (b) `get_profile` dropped from the recovery set, (c) remediation returning generic filler.
+
+---
+
+## Stage 4 — CLOSED 2026-07-25 (F5, test-state hygiene)
+
+Ran ahead of Stage 3 because it is independent of the discovery-surface analysis.
+
+### Two vacuous tests found — the acceptance suite was reporting green over a hole
+
+**AC-06 `POST /submit` had never passed.** It returns `422 INCOMPLETE_SUBMISSION —
+requested_upstream_url` because drafts default to `is_self_hosted=true` and the test never set
+a URL. That is CORRECT product behaviour; the test simply never satisfied it. On retry, the
+module-level `let serverId = ''` re-initialised, so `test.skip(!serverId)` skipped the retry —
+and Playwright reports fail-then-skip as **"flaky"**, not "failed". The suite showed
+`34 passed, 1 flaky` for however long this has been true.
+
+Fixed by supplying `requested_upstream_url` in the PATCH step, and by marking the block
+`test.describe.serial` so a retry re-runs the chain from the start instead of skipping into
+a false pass.
+
+**AC-02 `all admin nav tabs are present` only passed because AC-06 was broken.** The Servers
+nav button renders an awaiting-review count badge *inside itself*
+(`portal.py` → `adm-nav-badge`), so its accessible name becomes `"Servers1"` whenever a
+submission is pending. The test asserted `exact: true`, which held only while the pending
+count was always 0 — i.e. only while AC-06's `/submit` kept failing. Fixing the first test
+broke the second. Now matched with an anchored regex `^<group>\s*\d*$`.
+
+That coupling is F5's thesis in miniature: the suites shared mutable lab state, so one test's
+brokenness was another test's precondition.
+
+### Functional suite now establishes its own preconditions
+`_alice_profile_preconditions` (session, autouse) self-service-enables the tools the suite
+invokes as alice. The 2026-07-19 `disable_mcp` sweep left 37 rows that made 7 unrelated tests
+fail for six days with a policy deny that read like a broken gate chain. Uses alice's own
+token — no admin rights, no direct DB write — and only ever adds access the suite already
+assumes, so it cannot mask a genuine deny bug in tools it does not touch.
+
+**Proven by re-poisoning:** set `ping`/`search-kb` to `enabled=false` directly in the DB,
+flushed the profile cache, ran the suite → 46 passed, and the rows came back as
+`ping=true (by alice@corp)`. The fixture repaired state; the suite did not merely get lucky.
+
+### Diagnostics
+`_assert_invoke_ok` said *"gate-chain failure leaked through HTTP 200"* for every failure mode,
+including a correct policy deny — which reads as a security breach and sends you hunting a bug
+that is not there (it cost one diagnostic pass during this engagement). Policy denials are now
+reported distinctly as a PRECONDITION FAILURE, with the SQL to check the likely cause.
+
+`POST /submit` asserted a bare `expect(resp.ok())`, yielding "expected true, received false"
+with no server response — which is why this sat unexplained. It now prints status + body.
+
+### Verification (reproducibility is the point)
+| Suite | Before | After |
+|---|---|---|
+| portal acceptance | 34 passed, 1 flaky, 1 skipped | **36 passed, 0 flaky, 0 skipped** — twice back to back |
+| functional | 46 passed, 1 skipped | **46 passed, 1 skipped** — twice back to back |

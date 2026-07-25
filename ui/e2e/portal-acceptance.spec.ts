@@ -122,7 +122,14 @@ test.describe('AC-02 Admin navigation (alice)', () => {
     // Nav was regrouped into 5 top-level sections (2026-07-07); see
     // proxy/app/routers/portal.py's _ADMIN_GROUPS for the canonical list.
     for (const group of ['Security', 'Servers', 'Access', 'Settings']) {
-      await expect(page.getByRole('button', { name: group, exact: true })).toBeVisible()
+      // Anchored regex, NOT exact: the Servers button renders an awaiting-review
+      // count badge inside itself (portal.py `adm-nav-badge`), so its accessible name
+      // becomes "Servers1" whenever a submission is pending. `exact: true` passed only
+      // because AC-06's /submit step never actually succeeded and the count was always
+      // zero — fixing that test broke this one.
+      await expect(
+        page.getByRole('button', { name: new RegExp(`^${group}\\s*\\d*$`) })
+      ).toBeVisible()
     }
     await ctx.close()
   })
@@ -318,7 +325,12 @@ test.describe('AC-05 Design-assist API', () => {
 
 // ── AC-06: Submission lifecycle ───────────────────────────────────────────────
 
-test.describe('AC-06 Submission lifecycle', () => {
+// .serial: these six steps are one chain sharing `serverId`. Declared explicitly so a
+// retry re-runs the chain FROM THE START. Previously a retry re-initialised the
+// module-level serverId to '', so `test.skip(!serverId)` skipped the retry — a failed
+// step then reported as "flaky" instead of "failed", and the /submit step silently
+// never passed at all while the suite showed green.
+test.describe.serial('AC-06 Submission lifecycle', () => {
   const serverName = `at-${SUFFIX}`
   let serverId = ''
 
@@ -339,7 +351,15 @@ test.describe('AC-06 Submission lifecycle', () => {
     test.skip(!aliceStorage || !serverId, 'pre-conditions not met')
     const ctx = await authedCtx(browser, 'alice')
     const resp = await ctx.request.patch(`/api/v1/submissions/${serverId}`, {
-      data: { injection_mode: 'kc_token_exchange', data_categories: ['pii'], has_write_ops: false },
+      data: {
+        injection_mode: 'kc_token_exchange',
+        data_categories: ['pii'],
+        has_write_ops: false,
+        // Required before /submit will accept a self-hosted draft (drafts default to
+        // is_self_hosted=true). Without it /submit returns 422 INCOMPLETE_SUBMISSION —
+        // which is CORRECT product behaviour that this suite was not satisfying.
+        requested_upstream_url: 'http://lab-mcp-echo:9000/mcp',
+      },
     })
     expect(resp.ok()).toBeTruthy()
     expect((await resp.json()).updated).toBe(true)
@@ -371,8 +391,12 @@ test.describe('AC-06 Submission lifecycle', () => {
     test.skip(!aliceStorage || !serverId, 'pre-conditions not met')
     const ctx = await authedCtx(browser, 'alice')
     const resp = await ctx.request.post(`/api/v1/submissions/${serverId}/submit`)
-    expect(resp.ok()).toBeTruthy()
-    expect((await resp.json()).submission_status).toBe('awaiting_review')
+    // Report WHAT the server said on failure. Bare `expect(resp.ok())` yields
+    // "expected true, received false", which says nothing about why and makes an
+    // intermittent failure undiagnosable after the fact.
+    const rawBody = await resp.text()
+    expect(resp.ok(), `POST /submit -> HTTP ${resp.status()}: ${rawBody}`).toBeTruthy()
+    expect(JSON.parse(rawBody).submission_status).toBe('awaiting_review')
     await ctx.close()
   })
 

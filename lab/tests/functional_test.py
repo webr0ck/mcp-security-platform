@@ -167,10 +167,37 @@ def _assert_invoke_ok(result: dict, tool_name: str) -> dict:
     assert "error" not in body, f"{tool_name}: JSON-RPC error in response — {body['error']}"
     inner = body.get("result", {})
     text_blob = json.dumps(inner)
+
+    # Distinguish "a gate is broken" from "this caller was legitimately denied".
+    # These read identically in the payload (both are a failure string inside a 200),
+    # but they mean opposite things: the first is a product bug, the second means the
+    # TEST'S PRECONDITION is wrong — usually leftover lab state from an earlier run.
+    # The old message said "gate-chain failure leaked through HTTP 200" for both, which
+    # reads as a security breach and sends you hunting a bug that isn't there.
+    _POLICY_DENY_MARKERS = (
+        "mcp_disabled_for_profile",
+        "function_not_allowed_for_profile",
+        "not entitled",
+        "access denied by policy",
+    )
+    lowered = text_blob.lower()
+    for marker in _POLICY_DENY_MARKERS:
+        if marker in lowered:
+            raise AssertionError(
+                f"{tool_name}: PRECONDITION FAILURE, not a gate bug — the caller was "
+                f"correctly denied by policy ({marker!r}). The gate chain worked; this "
+                f"caller is simply not permitted to call {tool_name!r} right now.\n"
+                f"Most likely cause: leftover profile state in the lab from an earlier "
+                f"run (e.g. a disable_mcp sweep). Check:\n"
+                f"  SELECT mcp_name, enabled FROM mcp_profiles WHERE profile_id='alice@corp';\n"
+                f"Full result: {text_blob[:300]}"
+            )
+
     for sentinel in _INVOKE_FAILURE_SENTINELS:
-        assert sentinel.lower() not in text_blob.lower(), (
-            f"{tool_name}: gate-chain failure leaked through HTTP 200 — "
-            f"matched sentinel {sentinel!r} in result: {text_blob[:300]}"
+        assert sentinel.lower() not in lowered, (
+            f"{tool_name}: gate-chain failure inside an HTTP 200 — matched sentinel "
+            f"{sentinel!r}. (JSON-RPC reports failures in a 200 body, so status alone "
+            f"proves nothing.) Result: {text_blob[:300]}"
         )
     return inner
 
@@ -200,6 +227,42 @@ def _find_tool_id(token: str, name: str) -> str | None:
 @pytest.fixture(scope="session")
 def alice_token():
     return _get_user_token("alice", ALICE_PASSWORD)
+
+
+# Tools this suite invokes as alice. A leftover profile row disabling any of them
+# makes unrelated tests fail with a policy deny that looks like a gate bug.
+_ALICE_REQUIRED_TOOLS = ("ping", "search-kb", "echo-basic", "notes-store")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _alice_profile_preconditions(alice_token):
+    """Establish this suite's own profile preconditions instead of inheriting them.
+
+    A `disable_mcp` sweep on 2026-07-19 left 37 rows disabling nearly everything for
+    alice; every run for the next six days failed 7 tests with a policy deny that read
+    like a broken gate chain. Tests that assert "alice can call X" must ensure alice
+    can call X, not hope the lab was left tidy.
+
+    Self-service enable via alice's own token — no admin rights, no direct DB write,
+    and it only ever ADDS access this suite already assumes, so it cannot mask a
+    genuine deny bug in the tools it does not touch.
+    """
+    restored = []
+    for tool in _ALICE_REQUIRED_TOOLS:
+        try:
+            r = httpx.post(
+                f"{PROXY_URL}/api/v1/profiles/me/mcps/{tool}/enable",
+                headers=_auth_headers(alice_token), timeout=10,
+            )
+            if r.status_code == 200:
+                restored.append(tool)
+        except Exception:
+            # Best-effort: a tool not registered in this lab profile is fine. Real
+            # breakage still surfaces as a test failure with the precondition message.
+            pass
+    if restored:
+        print(f"\n[preconditions] ensured enabled for alice: {', '.join(restored)}")
+    yield
 
 @pytest.fixture(scope="session")
 def bob_token():
