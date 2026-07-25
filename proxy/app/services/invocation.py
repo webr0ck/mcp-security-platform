@@ -62,94 +62,102 @@ class _NullSpan:
         pass
 
 
-async def _lookup_profile_with_cache(
-    client_id: str,
+def merge_profile_deny_dominant(legacy: dict | None, named: dict | None) -> dict | None:
+    """
+    Merge a legacy per-identity profile with a named-profile binding, deny-dominant.
+
+    A named profile is a *narrowing* mechanism — a curated subset of what the caller
+    is already allowed. It must never widen access. Before this function existed the
+    two systems were an if/else (named REPLACED legacy), which let any caller shed
+    their own per-identity restrictions simply by binding a profile. See the
+    "profile-binding escalation" case in the deny-dominant tests.
+
+    Rules:
+      - enabled: logical AND. Either side saying False wins.
+      - allowed_functions: intersection when BOTH restrict; the restricting side when
+        only one does; unrestricted only when neither restricts.
+      - a DISJOINT intersection means nothing is permitted -> enabled=False. Returning
+        an empty list here would read as "unrestricted" to authz.rego (which triggers
+        only on count(...) > 0) and would be a fail-open.
+
+    None means "no row" = no restriction from that side.
+    """
+    if legacy is None:
+        return named
+    if named is None:
+        return legacy
+
+    enabled = bool(legacy.get("enabled", True)) and bool(named.get("enabled", True))
+    fns_legacy = list(legacy.get("allowed_functions") or [])
+    fns_named = list(named.get("allowed_functions") or [])
+
+    if fns_legacy and fns_named:
+        merged_fns = [f for f in fns_legacy if f in fns_named]  # order-stable intersection
+        if not merged_fns:
+            # Disjoint allowlists: no function satisfies both sides.
+            return {"enabled": False, "allowed_functions": []}
+    else:
+        merged_fns = fns_legacy or fns_named
+
+    return {"enabled": enabled, "allowed_functions": merged_fns or None}
+
+
+async def _lookup_profile_source(
+    *,
+    table: str,
+    key_column: str,
+    key_value: str,
     tool_name: str,
-    profile_uuid: str | None = None,
+    cache_key: str,
+    log_ctx: dict,
 ) -> dict | None:
     """
-    Look up an mcp_profiles row with Redis caching.
+    Single-source profile row lookup with the Redis last-known-state cache.
 
-    Task 4.3 update: when ``profile_uuid`` is set, queries by
-    ``(profile_uuid, tool_name)`` — the named-profile path.
-    Falls back to legacy ``(client_id, tool_name)`` lookup when
-    ``profile_uuid`` is None (backward compatible).
-
-    Task 1.10 (SELF-F2): fail-closed semantics — mirrors the role caching
-    pattern in middleware/auth.py but with stricter failure posture:
-
-      DB success:            use profile + update Redis cache (TTL 300s)
-      DB error + cache hit:  use cached profile (last-known-state)
+    Task 1.10 (SELF-F2): fail-closed semantics —
+      DB success:            use row + update Redis cache (TTL 300s)
+      DB error + cache hit:  use cached row (last-known-state)
       DB error + cache miss: raise ProfileLookupError → caller 503s
 
-    Returns:
-      dict with {enabled: bool, allowed_functions: list[str]} if a row exists,
-      or None if no profile row exists (no restriction, default allow).
-
-    Raises:
-      ProfileLookupError: if DB is unreachable and no cached profile available.
+    `table` and `key_column` are chosen from a fixed internal set by the two
+    callers below — never from request data — so the f-string interpolation
+    here cannot carry untrusted input into SQL.
     """
     import json as _json
     from app.core.redis_client import redis_pool
 
-    # Cache key disambiguates named-profile path from legacy path.
-    if profile_uuid:
-        cache_key = f"mcp_profile:uuid:{profile_uuid}:{tool_name}"
-    else:
-        cache_key = f"mcp_profile:{client_id}:{tool_name}"
     _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
 
-    # -----------------------------------------------------------------------
-    # Tier 1: Redis cache
-    # -----------------------------------------------------------------------
+    # ── Tier 1: Redis cache ────────────────────────────────────────────────
     cached_raw: str | None = None
-    redis_available = False
     try:
         redis = redis_pool.client
         cached_raw = await redis.get(cache_key)
-        redis_available = True
     except Exception as _redis_exc:
-        logger.warning(
-            "Profile cache Redis read failed",
-            extra={"client_id": client_id, "tool_name": tool_name, "error": str(_redis_exc)},
-        )
+        logger.warning("Profile cache Redis read failed", extra={**log_ctx, "error": str(_redis_exc)})
 
     if cached_raw is not None:
         if cached_raw == _SENTINEL_NO_ROW:
-            return None  # cached "no profile row" — default allow
+            return None  # cached "no profile row" — no restriction from this source
         try:
             return _json.loads(cached_raw)
         except Exception:
             pass  # malformed cache entry — fall through to DB
 
-    # -----------------------------------------------------------------------
-    # Tier 2: PostgreSQL mcp_profiles
-    # -----------------------------------------------------------------------
+    # ── Tier 2: PostgreSQL ─────────────────────────────────────────────────
     profile_data: dict | None = None
     db_succeeded = False
     try:
         from app.core.database import AsyncSessionLocal
         from sqlalchemy import text
         async with AsyncSessionLocal() as _db:
-            if profile_uuid:
-                # Task 4.3: named-profile path — query by profile_uuid FK
-                row = await _db.execute(
-                    text(
-                        "SELECT enabled, allowed_functions "
-                        "FROM mcp_profiles "
-                        "WHERE profile_uuid=:uuid AND mcp_name=:mname LIMIT 1"
-                    ),
-                    {"uuid": profile_uuid, "mname": tool_name},
-                )
-            else:
-                # Legacy path — query by profile_id (client identity)
-                row = await _db.execute(
-                    text(
-                        "SELECT enabled, allowed_functions "
-                        "FROM mcp_profiles WHERE profile_id=:pid AND mcp_name=:mname LIMIT 1"
-                    ),
-                    {"pid": client_id, "mname": tool_name},
-                )
+            row = await _db.execute(
+                text(
+                    f"SELECT enabled, allowed_functions FROM {table} "  # noqa: S608 — fixed internal values
+                    f"WHERE {key_column}=:kv AND mcp_name=:mname LIMIT 1"
+                ),
+                {"kv": key_value, "mname": tool_name},
+            )
             prow = row.mappings().first()
             if prow:
                 profile_data = {
@@ -158,31 +166,85 @@ async def _lookup_profile_with_cache(
                 }
         db_succeeded = True
     except Exception as _db_exc:
-        logger.error(
-            "mcp_profiles DB lookup failed",
-            extra={"client_id": client_id, "tool_name": tool_name, "error": str(_db_exc)},
-        )
+        logger.error("profile DB lookup failed", extra={**log_ctx, "error": str(_db_exc)})
 
     if db_succeeded:
-        # Update Redis cache with the DB result (best-effort)
         try:
             redis = redis_pool.client
             value = _json.dumps(profile_data) if profile_data is not None else _SENTINEL_NO_ROW
             await redis.setex(cache_key, _PROFILE_CACHE_TTL_SECONDS, value)
         except Exception as _cache_exc:
-            logger.warning(
-                "Failed to write profile to Redis cache",
-                extra={"client_id": client_id, "tool_name": tool_name, "error": str(_cache_exc)},
-            )
+            logger.warning("Failed to write profile to Redis cache", extra={**log_ctx, "error": str(_cache_exc)})
         return profile_data
 
-    # -----------------------------------------------------------------------
-    # DB failed. We have no cached value (cache hit was handled above).
-    # Fail-closed: raise ProfileLookupError → caller converts to 503.
-    # -----------------------------------------------------------------------
-    raise ProfileLookupError(
-        f"DB unreachable and no cached profile for {client_id}/{tool_name}"
+    raise ProfileLookupError(f"DB unreachable and no cached profile for {key_value}/{tool_name}")
+
+
+async def _lookup_profile_with_cache(
+    client_id: str,
+    tool_name: str,
+    profile_uuid: str | None = None,
+) -> dict | None:
+    """
+    Resolve the effective profile restriction for (client_id, tool_name, profile_uuid).
+
+    This is the SINGLE place that decides which identity key and which table a profile
+    decision is read from, and how the two systems combine. Discovery and invoke must
+    both route through it — parallel-implementing the rules is what produced the
+    hidden-but-callable and profile-binding-escalation defects.
+
+    Sources:
+      legacy  — mcp_profiles.profile_id       = client_id   (bare identity, e.g. 'alice@corp')
+      named   — profile_mcp_bindings.profile_id = profile_uuid
+
+    The named source reads ``profile_mcp_bindings`` — the table its only writer
+    (routers/profiles.py::_upsert_profile_mcp_binding) actually writes. It previously
+    read ``mcp_profiles WHERE profile_uuid=``, which no writer ever populates, so every
+    named restriction resolved to "no row" -> allow while discovery correctly hid the
+    tool: hidden in the UI, callable over the wire.
+
+    Combination is deny-dominant (see merge_profile_deny_dominant): a named profile
+    narrows, never widens.
+
+    Returns:
+      dict with {enabled: bool, allowed_functions: list[str] | None}, or None when
+      neither source restricts (default allow).
+
+    Raises:
+      ProfileLookupError: if DB is unreachable and no cached value is available.
+    """
+    # Cache keys are namespaced v2: the pre-merge entries have different semantics
+    # (they were single-source) and must not be served after this change.
+    legacy = await _lookup_profile_source(
+        table="mcp_profiles",
+        key_column="profile_id",
+        key_value=client_id,
+        tool_name=tool_name,
+        cache_key=f"mcp_profile:v2:id:{client_id}:{tool_name}",
+        log_ctx={"client_id": client_id, "tool_name": tool_name, "source": "legacy"},
     )
+
+    if not profile_uuid:
+        return legacy
+
+    named = await _lookup_profile_source(
+        table="profile_mcp_bindings",
+        key_column="profile_id",
+        key_value=profile_uuid,
+        tool_name=tool_name,
+        cache_key=f"mcp_profile:v2:uuid:{profile_uuid}:{tool_name}",
+        log_ctx={"profile_uuid": profile_uuid, "tool_name": tool_name, "source": "named"},
+    )
+
+    # Named-profile default-deny: a configured profile (>=1 binding anywhere) that has
+    # no row for THIS tool has not granted it. An unconfigured profile (zero bindings)
+    # stays default-allow so a freshly created profile isn't bricked before an admin
+    # adds the first binding. Resolved HERE so discovery and invoke cannot disagree
+    # about it — it used to live in invoke_tool() only.
+    if named is None and await _named_profile_has_any_binding(profile_uuid):
+        named = {"enabled": False, "allowed_functions": []}
+
+    return merge_profile_deny_dominant(legacy, named)
 
 
 async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
@@ -224,7 +286,7 @@ async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
     import json as _json
     from app.core.redis_client import redis_pool
 
-    cache_key = f"mcp_profile:uuid:{profile_uuid}:__has_bindings__"
+    cache_key = f"mcp_profile:v2:uuid:{profile_uuid}:__has_bindings__"
 
     # -----------------------------------------------------------------------
     # Tier 1: Redis cache
@@ -246,7 +308,14 @@ async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
             pass  # malformed cache entry — fall through to DB
 
     # -----------------------------------------------------------------------
-    # Tier 2: PostgreSQL mcp_profiles — count rows for this profile_uuid
+    # Tier 2: PostgreSQL profile_mcp_bindings — count rows for this profile.
+    #
+    # This counted `mcp_profiles WHERE profile_uuid=` until 2026-07-25. No writer
+    # ever populates mcp_profiles.profile_uuid (_upsert_profile_row does not set the
+    # column), so the count was ALWAYS 0 -> every named profile looked "unconfigured"
+    # -> default-allow. Combined with the named lookup reading the same wrong table,
+    # that made every named-profile restriction advisory-only: hidden from tools/list
+    # but fully callable. Counting the table the writer actually writes is the fix.
     # -----------------------------------------------------------------------
     has_binding: bool | None = None
     db_succeeded = False
@@ -255,7 +324,7 @@ async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
         from sqlalchemy import text
         async with AsyncSessionLocal() as _db:
             row = await _db.execute(
-                text("SELECT COUNT(*) AS cnt FROM mcp_profiles WHERE profile_uuid=:uuid"),
+                text("SELECT COUNT(*) AS cnt FROM profile_mcp_bindings WHERE profile_id=:uuid"),
                 {"uuid": profile_uuid},
             )
             prow = row.mappings().first()
@@ -794,17 +863,11 @@ async def invoke_tool(
         )
         if _profile_result is not None:
             profile_data = _profile_result
-        # Fix 1 (docs/spec/11-server-lifecycle-and-hardening-batch.md §1):
-        # named-profile default-deny. No explicit binding row exists for
-        # THIS tool under the named profile. If the profile has been
-        # configured at all (>=1 binding row anywhere), an unbound tool
-        # is "not granted" — synthesize a disabled profile so OPA denies
-        # with mcp_disabled_for_profile. An unconfigured profile (zero
-        # binding rows) keeps default-allow so it isn't bricked before
-        # an admin has added the first binding. Legacy per-identity path
-        # (profile_uuid is None) is unaffected — still default-allow.
-        elif profile_uuid and await _named_profile_has_any_binding(profile_uuid):
-            profile_data = {"enabled": False, "allowed_functions": []}
+        # NOTE: named-profile default-deny (Fix 1,
+        # docs/spec/11-server-lifecycle-and-hardening-batch.md §1) used to be
+        # synthesized here. It now lives inside _lookup_profile_with_cache so that
+        # discovery and invoke resolve it identically — keeping it here as well
+        # would double-apply it on one path only.
     except ProfileLookupError as _profile_exc:
         logger.error(
             "Profile lookup fail-closed: DB unreachable and no cached profile — "

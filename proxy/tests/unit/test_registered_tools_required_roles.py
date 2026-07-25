@@ -109,7 +109,7 @@ async def test_required_roles_excludes_non_matching_caller():
              return_value=type("Ent", (), {"entitled": True})()
          )), \
          patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
-         patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
 
         tools = await _registered_tools_for_client(
             client_id="bob@corp",
@@ -137,7 +137,7 @@ async def test_required_roles_includes_matching_caller():
              return_value=type("Ent", (), {"entitled": True})()
          )), \
          patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
-         patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
 
         tools = await _registered_tools_for_client(
             client_id="alice@corp",
@@ -166,7 +166,7 @@ async def test_absent_required_roles_is_unrestricted():
              return_value=type("Ent", (), {"entitled": True})()
          )), \
          patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
-         patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
 
         tools = await _registered_tools_for_client(
             client_id="bob@corp",

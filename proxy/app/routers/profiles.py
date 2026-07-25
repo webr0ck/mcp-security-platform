@@ -268,7 +268,7 @@ async def _invalidate_profile_cache(
     Write the updated profile value into the Redis cache used by
     _lookup_profile_with_cache (invocation.py Task 1.10).
 
-    Cache key: mcp_profile:{principal}:{mcp_name}
+    Cache key: mcp_profile:v2:id:{principal}:{mcp_name}
 
     If new_value is None → write the sentinel (no profile row = default allow).
 
@@ -280,7 +280,7 @@ async def _invalidate_profile_cache(
     try:
         from app.core.redis_client import redis_pool
         redis = redis_pool.client
-        cache_key = f"mcp_profile:{principal}:{mcp_name}"
+        cache_key = f"mcp_profile:v2:id:{principal}:{mcp_name}"
         value = json.dumps(new_value) if new_value is not None else _SENTINEL_NO_ROW
         await redis.setex(cache_key, _PROFILE_CACHE_TTL_SECONDS, value)
         logger.debug(
@@ -999,13 +999,25 @@ async def _get_profile_mcp_bindings(profile_uuid: str) -> list[dict]:
 
 
 async def _invalidate_profile_mcp_binding_cache(profile_uuid: str, mcp_name: str, new_value: dict | None) -> None:
-    """Invalidate Redis cache for a named-profile MCP binding (Task 4.3)."""
+    """Invalidate Redis cache for a named-profile MCP binding (Task 4.3).
+
+    Invalidates BOTH tiers the invoke path reads:
+      - the per-(profile, tool) row      -> mcp_profile:v2:uuid:{uuid}:{tool}
+      - the "is this profile configured?" -> mcp_profile:v2:uuid:{uuid}:__has_bindings__
+
+    The __has_bindings__ sentinel was never invalidated by any writer before
+    2026-07-25. Because it gates named-profile default-deny, a stale `false` there
+    keeps a freshly-configured profile in "unconfigured -> allow everything" mode for
+    the full TTL — a fail-open window on the exact mechanism that enforces the profile.
+    """
     try:
         from app.core.redis_client import redis_pool
         redis = redis_pool.client
-        cache_key = f"mcp_profile:uuid:{profile_uuid}:{mcp_name}"
+        cache_key = f"mcp_profile:v2:uuid:{profile_uuid}:{mcp_name}"
         value = json.dumps(new_value) if new_value is not None else _SENTINEL_NO_ROW
         await redis.setex(cache_key, _PROFILE_CACHE_TTL_SECONDS, value)
+        # Drop the binding-count sentinel so the next lookup re-derives it from the DB.
+        await redis.delete(f"mcp_profile:v2:uuid:{profile_uuid}:__has_bindings__")
         logger.debug(
             "Named profile MCP binding cache updated",
             extra={"profile_uuid": profile_uuid, "mcp_name": mcp_name},

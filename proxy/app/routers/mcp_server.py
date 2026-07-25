@@ -401,175 +401,25 @@ async def _load_grants_data(client_id: str) -> tuple[dict, dict]:
         return {}, tools_meta
 
 
-async def _lookup_profile_row(profile_id: str, mcp_name: str):
-    """Return the mcp_profiles row for (profile_id, mcp_name), or None if absent.
+async def _resolve_profile(
+    client_id: str,
+    tool_name: str,
+    *,
+    profile_uuid: str | None = None,
+) -> dict | None:
+    """Thin indirection over the shared profile resolver.
 
-    Absence means no explicit restriction — platform default applies (enabled=true,
-    all functions).  A row with enabled=False means this MCP is disabled for the
-    caller's profile.
+    Discovery MUST NOT implement its own profile query. This module used to carry
+    two bespoke lookups (_lookup_profile_row / _lookup_profile_mcp_binding); they
+    drifted from the invoke path on both the identity key and the table, producing
+    a listed-but-denied bug and a hidden-but-callable fail-open. Both are deleted;
+    this is the only seam, and it delegates to the same function invoke_tool uses.
 
-    INV-015: fail-closed semantics.
-      DB success:             write-through to Redis (TTL 120s), return row or None.
-      DB error + cache hit:   return cached value (last-known-state).
-      DB error + cache miss:  raise ProfileLookupError → caller converts to 503.
-      Redis exception:        treat as _SENTINEL_FAIL_CLOSED — never fall through
-                              to a live DB call on Redis exception.
-
-    Separate function so tests can patch it cleanly.
+    Raises ProfileLookupError (fail-closed) — callers must let it propagate.
     """
-    import json as _json
-    from sqlalchemy import text
-    from app.core.database import AsyncSessionLocal
-    from app.core.redis_client import redis_pool
-    from app.services.invocation import ProfileLookupError
-    from redis.exceptions import RedisError
+    from app.services.invocation import _lookup_profile_with_cache
 
-    cache_key = f"profile_row:{profile_id}:{mcp_name}"
-    _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
-
-    # ── Try DB first ────────────────────────────────────────────────────────
-    db_raised = False
-    db_row = None
-    try:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                text(
-                    "SELECT enabled FROM mcp_profiles "
-                    "WHERE profile_id = :pid AND mcp_name = :mcp_name LIMIT 1"
-                ),
-                {"pid": profile_id, "mcp_name": mcp_name},
-            )
-            db_row = result.mappings().fetchone()
-
-        # DB succeeded — write-through to Redis (best-effort)
-        try:
-            redis = redis_pool.client
-            value = _json.dumps(dict(db_row)) if db_row is not None else _SENTINEL_NO_ROW
-            await redis.setex(cache_key, 120, value)
-        except Exception as _cache_exc:
-            logger.debug(
-                "profile_row cache write-through failed profile_id=%s mcp_name=%s: %s",
-                profile_id, mcp_name, _cache_exc,
-            )
-        return db_row
-
-    except Exception as exc:
-        db_raised = True
-        logger.warning(
-            "mcp_profiles lookup failed profile_id=%s mcp_name=%s: %s",
-            profile_id, mcp_name, exc,
-        )
-
-    # ── DB failed — try Redis cache (SENTINEL pattern, INV-015) ────────────
-    cached = _SENTINEL_FAIL_CLOSED
-    try:
-        redis = redis_pool.client
-        cached = await redis.get(cache_key)
-    except RedisError as _redis_exc:
-        logger.warning(
-            "profile_row Redis fallback failed profile_id=%s mcp_name=%s: %s",
-            profile_id, mcp_name, _redis_exc,
-        )
-        cached = _SENTINEL_FAIL_CLOSED
-
-    if cached is _SENTINEL_FAIL_CLOSED or (db_raised and cached is None):
-        raise ProfileLookupError(
-            f"DB unreachable and no cached mcp_profiles row for {profile_id}/{mcp_name}"
-        )
-
-    if cached == _SENTINEL_NO_ROW:
-        return None  # cached "no row" — default allow
-    try:
-        return _json.loads(cached)
-    except Exception:
-        raise ProfileLookupError(
-            f"Malformed cache entry for mcp_profiles {profile_id}/{mcp_name}"
-        )
-
-
-async def _lookup_profile_mcp_binding(profile_uuid: str, mcp_name: str):
-    """Return the profile_mcp_bindings row for (profile_uuid, mcp_name), or None if absent.
-
-    Task 4.3: named-profile binding lookup. Absence = default (enabled=true, all functions).
-    A row with enabled=False means this MCP is disabled for the profile.
-
-    INV-015: fail-closed semantics (same pattern as _lookup_profile_row).
-      DB success:             write-through to Redis (TTL 120s), return row or None.
-      DB error + cache hit:   return cached value (last-known-state).
-      DB error + cache miss:  raise ProfileLookupError → caller converts to 503.
-      Redis exception:        treat as _SENTINEL_FAIL_CLOSED — never fall through
-                              to a live DB call on Redis exception.
-
-    Separate function so tests can patch it cleanly.
-    """
-    import json as _json
-    from sqlalchemy import text
-    from app.core.database import AsyncSessionLocal
-    from app.core.redis_client import redis_pool
-    from app.services.invocation import ProfileLookupError
-    from redis.exceptions import RedisError
-
-    cache_key = f"profile_binding:{profile_uuid}:{mcp_name}"
-    _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
-
-    # ── Try DB first ────────────────────────────────────────────────────────
-    db_raised = False
-    db_row = None
-    try:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                text(
-                    "SELECT enabled, allowed_functions FROM profile_mcp_bindings "
-                    "WHERE profile_id = :pid AND mcp_name = :mcp_name LIMIT 1"
-                ),
-                {"pid": profile_uuid, "mcp_name": mcp_name},
-            )
-            db_row = result.mappings().fetchone()
-
-        # DB succeeded — write-through to Redis (best-effort)
-        try:
-            redis = redis_pool.client
-            value = _json.dumps(dict(db_row)) if db_row is not None else _SENTINEL_NO_ROW
-            await redis.setex(cache_key, 120, value)
-        except Exception as _cache_exc:
-            logger.debug(
-                "profile_binding cache write-through failed profile_uuid=%s mcp_name=%s: %s",
-                profile_uuid, mcp_name, _cache_exc,
-            )
-        return db_row
-
-    except Exception as exc:
-        db_raised = True
-        logger.warning(
-            "profile_mcp_bindings lookup failed profile_uuid=%s mcp_name=%s: %s",
-            profile_uuid, mcp_name, exc,
-        )
-
-    # ── DB failed — try Redis cache (SENTINEL pattern, INV-015) ────────────
-    cached = _SENTINEL_FAIL_CLOSED
-    try:
-        redis = redis_pool.client
-        cached = await redis.get(cache_key)
-    except RedisError as _redis_exc:
-        logger.warning(
-            "profile_binding Redis fallback failed profile_uuid=%s mcp_name=%s: %s",
-            profile_uuid, mcp_name, _redis_exc,
-        )
-        cached = _SENTINEL_FAIL_CLOSED
-
-    if cached is _SENTINEL_FAIL_CLOSED or (db_raised and cached is None):
-        raise ProfileLookupError(
-            f"DB unreachable and no cached profile_mcp_bindings row for {profile_uuid}/{mcp_name}"
-        )
-
-    if cached == _SENTINEL_NO_ROW:
-        return None  # cached "no row" — default allow
-    try:
-        return _json.loads(cached)
-    except Exception:
-        raise ProfileLookupError(
-            f"Malformed cache entry for profile_mcp_bindings {profile_uuid}/{mcp_name}"
-        )
+    return await _lookup_profile_with_cache(client_id, tool_name, profile_uuid=profile_uuid)
 
 
 async def _registered_tools_for_client(
@@ -657,22 +507,24 @@ async def _registered_tools_for_client(
                 continue
 
         # ── Profile gate ────────────────────────────────────────────────────
-        # Task 4.3: when profile_uuid is set, check profile_mcp_bindings first.
-        # Absence of a binding row = default (enabled=true, not filtered).
-        if profile_uuid:
-            pmb = await _lookup_profile_mcp_binding(profile_uuid, row["name"])
-            if pmb is not None and not pmb["enabled"]:
-                continue
-        elif principal_id:
-            # Legacy path: mcp_profiles.enabled check keyed by principal_id.
-            # Only meaningful when we have a resolvable principal identity.
-            # Absence of a profile row = platform default (enabled=true).
-            profile = await _lookup_profile_row(
-                profile_id=principal_id,
-                mcp_name=row["name"],
-            )
-            if profile is not None and not profile["enabled"]:
-                continue
+        # Resolve through the SAME resolver the invoke path uses, so discovery and
+        # invoke cannot disagree. This replaced two bespoke per-surface lookups
+        # (_lookup_profile_row / _lookup_profile_mcp_binding) on 2026-07-25.
+        #
+        # The legacy lookup here was keyed by `principal_id`
+        # ("human:{issuer}:{sub}"), while both the WRITER (profiles.py
+        # _upsert_profile_row) and the invoke gate key by the bare `client_id`
+        # ("alice@corp"). It therefore never matched a row and every legacy-disabled
+        # tool was listed anyway — the caller saw tools that denied on call.
+        #
+        # INV-015: ProfileLookupError is deliberately NOT caught — it propagates to
+        # the tools/list handler, which returns a JSON-RPC 503. A partially filtered
+        # list would be a fail-open.
+        profile = await _resolve_profile(
+            client_id, row["name"], profile_uuid=profile_uuid
+        )
+        if profile is not None and not profile.get("enabled", True):
+            continue
 
         # required_roles: discovery-time role gate (Part C of the reviewer-
         # tools design). Absent/empty = unrestricted, matching every existing
