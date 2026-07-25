@@ -189,6 +189,14 @@ class Settings(BaseSettings):
     SCAN_FRESHNESS_ENFORCED: bool = True
     RESCAN_INTERVAL_HOURS: int = 24
 
+    # R6.1: continuous attestation for self-hosted servers. The rescan loop re-scans
+    # the SOURCE REPO; this re-reads the LIVE tool surface of the running backend and
+    # demotes the server to re-review if a registered-active tool no longer matches.
+    # Without it, a self-hosted server is trusted forever on one point-in-time check —
+    # submit a clean repo, get approved, then serve something else at the same URL.
+    # On by default: it only ever moves a server toward review, never away from it.
+    SELF_HOSTED_ATTESTATION_ENABLED: bool = True
+
     # CR-08: POST /api/v1/servers (self-service direct registration) skips the
     # submission-scan/review funnel entirely — a server_owner-role caller goes
     # straight to an admin-approvable 'pending' row with no scan evidence.
