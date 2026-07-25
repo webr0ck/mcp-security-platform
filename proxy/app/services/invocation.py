@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -443,83 +444,100 @@ async def _record_connection_result(
         logger.warning("connection_result_recording_failed: %s", exc)
 
 
-async def invoke_tool(
-    tool_record: dict[str, Any],
-    json_rpc_request: dict[str, Any],
-    client_id: str,
-    client_roles: list[str],
-    is_testing: bool,
-    request_id: str,
-    inbound_auth: str | None = None,
-    principal_id: str | None = None,
-    principal_type: str | None = None,
-    user_kc_token: str | None = None,
-    source_ip: str | None = None,
-    session_jti: str | None = None,
-    profile_uuid: str | None = None,
-    principal_issuer: str | None = None,
-    principal_display_sub: str | None = None,
-) -> dict[str, Any]:
+@dataclass
+class InvocationContext:
+    """State threaded through invoke_tool's gates.
+
+    WHY THIS EXISTS: invoke_tool had 50 top-level locals, 24 of which were assigned
+    before the OPA step and still read after it. That entanglement is what made the
+    function un-splittable — extracting a gate meant either a 24-argument signature or
+    returning tuples, both worse than the 1,100-line function. One object crossing the
+    boundary makes each gate a `(ctx) -> None` that raises to deny.
+
+    Two field groups, and the distinction is load-bearing:
+
+    INPUTS — set once when the context is built, never reassigned by a gate. Treat as
+    read-only. (Not `frozen=True` because the OUTPUT fields below must be writable;
+    splitting into two dataclasses would double the plumbing for no real gain.)
+
+    GATE OUTPUTS — each is written by exactly ONE gate and read later by OPA input
+    assembly, the audit event, or dispatch. If two gates ever write the same field,
+    that is a bug: it means an ordering dependency nobody declared.
+
+    The ordering of the gates is a security invariant, pinned by
+    tests/unit/services/test_invoke_tool_gate_order.py. Read that before reordering
+    anything here.
     """
-    Execute the full tool invocation pipeline.
 
-    Args:
-        tool_record: Full tool_registry record for the target tool.
-        json_rpc_request: Parsed MCP JSON-RPC 2.0 request body.
-        client_id: Resolved caller identity.
-        client_roles: List of roles for the caller.
-        is_testing: True if called by admin for testing (bypasses anomaly).
-        request_id: Request correlation ID.
-        inbound_auth: The client's raw inbound Authorization header value. Used
-            only by injection_mode='passthrough' (Case-3 / 3b) to forward a
-            downstream-IDP token to the upstream and relay its 401 challenge.
-        principal_id: Typed principal id from request.state (6.2 — used for the
-            discovery==invoke entitlement gate when the tool is server-linked).
-        principal_type: Typed principal type ('human' | 'agent') from
-            request.state, paired with principal_id.
-        user_kc_token: The caller's raw Keycloak access token (6.3). Threaded to
-            the credential dispatcher for injection_mode='oauth_user_token'
-            (RFC 8693 on-behalf-of exchange). Set only for direct-OIDC callers;
-            None for api_key/mtls/session callers (oauth_user_token then fails
-            closed in the dispatcher). Never logged (INV-002).
-        source_ip: Originating client IP from X-Forwarded-For / request.client.host
-            (Task 1.2 — "who" enrichment for audit trail, LOG-F04).
-        session_jti: OIDC session JWT ID (Task 1.2). Present only for
-            session-JWT callers; None for mTLS / API-key callers.
-        profile_uuid: Named profile UUID from request.state (Task 4.3). When
-            set, profile lookup uses (profile_uuid, tool_name) instead of
-            (client_id, tool_name). None = legacy mcp_profiles path (backward
-            compatible).
-        principal_issuer: CR-10 (WP-A1) — the issuer/CA component of the typed
-            principal (OIDC issuer id, mTLS CA id, or "apikey"). Forwarded
-            downstream as X-Principal-Issuer.
-        principal_display_sub: CR-10 (WP-A1) — the bare, human-readable
-            subject (== client_id). Forwarded downstream as
-            X-Principal-Display-Sub / X-User-Sub. NEVER an authorization key
-            on its own — only principal_id is collision-proof.
+    # ── INPUTS (read-only after construction) ───────────────────────────────
+    tool_record: dict[str, Any]
+    json_rpc_request: dict[str, Any]
+    client_id: str
+    client_roles: list[str]
+    is_testing: bool
+    request_id: str
+    inbound_auth: str | None = None
+    principal_id: str | None = None
+    principal_type: str | None = None
+    user_kc_token: str | None = None
+    source_ip: str | None = None
+    session_jti: str | None = None
+    profile_uuid: str | None = None
+    principal_issuer: str | None = None
+    principal_display_sub: str | None = None
 
-    Returns:
-        Dict matching the MCP JSON-RPC 2.0 response format with meta.audit_id.
+    # Derived from tool_record / json_rpc_request at construction — still inputs.
+    tool_id: Any = None
+    tool_name: str = ""
+    tool_status: str = ""
+    tool_risk_level: str = "low"
+    tool_server_id: str = ""
+    upstream_url: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
+    function_name: str = ""
 
-    Raises:
-        ToolQuarantinedError: If tool status == 'quarantined' (INV-005).
-        NotEntitledError: If the tool is server-linked and the caller is not
-            entitled to that server (6.2, discovery==invoke — no role exception).
-        OPADenyError: If OPA denies the invocation.
-        OPAUnavailableError: If OPA is unreachable (returns 503).
+    # ── GATE OUTPUTS (each written by exactly one gate) ─────────────────────
+    tainted: bool | None = None                 # _gate_taint_floor
+    taint_notice: str | None = None             # _gate_taint_floor
+    taint_server_trust_tier: int | None = None  # _gate_taint_floor
+    anomaly_score: float = 0.0                  # _stage_anomaly
+    recent_calls: list[dict] = field(default_factory=list)   # _stage_recent_calls
+    profile_data: dict = field(default_factory=dict)         # _stage_profile
+    owned_server_ids: list[str] = field(default_factory=list)  # _stage_owned_servers
+    owner_max_risk_level: str = "medium"        # _stage_owned_servers
+
+    @classmethod
+    def build(cls, **kw: Any) -> "InvocationContext":
+        """Construct from invoke_tool's arguments, deriving the tool_record fields."""
+        rec = kw["tool_record"]
+        jrpc = kw["json_rpc_request"]
+        self = cls(**kw)
+        self.tool_id = rec["tool_id"]
+        self.tool_name = rec["name"]
+        self.tool_status = rec["status"]
+        self.tool_risk_level = rec.get("risk_level", "low")
+        self.tool_server_id = str(rec["server_id"]) if rec.get("server_id") else ""
+        self.upstream_url = rec["upstream_url"]
+        self.params = jrpc.get("params", {}).get("arguments", {})
+        # Task 1.9 (SELF-F2): the JSON-RPC function identifier, NOT a tool argument.
+        # Reading it from params.arguments made it always "" on the direct tools/call
+        # path, silently bypassing allowed_functions.
+        self.function_name = (jrpc.get("params", {}) or {}).get("name", "") or ""
+        return self
+
+
+async def _gate_tool_status(ctx: "InvocationContext") -> None:
+    """Step 1 (INV-005). Cheapest gate, MUST stay first: a disabled/quarantined/
+    deprecated tool must never reach policy, the credential broker, or the network.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
     """
-    from app.services.anomaly import evaluate_anomaly
-    from app.services.policy import OPADenyError, OPAUnavailableError, evaluate_policy
-
-    tool_id = tool_record["tool_id"]
-    tool_name = tool_record["name"]
-    tool_status = tool_record["status"]
-    tool_risk_level = tool_record.get("risk_level", "low")
-    tool_server_id: str = str(tool_record["server_id"]) if tool_record.get("server_id") else ""
-    upstream_url = tool_record["upstream_url"]
-    params = json_rpc_request.get("params", {}).get("arguments", {})
-
-    # -------------------------------------------------------------------------
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_status = ctx.tool_status
     # Step 1: INV-005 — Block unavailable/quarantined tools before OPA evaluation
     # -------------------------------------------------------------------------
     if tool_status == "disabled":
@@ -532,6 +550,21 @@ async def invoke_tool(
         raise ToolDeprecatedError(tool_id, tool_name)
 
     # -------------------------------------------------------------------------
+
+async def _gate_maintenance(ctx: "InvocationContext") -> None:
+    """Step 1.1. Debug/maintenance mode: hard deny for everyone except the server's
+    owner and its maintainers. No role bypass — an admin is NOT exempt, by explicit
+    product requirement. Fails closed if the lookup itself errors.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_server_id = ctx.tool_server_id
     # Step 1.1: Debug/maintenance mode — hard deny for everyone except the
     # server's owner and its (max 2) maintainers. No role-based bypass: an
     # admin is not exempt, by explicit product requirement. Fail closed if
@@ -564,6 +597,27 @@ async def invoke_tool(
                 raise ServerInMaintenanceError(tool_id, tool_name, tool_server_id)
 
     # -------------------------------------------------------------------------
+
+async def _gate_scan_freshness(ctx: "InvocationContext") -> None:
+    """Step 1.2. Supply-chain scan freshness (Stage 3).
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    client_roles = ctx.client_roles
+    is_testing = ctx.is_testing
+    principal_id = ctx.principal_id
+    principal_type = ctx.principal_type
+    request_id = ctx.request_id
+    session_jti = ctx.session_jti
+    source_ip = ctx.source_ip
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_record = ctx.tool_record
+    tool_server_id = ctx.tool_server_id
     # Step 1.2: Supply-chain scan freshness gate (Stage 3).
     # If the tool is linked to a server and SCAN_FRESHNESS_ENFORCED=True,
     # deny calls to servers whose last_rescanned_at is older than
@@ -645,6 +699,27 @@ async def invoke_tool(
                 raise ScanFreshnessError(tool_id, tool_name, None) from _sf_exc
 
     # -------------------------------------------------------------------------
+
+async def _gate_entitlement(ctx: "InvocationContext") -> None:
+    """Step 1.5. discovery==invoke: a server-linked tool requires entitlement to that
+    server. No role exception, admin included.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    client_roles = ctx.client_roles
+    is_testing = ctx.is_testing
+    principal_id = ctx.principal_id
+    principal_type = ctx.principal_type
+    request_id = ctx.request_id
+    session_jti = ctx.session_jti
+    source_ip = ctx.source_ip
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_record = ctx.tool_record
     # Step 1.5: 6.2 — discovery==invoke. If the tool is linked to a server,
     # the caller must be entitled to that server (same resolver the catalog
     # uses for discovery). No role exception: admin/platform_admin are gated
@@ -678,6 +753,29 @@ async def invoke_tool(
         raise
 
     # -------------------------------------------------------------------------
+
+async def _gate_taint_floor(ctx: "InvocationContext") -> None:
+    """Step 1.6. B-coarse taint floor. Mode-selected: notify attaches a disclaimer,
+    enforce denies. Writes the taint outputs the audit event and response meta read.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    client_roles = ctx.client_roles
+    is_testing = ctx.is_testing
+    principal_id = ctx.principal_id
+    principal_type = ctx.principal_type
+    request_id = ctx.request_id
+    session_jti = ctx.session_jti
+    source_ip = ctx.source_ip
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_record = ctx.tool_record
+    tool_server_id = ctx.tool_server_id
+
     # Step 1.6: B-coarse taint floor (RFC-0001 §8.1, PRD-0001 M2).
     # Order: INV-005 quarantine -> taint-floor -> INV-004 OPA. A session tainted
     # by a prior untrusted result cannot invoke a high-sensitivity or credential-
@@ -781,6 +879,23 @@ async def invoke_tool(
             )
 
     # -------------------------------------------------------------------------
+    ctx.tainted = _tainted
+    ctx.taint_notice = _taint_notice
+    ctx.taint_server_trust_tier = _taint_server_trust_tier
+
+async def _stage_anomaly(ctx: "InvocationContext") -> None:
+    """Step 2. Anomaly detection — advisory score fed into the OPA input.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    is_testing = ctx.is_testing
+    json_rpc_request = ctx.json_rpc_request
+    tool_name = ctx.tool_name
+
     # Step 2: Anomaly detection
     # -------------------------------------------------------------------------
     # Testing bypass: skip anomaly for admin is_testing requests so test suites
@@ -803,6 +918,26 @@ async def invoke_tool(
             )
 
     # -------------------------------------------------------------------------
+    ctx.anomaly_score = anomaly_score
+
+async def _stage_recent_calls(ctx: "InvocationContext") -> None:
+    """Step 2.3. Recent-call window for OPA's structural anomaly rules.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    # OPAUnavailableError was imported in invoke_tool's preamble, so extracting this
+    # gate put it out of scope — a fail-closed path would have raised NameError
+    # instead of the 503-mapped error. Caught by the *_yields_503 tests. Same class
+    # as the _tf_settings leak: extraction must account for IMPORT bindings, not
+    # just assignments.
+    from app.services.policy import OPAUnavailableError
+    client_id = ctx.client_id
+    is_testing = ctx.is_testing
+    tool_name = ctx.tool_name
+
     # Step 2.3: Fetch recent_calls for OPA anomaly structural evaluation.
     # -------------------------------------------------------------------------
     # Task 1.7 (DET-F3): The anomaly.rego structural rules (credential_then_exec,
@@ -831,6 +966,30 @@ async def invoke_tool(
             ) from exc
 
     # -------------------------------------------------------------------------
+    ctx.recent_calls = recent_calls
+
+async def _stage_profile(ctx: "InvocationContext") -> None:
+    """Step 2.5. Profile resolution (both systems, deny-dominant) -> OPA input.profile.
+    Fail-closed: a lookup failure raises rather than defaulting to allow.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    # OPAUnavailableError was imported in invoke_tool's preamble, so extracting this
+    # gate put it out of scope — a fail-closed path would have raised NameError
+    # instead of the 503-mapped error. Caught by the *_yields_503 tests. Same class
+    # as the _tf_settings leak: extraction must account for IMPORT bindings, not
+    # just assignments.
+    from app.services.policy import OPAUnavailableError
+    client_id = ctx.client_id
+    function_name = ctx.function_name
+    json_rpc_request = ctx.json_rpc_request
+    params = ctx.params
+    profile_uuid = ctx.profile_uuid
+    tool_name = ctx.tool_name
+
     # Step 2.5: Profile lookup — check mcp_profiles for per-identity permission
     # -------------------------------------------------------------------------
     # If a profile row exists for (client_id, tool_name), inject it into OPA input.
@@ -879,6 +1038,19 @@ async def invoke_tool(
         ) from _profile_exc
 
     # -------------------------------------------------------------------------
+    ctx.profile_data = profile_data
+
+async def _stage_owned_servers(ctx: "InvocationContext") -> None:
+    """Step 2.7. Owned server ids for the server_owner/manager OPA rules.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    client_roles = ctx.client_roles
+
     # Step 2.7: Resolve owned server IDs for server_owner/manager OPA rules.
     # Only fetched when the caller holds one of those roles (fast-path for
     # all other roles). Fails open (empty list) so a transient DB/Redis error
@@ -896,6 +1068,146 @@ async def invoke_tool(
         owned_server_ids = await get_owned_server_ids(client_id)
 
     # -------------------------------------------------------------------------
+    ctx.owned_server_ids = owned_server_ids
+    ctx.owner_max_risk_level = owner_max_risk_level
+
+
+async def invoke_tool(
+    tool_record: dict[str, Any],
+    json_rpc_request: dict[str, Any],
+    client_id: str,
+    client_roles: list[str],
+    is_testing: bool,
+    request_id: str,
+    inbound_auth: str | None = None,
+    principal_id: str | None = None,
+    principal_type: str | None = None,
+    user_kc_token: str | None = None,
+    source_ip: str | None = None,
+    session_jti: str | None = None,
+    profile_uuid: str | None = None,
+    principal_issuer: str | None = None,
+    principal_display_sub: str | None = None,
+) -> dict[str, Any]:
+    """
+    Execute the full tool invocation pipeline.
+
+    Args:
+        tool_record: Full tool_registry record for the target tool.
+        json_rpc_request: Parsed MCP JSON-RPC 2.0 request body.
+        client_id: Resolved caller identity.
+        client_roles: List of roles for the caller.
+        is_testing: True if called by admin for testing (bypasses anomaly).
+        request_id: Request correlation ID.
+        inbound_auth: The client's raw inbound Authorization header value. Used
+            only by injection_mode='passthrough' (Case-3 / 3b) to forward a
+            downstream-IDP token to the upstream and relay its 401 challenge.
+        principal_id: Typed principal id from request.state (6.2 — used for the
+            discovery==invoke entitlement gate when the tool is server-linked).
+        principal_type: Typed principal type ('human' | 'agent') from
+            request.state, paired with principal_id.
+        user_kc_token: The caller's raw Keycloak access token (6.3). Threaded to
+            the credential dispatcher for injection_mode='oauth_user_token'
+            (RFC 8693 on-behalf-of exchange). Set only for direct-OIDC callers;
+            None for api_key/mtls/session callers (oauth_user_token then fails
+            closed in the dispatcher). Never logged (INV-002).
+        source_ip: Originating client IP from X-Forwarded-For / request.client.host
+            (Task 1.2 — "who" enrichment for audit trail, LOG-F04).
+        session_jti: OIDC session JWT ID (Task 1.2). Present only for
+            session-JWT callers; None for mTLS / API-key callers.
+        profile_uuid: Named profile UUID from request.state (Task 4.3). When
+            set, profile lookup uses (profile_uuid, tool_name) instead of
+            (client_id, tool_name). None = legacy mcp_profiles path (backward
+            compatible).
+        principal_issuer: CR-10 (WP-A1) — the issuer/CA component of the typed
+            principal (OIDC issuer id, mTLS CA id, or "apikey"). Forwarded
+            downstream as X-Principal-Issuer.
+        principal_display_sub: CR-10 (WP-A1) — the bare, human-readable
+            subject (== client_id). Forwarded downstream as
+            X-Principal-Display-Sub / X-User-Sub. NEVER an authorization key
+            on its own — only principal_id is collision-proof.
+
+    Returns:
+        Dict matching the MCP JSON-RPC 2.0 response format with meta.audit_id.
+
+    Raises:
+        ToolQuarantinedError: If tool status == 'quarantined' (INV-005).
+        NotEntitledError: If the tool is server-linked and the caller is not
+            entitled to that server (6.2, discovery==invoke — no role exception).
+        OPADenyError: If OPA denies the invocation.
+        OPAUnavailableError: If OPA is unreachable (returns 503).
+    """
+    from app.services.anomaly import evaluate_anomaly
+    from app.services.policy import OPADenyError, OPAUnavailableError, evaluate_policy
+
+    # Phase 1: one context object replaces the 24 locals that used to cross the
+    # pre-dispatch/dispatch boundary. Gates take ctx and raise to deny.
+    ctx = InvocationContext.build(
+        tool_record=tool_record,
+        json_rpc_request=json_rpc_request,
+        client_id=client_id,
+        client_roles=client_roles,
+        is_testing=is_testing,
+        request_id=request_id,
+        inbound_auth=inbound_auth,
+        principal_id=principal_id,
+        principal_type=principal_type,
+        user_kc_token=user_kc_token,
+        source_ip=source_ip,
+        session_jti=session_jti,
+        profile_uuid=profile_uuid,
+        principal_issuer=principal_issuer,
+        principal_display_sub=principal_display_sub,
+    )
+
+    # The dispatch half below still reads these by bare name; bind them from ctx so
+    # that ~590 lines stay byte-identical in this phase.
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_status = ctx.tool_status
+    tool_risk_level = ctx.tool_risk_level
+    tool_server_id = ctx.tool_server_id
+    upstream_url = ctx.upstream_url
+    params = ctx.params
+    function_name = ctx.function_name
+
+    # -------------------------------------------------------------------------
+    # ---------------------------------------------------------------------
+    # PRE-DISPATCH GATES (Steps 1 -> 2.7), extracted in Phase 2.
+    # THE ORDER OF THESE CALLS IS A SECURITY INVARIANT. Each edge is pinned by
+    # tests/unit/services/test_invoke_tool_gate_order.py — read it before you
+    # insert, reorder or remove a line here. Status must precede everything;
+    # nothing here may fetch a credential or touch the network.
+    # ---------------------------------------------------------------------
+    await _gate_tool_status(ctx)
+    await _gate_maintenance(ctx)
+    await _gate_scan_freshness(ctx)
+    await _gate_entitlement(ctx)
+    await _gate_taint_floor(ctx)
+    await _stage_anomaly(ctx)
+    await _stage_recent_calls(ctx)
+    await _stage_profile(ctx)
+    await _stage_owned_servers(ctx)
+
+    # Unpack the gate outputs the dispatch half below still reads by bare name,
+    # so the remaining ~590 lines stay byte-identical in this phase.
+    #
+    # _tf_settings was previously bound by an `import ... as` INSIDE the taint step and
+    # then read again far below in the response-meta code. Extracting the gate moved
+    # that binding out of scope — caught immediately by the Phase 0 allow-path tests
+    # (NameError), which is exactly why those two tests exist. Import bindings cross
+    # boundaries just like assignments do; an assignment-only audit misses them.
+    from app.core.config import settings as _tf_settings
+
+    _tainted = ctx.tainted
+    _taint_notice = ctx.taint_notice
+    _taint_server_trust_tier = ctx.taint_server_trust_tier
+    anomaly_score = ctx.anomaly_score
+    recent_calls = ctx.recent_calls
+    profile_data = ctx.profile_data
+    owned_server_ids = ctx.owned_server_ids
+    owner_max_risk_level = ctx.owner_max_risk_level
+
     # Step 3: OPA policy evaluation (INV-003, INV-004)
     # -------------------------------------------------------------------------
     try:
