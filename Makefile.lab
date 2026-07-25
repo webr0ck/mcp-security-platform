@@ -29,6 +29,7 @@ lab-up:
 	# init and never rotated — every chain validation fails ~15 min after boot, which
 	# is why AT2 was red. A fresh boot alone does not fix this; it just buys another
 	# 15-minute window that expires partway through the same acceptance run.
+	bash lab/scripts/render_dex_config.sh
 	$(LAB_COMPOSE) --profile trust-envelope up -d --build
 	sleep 10
 	$(MAKE) -f Makefile.lab lab-init

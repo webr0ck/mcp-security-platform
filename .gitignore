@@ -80,3 +80,6 @@ graphify-out/
 .ops-agent-git-workdirs/
 .superpowers/
 dep-audit-report.json
+
+# Rendered Dex config — contains the host's real PROXY_BASE_URL (LAN/Tailscale IP)
+lab/dex/config.rendered.yaml

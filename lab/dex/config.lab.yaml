@@ -2,6 +2,15 @@
 # This is the actual config mounted into the Dex container.
 # config.yaml is the template (with ${LAB_HOST} placeholders).
 # Regenerate after changing LAB_HOST or adding clients.
+#
+# mcp-dex-generic's redirectURIs list below carries ONE line managed by
+# lab/scripts/render_dex_config.sh (marked `# dynamic:PROXY_BASE_URL`) that
+# tracks the CURRENT .env.lab PROXY_BASE_URL (a LAN/Tailscale IP that drifts
+# across sessions) — Dex has no env-var expansion of its own, so this file is
+# rewritten on the host instead. Run that script (then `podman restart
+# lab-dex`) after PROXY_BASE_URL changes; lab-setup.sh and `make lab-up` do
+# this automatically. Do not hand-edit that one line — it will be overwritten
+# on the next render.
 
 issuer: http://localhost:5556/dex
 

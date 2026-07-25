@@ -17,7 +17,11 @@ import { defineConfig, devices } from '@playwright/test'
 // while page.goto() navigations get redirected there transparently, ctx.request()
 // API calls do not, so a mismatched default here silently 401s every API-based
 // acceptance test without ever exercising a redirect to fix it up.
-const BASE = process.env.PORTAL_BASE_URL ?? 'https://100.119.138.35:8443'
+// Never hardcode a real LAN/Tailscale address here — it lands in git. Point at the
+// loopback the lab always exposes; override with PORTAL_BASE_URL to test over the
+// network (that value must match .env.lab's PROXY_BASE_URL, since the server builds
+// its OAuth redirect_uri from that, not from however the test reached it).
+const BASE = process.env.PORTAL_BASE_URL ?? 'https://127.0.0.1:8443'
 
 export default defineConfig({
   testDir: './e2e',
