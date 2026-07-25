@@ -657,3 +657,39 @@ Two findings surfaced but not fixed, each needing a product decision:
   profile toggle to the role that gets 403 using it — and a plain `agent` has no self-recovery
   path at all (no `get_my_profile`, no `enable_mcp_server`).
 - `server_registry` has accumulated `at-*` / `bob-*` acceptance-test submissions.
+
+---
+
+## Fresh boot + acceptance repair — 2026-07-25
+
+Full `down -v` wipe and rebuild, with `--profile trust-envelope` added to `lab-up` FIRST
+(wiping without it would only have bought another 15-minute cert window).
+
+### Fresh boot proved out
+| | before | after |
+|---|---|---|
+| `mcp-labeler-renewal` | **never existed** | **running** |
+| `server_registry` rows | 98 | 15 |
+| `at-*` / `bob-*` test rows | 39 | **0** |
+| `self-service debug_mode` | `true` (auto-quarantined) | **`false`** |
+
+`lab-smoke` 4/4 and `test-lab-functional` 46/1 both green on a completely fresh database —
+which also demonstrates fresh-bootability, previously flagged as historically unreliable.
+
+### `make lab-acceptance`: 8F/32P/3E → **5F/36P/2E**
+Fixed: `test_malicious_submission_blocked_and_unapprovable` (resolvable host),
+`test_at2_trust_envelope_verify` + `test_at2_trust_envelope_enforce` (labeler now runs),
+`test_submit_mcp_server_via_gateway_attributes_real_caller_as_owner` (self-service unquarantined).
+
+### Still failing — and the DevOps prediction was WRONG on two
+| Test | Predicted | Actual |
+|---|---|---|
+| `test_entra_user_token_m365_delegated` | "fresh boot would likely fix" | **survived the wipe** — a real code/config issue, not stale state |
+| `test_external_oauth_dex_user_token_generic_path` | "fresh boot would likely fix" | **survived the wipe** — same |
+| `test_entra_directory_self_service_onboarding_before_and_after` | fixed by clearing debug_mode | **survived** — root cause is NOT only the quarantine flag |
+| `test_clean_submission_full_chain_to_invoke` | stale assertion (fixed) | fails EARLIER now: `'blocked' == 'passed'` — the scanner blocks the clean fixture repo on a fresh scanner. Independent of the assertion fix, which is never reached. |
+| `test_at4_apply_deploy_verify_full_loop` | stale assertion | assertion now PASSES; fails much later in `run_verification_probes` with `discover_tools SSRF validation failed` for `at4-clean-mcp-fixture`. My `self_host=False` setup fix moved it from step 1 to the final step — needs confirming whether the deploy verifier should allowlist a platform-deployed fixture's own runtime URL. |
+| `test_at1_external_oauth_client_credentials` (2 ERRORs) | fixed by the port constant | ran standalone pre-wipe (1 pass / 1 real failure); ERROR again post-wipe — likely fresh Vault token/state, needs one more look |
+
+Lesson worth keeping: two failures were confidently predicted to be environmental and were not.
+Baseline-then-verify beat the prediction; the wipe was still worth doing for the other four.
