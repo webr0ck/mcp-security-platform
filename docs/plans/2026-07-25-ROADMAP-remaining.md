@@ -15,9 +15,9 @@ so it can be worked from a clean session with no prior context.
 | portal acceptance (`ui/e2e/portal-acceptance.spec.ts`) | ✅ 39/39, 0 flaky, reproducible |
 | `make security-check` | ✅ ALL CHECKS PASSED |
 | `check_network_isolation.py` | ✅ ALL PASS |
-| `opa test` | ✅ 59/59 |
+| `opa test` | ✅ 61/61 |
 | proxy unit suite | ⚠️ **41 failed** (was 42; one fixed) — deterministic, see R5.3 |
-| `make lab-acceptance` | ❌ **5 failed / 36 passed / 2 errors** (was 8F/32P/3E) |
+| `make lab-acceptance` | ⚠️ **2 failed / 41 passed / 0 errors** (was 8F/32P/3E) |
 | `make lint` | ❌ **1583 ruff + 728 mypy across 94 files**; `ruff format` fails 124/140 files |
 
 **CI on `main` has been red on the lint gate for at least 5 pushes.** Pre-existing.
@@ -37,7 +37,8 @@ deleted (never deployed). Current state, measured:
 | inline `style="…"` attributes | 615 |
 | inline `onclick=` handlers | 102 |
 
-### R1.1 — Extract inline assets to `static/` (DO FIRST — unblocks R1.2 and R1.3)
+### R1.1 — ✅ DONE (847a76a) — portal.py 7048 → 5930; 3 blocks justifiably remain
+~~Extract inline assets~~
 Move the 28 inline blocks into `proxy/app/static/portal.css` + `portal.js`. `/static` is already
 mounted (`main.py`). Nothing else changes behaviourally.
 **Why first:** CSS/JS inside Python f-strings gets zero ruff/mypy/formatter coverage, cannot be
@@ -66,19 +67,20 @@ arbitrary `font-size: 11/12/13px`). Lowest priority; cosmetic consistency.
 
 ---
 
-# R2 — Remaining `lab-acceptance` failures  🟠
+# R2 — `lab-acceptance`  ⚠️ 2 failed / 41 passed / 0 errors (was 8F/32P/3E)
 
-Five failures + two errors. **Three now fail DIFFERENTLY than before** — earlier fixes moved
-them forward rather than masking them. Each needs individual root-causing.
+Six of the eight were fixed (26aaadf) — see the commit for each root cause. The headline
+one: `conftest.py::db_query` was missing `-q`, so `INSERT … RETURNING` returned the value
+WITH psql's command tag appended (`"<uuid>
+INSERT 0 1"`), silently corrupting every
+chained query and permanently poisoning the seed idempotency check.
 
-| # | Test | Symptom | Notes |
+Both remainders are lab CONFIG drift, not code:
+
+| # | Test | Cause | Status |
 |---|---|---|---|
-| R2.1 | `test_at1_external_oauth_client_credentials` (×2, ERROR) | ERROR at setup post-wipe | Ran fine standalone pre-wipe (1 pass / 1 real failure) after the Vault port fix. Likely fresh Vault token/state. **Start here — cheapest.** |
-| R2.2 | `test_at4_apply_deploy_verify_full_loop` | `run_verification_probes` → `discover_tools SSRF validation failed` for `at4-clean-mcp-fixture` | The `self_host=False` setup fix moved this from step 1 to the FINAL step. Confirm whether `deploy_verifier` should allowlist a platform-deployed fixture's own runtime URL, or whether the fixture needs registering. **Unconfirmed whether the fix is right-but-incomplete or wrong.** |
-| R2.3 | `test_clean_submission_full_chain_to_invoke` | `'blocked' == 'passed'` | Fails EARLIER than before, at `_poll_scan`. The scanner blocks the clean fixture repo on a fresh scanner. Independent of the assertion fix (never reached). |
-| R2.4 | `test_entra_user_token_m365_delegated` | `🔐 Login required for 'm365'` | **Predicted environmental; SURVIVED the wipe.** Real code/config issue. Check broker decrypt / KEK vs a freshly-initialised Vault. |
-| R2.5 | `test_external_oauth_dex_user_token_generic_path` | lands on `/dex/auth/local?...` instead of `/dex/auth/local/login` | **Also survived the wipe.** Inspect the lab-dex connector config. |
-| R2.6 | `test_entra_directory_self_service_onboarding_before_and_after` | still failing | Survived the wipe, so the root cause is NOT only `self-service.debug_mode`. Re-diagnose from scratch. |
+| R2.4 | `test_entra_user_token_m365_delegated` | `.env.lab` points `ENTRA_TOKEN_URL` at REAL Azure AD, but `seed.py` still seeds a fake `mock-refresh-<identity>` token. Real AAD rejects it (`AADSTS9002313`); the broker reports it as "please enroll". | **DECIDED: provision a real delegated refresh token.** BLOCKED — needs a real token from the tenant owner. Until then this test stays red. |
+| R2.5 | `test_external_oauth_dex_user_token_generic_path` | `PROXY_BASE_URL` is the host's Tailscale IP; `lab/dex/config.yaml` only registers 127.0.0.1/localhost `redirectURIs`, so Dex 400s "Unregistered redirect_uri". | **DECIDED: template the redirectURI from `PROXY_BASE_URL`** so it never drifts. In progress. |
 
 ---
 
@@ -108,20 +110,27 @@ and keep the full `ruff check app/` as a non-blocking informational job so the d
 
 # R4 — Security findings surfaced but NOT fixed  🔴 each needs a decision
 
-### R4.1 — `str(exc)` leaked to API clients
+### R4.1 — ✅ DONE (2e6a30c)
+~~`str(exc)` leaked to API clients~~
 `admin_credentials.py:108,154,215,259,314,383` put raw exception text into client-facing
 `HTTPException` details — DB error text / internals reaching a caller. Same class as the
 `/mcp` deny-path leak already closed via `services/deny_map.py`. Also `admin_git.py:86,117`.
 
-### R4.2 — `agent` role has no self-recovery path
-`_SELF_SERVICE_ALLOWED_ROLES` (`profiles.py:70`) = `{admin, platform_admin, analyst, editor,
-profile_service}` — excludes `agent` and `viewer`. Consequences:
-- the agent portal renders a profile toggle that **403s** for the role that mainly uses it
-- a plain `agent` cannot call `get_my_profile` or `enable_mcp_server` (not in their `_roles`)
-→ **an agent locked out of their tools has no self-service way back.**
-Decide: grant `agent` self-service, or hide the toggle so the UI stops lying.
+### R4.2 — ✅ DONE (632fc37) — and it uncovered a latent privilege escalation
+`agent` now has the three recovery meta-tools. NOTE: the claim that "the agent portal
+renders a toggle that 403s" was **WRONG** — the portal calls the canonical
+`/{principal}/…` route, which is role-blind for self. Only the `/me/` shorthand 403'd.
 
-### R4.3 — platform-critical servers are subject to auto-quarantine with no recovery
+The real find while implementing: `_handle_enable_mcp_server` / `_handle_disable_mcp_server`
+call `_upsert_profile_row` DIRECTLY, bypassing `_assert_may_write` and therefore the P1-2
+service-account guard. A machine token holding a granted role could self-enable MCP servers
+— automated credential compromise → scope expansion. Latent (no lab service account held a
+granted role) but would have gone live with this change. Closed by
+`_sa_blocked_for_profile_mutation`.
+
+### R4.3 — **DECIDED: lab health-check only** (option c). In progress.
+Auto-recovery (b) rejected as gameable; exempting platform-critical servers (a) rejected as
+backwards — it would strip the circuit-breaker from the most-trusted server. Original text:
 `invocation.py` auto-flips `debug_mode=true` after 3 consecutive connection failures and
 **never auto-clears** (deliberate). It applied to the platform's own `self-service` provider,
 which then denied every non-owner caller platform-wide until the wipe. Options: exempt
@@ -142,7 +151,8 @@ they cannot call). But RBAC admits `agent`/`user`, so any agent can enumerate th
 inventory. Intentional for a registry view; same disclosure shape as the portal catalog
 fragment that was deleted. Deserves a deliberate decision rather than an inherited default.
 
-### R4.6 — `"change-me-in-production"` defaults
+### R4.6 — ✅ DONE (32674a7) — it was a staging PARITY gap; production was already guarded
+~~`"change-me-in-production"` defaults~~
 `config.py:400 VAULT_TOKEN` and `config.py:526 OAUTH_STATE_SECRET`. Confirm a production
 startup guard hard-fails on these (there is precedent for fail-closed startup checks).
 
@@ -156,7 +166,8 @@ numbering is the code admitting it has been inserted-into ~10 times. Clean seam:
 gates (1 → 2.7) split from dispatch+audit (3c → 6a). **Highest-risk item in this roadmap** —
 it is the security choke point. Full unit + functional + security gate required.
 
-### R5.2 — Auth-ordering smell
+### R5.2 — ✅ DONE (b123a78) — NOT an auth-ordering smell; the read is deliberately open. The test was vacuous.
+~~Auth-ordering smell~~
 `_list_named_profiles` runs its DB query **before** the admin check, so a non-admin triggers a
 query before rejection. Surfaced by `test_list_profiles_forbidden_for_non_admin`, which fails at
 HEAD.
