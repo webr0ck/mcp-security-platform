@@ -599,3 +599,61 @@ the assertions vacuous; exceptions are now constructed explicitly.
 ### Verification
 functional 46/1 · acceptance 39/39 · unit 1655 passed / 42 failed == HEAD baseline (zero
 regressions, +28) · `make security-check` ALL CHECKS PASSED.
+
+---
+
+## Docs honesty — the discovery==invoke claim (Stage 0 follow-through)
+
+Codex's blocking objection was correct and is now reflected in the docs: **literal
+discovery==invoke is not achievable.** The invoke decision consumes call arguments, anomaly
+score, taint state and the recent-call window — none of which exist at list time. Claiming
+equality in the README made a promise the architecture cannot keep.
+
+Restated as a **conservative preflight**, one-directional in the safe direction: discovery never
+advertises what static policy would deny; a call may still be denied by per-call state, and that
+TOCTOU denial is expected rather than a bug. `README.md` and `docs/enforced-vs-roadmap.md`
+updated together.
+
+## `make lab-acceptance` — baselined, NOT a regression
+
+Current: **8 failed, 32 passed, 3 errors.** Baselined by checking out the pre-session commit
+(`a1171dc`), restarting the proxy against it, and re-running: **identical — same 8 failures,
+same 3 errors, same test names.** Every one is pre-existing.
+
+Observed causes worth their own tickets (not touched here):
+- `test_at3_onboarding` — `assert 'active' == 'approved_pending_url'` and a fail-closed SSRF
+  rejection of the literal placeholder host `at3-placeholder`.
+- `test_at2_trust_envelope_verify` — `{'reason': 'chain_validation_failed'} != {'reason': None}`.
+- 3 errors in `test_at1_external_oauth_client_credentials` / `test_at2_trust_envelope_enforce`.
+
+This suite is NOT in the exit criteria as green — it was never green this session, and claiming
+otherwise would be the over-claiming this repo treats as a bug.
+
+## Exit criteria — status
+
+| # | Criterion | Status |
+|---|---|---|
+| 1 | `lab-smoke` 4/4 | ✅ |
+| 2 | `test-lab-functional` 46+/0 fail | ✅ 46 passed, 1 skipped |
+| 3 | portal acceptance 0 fail, 0 flaky | ✅ **39/39**, reproducible twice (was 34/1 flaky/1 skipped) |
+| 4 | `lab-acceptance` AT0–AT3 green | ❌ 8F/32P/3E — **pre-existing, baselined against `a1171dc`** |
+| 5 | `make security-check` | ✅ **ALL CHECKS PASSED** (was 2 failing at HEAD) |
+| 6 | `make lint` clean | ❌ 1601 ruff errors, **1041 of them E501** — pre-existing |
+| 7 | `check_network_isolation.py` | ✅ ALL PASS |
+| 8 | suites reproducible back-to-back | ✅ both, twice |
+| 9 | README table true | ✅ corrected — see above |
+
+## Remaining, deliberately not attempted
+
+Quality work, no known correctness defect in any of them:
+- **A2** — extract portal.py's 28 inline `<style>`/`<script>` blocks to `static/` (unlocks B1/B2 and any CSP tightening)
+- **B1** — 73 `alert()`/`confirm()` → toast/dialog
+- **B2** — accessibility: still **zero** `aria-*` across 119 buttons; no `aria-live` on htmx swap targets
+- **A4** — split `invoke_tool` (~1,130 lines) at the dispatch seam
+- **Lint** — auto-fix the 305 fixable, then the ~57 `S`-rule findings; decide `E501` separately
+
+Two findings surfaced but not fixed, each needing a product decision:
+- `_SELF_SERVICE_ALLOWED_ROLES` excludes `agent` and `viewer`, so the agent portal renders a
+  profile toggle to the role that gets 403 using it — and a plain `agent` has no self-recovery
+  path at all (no `get_my_profile`, no `enable_mcp_server`).
+- `server_registry` has accumulated `at-*` / `bob-*` acceptance-test submissions.
