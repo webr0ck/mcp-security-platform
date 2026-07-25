@@ -436,13 +436,63 @@ class TestNamedProfileCrud:
         assert data["profiles"][0]["name"] == "analyst"
 
     @pytest.mark.asyncio
-    async def test_list_profiles_forbidden_for_non_admin(self) -> None:
+    async def test_list_profiles_allowed_for_any_authenticated_caller(self) -> None:
+        """READING the catalog is deliberately open to any authenticated caller.
+
+        This asserted 403 for a non-admin, which the product no longer does — and the
+        test did not actually verify authorization at all: with the read allowed, it
+        fell through to a REAL database connection and failed on a connection error,
+        not on a missing 403. It has been failing on clean HEAD for that reason.
+
+        The open read is intentional (see list_named_profiles' docstring): a user needs
+        the catalog to pick a profile for their MCP client via ?profile=<name> at login.
+        What makes that safe is that every WRITE stays admin-only — pinned below.
+        """
+        from app.routers.profiles import list_named_profiles
+        with patch("app.routers.profiles._list_named_profiles",
+                   new_callable=AsyncMock, return_value=[]):
+            resp = await list_named_profiles(self._make_nonadmin_request())
+        assert resp.status_code == 200
+        assert json.loads(resp.body)["profiles"] == []
+
+    @pytest.mark.asyncio
+    async def test_list_profiles_requires_authentication(self) -> None:
         from fastapi import HTTPException
         from app.routers.profiles import list_named_profiles
         req = self._make_nonadmin_request()
-        with pytest.raises(HTTPException) as exc_info:
+        req.state.client_id = ""          # unauthenticated
+        with pytest.raises(HTTPException) as exc:
             await list_named_profiles(req)
-        assert exc_info.value.status_code == 403
+        assert exc.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_profile_WRITES_remain_admin_only(self) -> None:
+        """The guard that makes the open read above safe.
+
+        A non-admin who could create a profile, or rebind an existing one, could hand
+        themselves a profile that widens access. Reading the catalogue is harmless;
+        writing to it is not.
+        """
+        from fastapi import HTTPException
+        from app.routers.profiles import (
+            NamedProfileCreateBody,
+            NamedProfileMCPBindingBody,
+            create_named_profile,
+            upsert_named_profile_mcp,
+        )
+
+        req = self._make_nonadmin_request()
+
+        with pytest.raises(HTTPException) as exc:
+            await create_named_profile(
+                NamedProfileCreateBody(name="attacker-profile"), req)
+        assert exc.value.status_code == 403
+
+        with pytest.raises(HTTPException) as exc:
+            await upsert_named_profile_mcp(
+                "analyst", "echo-basic",
+                NamedProfileMCPBindingBody(enabled=True), req)
+        assert exc.value.status_code == 403
 
     @pytest.mark.asyncio
     async def test_create_profile_returns_201(self) -> None:
