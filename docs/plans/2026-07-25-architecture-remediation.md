@@ -13,7 +13,8 @@
 | 2 | F2/F3/F4 — self-lockout guard, deny-message remediation | ✅ **done** | 400 on self-lockout; remediation live; 3 mutations caught |
 | 3 | F8 — audit all discovery surfaces (fan-out) | ✅ **done** | 2 no-change verdicts, 3 real fixes; 39/39 acceptance |
 | 4 | F5 — test state hygiene (F3 folded into Stage 2) | ✅ **done** | acceptance 36/0/0 twice; functional 46/1 twice |
-| 5 | A5/A7 — unify deny mapping, health honesty | ⏳ pending | unit + functional |
+| 5a | A7 — health reports degraded startup subsystems | ✅ **done** | 8 subsystems visible; 9 tests |
+| 5b | A5 — unify the 3 deny-mapping sites | ⏳ pending | unit + functional |
 | 6a | A1/A3 — delete dead React SPA + design.html | ✅ **done** | acceptance 39/39 after deletion |
 | 6b | A2 — extract portal inline CSS/JS to static/ | ⏳ pending | portal acceptance green |
 | 7 | B1/B2 — toast/confirm, accessibility | ⏳ pending | portal acceptance + a11y pass |
@@ -536,3 +537,34 @@ unauthenticated from the `/static` mount.
 Docs updated in the same change: `CLAUDE.md` (repo map + commands), `AGENTS.md`, `ui/README.md`
 now states plainly that the live UI is the server-rendered portal. `make ui-dev`/`ui-build`
 replaced by `make ui-acceptance`.
+
+---
+
+## Stage 5a — CLOSED 2026-07-25: `/health` reports degraded startup subsystems
+
+`lifespan()` starts eight background subsystems, each wrapped in
+`except Exception: logger.warning(...)`. Fail-graceful startup is the right call — a proxy that
+still authenticates, authorizes and denies correctly should not crash-loop because a scan
+evaluator failed. The defect was that the failure existed **only as a line in stdout**:
+*"OPA data sync initialization failed — grants will not be synced"* was a WARNING on a
+fail-closed platform, and `/health` answered `"ok"` while authorization data stopped reconciling.
+
+New `app/core/startup_state.py` records each subsystem's outcome; `/health` reports a
+`subsystems` block plus `degraded_subsystems` for the required ones.
+
+**Required** (a degradation changes enforcement or authorization data): `credential_broker`,
+`registry`, `opa_data_sync`, `database_startup_probe`, and `trust_observer` *only when*
+`TRUST_ENVELOPE_ENFORCE` is on — an observer that never initialised silently removes an
+enforcement path. **Optional**: rescan/scan/build evaluators, trust labeler.
+
+Note `credential_broker` records `disabled` (not `degraded`) when `VAULT_TOKEN` is empty, and
+that still alerts: every credential-injecting tool then fails closed at call time, which an
+operator must see.
+
+**Deliberate:** the HTTP status stays keyed on the live critical dependencies only. A degraded
+background subsystem is now visible but does **not** fail liveness — turning it into a 503 would
+restart-loop a proxy that is still serving and denying correctly. Pinned by
+`test_degraded_subsystem_downgrades_status_but_keeps_200`.
+
+Verified live: all 8 subsystems reported. functional 46/1 · smoke 4/4 · unit 1627 passed / 42
+failed == HEAD baseline (+9).

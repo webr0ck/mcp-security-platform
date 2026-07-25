@@ -28,6 +28,7 @@ from app.core.config import settings
 from app.core.database import check_database_health
 from app.core.log_filter import RedactingFilter
 from app.core.hardening import apply_process_hardening
+from app.core import startup_state
 from app.core.redis_client import redis_pool
 from app.core.telemetry import telemetry
 from app.core.asyncpg_pool import asyncpg_pool
@@ -121,8 +122,14 @@ async def lifespan(app: FastAPI):
             "Credential broker disabled (VAULT_TOKEN empty) — "
             "tools with service_name + credential_approach set will fail-closed at call time"
         )
+        startup_state.record(
+            "credential_broker", "disabled",
+            "VAULT_TOKEN empty — credential-injecting tools fail closed at call time",
+            required=True,
+        )
     else:
         logger.info("Credential broker initialized")
+        startup_state.record("credential_broker", "ok", required=True)
 
     # Step 4: Initialize Registry with asyncpg pool and start auto-refresh loop
     from app.credential_broker.registry import Registry
@@ -133,11 +140,13 @@ async def lifespan(app: FastAPI):
         inv_svc.registry_instance = registry
         await registry.start_refresh_loop()
         logger.info("Registry initialized with 30s auto-refresh")
+        startup_state.record("registry", "ok", required=True)
     except Exception as exc:
         logger.warning(
             "Registry initialization failed — server discovery will be unavailable",
             extra={"error": str(exc)},
         )
+        startup_state.record("registry", "degraded", str(exc), required=True)
 
     # Step 5: Initialize OPA data sync service (push grants to OPA immediately)
     from app.services.opa_data_sync import OPADataSync
@@ -158,18 +167,26 @@ async def lifespan(app: FastAPI):
         # Start background reconciliation loop (60s interval)
         await opa_data_sync.start_reconcile_loop()
         logger.info("OPA data sync service initialized")
+        startup_state.record("opa_data_sync", "ok", required=True)
     except Exception as exc:
         logger.warning(
             "OPA data sync initialization failed — grants will not be synced",
             extra={"error": str(exc)},
+        )
+        startup_state.record(
+            "opa_data_sync", "degraded",
+            f"grants are NOT reconciling — authorization data is stale: {exc}",
+            required=True,
         )
 
     # Step 5.5: Start supply-chain re-scan loop (Stage 3 — periodic freshness check)
     from app.services import rescan_scheduler as _rescan_svc
     try:
         _rescan_svc.start(interval_hours=settings.RESCAN_INTERVAL_HOURS)
+        startup_state.record("rescan_scheduler", "ok")
     except Exception as exc:
         logger.warning("Rescan scheduler failed to start: %s", exc)
+        startup_state.record("rescan_scheduler", "degraded", str(exc))
 
     # Step 5.6 (CR-14 / WP-B1): start the scan evaluator loop — the trusted
     # side that reads scan_raw_results (written by the isolated
@@ -177,8 +194,10 @@ async def lifespan(app: FastAPI):
     from app.services import scan_evaluator as _scan_evaluator
     try:
         _scan_evaluator.start()
+        startup_state.record("scan_evaluator", "ok")
     except Exception as exc:
         logger.warning("Scan evaluator failed to start: %s", exc)
+        startup_state.record("scan_evaluator", "degraded", str(exc))
 
     # Step 5.7 (CR-01 / WP-B3): start the build evaluator loop — the trusted
     # side that reads build_results (written by the isolated build-worker)
@@ -186,10 +205,16 @@ async def lifespan(app: FastAPI):
     from app.services import build_evaluator as _build_evaluator
     try:
         _build_evaluator.start()
+        startup_state.record("build_evaluator", "ok")
     except Exception as exc:
         logger.warning("Build evaluator failed to start: %s", exc)
+        startup_state.record("build_evaluator", "degraded", str(exc))
 
     # Step 6: Initialize trust envelope labeler (PRD-0001 M3) — fail-graceful
+    startup_state.record(
+        "trust_labeler", "ok" if settings.TRUST_ENVELOPE_ENABLED else "disabled",
+        "" if settings.TRUST_ENVELOPE_ENABLED else "TRUST_ENVELOPE_ENABLED=false",
+    )
     if settings.TRUST_ENVELOPE_ENABLED:
         from app.services.trust_labeler import init_labeler as _init_labeler
         _init_labeler(
@@ -203,15 +228,24 @@ async def lifespan(app: FastAPI):
     # lazy) — wrap it so a missing/unreadable sub_ca.crt degrades the observer
     # instead of crash-looping the whole proxy (matches the fail-graceful
     # pattern used by every other optional Step 5.x/6 startup task here).
+    if not settings.TRUST_OBSERVER_ENABLED:
+        startup_state.record("trust_observer", "disabled", "TRUST_OBSERVER_ENABLED=false")
     if settings.TRUST_OBSERVER_ENABLED:
         try:
             from app.services.trust_verifier import init_verifier as _init_verifier
             _init_verifier(sub_ca_cert_path=settings.LABELER_SUB_CA_PATH)
+            startup_state.record("trust_observer", "ok")
         except Exception as exc:
             logger.warning("TrustVerifier failed to initialise (observer disabled): %s", exc)
+            # required: TRUST_ENVELOPE_ENFORCE denies on a bad verdict, so an observer
+            # that never initialised silently removes an enforcement path.
+            startup_state.record("trust_observer", "degraded", str(exc),
+                                 required=settings.TRUST_ENVELOPE_ENFORCE)
 
     # Step 7: Verify database on startup (warn but don't crash)
     db_ok = await check_database_health()
+    startup_state.record("database_startup_probe", "ok" if db_ok else "degraded",
+                         "" if db_ok else "not reachable at startup", required=True)
     if not db_ok:
         logger.warning("Database not reachable at startup — health endpoint will report degraded")
 
