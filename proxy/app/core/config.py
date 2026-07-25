@@ -683,6 +683,26 @@ class Settings(BaseSettings):
                 "staging. Set SESSION_COOKIE_SECURE=true in your environment."
             )
 
+        # R4.6: VAULT_TOKEN, OAUTH_STATE_SECRET, and DEX_CLIENT_SECRET ship with
+        # non-empty dev-placeholder defaults ("change-me-in-production",
+        # "mcp-proxy-secret") so the lab and local dev can boot without extra
+        # config. _reject_placeholders_in_production already refuses to boot
+        # production on these values; staging must mirror that (same rationale
+        # as the OIDC_AUDIENCE/SESSION_COOKIE_SECURE checks above) rather than
+        # silently authenticating to Vault, signing OAuth state, or trusting
+        # Dex with a well-known secret in a pre-production environment.
+        staging_sensitive_fields = ("VAULT_TOKEN", "OAUTH_STATE_SECRET", "DEX_CLIENT_SECRET")
+        bad = [
+            name for name in staging_sensitive_fields
+            if str(getattr(self, name, "")).strip() in _KNOWN_PLACEHOLDER_VALUES
+        ]
+        if bad:
+            raise ValueError(
+                "Staging startup blocked: the following secrets are unset "
+                "or set to a known placeholder value: "
+                + ", ".join(bad)
+            )
+
         return self
 
     @model_validator(mode="after")

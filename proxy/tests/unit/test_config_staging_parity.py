@@ -49,6 +49,15 @@ def _make_settings(**overrides):
 # Minimum key length that passes the production 32-byte HMAC length check.
 _LONG_KEY = "a" * 32
 
+# R4.6: staging now blocks on placeholder VAULT_TOKEN/OAUTH_STATE_SECRET/
+# DEX_CLIENT_SECRET (mirrors production). Every "...passes_staging" test below
+# that isn't specifically testing that guard needs real values for these three.
+_STAGING_REAL_SECRETS = dict(
+    VAULT_TOKEN="a-real-token",
+    OAUTH_STATE_SECRET=_LONG_KEY,
+    DEX_CLIENT_SECRET="not-a-placeholder",
+)
+
 # Minimum production-valid kwargs (satisfies all production validators).
 _PRODUCTION_BASE = dict(
     ENVIRONMENT="production",
@@ -101,6 +110,7 @@ class TestStagingOidcAudience:
             OIDC_ENABLED=True,
             OIDC_AUDIENCE="mcp-proxy",
             SESSION_COOKIE_SECURE=True,
+            **_STAGING_REAL_SECRETS,
         )
         assert s.OIDC_AUDIENCE == "mcp-proxy"
 
@@ -112,6 +122,7 @@ class TestStagingOidcAudience:
             OIDC_ENABLED=False,
             OIDC_AUDIENCE="",
             SESSION_COOKIE_SECURE=True,
+            **_STAGING_REAL_SECRETS,
         )
         assert s.ENVIRONMENT == "staging"
 
@@ -155,6 +166,7 @@ class TestStagingSessionCookieSecure:
             ENVIRONMENT=environment,
             VAULT_ADDR="https://vault:8200",
             SESSION_COOKIE_SECURE=True,
+            **_STAGING_REAL_SECRETS,
         )
         assert s.SESSION_COOKIE_SECURE is True
 
@@ -172,6 +184,68 @@ class TestStagingSessionCookieSecure:
             SESSION_COOKIE_SECURE=False,
         )
         assert s.SESSION_COOKIE_SECURE is False
+
+
+# ===========================================================================
+# R4.6 — Staging must reject placeholder secrets (VAULT_TOKEN, OAUTH_STATE_SECRET,
+#         DEX_CLIENT_SECRET), same as production already does.
+# ===========================================================================
+
+class TestStagingSecretPlaceholders:
+    """VAULT_TOKEN / OAUTH_STATE_SECRET / DEX_CLIENT_SECRET ship with non-empty
+    dev-placeholder defaults. Production already refuses to boot on these via
+    _reject_placeholders_in_production; staging must mirror that."""
+
+    @pytest.mark.parametrize(
+        "field,placeholder",
+        [
+            ("VAULT_TOKEN", "change-me-in-production"),
+            ("OAUTH_STATE_SECRET", "change-me-in-production"),
+            ("DEX_CLIENT_SECRET", "mcp-proxy-secret"),
+        ],
+    )
+    def test_placeholder_secret_blocks_staging(self, field, placeholder):
+        with pytest.raises(ValueError, match=f"Staging startup blocked.*{field}"):
+            _make_settings(
+                ENVIRONMENT="staging",
+                VAULT_ADDR="https://vault:8200",
+                OIDC_ENABLED=False,
+                SESSION_COOKIE_SECURE=True,
+                **{**_STAGING_REAL_SECRETS, field: placeholder},
+            )
+
+    def test_real_secrets_pass_staging(self):
+        s = _make_settings(
+            ENVIRONMENT="staging",
+            VAULT_ADDR="https://vault:8200",
+            OIDC_ENABLED=False,
+            SESSION_COOKIE_SECURE=True,
+            **_STAGING_REAL_SECRETS,
+        )
+        assert s.ENVIRONMENT == "staging"
+
+    @pytest.mark.parametrize(
+        "field,placeholder",
+        [
+            ("VAULT_TOKEN", "change-me-in-production"),
+            ("OAUTH_STATE_SECRET", "change-me-in-production"),
+            ("DEX_CLIENT_SECRET", "mcp-proxy-secret"),
+        ],
+    )
+    def test_placeholder_secret_passes_development(self, field, placeholder):
+        """Development must keep booting unchanged with the shipped defaults."""
+        s = _make_settings(
+            ENVIRONMENT="development",
+            **{field: placeholder},
+        )
+        assert s.ENVIRONMENT == "development"
+
+    def test_placeholder_secret_still_blocks_production(self):
+        """Production behaviour is unchanged: this is not a new production check."""
+        with pytest.raises(ValueError, match="Production startup blocked.*VAULT_TOKEN"):
+            _make_settings(
+                **{**_PRODUCTION_BASE, "VAULT_TOKEN": "change-me-in-production"},
+            )
 
 
 # ===========================================================================
@@ -232,6 +306,7 @@ class TestGatewaySecretProductionFailClosed:
             VAULT_ADDR="https://vault:8200",
             SESSION_COOKIE_SECURE=True,
             GATEWAY_SHARED_SECRET="",
+            **_STAGING_REAL_SECRETS,
         )
         assert s.ENVIRONMENT == "staging"
 
