@@ -318,9 +318,9 @@ platform_meta_tool_roles := {
     # recovery. Sets below mirror _TOOLS[i]["_roles"] exactly, as the comment
     # above this map has always required.
     "list_available_mcps":    {"admin", "analyst", "viewer", "editor", "platform_admin", "agent"},
-    "get_my_profile":         {"admin", "analyst", "viewer", "editor", "platform_admin"},
-    "enable_mcp_server":      {"admin", "analyst", "editor", "platform_admin"},
-    "disable_mcp_server":     {"admin", "analyst", "editor", "platform_admin"},
+    "get_my_profile":         {"admin", "analyst", "viewer", "editor", "platform_admin", "agent"},
+    "enable_mcp_server":      {"admin", "analyst", "editor", "platform_admin", "agent"},
+    "disable_mcp_server":     {"admin", "analyst", "editor", "platform_admin", "agent"},
 }
 
 # A request is a platform meta-tool ONLY when the inline /mcp meta dispatch

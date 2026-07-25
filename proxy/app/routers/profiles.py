@@ -67,7 +67,14 @@ _CROSS_PROFILE_WRITE_ROLES = frozenset({"platform_admin"}) | _PROFILE_SERVICE_RO
 # Deny-by-default: only listed roles may enable/disable their own MCP servers.
 # The old negative check ("block if viewer") was bypassed by empty-roles tokens
 # (PRIVESC-001 fix). A positive allowlist is the correct pattern.
-_SELF_SERVICE_ALLOWED_ROLES = frozenset({"admin", "platform_admin", "analyst", "editor", "profile_service"})
+# `agent` added 2026-07-25: the canonical /{principal}/... routes already allow ANY
+# role to manage its OWN profile (_assert_may_write returns early on
+# caller_id == principal), and the portal already permits agent via
+# _require_portal_write. Excluding agent here made only the /me/ shorthand behave
+# differently from the two surfaces that already worked — an inconsistency, not a
+# control. Service accounts remain barred on every path by
+# _assert_not_service_account (P1-2). `viewer` stays out: read-only by design.
+_SELF_SERVICE_ALLOWED_ROLES = frozenset({"admin", "platform_admin", "analyst", "editor", "profile_service", "agent"})
 
 # Cache sentinel — must match the value in invocation.py
 _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"

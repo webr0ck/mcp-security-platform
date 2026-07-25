@@ -248,7 +248,7 @@ _TOOLS: list[dict[str, Any]] = [
             "and (if configured) which individual functions within each server you can use."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "_roles": {"admin", "analyst", "viewer", "editor", "platform_admin"},
+        "_roles": {"admin", "analyst", "viewer", "editor", "platform_admin", "agent"},
     },
     {
         "name": "enable_mcp_server",
@@ -263,7 +263,7 @@ _TOOLS: list[dict[str, Any]] = [
             },
             "required": ["server_name"],
         },
-        "_roles": {"admin", "analyst", "editor", "platform_admin"},
+        "_roles": {"admin", "analyst", "editor", "platform_admin", "agent"},
     },
     {
         "name": "disable_mcp_server",
@@ -278,7 +278,7 @@ _TOOLS: list[dict[str, Any]] = [
             },
             "required": ["server_name"],
         },
-        "_roles": {"admin", "analyst", "editor", "platform_admin"},
+        "_roles": {"admin", "analyst", "editor", "platform_admin", "agent"},
     },
 ]
 
@@ -1339,7 +1339,46 @@ async def _handle_get_my_profile(args: dict, request: Request) -> dict:
     }
 
 
+def _sa_blocked_for_profile_mutation(request: Request) -> dict | None:
+    """P1-2 at the meta-tool seam. Returns an error payload if the caller is a
+    service account, else None.
+
+    profiles.py bars machine tokens from mutating profiles via
+    _assert_not_service_account, reached through _assert_may_write on the REST
+    routes. But _handle_enable_mcp_server / _handle_disable_mcp_server call
+    _upsert_profile_row DIRECTLY, so they never reach that guard — a service
+    account holding any role in the tool's _roles set could self-enable an MCP
+    over /mcp and expand its own reach, which is exactly the escalation P1-2
+    exists to stop (automated credential compromise -> scope expansion).
+
+    Latent rather than live before 2026-07-25 only because no service account in
+    this lab happened to hold admin/analyst/editor/platform_admin. It becomes
+    reachable the moment one does — or, as here, the moment `agent` is added to
+    those _roles so agent-only MCP clients can recover their own profile.
+
+    Reading your own profile (get_my_profile) is NOT blocked: it mutates nothing.
+    """
+    if getattr(request.state, "is_service_account", False):
+        caller = getattr(request.state, "client_id", "") or "unknown"
+        logger.warning(
+            "META_TOOL_SA_BLOCKED: service-account %s attempted profile mutation "
+            "via an MCP meta-tool — denied (P1-2)", caller,
+        )
+        return {
+            "type": "text",
+            "text": (
+                "Profile changes are a human governance action — a service account "
+                "cannot enable or disable MCP servers for itself. Ask an "
+                "administrator to change this profile."
+            ),
+        }
+    return None
+
+
 async def _handle_enable_mcp_server(args: dict, request: Request) -> dict:
+    _sa_denied = _sa_blocked_for_profile_mutation(request)
+    if _sa_denied is not None:
+        return _sa_denied
     principal: str = getattr(request.state, "client_id", "")
     server_name: str = args.get("server_name", "").strip()
     if not server_name:
@@ -1372,6 +1411,9 @@ async def _handle_enable_mcp_server(args: dict, request: Request) -> dict:
 
 
 async def _handle_disable_mcp_server(args: dict, request: Request) -> dict:
+    _sa_denied = _sa_blocked_for_profile_mutation(request)
+    if _sa_denied is not None:
+        return _sa_denied
     principal: str = getattr(request.state, "client_id", "")
     server_name: str = args.get("server_name", "").strip()
     if not server_name:

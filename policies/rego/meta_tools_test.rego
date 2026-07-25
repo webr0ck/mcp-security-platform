@@ -243,8 +243,31 @@ test_viewer_cannot_disable_mcp_server if {
 	not allow with input as _meta_input("disable_mcp_server", ["viewer"])
 }
 
-test_agent_cannot_get_my_profile if {
-	not allow with input as _meta_input("get_my_profile", ["agent"])
+# REVERSED 2026-07-25 (was test_agent_cannot_get_my_profile). `agent` is now granted
+# the three recovery meta-tools: an agent-only MCP client could previously SEE via
+# list_available_mcps that its tools were disabled but had no way to inspect or restore
+# its own profile through the protocol it was actually using — its only routes back were
+# a REST endpoint it had no reason to know about, or an admin.
+#
+# This grants no new capability: the portal (_require_portal_write) and the canonical
+# /{principal}/... REST routes (_assert_may_write returns early on caller_id == principal)
+# already allowed it for any role. It only makes the MCP surface consistent with those.
+test_agent_can_get_my_profile if {
+	allow with input as _meta_input("get_my_profile", ["agent"])
+}
+
+test_agent_can_enable_mcp_server if {
+	allow with input as _meta_input("enable_mcp_server", ["agent"])
+}
+
+# The role grant is necessary but NOT sufficient — a SERVICE-ACCOUNT token holding
+# `agent` must still never mutate a profile (P1-2). OPA cannot see that: it has no
+# is_service_account signal. Enforcement lives at the handler seam
+# (_sa_blocked_for_profile_mutation in routers/mcp_server.py), covered by
+# proxy/tests/unit/test_meta_tool_service_account_guard.py. Noted here so the OPA-side
+# allow is not mistaken for the whole control.
+test_viewer_still_cannot_enable_mcp_server if {
+	not allow with input as _meta_input("enable_mcp_server", ["viewer"])
 }
 
 # --- the marker is still required: no is_platform_meta => no meta-tool path --
