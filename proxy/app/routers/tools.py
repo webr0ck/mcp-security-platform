@@ -1789,6 +1789,9 @@ async def invoke_tool(
             },
         )
     except OPADenyError as exc:
+        from app.services.policy import deny_remediation as _deny_remediation
+        _deny_reasons = exc.reasons if hasattr(exc, "reasons") else [str(exc)]
+        _deny_help = _deny_remediation(_deny_reasons)
         return JSONResponse(
             status_code=403,
             content={
@@ -1796,10 +1799,15 @@ async def invoke_tool(
                 "id": body.get("id"),
                 "error": {
                     "code": -32603,
-                    "message": "Tool invocation denied by policy.",
+                    "message": "Tool invocation denied by policy." + (
+                        f" {_deny_help}" if _deny_help else ""
+                    ),
                     "data": {
-                        "opa_reasons": exc.reasons if hasattr(exc, "reasons") else [str(exc)],
-                        "audit_id": "see X-Request-ID",
+                        "opa_reasons": _deny_reasons,
+                        # Was the literal string "see X-Request-ID", which is not an id
+                        # and cannot be pasted into a support ticket or grepped in Loki.
+                        "request_id": request_id,
+                        **({"remediation": _deny_help} if _deny_help else {}),
                     },
                 },
             },

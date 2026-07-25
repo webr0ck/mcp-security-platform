@@ -10,9 +10,9 @@
 |---|---|---|---|
 | 0 | Architect decision on the profile fork | ✅ done | 3-critic REJECTED the original diagnosis — verdict below |
 | 1 | **F6/F7/F1 — fail-open, escalation, key mismatch** | ✅ **done** | live repro flips to denied; 46/1/0; 3 mutations caught |
-| 2 | F2/F4 — self-lockout guard, deny-message remediation | ⏳ pending | recovery set uninhibitable |
+| 2 | F2/F3/F4 — self-lockout guard, deny-message remediation | ✅ **done** | 400 on self-lockout; remediation live; 3 mutations caught |
 | 3 | F8 — single `list_authorized_tools` across all 4 discovery surfaces | ⏳ pending | cross-surface contract tests |
-| 4 | F3/F5 — naming trap, test state hygiene | ⏳ pending | suites reproducible from clean state |
+| 4 | F5 — test state hygiene (F3 folded into Stage 2) | ⏳ pending | suites reproducible from clean state |
 | 5 | A5/A7 — unify deny mapping, health honesty | ⏳ pending | unit + functional |
 | 6 | A1/A3/A2 — delete dead UI, extract portal assets | ⏳ pending | portal acceptance green |
 | 7 | B1/B2 — toast/confirm, accessibility | ⏳ pending | portal acceptance + a11y pass |
@@ -280,3 +280,51 @@ work (`config.py`, `taint_floor.py`, `tools.py`, `tests/rfc0002/`, `test_taint_f
 `test_invocation_taint_notices.py`), which `CHANGES-article4-truth.md` explicitly reserves for the
 user to review and commit. **`services/invocation.py` contains BOTH that work and the Stage 1 fix**,
 so there is no clean split. Left uncommitted pending the user's call.
+
+---
+
+## Stage 2 — CLOSED 2026-07-25
+
+### F2 — self-lockout guard
+`would_self_lockout(principal, mcp_name, enabled, changed_by)` — a pure predicate — plus a
+`400 PROFILE_SELF_LOCKOUT_BLOCKED` raised from **inside `_upsert_profile_row`**. The guard lives in
+the writer, not the endpoints, because **11 call sites** across `profiles.py` and `mcp_server.py`
+route through it; guarding each caller would leave the next one unprotected.
+
+Protected set `_RECOVERY_MCPS = {get_profile, enable_mcp, enable_function}` — deliberately covers
+both halves of recovery: **inspect** (you must be able to see what you disabled) and **undo** (server
+and function level). A set that can undo but not inspect only lets you fix what you could already name.
+
+**Scoped to self-directed writes (`changed_by == principal`).** An admin restricting *another*
+principal's self-service stays allowed — that is legitimate policy and not a lockout, because the
+admin can still reverse it. Role is irrelevant to the predicate: the lab case was an `admin`
+locking *herself* out, and there is deliberately no role bypass on the profile gate.
+
+### F3 — name-trap closed structurally
+Recovery previously survived only by accident: `get_my_profile` / `enable_mcp_server` are platform
+meta-tools served by the role-only `_visible_tools` path, so they bypass the profile gate, while the
+near-identically-named `get_profile` / `enable_mcp` are registry tools that do not. With F2 the
+recovery tools can no longer be disabled at all, so the accident is now a guarantee. No rename
+needed; the confusing pairs remain but are no longer load-bearing.
+
+### F4 — deny messages carry remediation
+`deny_remediation(reasons)` in `services/policy.py`, one table consumed by all three deny-mapping
+sites. Remediation goes **in the message, not only in `data`** — MCP clients render `message` and
+frequently ignore `data`, which is why the credential-enrollment path already does this. Handles
+decorated reasons (`taint_floor:required_integrity=3`) by falling back to the prefix.
+
+Returns **None** for unrecognised reasons rather than generic filler: "contact your administrator"
+on every deny trains both agents and humans to ignore the field, which costs more than an absent one.
+
+Also fixed: the REST deny carried `"audit_id": "see X-Request-ID"` — a literal string, not an id.
+It is now the real `request_id`, so a deny is greppable in Loki and pasteable into a ticket.
+
+Live: `disable enable_mcp` → 400 · `disable get_profile` → 400 · `disable echo-basic` → 200 ·
+invoke denied → message carries the how-to-undo text + `request_id`.
+
+### Verification
+smoke 4/4 · functional **46 passed, 1 skipped** · unit **1606 passed / 42 failed == HEAD baseline
+exactly** (+15 tests) · portal acceptance 34 passed, 1 pre-existing flaky.
+
+Mutations caught: (a) guard ignoring `changed_by` (would block legitimate admin action),
+(b) `get_profile` dropped from the recovery set, (c) remediation returning generic filler.

@@ -773,7 +773,20 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             # reason list a client would get calling the tool directly.
             logger.info("MCP invoke denied (OPA) tool=%s client=%s reasons=%s",
                         name, client_id, exc.reasons)
-            return _err(req_id, -32003, "Access denied by policy", data={"reasons": exc.reasons})
+            from app.services.policy import deny_remediation as _deny_help
+            _help = _deny_help(exc.reasons)
+            # Put remediation IN THE MESSAGE, not only in `data`: MCP clients render
+            # `message` and frequently ignore `data` (same reasoning as the credential
+            # enrollment deny below). request_id makes the deny reportable.
+            _msg = "Access denied by policy" + (f". {_help}" if _help else "")
+            return _err(
+                req_id, -32003, _msg,
+                data={
+                    "reasons": exc.reasons,
+                    "request_id": request_id,
+                    **({"remediation": _help} if _help else {}),
+                },
+            )
         logger.exception("Registry tool invocation error for %s", name)
         return _err(req_id, -32603, f"Tool invocation failed: {exc}")
 
@@ -1207,7 +1220,13 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
         if isinstance(exc, OPADenyError):
             logger.info("invoke_tool denied (OPA) tool=%s client=%s reasons=%s",
                         tool_name, client_id, exc.reasons)
-            return {"type": "text", "text": f"Access denied by policy: {', '.join(exc.reasons)}"}
+            from app.services.policy import deny_remediation as _deny_help
+            _help = _deny_help(exc.reasons)
+            _text = f"Access denied by policy: {', '.join(exc.reasons)}"
+            if _help:
+                _text += f"\n\n{_help}"
+            _text += f"\n\n(request_id: {request_id})"
+            return {"type": "text", "text": _text}
         logger.exception("invoke_tool pipeline error for %s", tool_name)
         return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}
 
