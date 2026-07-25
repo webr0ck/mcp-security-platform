@@ -16,7 +16,7 @@ so it can be worked from a clean session with no prior context.
 | `make security-check` | ✅ ALL CHECKS PASSED |
 | `check_network_isolation.py` | ✅ ALL PASS |
 | `opa test` | ✅ 59/59 |
-| proxy unit suite | ⚠️ 1655 passed / **42 failed == pre-session baseline** (zero regressions) |
+| proxy unit suite | ⚠️ **41 failed** (was 42; one fixed) — deterministic, see R5.3 |
 | `make lab-acceptance` | ❌ **5 failed / 36 passed / 2 errors** (was 8F/32P/3E) |
 | `make lint` | ❌ **1583 ruff + 728 mypy across 94 files**; `ruff format` fails 124/140 files |
 
@@ -161,9 +161,33 @@ it is the security choke point. Full unit + functional + security gate required.
 query before rejection. Surfaced by `test_list_profiles_forbidden_for_non_admin`, which fails at
 HEAD.
 
-### R5.3 — Four intermittently-failing unit tests
-One run reported 46 failures where two consecutive runs reported 42. Unexplained; not a
-regression. Worth identifying before they mask something real.
+### R5.3 — ~~Four intermittently-failing unit tests~~ RESOLVED: not a defect
+**The suite is deterministic.** Investigated with 24 full runs on a settled tree —
+6 sequential, 2 deliberately concurrent, and 16 with `PYTHONHASHSEED` forced to different
+values (the standard suspect for same-code-different-result non-determinism). All 24
+produced byte-identical sorted FAILED lists.
+
+The apparent flakiness was **an artifact of running pytest against a tree being
+concurrently edited.** It was reproduced live and diffed: the extra failures were exactly
+the tests covering the files that were mid-write at that moment (`_TOOLS` /
+`platform_meta_tool_roles` during the R4.2 edit, and the self-service handlers before
+their fixture was updated for the new guard). Not random tests — whichever tests exercise
+whatever file is being written.
+
+A hypothesis was raised and **disproved rather than assumed**: nine test files do
+`del sys.modules["app.services.invocation"]` + reimport inside `patch.dict(sys.modules, …)`,
+which looks like it should leave a swapped module polluting later tests. Verified by
+`id()`-comparing the module object before and after — `patch.dict.__exit__` restores the
+whole `sys.modules` snapshot and silently undoes the `del`. Poor hygiene, not a live bug.
+
+**Standing rule this produced — now part of the verification discipline:**
+> A FAILED-list diff is only meaningful when `git status --short` is clean for the files
+> the tests cover. Check it BEFORE trusting a pytest run as a regression signal. With
+> several agents editing concurrently, a full-suite run samples a moving target.
+
+Confirmed after settling: 3 consecutive runs, byte-identical, 41 failures — the old
+42-baseline minus `test_list_profiles_forbidden_for_non_admin`, which was deliberately
+fixed. Zero regressions.
 
 ### R5.4 — Dangling doc references
 `docs/prd/` does not exist, yet `PRD-0010`, `PRD-0001`, `PRD-0012` are cited in code comments.
