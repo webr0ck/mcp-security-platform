@@ -14,7 +14,8 @@
 | 3 | F8 — audit all discovery surfaces (fan-out) | ✅ **done** | 2 no-change verdicts, 3 real fixes; 39/39 acceptance |
 | 4 | F5 — test state hygiene (F3 folded into Stage 2) | ✅ **done** | acceptance 36/0/0 twice; functional 46/1 twice |
 | 5 | A5/A7 — unify deny mapping, health honesty | ⏳ pending | unit + functional |
-| 6 | A1/A3/A2 — delete dead UI, extract portal assets | ⏳ pending | portal acceptance green |
+| 6a | A1/A3 — delete dead React SPA + design.html | ✅ **done** | acceptance 39/39 after deletion |
+| 6b | A2 — extract portal inline CSS/JS to static/ | ⏳ pending | portal acceptance green |
 | 7 | B1/B2 — toast/confirm, accessibility | ⏳ pending | portal acceptance + a11y pass |
 | 8 | A4 — split `invoke_tool` at the dispatch seam | ⏳ pending | full unit + functional + security |
 | 4.5 | **Unblock the security gate** (H3 + F-001) | ✅ **done** | `make security-check`: ALL CHECKS PASSED |
@@ -505,3 +506,33 @@ control confirms a backend sharing two accepted nets still FAILS. Renaming a liv
 would have changed no security property.
 
 **Result: `make security-check` → ALL CHECKS PASSED** (was 2 failing at HEAD).
+
+---
+
+## Stage 6a — CLOSED 2026-07-25: deleted the dead React SPA
+
+**~3,000 LOC of `ui/src` removed.** Evidence it was never deployed:
+- no service in `docker-compose.yml`, `podman-compose.lab.yml`, or any `compose.*.yml`
+- no `location` block in `gateway/nginx/conf.d/mcp-proxy.conf`
+- no CI job built it (`.github/workflows/ci.yml` builds only proxy + compliance-checker)
+- the only references were `make ui-dev` / `make ui-build`, which built the dead app
+
+It had become a parallel implementation of screens the portal already serves (servers,
+submissions, limits, wizard, credentials), so every UI decision was made twice and shipped
+zero-to-once — and the UX effort was landing on the dead tree (a WCAG-contrast fix and a
+design-token fix are both in its git history, while the live portal has zero `aria-*`).
+
+Deleted: `ui/src`, `ui/e2e/portal.spec.ts` (tested the dead app, partly against mocks),
+`index.html`, `vite.config.ts`, `tailwind.config.js`, `postcss.config.js`, `tsconfig.json`,
+`playwright.config.ts`, and every React/Vite/Tailwind dependency.
+
+**Kept:** `ui/e2e/portal-acceptance.spec.ts` + `playwright.portal.config.ts` — the suite that
+tests the REAL portal. Verified independent (imports only `@playwright/test`) and still
+**39/39 green** after the deletion.
+
+Also deleted `proxy/app/static/design.html` — 96 KB, referenced by nothing, served
+unauthenticated from the `/static` mount.
+
+Docs updated in the same change: `CLAUDE.md` (repo map + commands), `AGENTS.md`, `ui/README.md`
+now states plainly that the live UI is the server-rendered portal. `make ui-dev`/`ui-build`
+replaced by `make ui-acceptance`.

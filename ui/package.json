@@ -1,31 +1,13 @@
 {
-  "name": "mcp-security-platform-ui",
+  "name": "mcp-security-platform-acceptance",
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "description": "Playwright acceptance suite for the server-rendered portal (proxy/app/routers/portal.py). The React SPA that used to live in ui/src was deleted 2026-07-25 — it was never deployed: no compose service, no nginx location, and no CI job built it.",
   "scripts": {
-    "predev": "npm audit --audit-level=high",
-    "dev": "vite",
-    "prebuild": "npm audit --audit-level=high",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "audit:ci": "npm audit --audit-level=moderate --json",
-    "e2e": "playwright test",
-    "e2e:ui": "playwright test --ui"
-  },
-  "dependencies": {
-    "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "acceptance": "playwright test --config playwright.portal.config.ts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.0",
-    "@types/react": "18.3.23",
-    "@types/react-dom": "18.3.7",
-    "@vitejs/plugin-react": "4.3.4",
-    "autoprefixer": "^10.5.0",
-    "postcss": "^8.5.15",
-    "tailwindcss": "^3.4.19",
-    "typescript": "5.8.3",
-    "vite": "8.0.16"
+    "@playwright/test": "^1.61.0"
   }
 }
