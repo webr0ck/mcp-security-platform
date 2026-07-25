@@ -16,6 +16,7 @@ See docs/RBAC.md Section 5 for enforcement points.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -568,6 +569,16 @@ async def _is_session_jti_revoked(jti: str) -> bool:
 
 _jwks_cache: dict[str, Any] = {}   # {"keys": [...], "fetched_at": float, "jwks_uri": str}
 _JWKS_TTL = 300.0
+# After a failed fetch, don't retry on every inbound request: _fetch_jwks sits on the
+# hot path of EVERY OIDC-authenticated call, and a cold cache costs up to 3 HTTP calls
+# (2 discovery + 1 JWKS) at 5s each. Without this, an IdP outage turns each client
+# request into ~15s of outbound work against the already-failing IdP.
+_JWKS_ERROR_BACKOFF = 30.0
+# Upper bound on serving stale keys. Riding out a short IdP blip on last-known-good keys
+# is correct; trusting keys the issuer may have rotated away hours ago is not. Past this,
+# return no keys -> _validate_oidc_jwt rejects the token (fail-closed).
+_JWKS_MAX_STALE = 3600.0
+_jwks_lock = asyncio.Lock()
 
 
 async def _discover_jwks_uri(base: str) -> str:
@@ -607,11 +618,41 @@ def _get_jwks_base_url() -> str:
 async def _fetch_jwks() -> list[dict]:
     """Fetch and cache the JWKS from the configured OIDC issuer using discovery."""
     import time
-    import httpx
 
     now = time.monotonic()
     if _jwks_cache and now - _jwks_cache.get("fetched_at", 0) < _JWKS_TTL:
         return _jwks_cache["keys"]
+
+    # Single-flight: without this, N concurrent requests arriving on an expired cache all
+    # fetch at once. Re-check the TTL inside the lock so the losers use the winner's result.
+    async with _jwks_lock:
+        now = time.monotonic()
+        if _jwks_cache and now - _jwks_cache.get("fetched_at", 0) < _JWKS_TTL:
+            return _jwks_cache["keys"]
+        if now < _jwks_cache.get("retry_after", 0.0):
+            return _stale_jwks_or_empty(now)
+        return await _fetch_jwks_locked(now)
+
+
+def _stale_jwks_or_empty(now: float) -> list[dict]:
+    """Serve last-known-good keys, but only within _JWKS_MAX_STALE. Then fail closed."""
+    keys = _jwks_cache.get("keys", [])
+    if not keys:
+        return []
+    age = now - _jwks_cache.get("fetched_at", 0.0)
+    if age > _JWKS_MAX_STALE:
+        logger.error(
+            "JWKS unavailable for %.0fs (> %.0fs max stale) — refusing to keep trusting "
+            "possibly-rotated keys; OIDC tokens will be rejected until the issuer returns",
+            age, _JWKS_MAX_STALE,
+        )
+        return []
+    return keys
+
+
+async def _fetch_jwks_locked(now: float) -> list[dict]:
+    """The actual fetch. Caller holds _jwks_lock and has already checked TTL/backoff."""
+    import httpx
 
     # Use OIDC_INTERNAL_ISSUER_URL (Keycloak container URL) for JWKS fetches,
     # falling back to OIDC_INTERNAL_URL and finally OIDC_ISSUER_URL.
@@ -635,10 +676,15 @@ async def _fetch_jwks() -> list[dict]:
             _jwks_cache["keys"] = keys
             _jwks_cache["fetched_at"] = now
             _jwks_cache["jwks_uri"] = jwks_uri
+            _jwks_cache.pop("retry_after", None)
             return keys
     except Exception as exc:
-        logger.warning("JWKS fetch failed from %s: %s", jwks_uri, exc)
-        return _jwks_cache.get("keys", [])
+        _jwks_cache["retry_after"] = now + _JWKS_ERROR_BACKOFF
+        logger.warning(
+            "JWKS fetch failed from %s: %s — backing off %.0fs",
+            jwks_uri, exc, _JWKS_ERROR_BACKOFF,
+        )
+        return _stale_jwks_or_empty(now)
 
 
 async def _validate_oidc_jwt(token: str) -> tuple[str | None, list[str], bool]:
