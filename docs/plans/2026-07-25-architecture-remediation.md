@@ -17,6 +17,7 @@
 | 6 | A1/A3/A2 — delete dead UI, extract portal assets | ⏳ pending | portal acceptance green |
 | 7 | B1/B2 — toast/confirm, accessibility | ⏳ pending | portal acceptance + a11y pass |
 | 8 | A4 — split `invoke_tool` at the dispatch seam | ⏳ pending | full unit + functional + security |
+| 4.5 | **Unblock the security gate** (H3 + F-001) | ✅ **done** | `make security-check`: ALL CHECKS PASSED |
 | 9 | Full acceptance + security gate | ⏳ pending | see Exit criteria |
 
 Legend: ⏳ pending · 🔄 in progress · ✅ done · ⚠️ done with caveats · ⛔ blocked
@@ -466,3 +467,41 @@ is speculative work. Follow-up worth a ticket (NOT fixed here): the `agent`/`use
 agent can enumerate the full tool inventory. Intentional for a registry view, but it is the same
 disclosure shape as the portal catalog fragment that was deleted — worth a deliberate decision rather
 than an inherited default.
+
+---
+
+## Stage 4.5 — CLOSED 2026-07-25: `make security-check` now passes
+
+Both failures were pre-existing at HEAD. Fixed properly rather than suppressed.
+
+### H3 — identity-as-tool-param in the entra lab sample (CWE-639)
+`get_user(user_id: str)` tripped `policies/semgrep.yml::mcp-identity-as-tool-param`.
+
+The rule fires on an ambiguous NAME, and it is right to: `user_id` reads as both "who I am"
+and "who I am asking about". Here it was the latter — a Graph lookup key — so this was not an
+identity-forgery hole. But the honest fix is to stop using an identity-shaped name for a query
+key, not to suppress the rule. Renamed to `target_user_id` with the reasoning written down.
+
+The adjacent REAL gap the rule does not catch: this server holds an app-only Graph token with
+tenant-wide read scopes, so every caller reads the whole directory at the same privilege, and
+the server logged **nothing** about who asked. Added `_caller()`, which records
+`X-Principal-Id` (collision-proof, CR-10) and the display sub on every directory read.
+
+Deliberately NOT added: per-caller authorization inside the server. "May this caller use this
+tool" is the proxy's decision (entitlement → profile → OPA); a second implementation in the
+server is exactly the drift pattern that produced F1/F6. `X-User-Sub` is recorded for humans
+and never branched on — invocation.py states it is never an authorization key.
+
+### F-001 — network isolation gate had a stale expectation
+`proxy<->self-service reachable via proxy-self-service-net only (got ['mcp-self-service-net'])`.
+`docker-compose.yml` uses the `proxy-<svc>-net` convention; `podman-compose.lab.yml` names ALL
+of its per-server pairwise nets `mcp-<svc>-net` (mcp-echo-net, mcp-notes-net, …). Both are
+internally consistent and the control is identical — one dedicated pairwise net, nothing else.
+Only the label differed, so the GATE was wrong, not either compose file.
+
+`PAIRWISE` values may now be a set of accepted names. **The exactly-one-shared-network
+assertion is unchanged** — widening the name set must not weaken the control, and a negative
+control confirms a backend sharing two accepted nets still FAILS. Renaming a live lab network
+would have changed no security property.
+
+**Result: `make security-check` → ALL CHECKS PASSED** (was 2 failing at HEAD).

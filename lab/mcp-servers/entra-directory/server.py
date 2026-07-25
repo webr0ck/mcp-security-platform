@@ -89,8 +89,45 @@ async def _get_app_token() -> str:
     return raw[7:].strip()
 
 
+def _caller() -> dict[str, str]:
+    """Identify the caller for ATTRIBUTION ONLY — never for authorization.
+
+    This server holds an app-only (client_credentials) Graph token with
+    tenant-wide read scopes, so every tool call reads the whole directory with
+    the same privilege regardless of who asked. Authorization for "may this
+    caller use this tool" is the proxy's job (entitlement -> profile -> OPA);
+    duplicating it here would be a second, drifting implementation of a decision
+    that already has one owner.
+
+    What the proxy CANNOT do is tell this server's own logs who triggered a
+    tenant-wide directory read. Without that, a read of every user in the tenant
+    is indistinguishable from any other and unattributable at the point it
+    happens. That is what this adds.
+
+    X-Principal-Id is the collision-proof identity (CR-10). X-User-Sub is a bare
+    display subject and is explicitly NOT an authorization key — see
+    proxy/app/services/invocation.py — so it is recorded for humans and never
+    branched on.
+    """
+    req = _http_request()
+    if req is None:
+        return {"principal_id": "unknown", "sub": "unknown"}
+    return {
+        "principal_id": req.headers.get("x-principal-id", "unknown"),
+        "sub": req.headers.get("x-principal-display-sub") or req.headers.get("x-user-sub", "unknown"),
+    }
+
+
 async def _get(path: str, params: dict | None = None) -> Any:
     token = await _get_app_token()
+    who = _caller()
+    # Attribute every tenant-scoped directory read. INFO, not DEBUG: this is the
+    # audit-relevant fact, and the proxy's own audit records the tool call but not
+    # which Graph resource path it resolved to.
+    logger.info(
+        "entra directory read path=%s principal_id=%s sub=%s",
+        path, who["principal_id"], who["sub"],
+    )
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
             f"{GRAPH}{path}",
@@ -123,9 +160,22 @@ async def list_users(top: int = 25) -> dict:
 
 
 @mcp.tool()
-async def get_user(user_id: str) -> dict:
-    """Get a single user by id (GUID) or userPrincipalName. Requires User.Read.All."""
-    return await _get(f"/users/{user_id}")
+async def get_user(target_user_id: str) -> dict:
+    """Look up ANOTHER directory user by object id (GUID) or userPrincipalName.
+
+    `target_user_id` is the user being looked UP — it is not, and must never be
+    read as, the caller's own identity. It was named `user_id`, which is
+    ambiguous between "who I am" and "who I am asking about"; the H3 rule
+    (policies/semgrep.yml::mcp-identity-as-tool-param, CWE-639) flags exactly
+    that ambiguity, because a tool that derives the CALLER from an argument lets
+    a client forge it.
+
+    Renamed rather than suppressed: the rule is right that the name is unsafe,
+    and the honest fix is to stop using an identity-shaped name for a query key.
+    Caller identity here comes from the request headers via _caller() and is used
+    only for attribution. Requires User.Read.All (tenant-wide, app-only).
+    """
+    return await _get(f"/users/{target_user_id}")
 
 
 @mcp.tool()
