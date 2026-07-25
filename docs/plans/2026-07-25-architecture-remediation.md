@@ -447,6 +447,22 @@ disabled must), that the self-lockout guard returns 400, and that the deleted fr
 acceptance **39 passed, 0 flaky, 0 skipped — twice** (was 34/1 flaky/1 skipped at session start) ·
 functional 46/1 · unit 1618 passed / 42 failed == HEAD baseline · `opa test` 59/59 · smoke 4/4.
 
-### Still open
-`GET /api/v1/tools` — the third agent never delivered. Unaudited; likely an admin inventory (in which
-case no change), but unverified, so it stays open rather than being assumed.
+### NO CHANGE — `GET /api/v1/tools` (delivered late; verdict accepted)
+A **registry/inventory** endpoint, not a discovery-then-invoke surface. Verified directly:
+
+- RBAC is NOT admin-only — `tools.py:371` admits `{admin, agent, auditor, readonly}` and
+  `middleware/rbac.py:75` is wider still. That is what made it *look* caller-facing.
+- The deciding evidence is `lab/tests/functional_test.py::TestToolRegistry::test_all_new_tools_registered`
+  (L579-585): it asserts the FULL registered set is present in a regular user's response. That is a
+  registry-completeness contract, not a can-I-call-this contract.
+- The portal's admin Tools tab never calls this endpoint — it queries `tool_registry` by raw SQL — and
+  `ui/**` has zero references. Every real consumer (functional, acceptance, red-team, smoke scripts)
+  uses it for **tool_id resolution**.
+- Auditors specifically MUST see tools they cannot personally call; filtering would defeat
+  `test_list_tools_auditor_allowed` in intent, not just in status.
+
+The `callable_by_you` annotation idea was withdrawn: `grep` finds zero consumers of such a field, so it
+is speculative work. Follow-up worth a ticket (NOT fixed here): the `agent`/`user` RBAC grant means any
+agent can enumerate the full tool inventory. Intentional for a registry view, but it is the same
+disclosure shape as the portal catalog fragment that was deleted — worth a deliberate decision rather
+than an inherited default.
