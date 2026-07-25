@@ -85,9 +85,21 @@ def clean_mcp_upstream_b3():
 
 
 def _create_draft(token: str, name: str, repo_url: str) -> str:
+    # self_host=False is REQUIRED for what this module tests. It exercises the
+    # PLATFORM-MANAGED build/deploy loop (/apply -> build_requested -> deploy ->
+    # verify), and that path only exists for platform-deployed submissions.
+    #
+    # The draft was created with the default self_host=True, which since PRD-0012 C2
+    # makes approval run the self-hosted pipeline INLINE and land 'active' — so the
+    # test's own setup contradicted the flow it goes on to assert, and its
+    # 'approved_pending_url' expectation became unreachable. The assertion was never
+    # wrong; the setup was. Platform-deployed submissions still park at
+    # 'approved_pending_url' by design (submission.py::approve_submission docstring),
+    # because the platform has not built or deployed anything yet.
     r = httpx.post(f"{BASE_URL}/api/v1/submissions", headers=_auth_headers(token),
                    json={"name": name, "github_repo_url": repo_url,
-                         "description": f"{name} acceptance test fixture"},
+                         "description": f"{name} acceptance test fixture",
+                         "self_host": False},
                    verify=False, timeout=60)
     assert r.status_code == 201, f"draft create failed: {r.status_code} {r.text}"
     return r.json()["server_id"]

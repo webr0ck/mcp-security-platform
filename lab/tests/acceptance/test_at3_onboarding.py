@@ -106,7 +106,15 @@ def _create_draft(token: str, name: str, repo_url: str) -> str:
     return r.json()["server_id"]
 
 
-def _submit(token: str, server_id: str, requested_upstream_url: str = "http://at3-placeholder:8000/mcp") -> None:
+# Default must RESOLVE. It was "http://at3-placeholder:8000/mcp", a hostname that has
+# never existed, and it predates the SSRF gate becoming fail-closed on DNS failure.
+# Submit then 422s (SSRF_VALIDATION_FAILED) before the scanner ever runs, so the
+# malicious-submission test never reached the assertion it exists to make. The
+# fail-closed DNS behaviour is a deliberate invariant and is NOT what changes here —
+# the fixture is. lab-mcp-echo resolves on lab-net; callers that need a genuinely
+# fresh upstream (the clean-submission path) pass clean_mcp_upstream explicitly.
+def _submit(token: str, server_id: str,
+            requested_upstream_url: str = "http://lab-mcp-echo:8000/mcp") -> None:
     # description + requested_upstream_url are required before submit (V075) —
     # description is set at draft-create time above, requested_upstream_url
     # needs its own PATCH since POST /api/v1/submissions doesn't accept it.
@@ -193,22 +201,26 @@ def test_clean_submission_full_chain_to_invoke(alice_token, carol_token, clean_m
     r = httpx.post(f"{BASE_URL}/api/v1/admin/submissions/{server_id}/approve",
                    headers=_auth_headers(carol_token), json={"notes": "AT3 approve"}, verify=False, timeout=60)
     assert r.status_code == 200, f"approve failed: {r.status_code} {r.text}"
-    assert r.json()["submission_status"] == "approved_pending_url"
-
-    # Alice (owner) supplies the running upstream — her own freshly-started
-    # clean_mcp_upstream fixture container (running the exact server.py that
-    # was just scanned), not a pre-existing lab server whose tool names
-    # (name+version is globally unique in tool_registry) would just collide.
-    r = httpx.post(f"{BASE_URL}/api/v1/submissions/{server_id}/provide-url",
-                   headers=_auth_headers(alice_token),
-                   json={"upstream_url": clean_mcp_upstream},
-                   verify=False, timeout=30)
-    assert r.status_code == 200, f"provide-url failed: {r.status_code} {r.text}"
-    provide_body = r.json()
-    # R-10: provide-url auto-runs tool discovery synchronously (see
-    # submission.py's provide_running_url) — a second explicit
-    # POST .../discover-tools would just see "already registered" (0 new).
-    assert provide_body["tools_provisioned"] >= 1, f"expected >=1 auto-discovered tool: {provide_body}"
+    approve_body = r.json()
+    # PRD-0012 C2 (submission.py::approve_submission docstring): a self-hosted,
+    # repo-backed submission no longer parks at 'approved_pending_url' waiting for a
+    # URL — the owner already supplied the real URL at submit time (C1), so approval
+    # runs SSRF-validate -> verify -> debug-mode -> release INLINE and lands 'active'
+    # in debug_mode (owner/maintainer-only until an explicit go-live). This test
+    # asserted the pre-C2 status and the now-inapplicable provide-url follow-up.
+    assert approve_body["submission_status"] == "active", (
+        f"PRD-0012 C2: expected inline completion to 'active', got {approve_body}"
+    )
+    # Landing in debug_mode is the point — tools are released from quarantine but
+    # only the owner/maintainers may call them until they go live.
+    debug_mode = db_query(f"SELECT debug_mode FROM server_registry WHERE server_id='{server_id}'")
+    assert debug_mode in ("t", "true", "True"), (
+        f"C2 approval must land in debug_mode (owner-only), got {debug_mode!r}"
+    )
+    # Discovery ran inline as part of approval, so tools exist without provide-url.
+    provisioned = db_query(
+        f"SELECT count(*) FROM tool_registry WHERE server_id='{server_id}' AND deleted_at IS NULL")
+    assert int(provisioned) >= 1, f"expected >=1 tool discovered inline at approval, got {provisioned}"
 
     tool_id, tool_name, tool_status = db_query(
         f"SELECT tool_id || ',' || name || ',' || status FROM tool_registry "
