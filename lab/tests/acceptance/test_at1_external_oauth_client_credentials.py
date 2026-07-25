@@ -43,7 +43,10 @@ SERVER_NAME = "lab-echo-external-cc"
 SERVICE_NAME = "echo-external-cc"
 TOOL_NAME = "echo-external-cc"
 TOKEN_ENDPOINT = "http://lab-mock-idp:8888/oauth/token"
-VAULT_ADDR = "http://127.0.0.1:8200"
+# 8201, not 8200: podman-compose.lab.yml remaps the published port because 8200 is
+# taken by isl-vault from the intentional-secrets-lab. The constant was never
+# updated when that remap landed, so both tests in this file ERRORed at setup.
+VAULT_ADDR = os.environ.get("LAB_VAULT_ADDR", "http://127.0.0.1:8201")
 
 
 def _encrypt_credential(plaintext: str, user_sub: str, master_bytes: bytes, *,

@@ -1497,7 +1497,22 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
         platform_tools = _visible_tools(roles)
         principal_id: str | None = getattr(request.state, "principal_id", None)
         principal_type: str | None = getattr(request.state, "principal_type", None)
+
+        # Conservative preflight for meta-tools: a bound NAMED profile may disable them
+        # (including the self-service ones — see the tools/call gate below), so a
+        # locked-down profile must not advertise what it will deny. Only applies when a
+        # named profile is bound; the default per-identity profile leaves meta-tools
+        # visible so recovery stays discoverable.
+        _lp = getattr(request.state, "profile_uuid", None)
         try:
+            if _lp and platform_tools:
+                from app.services.invocation import _lookup_profile_with_cache as _rp
+                _kept = []
+                for _pt in platform_tools:
+                    _r = await _rp(client_id, _pt["name"], profile_uuid=_lp)
+                    if _r is None or _r.get("enabled", True):
+                        _kept.append(_pt)
+                platform_tools = _kept
             registry_tools = await _registered_tools_for_client(
                 client_id=client_id,
                 roles=roles,
@@ -1535,6 +1550,42 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
         # (computed at import time) rather than rebuilding per request.
         if name in _PLATFORM_NAMES and not _can_call(name, roles):
             return _err(req_id, -32003, "Authorization denied")
+
+        # A BOUND NAMED PROFILE may lock down the self-service meta-tools.
+        #
+        # Meta-tools are dispatched inline and their OPA input never carries a
+        # `profile` key, so mcp_disabled_for_profile cannot fire for them — they were
+        # role-gated only. That made a named profile an escape hatch: an admin could
+        # curate a locked-down profile, and a caller bound to it could still call
+        # enable_mcp_server and unlock themselves back out of it.
+        #
+        # Gated ONLY when a named profile is bound (profile_uuid set). The default
+        # per-identity profile deliberately stays ungated here, which is what keeps
+        # recovery possible for a user who has disabled their own tools — and is why
+        # would_self_lockout() protects the recovery set on THAT path but not on the
+        # named-binding path. The two halves are the same policy seen from both ends:
+        #   default profile -> you can never lock yourself out
+        #   named profile   -> an admin CAN lock you all the way down, on purpose
+        _bound_profile = getattr(request.state, "profile_uuid", None)
+        if _bound_profile and name in _PLATFORM_NAMES:
+            from app.services.invocation import ProfileLookupError, _lookup_profile_with_cache
+            _rid = getattr(request.state, "request_id", "")
+            try:
+                _mp = await _lookup_profile_with_cache(client_id, name, profile_uuid=_bound_profile)
+            except ProfileLookupError:
+                # INV-015 fail-closed: cannot resolve the restriction => deny.
+                logger.error("meta-tool profile lookup unavailable tool=%s client=%s", name, client_id)
+                return _err(req_id, -32603, "Profile lookup unavailable — service degraded")
+            if _mp is not None and not _mp.get("enabled", True):
+                logger.info("meta-tool denied by named profile tool=%s client=%s profile=%s",
+                            name, client_id, _bound_profile)
+                return _err(
+                    req_id, -32003,
+                    "Access denied by policy. This tool is disabled by the profile you are "
+                    "bound to. Only an administrator can change a named profile — including "
+                    "the self-service tools, which a locked-down profile may disable on purpose.",
+                    data={"reasons": ["mcp_disabled_for_profile"], "request_id": _rid},
+                )
 
         # Registry tool — route directly through the security pipeline
         if not _can_call(name, roles):
