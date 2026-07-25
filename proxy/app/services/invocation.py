@@ -619,13 +619,18 @@ async def invoke_tool(
     from app.core.config import settings as _tf_settings
     _taint_server_trust_tier: int | None = None  # stashed for write-before-forward below
     _tainted: bool | None = None  # GAP-1: session taint state, recorded on the ALLOW audit too
-    # Phase 0 (2026-07-18, PRD-0010): taint floor is NOTIFY-ONLY for now, never blocks.
-    # See docs/prd/PRD-0010-taint-floor-mode-delegation.md for the full mode/delegation roadmap.
+    # PRD-0010 Phase 0: taint-floor action is mode-selected via TAINT_FLOOR_MODE.
+    #   "notify"  (default) — allow the call, attach a disclaimer notice; never blocks.
+    #   "enforce"           — hard-DENY via TaintFloorDenyError (routers map to 403 /
+    #                         JSON-RPC error), audited as a deny. RFC-0001 §8.1.
+    # See docs/prd/PRD-0010-taint-floor-mode-delegation.md for the mode/delegation roadmap.
     _taint_notice: str | None = None
     if _tf_settings.TAINT_FLOOR_ENABLED:
         from app.services.taint_floor import (
+            TAINT_ACTION_BLOCK,
             effective_injection_mode,
             effective_required_integrity,
+            resolve_taint_action,
             taint_floor_decision,
         )
         from app.services.taint_store import is_tainted_for_principal
@@ -641,12 +646,41 @@ async def invoke_tool(
         )
         _required = effective_required_integrity(_tool_required, _eff_injection)
         _tainted = await is_tainted_for_principal(client_id)  # keyed on logical identity, not auth-method (LOGIC-005)
-        if taint_floor_decision(tainted=_tainted, required_integrity=_required) == "deny":
-            # Phase 0 (PRD-0010): NOTIFY-ONLY. Previously raised TaintFloorDenyError here
-            # (hard deny) — now allow the call through and surface a disclaimer in the
-            # response meta instead. Still audited (outcome="allow") so the
-            # taint event isn't silently lost. TaintFloorDenyError / the deny path are kept
-            # intact in code for Phase 1 (per-profile/tenant mode switching) to re-enable.
+        _decision = taint_floor_decision(tainted=_tainted, required_integrity=_required)
+        _action = resolve_taint_action(_decision, _tf_settings.TAINT_FLOOR_MODE)
+        if _action == TAINT_ACTION_BLOCK:
+            # ENFORCE mode: hard deny (RFC-0001 §8.1). Audit the deny (INV-001) BEFORE
+            # raising, mirroring the entitlement gate above, then let the router map
+            # TaintFloorDenyError to a 403 / JSON-RPC error. Fail-closed (INV-015).
+            await _emit_audit_event(
+                tool_id=str(tool_id) if tool_id is not None else None,
+                tool_name=tool_name,
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=[f"taint_floor:required_integrity={_required}"],
+                notices=[],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=0.0,
+                opa_decision_id="",
+                is_testing=is_testing,
+                source_ip=source_ip,
+                principal_type=principal_type,
+                principal_id=principal_id,
+                roles=client_roles,
+                session_jti=session_jti,
+                tainted=_tainted,
+            )
+            raise TaintFloorDenyError(
+                tool_id=str(tool_id) if tool_id is not None else "",
+                tool_name=tool_name,
+                required_integrity=_required,
+            )
+        elif _action:  # "notify"
+            # NOTIFY mode (Phase-0 default): allow the call through and surface a
+            # disclaimer in the response meta. Still audited (outcome="allow") so the
+            # taint event isn't silently lost.
             _taint_notice = (
                 f"This result may include data derived from an untrusted or "
                 f"not-yet-reviewed source (required_integrity={_required}); the "
@@ -671,7 +705,7 @@ async def invoke_tool(
                 is_testing=is_testing,
                 source_ip=source_ip,
                 principal_type=principal_type,
-            principal_id=principal_id,
+                principal_id=principal_id,
                 roles=client_roles,
                 session_jti=session_jti,
                 tainted=_tainted,

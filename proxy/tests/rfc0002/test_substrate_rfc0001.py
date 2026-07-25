@@ -168,3 +168,66 @@ def test_credential_injection_bumps_floor():
 def _minutes_ago(n: int):
     from datetime import UTC, datetime, timedelta
     return datetime.now(UTC) - timedelta(minutes=n)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# WI-3 — FULL REASON COVERAGE: ENFORCE denies on ANY non-accepted verdict.
+# Proves the fix is non-vacuous: a stale envelope and an EKU-rejected envelope
+# are rejected reasons the OLD 4-reason allowlist did NOT cover, so old ENFORCE
+# would have advisory-logged and RETURNED them; the new predicate DENIES them.
+# ════════════════════════════════════════════════════════════════════════════
+
+# The exact reason allowlist the pre-WI-3 ENFORCE gate used (mcp_server.py history).
+_OLD_ENFORCE_ALLOWLIST = (
+    "signature_invalid", "no_envelope", "chain_validation_failed", "content_hash_mismatch",
+)
+
+
+def _old_enforce_would_deny(verdict) -> bool:
+    return not verdict.accepted and (verdict.reason or "").startswith(_OLD_ENFORCE_ALLOWLIST)
+
+
+def test_wi3_stale_envelope_denies_under_enforce_but_old_allowlist_missed_it(pki):
+    import time
+
+    from app.routers.mcp_server import trust_enforce_denies
+    from app.services.trust_verifier import TrustVerifier
+
+    _k, sub_ca, leaf_key, leaf = pki
+    strict = TrustVerifier(sub_ca_cert=sub_ca, max_envelope_age_seconds=0)
+    content = [{"type": "text", "text": "result"}]
+    env = sign_envelope(leaf_key, leaf, sub_ca, content, trust_tier=2)
+    time.sleep(0.01)
+    verdict = strict.verify({"content": content, "_meta": {TRUST_ENVELOPE_KEY: env}},
+                            tool_name="web_search", server_id="demo-srv", result_id="demo-rid-1")
+    assert verdict.accepted is False and "too_old" in (verdict.reason or "")
+    assert _old_enforce_would_deny(verdict) is False   # old allowlist missed staleness
+    assert trust_enforce_denies(True, verdict) is True  # new full-coverage rule denies it
+    assert trust_enforce_denies(False, verdict) is False  # still opt-in (enforce off = no deny)
+
+
+def test_wi3_eku_rejected_envelope_denies_under_enforce_but_old_allowlist_missed_it():
+    from app.routers.mcp_server import trust_enforce_denies
+    from app.services.trust_verifier import TrustVerifier
+
+    _k, sub_ca, leaf_key, leaf = make_pki(eku_oids=[])  # leaf without the labeler EKU
+    content = [{"type": "text", "text": "no-eku leaf"}]
+    env = sign_envelope(leaf_key, leaf, sub_ca, content, trust_tier=2)
+    v = TrustVerifier(sub_ca_cert=sub_ca)
+    verdict = v.verify({"content": content, "_meta": {TRUST_ENVELOPE_KEY: env}},
+                       tool_name="web_search", server_id="demo-srv", result_id="demo-rid-1")
+    assert verdict.accepted is False and verdict.reason == "missing_eku"
+    assert _old_enforce_would_deny(verdict) is False   # old allowlist missed missing_eku
+    assert trust_enforce_denies(True, verdict) is True  # new rule denies it
+
+
+def test_wi3_accepted_verdict_never_denied_under_enforce(verifier, pki):
+    from app.routers.mcp_server import trust_enforce_denies
+
+    _k, sub_ca, leaf_key, leaf = pki
+    content = [{"type": "text", "text": "Internal KB lookup result."}]
+    env = sign_envelope(leaf_key, leaf, sub_ca, content, trust_tier=2, server_id="kb")
+    verdict = verifier.verify({"content": content, "_meta": {TRUST_ENVELOPE_KEY: env}},
+                              tool_name="web_search", server_id="kb", result_id="demo-rid-1")
+    assert verdict.accepted is True
+    assert trust_enforce_denies(True, verdict) is False  # a good result is never denied

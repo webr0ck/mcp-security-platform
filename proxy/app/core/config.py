@@ -137,6 +137,15 @@ class Settings(BaseSettings):
     # place and the D1/D2 integration tests pass. Fail-closed when enabled.
     TAINT_FLOOR_ENABLED: bool = False
 
+    # PRD-0010 Phase 0: taint-floor action when TAINT_FLOOR_ENABLED and a tainted
+    # session hits a high-integrity sink.
+    #   "notify"  — allow the call, attach a disclaimer notice (Phase-0 default, never blocks)
+    #   "enforce" — DENY the call (raise TaintFloorDenyError → router 403/JSON-RPC error),
+    #               audited (INV-001). Fail-closed, RFC-0001 §8.1 hard-deny.
+    # Only consulted when TAINT_FLOOR_ENABLED is True. An unrecognised value is treated
+    # as "notify" (fail-safe-for-availability at this dark-launch stage; see resolve_taint_action).
+    TAINT_FLOOR_MODE: str = "notify"
+
     # =========================================================================
     # Wazuh SIEM integration (AI attack detection)
     # =========================================================================

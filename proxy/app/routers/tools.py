@@ -1609,6 +1609,15 @@ async def invoke_tool(
             # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
             profile_uuid=getattr(request.state, "profile_uuid", None),
         )
+        # SCOPE (WI-3/WI-4): this REST invoke path is a SIGNER only — it labels the
+        # result with a fresh trust envelope and returns it. It intentionally does NOT
+        # run the observer/TRUST_ENVELOPE_ENFORCE verify step (that lives on the direct
+        # tools/call dispatch path in mcp_server.py). Verifying here would only re-check
+        # the gateway's OWN just-minted signature, which by construction always passes and
+        # catches nothing (a downstream MITM tampers AFTER this point). Content integrity
+        # for a result served over this path is the INDEPENDENT CONSUMER's job (the
+        # mcp-envelope-harness TrustGate), not the signer's. So "full reason coverage"
+        # (WI-3) is a property of the ENFORCE verify seam only; this path is out of its scope.
         from app.services.trust_labeler import get_labeler as _get_labeler, TRUST_ENVELOPE_KEY as _TEK
         _tl = _get_labeler()
         if _tl is not None and isinstance(response.get("result"), dict):

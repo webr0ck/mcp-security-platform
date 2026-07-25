@@ -985,6 +985,21 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
     # A2: the ENFORCE deny path below is GATED by TRUST_OBSERVER_ENABLED — enforce only
     # fires when the observer is also on. A deployment that wants denial must enable both
     # TRUST_OBSERVER_ENABLED and TRUST_ENVELOPE_ENFORCE (and TRUST_ENVELOPE_ENABLED to sign).
+    #
+    # WI-4 ENFORCE-SEMANTICS DECISION (what this seam does and does NOT protect against):
+    #   The gateway signs the result (above) and then, under ENFORCE, verifies THAT SAME
+    #   freshly-signed envelope before returning. Because it is verifying its own signature
+    #   over bytes it just produced, this seam CANNOT detect a downstream man-in-the-middle
+    #   that tampers with the result AFTER it leaves the gateway — such a tamper happens
+    #   past this point, and any re-sign by an attacker fails chain validation only at a
+    #   party that INDEPENDENTLY verifies (the consumer), not here. What ENFORCE here DOES
+    #   catch: a malformed/absent/forged envelope or content_hash_mismatch arising BEFORE or
+    #   AT signing (e.g. a non-conformant labeler, a bug, an upstream that pre-populated a
+    #   bad _meta), and it makes the gateway fail-closed rather than emit an unverifiable
+    #   result. End-to-end integrity against a wire MITM is the INDEPENDENT CONSUMER's job
+    #   (mcp-envelope-harness TrustGate verifying against a pinned anchor). The article must
+    #   NOT conflate the two: gateway ENFORCE = "don't emit a result we can't self-verify";
+    #   consumer verify = "don't trust a result that was altered in transit".
     from app.core.config import get_settings as _gs
     if _gs().TRUST_OBSERVER_ENABLED:
         from app.services.trust_observer import observe_result as _observe
@@ -997,13 +1012,15 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             result_id=request_id,
         )
         # TRUST_ENVELOPE_ENFORCE (opt-in, default off): promote fail-closed verifier
-        # reasons from advisory-log to a real deny. Covers envelope-level untrustworthiness
-        # (forged/absent/broken chain) AND content-level tamper (content_hash_mismatch) —
-        # a modified body in flight is at least as serious as a bad chain, so it must deny
-        # too (A1 fix: previously omitted, so a detected tamper was logged then returned).
-        if _gs().TRUST_ENVELOPE_ENFORCE and not _verdict.accepted and (_verdict.reason or "").startswith(
-            ("signature_invalid", "no_envelope", "chain_validation_failed", "content_hash_mismatch")
-        ):
+        # reasons from advisory-log to a real deny. FULL REASON COVERAGE (WI-3): deny on
+        # ANY non-accepted verdict, not a hand-maintained reason allowlist. VerifierVerdict
+        # is exhaustively fail-closed (trust_verifier.py: every reject path — signature,
+        # no/absent envelope, broken chain, content_hash_mismatch, stale/future/malformed
+        # timestamp, empty x5c, missing/wildcard EKU, sig-decode, unexpected_error —
+        # returns accepted=False), so `not accepted` is the complete, drift-proof deny set.
+        # A previously-advisory reason (e.g. stale, EKU-rejected) now denies too.
+        # Predicate extracted to trust_enforce_denies() so the deny set is unit-testable.
+        if trust_enforce_denies(_gs().TRUST_ENVELOPE_ENFORCE, _verdict):
             return _err(
                 req_id, -32603,
                 "Tool result rejected: trust envelope verification failed",
@@ -1514,6 +1531,14 @@ def _err(req_id: Any, code: int, message: str, data: Any = None) -> dict:
     if data is not None:
         err["data"] = data
     return {"jsonrpc": "2.0", "id": req_id, "error": err}
+
+
+def trust_enforce_denies(enforce_enabled: bool, verdict) -> bool:
+    """WI-3 full reason coverage: under TRUST_ENVELOPE_ENFORCE, deny on ANY non-accepted
+    verifier verdict — no hand-maintained reason allowlist. VerifierVerdict is exhaustively
+    fail-closed, so `not verdict.accepted` is the complete, drift-proof deny set (stale,
+    EKU-rejected, malformed-timestamp, empty-x5c, etc. all deny, not just the old 4)."""
+    return bool(enforce_enabled) and not verdict.accepted
 
 
 async def _dispatch(body: dict, request: Request) -> dict | None:

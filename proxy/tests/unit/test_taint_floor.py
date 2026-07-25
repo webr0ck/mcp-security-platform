@@ -14,9 +14,12 @@ the Redis taint store and the invocation.py wiring are integration-tested separa
 import pytest
 
 from app.services.taint_floor import (
+    TAINT_ACTION_BLOCK,
+    TAINT_ACTION_NOTIFY,
     binary_integrity,
     effective_injection_mode,
     effective_required_integrity,
+    resolve_taint_action,
     result_taints_session,
     taint_floor_decision,
 )
@@ -112,3 +115,30 @@ def test_deny_on_unknown_default_floor_blocks_tainted_session():
     # Unclassified tool defaults to required_integrity=1; a tainted session is denied.
     default_floor = 1
     assert taint_floor_decision(tainted=True, required_integrity=default_floor) == "deny"
+
+
+# --- resolve_taint_action: PRD-0010 mode selector (notify vs enforce) ---
+
+def test_allow_decision_yields_no_action_in_either_mode():
+    # A clean/low-sink call proceeds normally — no block, no notice — regardless of mode.
+    assert resolve_taint_action("allow", "notify") == ""
+    assert resolve_taint_action("allow", "enforce") == ""
+
+
+def test_deny_in_enforce_mode_blocks():
+    # ENFORCE: a tainted high sink is hard-denied (invocation.py raises TaintFloorDenyError).
+    assert resolve_taint_action("deny", "enforce") == TAINT_ACTION_BLOCK
+
+
+def test_deny_in_notify_mode_notifies():
+    # NOTIFY (Phase-0 default): the same deny becomes an allow-with-disclaimer.
+    assert resolve_taint_action("deny", "notify") == TAINT_ACTION_NOTIFY
+
+
+def test_unknown_mode_degrades_to_notify_never_blocks():
+    # A dark-launched control must not start denying on an operator typo — only the exact
+    # string "enforce" enforces; anything else is notify. (Security fail-closed lives in the
+    # DECISION, deny-on-unknown-taint; the MODE only chooses block-vs-notify once denied.)
+    assert resolve_taint_action("deny", "") == TAINT_ACTION_NOTIFY
+    assert resolve_taint_action("deny", "ENFORCE") == TAINT_ACTION_NOTIFY
+    assert resolve_taint_action("deny", "garbage") == TAINT_ACTION_NOTIFY
