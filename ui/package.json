@@ -8,6 +8,7 @@
     "acceptance": "playwright test --config playwright.portal.config.ts"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.61.0"
   }
 }

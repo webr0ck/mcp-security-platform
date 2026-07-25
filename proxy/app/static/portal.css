@@ -403,7 +403,7 @@
     --adm-border:  rgba(255,255,255,0.07);
     --adm-text:    #e7eaf0;
     --adm-muted:   #8a93a4;
-    --adm-dim:     #5b6474;
+    --adm-dim:     #7d838d;  /* was #5b6474 — axe color-contrast (serious): ~3:1 on dark surfaces, need 4.5:1 */
     --adm-blue:    #4f9cf9;   /* primary accent */
     --adm-blue2:   #7c5cff;   /* violet — logo gradient end */
     --adm-green:   #35c88a;
@@ -440,7 +440,7 @@
     border-radius: 2px; transform: rotate(45deg);
   }
   .adm-logo-name { font-size: 15px; font-weight: 800; color: var(--adm-text); letter-spacing: -0.01em; }
-  .adm-logo-sub  { font: 500 9px var(--ff-mono); letter-spacing: 0.16em; color: #5b626c; }
+  .adm-logo-sub  { font: 500 9px var(--ff-mono); letter-spacing: 0.16em; color: #7d838d; }
   .adm-nav-group {
     font: 600 10px var(--ff-mono); letter-spacing: 0.14em; color: #4f565f;
     padding: 14px 10px 6px;
@@ -464,7 +464,11 @@
   }
   .adm-nav-dot.active { background: var(--adm-blue); opacity: 1; box-shadow: 0 0 8px rgba(79,156,249,0.7); }
   .adm-nav-badge {
-    margin-left: auto; font: 700 10px var(--ff-sans); color: var(--adm-blue);
+    /* WCAG AA: --adm-blue (#4f9cf9) on this badge's tinted background measured
+       4.49:1 — just under the 4.5 minimum for the 10px bold text, flagged by the
+       axe check in AC-10. Lightened to #6bb0fc (5.57:1) here only; the global
+       --adm-blue token is unchanged because it passes at its other, larger sizes. */
+    margin-left: auto; font: 700 10px var(--ff-sans); color: #6bb0fc;
     background: rgba(79,156,249,0.16); padding: 1px 7px; border-radius: 10px;
   }
   .adm-user-panel {
@@ -498,9 +502,9 @@
   .adm-search-orb {
     width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--adm-blue); flex: none;
   }
-  .adm-search-text { font-size: 12.5px; color: #717983; flex: 1; }
+  .adm-search-text { font-size: 12.5px; color: #868c96; flex: 1; }
   .adm-search-kbd {
-    font: 500 10px var(--ff-mono); color: #5b626c;
+    font: 500 10px var(--ff-mono); color: #7d838d;
     background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 5px;
   }
   .adm-tabs-bar {
@@ -587,7 +591,9 @@
     background: rgba(255,255,255,0.09); color: var(--adm-text); font-weight: 600;
   }
   .btn-register-srv {
-    background: var(--adm-blue); color: #fff; font-size: 13px; font-weight: 600;
+    /* --adm-on-accent (not white) — white-on-#4f9cf9 is 2.81:1, fails WCAG AA's
+       4.5:1 for normal text (axe color-contrast, serious). */
+    background: var(--adm-blue); color: var(--adm-on-accent); font-size: 13px; font-weight: 600;
     padding: 8px 14px; border-radius: 9px; display: flex; align-items: center;
     gap: 7px; border: none; cursor: pointer; font-family: var(--ff-sans);
   }
@@ -602,7 +608,7 @@
     grid-template-columns: 2.1fr 2.3fr 1.15fr 1.2fr 1.1fr 0.8fr 100px;
     gap: 12px; padding: 11px 18px;
     border-bottom: 1px solid rgba(255,255,255,0.06);
-    font: 600 10px var(--ff-mono); letter-spacing: 0.08em; color: #5b626c;
+    font: 600 10px var(--ff-mono); letter-spacing: 0.08em; color: #7d838d;
   }
   .srv-tbl-row {
     display: grid;
@@ -724,7 +730,7 @@
   .portal-logo { display: flex; align-items: center; gap: 10px; }
   .portal-logo-name { font-size: 15px; font-weight: 800; color: var(--adm-text); letter-spacing: -0.01em; }
   .portal-logo-lbl {
-    font: 500 10px var(--ff-mono); letter-spacing: 0.12em; color: #5b626c;
+    font: 500 10px var(--ff-mono); letter-spacing: 0.12em; color: #7d838d;
     background: rgba(255,255,255,0.05); padding: 3px 7px; border-radius: 5px;
   }
   .portal-user-area { display: flex; align-items: center; gap: 14px; }
@@ -751,11 +757,11 @@
     border-radius: 10px; padding: 9px 12px;
   }
   .portal-find-orb { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--adm-blue); flex: none; }
-  .portal-find-text { font-size: 12.5px; color: #717983; flex: 1; }
+  .portal-find-text { font-size: 12.5px; color: #868c96; flex: 1; }
 
   /* ---- Profile bar ---- */
   .profile-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .profile-lbl { font: 600 10px var(--ff-mono); letter-spacing: 0.12em; color: #5b626c; }
+  .profile-lbl { font: 600 10px var(--ff-mono); letter-spacing: 0.12em; color: #7d838d; }
   .profile-pills { display: flex; gap: 7px; flex-wrap: wrap; }
   .profile-pill {
     display: flex; align-items: center; gap: 7px;
@@ -770,10 +776,10 @@
   }
   .profile-pill-dot { width: 6px; height: 6px; border-radius: 50%; background: #7aa7ff; }
   .profile-pill-new {
-    border: 1px dashed rgba(255,255,255,0.16); color: #717983;
+    border: 1px dashed rgba(255,255,255,0.16); color: #868c96;
     background: transparent;
   }
-  .profile-summary { font-size: 12px; color: #717983; margin-left: auto; }
+  .profile-summary { font-size: 12px; color: #868c96; margin-left: auto; }
   .profile-summary strong { color: #cbd0d7; }
 
   /* ---- Server summary strip ---- */
@@ -806,11 +812,11 @@
     display: flex; align-items: center; justify-content: center;
     font: 700 14px var(--ff-sans); color: #cbd0d7; flex: none;
   }
-  .srv-card-icon.dim { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.07); color: #717983; }
+  .srv-card-icon.dim { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.07); color: #868c96; }
   .srv-card-name { font-size: 14px; font-weight: 700; color: var(--adm-text); }
   .srv-card-name.dim { color: #cbd0d7; }
   .srv-card-desc { font-size: 12.5px; color: var(--adm-muted); line-height: 1.4; }
-  .srv-card-desc.dim { color: #717983; }
+  .srv-card-desc.dim { color: #868c96; }
   .srv-card-tools { display: flex; flex-wrap: wrap; gap: 6px; }
   .tool-chip {
     display: inline-flex; align-items: center; gap: 5px;
@@ -820,7 +826,7 @@
   }
   .tool-chip-dot  { width: 5px; height: 5px; border-radius: 50%; background: #4ade80; }
   .tool-chip-off  {
-    font: 500 11px var(--ff-mono); color: #5b626c;
+    font: 500 11px var(--ff-mono); color: #7d838d;
     border: 1px dashed rgba(255,255,255,0.14); padding: 3px 8px; border-radius: 6px;
   }
   .tool-chip-sus  {
@@ -833,7 +839,7 @@
   }
   .srv-card-footer-lbl { font-size: 12px; color: var(--adm-muted); }
   .srv-card-footer-link { font-size: 12px; color: #7aa7ff; font-weight: 600; cursor: pointer; text-decoration: none; }
-  .srv-card-footer-pend { font-size: 12px; color: #717983; }
+  .srv-card-footer-pend { font-size: 12px; color: #868c96; }
   .srv-toggle {
     width: 40px; height: 22px; border-radius: 999px; background: var(--adm-blue);
     position: relative; border: none; cursor: pointer; flex: none; transition: background 0.2s;
@@ -845,7 +851,7 @@
   .srv-toggle.off {
     background: rgba(255,255,255,0.08); cursor: not-allowed; opacity: 0.5;
   }
-  .srv-toggle.off::after { left: 2px; background: #717983; }
+  .srv-toggle.off::after { left: 2px; background: #868c96; }
 
   /* ---- Status pills (portal cards) ---- */
   .cpill {
@@ -860,3 +866,37 @@
   .cpill-awaiting  { background: rgba(251,191,36,0.13);  color: #fbbf24; }
   .cpill-awaiting  .cpill-dot { background: #fbbf24; }
 
+
+  /* ---- Toasts (R1.2 — replaces alert()) ---- */
+  #_toast-container {
+    position: fixed; bottom: 20px; right: 20px; z-index: 10000;
+    display: flex; flex-direction: column; gap: 8px; max-width: 420px;
+  }
+  .toast {
+    display: flex; align-items: flex-start; gap: 10px;
+    background: var(--adm-surface, #12161e); border: 1px solid rgba(255,255,255,0.1);
+    border-left: 3px solid var(--adm-blue, #4f9cf9);
+    border-radius: 8px; padding: 10px 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    font-size: 13px; color: var(--adm-text, #e7eaf0); line-height: 1.4;
+  }
+  .toast-success { border-left-color: var(--adm-green, #35c88a); }
+  .toast-error   { border-left-color: var(--adm-red, #ef5350); }
+  .toast-msg { flex: 1; user-select: text; word-break: break-word; }
+  .toast-close {
+    background: none; border: none; color: var(--adm-muted, #8a93a4);
+    cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px; flex: none;
+  }
+  .toast-close:hover { color: var(--adm-text, #e7eaf0); }
+
+  /* ---- confirmDialog (R1.2 — replaces confirm()) ---- */
+  .confirm-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 10001;
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .confirm-dialog {
+    background: var(--adm-surface, #12161e); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px; padding: 20px 22px; max-width: 420px; width: 100%;
+    color: var(--adm-text, #e7eaf0); box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+  }
+  .confirm-dialog-msg { margin: 0 0 18px; font-size: 14px; line-height: 1.55; user-select: text; }
+  .confirm-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }

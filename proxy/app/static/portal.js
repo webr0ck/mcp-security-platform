@@ -50,6 +50,137 @@
     return d.innerHTML;
   }
 
+  // ---------------------------------------------------------------------
+  // toast() / confirmDialog() — R1.2: replace the blocking window dialogs.
+  // ---------------------------------------------------------------------
+
+  function _toastContainer() {
+    let c = document.getElementById('_toast-container');
+    if (!c) {
+      c = document.createElement('div');
+      c.id = '_toast-container';
+      document.body.appendChild(c);
+    }
+    return c;
+  }
+
+  // Non-blocking notification. kind: 'success' | 'error' | 'info' (default).
+  // 'error' toasts do NOT auto-dismiss — error text must stay on screen and
+  // selectable long enough for a user to copy it into a bug report, which a
+  // timed dismiss (like the old blocking window dialog's "click OK to lose
+  // it forever", but silent) would regress. success/info auto-dismiss after
+  // 5s, paused on hover/focus so a user mid-read/copy doesn't have it
+  // vanish under them.
+  function toast(message, kind) {
+    kind = kind === 'success' || kind === 'error' ? kind : 'info';
+    const container = _toastContainer();
+    const el = document.createElement('div');
+    el.className = 'toast toast-' + kind;
+    el.setAttribute('role', 'status');
+    const msgEl = document.createElement('span');
+    msgEl.className = 'toast-msg';
+    msgEl.textContent = message == null ? '' : String(message);
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'toast-close';
+    closeBtn.setAttribute('aria-label', 'Dismiss notification');
+    closeBtn.textContent = '×';
+    let timer = null;
+    function remove() {
+      if (timer) clearTimeout(timer);
+      el.remove();
+    }
+    closeBtn.addEventListener('click', remove);
+    el.append(msgEl, closeBtn);
+    container.appendChild(el);
+    if (kind !== 'error') {
+      timer = setTimeout(remove, 5000);
+      el.addEventListener('mouseenter', () => { if (timer) { clearTimeout(timer); timer = null; } });
+      el.addEventListener('mouseleave', () => { if (!timer) timer = setTimeout(remove, 5000); });
+    }
+    return el;
+  }
+
+  // Promise-based, accessible replacement for the blocking window dialog.
+  // Resolves true/false — callers await it, so "a confirmation that
+  // currently blocks an action must still block it" holds (the action only
+  // proceeds after the promise settles, same net effect as the old
+  // synchronous blocking call).
+  //
+  // a11y: role=alertdialog + aria-modal + aria-labelledby give it an
+  // accessible name; Escape cancels; Enter confirms (default focus lands on
+  // the Confirm button, so plain Enter activates it natively — the explicit
+  // handler below also covers Enter while focus is elsewhere, e.g. after a
+  // Tab press, as long as it's not on the Cancel button); Tab/Shift+Tab are
+  // trapped between the two buttons; focus returns to whatever triggered
+  // the dialog when it closes.
+  function confirmDialog(message, opts) {
+    opts = opts || {};
+    const confirmLabel = opts.confirmLabel || 'Confirm';
+    const cancelLabel = opts.cancelLabel || 'Cancel';
+    const danger = opts.danger !== false;
+    return new Promise(function(resolve) {
+      const previouslyFocused = document.activeElement;
+      const overlay = document.createElement('div');
+      overlay.className = 'confirm-overlay';
+
+      const dialog = document.createElement('div');
+      dialog.className = 'confirm-dialog';
+      dialog.setAttribute('role', 'alertdialog');
+      dialog.setAttribute('aria-modal', 'true');
+      const titleId = '_confirm-msg-' + Math.random().toString(36).slice(2);
+      dialog.setAttribute('aria-labelledby', titleId);
+
+      const msgEl = document.createElement('p');
+      msgEl.id = titleId;
+      msgEl.className = 'confirm-dialog-msg';
+      msgEl.textContent = message == null ? '' : String(message);
+
+      const actions = document.createElement('div');
+      actions.className = 'confirm-dialog-actions';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'btn-secondary';
+      cancelBtn.textContent = cancelLabel;
+      const confirmBtn = document.createElement('button');
+      confirmBtn.type = 'button';
+      confirmBtn.className = danger ? 'btn-danger' : 'btn-primary';
+      confirmBtn.textContent = confirmLabel;
+      actions.append(cancelBtn, confirmBtn);
+      dialog.append(msgEl, actions);
+      overlay.appendChild(dialog);
+      document.body.appendChild(overlay);
+
+      function close(result) {
+        document.removeEventListener('keydown', onKeydown, true);
+        overlay.remove();
+        if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+          previouslyFocused.focus();
+        }
+        resolve(result);
+      }
+      function onKeydown(e) {
+        if (e.key === 'Escape') { e.preventDefault(); close(false); return; }
+        if (e.key === 'Enter' && document.activeElement !== cancelBtn) {
+          e.preventDefault(); close(true); return;
+        }
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          const focusables = [cancelBtn, confirmBtn];
+          const idx = focusables.indexOf(document.activeElement);
+          const next = e.shiftKey
+            ? focusables[(idx - 1 + focusables.length) % focusables.length]
+            : focusables[(idx + 1) % focusables.length];
+          next.focus();
+        }
+      }
+      cancelBtn.addEventListener('click', () => close(false));
+      confirmBtn.addEventListener('click', () => close(true));
+      document.addEventListener('keydown', onKeydown, true);
+      confirmBtn.focus();
+    });
+  }
+
   // Toggle a section's visibility
   function toggle(id) {
     const el = document.getElementById(id);
@@ -127,7 +258,8 @@
     bar.style.display = 'flex';
     bar.innerHTML = group.panels.map(p => {
       const active = p === activeName;
-      return '<button class="adm-tab' + (active ? ' active' : '') + '" ' +
+      return '<button class="adm-tab' + (active ? ' active' : '') + '"' +
+             (active ? ' aria-current="page"' : '') + ' ' +
              'onclick="loadAdminTab(\'' + p + '\')">' + (_TAB_MAP[p] || p) + '</button>';
     }).join('');
   }
@@ -141,13 +273,20 @@
     document.querySelectorAll('.adm-nav-item').forEach(b => {
       const match = b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + group.panels[0] + "'");
       b.classList.toggle('active', match);
+      if (match) { b.setAttribute('aria-current', 'page'); } else { b.removeAttribute('aria-current'); }
       const dot = b.querySelector('.adm-nav-dot');
       if (dot) dot.classList.toggle('active', match);
     });
     // Update subtab bar
     _renderTabsBar(group, name);
-    // Load fragment
-    htmx.ajax('GET', '/portal/fragments/admin/' + name, {target: '#adm-content', swap: 'innerHTML'});
+    // Load fragment. Focus moves to the content region once the new
+    // fragment settles, so keyboard/screen-reader users land on the tab's
+    // content instead of being stranded wherever they clicked from.
+    htmx.ajax('GET', '/portal/fragments/admin/' + name, {target: '#adm-content', swap: 'innerHTML'})
+      .then(function() {
+        const content = document.getElementById('adm-content');
+        if (content) content.focus();
+      });
     if (!opts.fromPopState) {
       history.pushState({admTab: name}, '', '/portal/admin/' + name);
     }
@@ -191,51 +330,51 @@
         r.style.display = hasStatus ? '' : 'none';
       });
     }
-    function adminApproveSrv(id) {
-      if (!confirm('Approve this server? This mints a dual-control consent token and immediately consumes it.')) return;
+    async function adminApproveSrv(id) {
+      if (!(await confirmDialog('Approve this server? This mints a dual-control consent token and immediately consumes it.'))) return;
       fetch('/api/v1/servers/' + id + '/consent', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
         .then(r => r.ok ? r.json() : r.json().then(d => Promise.reject(d.detail?.message || d.detail || 'Failed to mint consent token')))
         .then(d => fetch('/api/v1/admin/servers/' + id + '/approve', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({consent_token: d.consent_token})}))
         .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => Promise.reject(d.detail?.message || d.detail || 'Approve failed')))
-        .catch(e => alert('Error: ' + e));
+        .catch(e => toast('Error: ' + e, 'error'));
     }
-    function adminRejectSrv(id) {
-      if (!confirm('Reject and remove this server?')) return;
+    async function adminRejectSrv(id) {
+      if (!(await confirmDialog('Reject and remove this server?'))) return;
       fetch('/api/v1/admin/servers/' + id + '/reject', {method:'POST'})
-        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.detail?.message || 'Error')))
-        .catch(e => alert('Network error: ' + e));
+        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => toast(d.detail?.message || 'Error', 'error')))
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
-    function adminReleaseSrv(id) {
-      if (!confirm('Release this server from quarantine?')) return;
+    async function adminReleaseSrv(id) {
+      if (!(await confirmDialog('Release this server from quarantine?'))) return;
       fetch('/api/v1/admin/servers/' + id + '/release', {method:'POST'})
-        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.detail?.message || 'Error')))
-        .catch(e => alert('Network error: ' + e));
+        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => toast(d.detail?.message || 'Error', 'error')))
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
-    function adminSetPublic(id, enable) {
+    async function adminSetPublic(id, enable) {
       document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
-      if (!confirm(enable
+      if (!(await confirmDialog(enable
           ? 'Make this server reachable by ALL authenticated users? (Read-only servers only.)'
-          : 'Make this server private again (explicit grants only)?')) return;
+          : 'Make this server private again (explicit grants only)?'))) return;
       fetch('/api/v1/admin/servers/' + id + '/public', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({enabled: enable})
       })
-        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.detail || 'Error')))
-        .catch(e => alert('Network error: ' + e));
+        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => toast(d.detail || 'Error', 'error')))
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
-    function adminQuarantineSrv(id) {
+    async function adminQuarantineSrv(id) {
       document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
-      if (!confirm('Quarantine this server? It will be blocked from invocations.')) return;
+      if (!(await confirmDialog('Quarantine this server? It will be blocked from invocations.'))) return;
       fetch('/api/v1/admin/servers/' + id + '/quarantine', {method:'POST'})
-        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.detail?.message || 'Error')))
-        .catch(e => alert('Network error: ' + e));
+        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => toast(d.detail?.message || 'Error', 'error')))
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
-    function adminDeleteSrv(id) {
+    async function adminDeleteSrv(id) {
       document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
-      if (!confirm('Delete this server? This cannot be undone.')) return;
+      if (!(await confirmDialog('Delete this server? This cannot be undone.'))) return;
       fetch('/api/v1/admin/servers/' + id, {method:'DELETE'})
-        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.detail?.message || 'Error')))
-        .catch(e => alert('Network error: ' + e));
+        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => toast(d.detail?.message || 'Error', 'error')))
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
     function adminSetMaintainers(id, current) {
       document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
@@ -245,20 +384,20 @@
       fetch('/api/v1/servers/' + id + '/maintainers', {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({maintainers}),
-      }).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
-        .catch(e => alert('Network error: ' + e));
+      }).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => toast(d.error?.message || d.detail?.message || d.detail || 'Error', 'error')))
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
-    function adminToggleDebug(id, enable) {
+    async function adminToggleDebug(id, enable) {
       document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
       const msg = enable
         ? 'Enable debug/maintenance mode for this server? Only the owner and maintainers will be able to invoke it while enabled.'
         : 'Go live? This exits maintenance mode and opens invocation to every entitled caller. Make sure verification has passed first.';
-      if (!confirm(msg)) return;
+      if (!(await confirmDialog(msg))) return;
       fetch('/api/v1/servers/' + id + '/debug-mode', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({enabled: enable}),
-      }).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
-        .catch(e => alert('Network error: ' + e));
+      }).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => toast(d.error?.message || d.detail?.message || d.detail || 'Error', 'error')))
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
     function adminVerifySrv(id) {
       // PRD-0012 C4: distinct from go-live — re-runs verification probes and
@@ -268,18 +407,18 @@
         .then(async r => {
           const d = await r.json().catch(() => ({}));
           if (r.ok && d.verified) {
-            alert('Verification passed. You can now go live.');
+            toast('Verification passed. You can now go live.', 'success');
           } else {
             const reason = d.verification_report
               ? JSON.stringify(d.verification_report)
               : (d.detail?.message || d.detail || 'verification failed');
-            alert('Verification failed — still in maintenance.\n' + reason);
+            toast('Verification failed — still in maintenance.\n' + reason, 'error');
           }
           loadAdminTab('servers');
         })
-        .catch(e => alert('Network error: ' + e));
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
-    function adminEditEndpoint(id, currentUrl) {
+    async function adminEditEndpoint(id, currentUrl) {
       // PRD-0012 C3: edits are never a silent overwrite — this always goes
       // through POST /request-change, which quarantines every tool and
       // demotes the server before re-verifying (or re-reviewing) the change.
@@ -287,29 +426,30 @@
       const url = prompt('New backend (upstream) URL:', currentUrl || '');
       if (url === null) return;
       const trimmed = url.trim();
-      if (!trimmed) { alert('URL is required.'); return; }
-      const ipOnly = confirm(
+      if (!trimmed) { toast('URL is required.', 'error'); return; }
+      const ipOnly = await confirmDialog(
         'Did ONLY the address change (same code, e.g. IP/DNS rotation)?\n\n' +
         'OK = yes, same code, address only — may auto-approve after re-verifying.\n' +
-        'Cancel = no, this is a code/config change — goes through full reviewer re-approval.'
+        'Cancel = no, this is a code/config change — goes through full reviewer re-approval.',
+        {confirmLabel: 'Address only', cancelLabel: 'Code/config change', danger: false}
       );
-      if (!confirm('Submit this change? The server will be quarantined and re-verified' +
-          (ipOnly ? ' (auto-approve if nothing else changed).' : ', then a reviewer must re-approve.'))) return;
+      if (!(await confirmDialog('Submit this change? The server will be quarantined and re-verified' +
+          (ipOnly ? ' (auto-approve if nothing else changed).' : ', then a reviewer must re-approve.')))) return;
       fetch('/api/v1/servers/' + id + '/request-change', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({new_upstream_url: trimmed, asserted_ip_only: ipOnly, reason: 'edit endpoint via portal'}),
-      }).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
-        .catch(e => alert('Network error: ' + e));
+      }).then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => toast(d.error?.message || d.detail?.message || d.detail || 'Error', 'error')))
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
-    function adminRebuildSrv(id) {
+    async function adminRebuildSrv(id) {
       // "Update from git & rebuild" — pulls latest from the linked repo and
       // rebuilds/restarts the container (ops-agent), then the backend's own
       // request-change contract re-verifies/re-reviews as needed.
       document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
-      if (!confirm('Pull the latest commit and rebuild this server\'s container? It will be briefly unavailable.')) return;
+      if (!(await confirmDialog('Pull the latest commit and rebuild this server\'s container? It will be briefly unavailable.'))) return;
       fetch('/api/v1/admin/servers/' + id + '/rebuild', {method: 'POST'})
-        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => alert(d.error?.message || d.detail?.message || d.detail || 'Error')))
-        .catch(e => alert('Network error: ' + e));
+        .then(r => r.ok ? loadAdminTab('servers') : r.json().then(d => toast(d.error?.message || d.detail?.message || d.detail || 'Error', 'error')))
+        .catch(e => toast('Network error: ' + e, 'error'));
     }
     function adminViewLogs(id) {
       document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
@@ -332,7 +472,7 @@
           box.appendChild(hdr); box.appendChild(pre); ov.appendChild(box);
           document.body.appendChild(ov);
         })
-        .catch(e => alert('Could not load logs: ' + e.message));
+        .catch(e => toast('Could not load logs: ' + e.message, 'error'));
     }
     function adminManageServerTools(sid) {
       document.querySelectorAll('.srv-dropdown').forEach(d => d.style.display='none');
@@ -348,11 +488,16 @@
       document.querySelectorAll('.adm-nav-item').forEach(b => {
         const match = b.getAttribute('onclick') && b.getAttribute('onclick').includes("'" + group.panels[0] + "'");
         b.classList.toggle('active', match);
+        if (match) { b.setAttribute('aria-current', 'page'); } else { b.removeAttribute('aria-current'); }
         const dot = b.querySelector('.adm-nav-dot');
         if (dot) dot.classList.toggle('active', match);
       });
       _renderTabsBar(group, 'tools');
-      htmx.ajax('GET', '/portal/fragments/admin/tools?server_id=' + sid, {target: '#adm-content', swap: 'innerHTML'});
+      htmx.ajax('GET', '/portal/fragments/admin/tools?server_id=' + sid, {target: '#adm-content', swap: 'innerHTML'})
+        .then(function() {
+          const content = document.getElementById('adm-content');
+          if (content) content.focus();
+        });
       history.pushState({admTab: 'tools'}, '', '/portal/admin/tools');
     }
     function srvMenuToggle(evt, id) {
@@ -415,17 +560,17 @@
         async function providePendingUrl(sid) {
           const input = document.getElementById('provurl-' + sid);
           const url = (input.value || '').trim();
-          if (!url) { alert('Enter the URL your server is running at.'); return; }
+          if (!url) { toast('Enter the URL your server is running at.', 'error'); return; }
           try {
             const r = await fetch('/api/v1/submissions/' + sid + '/provide-url', {
               method: 'POST', headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({upstream_url: url}),
             });
             const d = await r.json();
-            if (!r.ok) { alert(d.detail || 'Failed to go live'); return; }
+            if (!r.ok) { toast(d.detail || 'Failed to go live', 'error'); return; }
             await htmx.ajax('GET', '/portal/fragments/my-access', {target:'#portal-body', swap:'innerHTML'});
             ssShowTab('submit');
-          } catch (e) { alert('Network error: ' + e); }
+          } catch (e) { toast('Network error: ' + e, 'error'); }
         }
         async function editAndResubmit(sid) {
           const repo = (document.getElementById('editrepo-' + sid)?.value || '').trim();
@@ -444,7 +589,7 @@
             });
             if (!pr.ok) {
               const d = await pr.json().catch(() => ({}));
-              alert('Save failed: ' + (d.detail?.message || d.detail || pr.status));
+              toast('Save failed: ' + (d.detail?.message || d.detail || pr.status), 'error');
               return;
             }
             const sr = await fetch('/api/v1/submissions/' + sid + '/submit', {
@@ -452,12 +597,12 @@
             });
             if (!sr.ok) {
               const d = await sr.json().catch(() => ({}));
-              alert('Resubmit failed: ' + (d.detail?.message || d.detail || sr.status));
+              toast('Resubmit failed: ' + (d.detail?.message || d.detail || sr.status), 'error');
               return;
             }
             await htmx.ajax('GET', '/portal/fragments/my-access', {target:'#portal-body', swap:'innerHTML'});
             ssShowTab('submit');
-          } catch (e) { alert('Network error: ' + e); }
+          } catch (e) { toast('Network error: ' + e, 'error'); }
         }
 
 // ---------------------------------------------------------------------------
@@ -465,10 +610,16 @@
 // ---------------------------------------------------------------------------
     function ssShowTab(name) {
       document.querySelectorAll('.ss-panel').forEach(p => p.style.display = 'none');
-      document.querySelectorAll('#ss-tabs-bar .adm-tab').forEach(b => b.classList.remove('active'));
-      document.getElementById('ss-panel-' + name).style.display = 'block';
+      document.querySelectorAll('#ss-tabs-bar .adm-tab').forEach(b => { b.classList.remove('active'); b.removeAttribute('aria-current'); });
+      const panel = document.getElementById('ss-panel-' + name);
+      panel.style.display = 'block';
       const idx = ['home','catalog','submit','profile'].indexOf(name);
-      document.querySelectorAll('#ss-tabs-bar .adm-tab')[idx].classList.add('active');
+      const tabBtn = document.querySelectorAll('#ss-tabs-bar .adm-tab')[idx];
+      tabBtn.classList.add('active');
+      tabBtn.setAttribute('aria-current', 'page');
+      // Move focus into the newly-shown panel so keyboard/screen-reader users
+      // land on the tab's content instead of staying on the tab button.
+      panel.focus();
       if (name === 'profile' && !document.getElementById('ss-panel-profile').dataset.loaded) {
         htmx.ajax('GET', '/portal/fragments/profile', {target: '#ss-panel-profile', swap: 'innerHTML'});
         document.getElementById('ss-panel-profile').dataset.loaded = '1';
@@ -517,8 +668,8 @@
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <div style="margin-top:10px;font-size:11.5px;color:#5b626c;line-height:1.5">
-        <strong style="color:#717983">unauthenticated</strong> = requests counted by the
+      <div style="margin-top:10px;font-size:11.5px;color:#7d838d;line-height:1.5">
+        <strong style="color:#868c96">unauthenticated</strong> = requests counted by the
         rate limiter before authentication resolved (bot probes, health checks, unauthenticated
         endpoint hits). This is intentional: the gateway rate-limits all traffic, not just
         authenticated clients.
@@ -672,16 +823,16 @@
         }
       })).catch(e => showMsg(msgEl, 'err', 'Network error: ' + e));
     }
-    function toggleStatus(toolId, newStatus) {
-      if (!confirm('Set tool status to "' + newStatus + '"?')) return;
+    async function toggleStatus(toolId, newStatus) {
+      if (!(await confirmDialog('Set tool status to "' + newStatus + '"?'))) return;
       fetch('/api/v1/tools/' + toolId, {
         method: 'PATCH',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({status: newStatus}),
       }).then(r => {
         if (r.ok) activateAdminTab('tools');
-        else r.json().then(d => alert('Error: ' + (d.detail?.message || d.detail || r.status)));
-      }).catch(e => alert('Network error: ' + e));
+        else r.json().then(d => toast('Error: ' + (d.detail?.message || d.detail || r.status), 'error'));
+      }).catch(e => toast('Network error: ' + e, 'error'));
     }
     function showMsg(el, type, text) {
       if (!el) return;
@@ -706,8 +857,8 @@
         else showMsg(msgEl, 'err', d.detail?.message || d.detail || 'Failed.');
       })).catch(e => showMsg(msgEl, 'err', 'Network error: ' + e));
     }
-    function revokeCred(toolId) {
-      if (!confirm('Revoke credential for this tool?')) return;
+    async function revokeCred(toolId) {
+      if (!(await confirmDialog('Revoke credential for this tool?'))) return;
       const msgEl = document.getElementById('cred-msg-' + toolId);
       fetch('/admin/credentials/' + toolId, {method: 'DELETE'})
         .then(r => {
@@ -849,7 +1000,7 @@
       } else {
         const err = await r.json().catch(() => ({}));
         const msg = (err.detail && typeof err.detail === 'object') ? (err.detail.message || JSON.stringify(err.detail)) : (err.detail || r.status);
-        alert('Action failed: ' + msg);
+        toast('Action failed: ' + msg, 'error');
       }
     }
 
@@ -863,13 +1014,13 @@
         body: JSON.stringify({text: el.value})
       });
       if (r.ok) { htmx.ajax('GET', '/portal/fragments/admin/prompts', {target: '#adm-content', swap: 'innerHTML'}); }
-      else { const e = await r.json().catch(() => ({})); alert('Save failed: ' + (e.detail || r.status)); }
+      else { const e = await r.json().catch(() => ({})); toast('Save failed: ' + (e.detail || r.status), 'error'); }
     }
     async function resetPrompt(key) {
-      if (!confirm('Reset this prompt to its built-in default?')) return;
+      if (!(await confirmDialog('Reset this prompt to its built-in default?'))) return;
       const r = await fetch('/api/v1/admin/prompts/' + encodeURIComponent(key), {method: 'DELETE'});
       if (r.ok) { htmx.ajax('GET', '/portal/fragments/admin/prompts', {target: '#adm-content', swap: 'innerHTML'}); }
-      else { const e = await r.json().catch(() => ({})); alert('Reset failed: ' + (e.detail || r.status)); }
+      else { const e = await r.json().catch(() => ({})); toast('Reset failed: ' + (e.detail || r.status), 'error'); }
     }
 
 // ---------------------------------------------------------------------------
@@ -884,17 +1035,17 @@
       };
       const r = await fetch('/api/v1/admin/llm', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       if (r.ok) { htmx.ajax('GET','/portal/fragments/admin/llm',{target:'#adm-content',swap:'innerHTML'}); }
-      else { const e=await r.json().catch(()=>({})); alert('Save failed: '+(e.detail||r.status)); }
+      else { const e=await r.json().catch(()=>({})); toast('Save failed: '+(e.detail||r.status), 'error'); }
     }
     async function saveLlmToken() {
       const t = document.getElementById('llm-token').value;
-      if (!t) { alert('Enter a token first.'); return; }
+      if (!t) { toast('Enter a token first.', 'error'); return; }
       const r = await fetch('/api/v1/admin/llm/token', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
       if (r.ok) { htmx.ajax('GET','/portal/fragments/admin/llm',{target:'#adm-content',swap:'innerHTML'}); }
-      else { const e=await r.json().catch(()=>({})); alert('Token save failed: '+(e.detail||r.status)); }
+      else { const e=await r.json().catch(()=>({})); toast('Token save failed: '+(e.detail||r.status), 'error'); }
     }
     async function delLlmToken() {
-      if (!confirm('Remove the stored LLM token?')) return;
+      if (!(await confirmDialog('Remove the stored LLM token?'))) return;
       const r = await fetch('/api/v1/admin/llm/token', {method:'DELETE'});
       if (r.ok) { htmx.ajax('GET','/portal/fragments/admin/llm',{target:'#adm-content',swap:'innerHTML'}); }
     }
@@ -919,17 +1070,17 @@
       };
       const r = await fetch('/api/v1/admin/git-providers/'+prov, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       if (r.ok) { htmx.ajax('GET','/portal/fragments/admin/git',{target:'#adm-content',swap:'innerHTML'}); }
-      else { const e=await r.json().catch(()=>({})); alert('Save failed: '+(e.detail||r.status)); }
+      else { const e=await r.json().catch(()=>({})); toast('Save failed: '+(e.detail||r.status), 'error'); }
     }
     async function saveGitToken(prov) {
       const t = document.getElementById('git-token-'+prov).value;
-      if (!t) { alert('Enter a token first.'); return; }
+      if (!t) { toast('Enter a token first.', 'error'); return; }
       const r = await fetch('/api/v1/admin/git-providers/'+prov+'/token', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
       if (r.ok) { htmx.ajax('GET','/portal/fragments/admin/git',{target:'#adm-content',swap:'innerHTML'}); }
-      else { const e=await r.json().catch(()=>({})); alert('Token save failed: '+(e.detail||r.status)); }
+      else { const e=await r.json().catch(()=>({})); toast('Token save failed: '+(e.detail||r.status), 'error'); }
     }
     async function delGitToken(prov) {
-      if (!confirm('Remove the stored token for '+prov+'?')) return;
+      if (!(await confirmDialog('Remove the stored token for '+prov+'?'))) return;
       const r = await fetch('/api/v1/admin/git-providers/'+prov+'/token', {method:'DELETE'});
       if (r.ok) { htmx.ajax('GET','/portal/fragments/admin/git',{target:'#adm-content',swap:'innerHTML'}); }
     }
@@ -962,7 +1113,7 @@ function _accessRefresh() {
   htmx.ajax('GET', '/portal/fragments/admin/access', {target: '#adm-content', swap: 'innerHTML'});
 }
 
-document.body.addEventListener('click', function(e) {
+document.body.addEventListener('click', async function(e) {
   // --- MCP named-profile manage: per-tool toggle + bulk enable/disable ---
   const mcpToggle = e.target.closest('.mcpprof-toggle-btn');
   if (mcpToggle) {
@@ -978,7 +1129,7 @@ document.body.addEventListener('click', function(e) {
       _mcpProfileReload(btn.dataset.container, profile);
     }).catch(function(err) {
       btn.disabled = false;
-      alert('Failed to update: ' + err.message);
+      toast('Failed to update: ' + err.message, 'error');
     });
     return;
   }
@@ -1001,7 +1152,7 @@ document.body.addEventListener('click', function(e) {
         _mcpProfileReload(btn.dataset.container, profile);
       } catch (err) {
         btn.disabled = false;
-        alert('Failed to update all tools: ' + err.message);
+        toast('Failed to update all tools: ' + err.message, 'error');
       }
     })();
     return;
@@ -1014,7 +1165,7 @@ document.body.addEventListener('click', function(e) {
     fetch('/api/v1/tools/' + encodeURIComponent(sbomGenBtn.dataset.toolId) + '/sbom/generate',
           {method: 'POST', credentials: 'include'})
       .then(function(r) { if (!r.ok) return r.json().then(function(d) { throw new Error(d.detail && d.detail.message || ('HTTP ' + r.status)); }); _sbomRefresh(); })
-      .catch(function(err) { sbomGenBtn.disabled = false; alert(err.message); });
+      .catch(function(err) { sbomGenBtn.disabled = false; toast(err.message, 'error'); });
     return;
   }
   const sbomGenServerBtn = e.target.closest('.sbom-gen-server-btn');
@@ -1044,20 +1195,20 @@ document.body.addEventListener('click', function(e) {
   const apikeyRevokeBtn = e.target.closest('.apikey-revoke-btn');
   if (apikeyRevokeBtn) {
     const keyId = apikeyRevokeBtn.dataset.keyId, clientId = apikeyRevokeBtn.dataset.clientId;
-    if (!confirm('Revoke API key for "' + clientId + '"? It stops authenticating immediately.')) return;
+    if (!(await confirmDialog('Revoke API key for "' + clientId + '"? It stops authenticating immediately.'))) return;
     fetch('/api/v1/admin/api-keys/' + encodeURIComponent(keyId), {method: 'DELETE', credentials: 'include'})
       .then(function(r) { if (!r.ok) return r.json().then(function(d) { throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }); _accessRefresh(); })
-      .catch(function(err) { alert(err.message); });
+      .catch(function(err) { toast(err.message, 'error'); });
     return;
   }
   const roleXBtn = e.target.closest('.role-x-btn');
   if (roleXBtn) {
     const clientId = roleXBtn.dataset.clientId, role = roleXBtn.dataset.role;
-    if (!confirm('Revoke role "' + role + '" from ' + clientId + '?')) return;
+    if (!(await confirmDialog('Revoke role "' + role + '" from ' + clientId + '?'))) return;
     fetch('/api/v1/admin/roles/' + encodeURIComponent(clientId) + '/' + encodeURIComponent(role),
           {method: 'DELETE', credentials: 'include'})
       .then(function(r) { if (!r.ok) return r.json().then(function(d) { throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }); _accessRefresh(); })
-      .catch(function(err) { alert(err.message); });
+      .catch(function(err) { toast(err.message, 'error'); });
     return;
   }
   const roleAddBtn = e.target.closest('.role-add-btn');
@@ -1071,16 +1222,16 @@ document.body.addEventListener('click', function(e) {
       headers: {'content-type': 'application/json'},
       body: JSON.stringify({client_id: clientId, role: role}),
     }).then(function(r) { if (!r.ok) return r.json().then(function(d) { throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }); _accessRefresh(); })
-      .catch(function(err) { alert(err.message); });
+      .catch(function(err) { toast(err.message, 'error'); });
     return;
   }
   const grantRevokeBtn = e.target.closest('.grant-revoke-btn');
   if (grantRevokeBtn) {
     const clientId = grantRevokeBtn.dataset.clientId;
-    if (!confirm('Revoke API client grant for "' + clientId + '"? It will lose all tool/tag access immediately.')) return;
+    if (!(await confirmDialog('Revoke API client grant for "' + clientId + '"? It will lose all tool/tag access immediately.'))) return;
     fetch('/api/v1/admin/grants/' + encodeURIComponent(clientId), {method: 'DELETE', credentials: 'include'})
       .then(function(r) { if (!r.ok) return r.json().then(function(d) { throw new Error((d.detail && d.detail.message) || d.detail || ('HTTP ' + r.status)); }); _accessRefresh(); })
-      .catch(function(err) { alert(err.message); });
+      .catch(function(err) { toast(err.message, 'error'); });
     return;
   }
   // Unobtrusive binding (not inline onclick=) — principal/mcp names come from the

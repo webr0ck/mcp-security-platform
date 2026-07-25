@@ -13,6 +13,7 @@
  */
 
 import { test, expect, Page, Browser, BrowserContext } from '@playwright/test'
+import AxeBuilder from '@axe-core/playwright'
 
 const CREDS = {
   alice: ['alice', 'CudvCD5L3WzmmktMEVmWvRkLqFlI'],
@@ -567,5 +568,48 @@ test.describe.serial('AC-09 Portal access pill matches invoke decision', () => {
     const ctx = await authedCtx(browser, 'alice')
     expect((await ctx.request.get('/portal/fragments/catalog')).status()).toBe(404)
     await ctx.close()
+  })
+})
+
+// ── AC-10: Accessibility (axe-core) — R1.3 ────────────────────────────────────
+// Runs axe against the loaded /portal admin shell (alice) and agent shell
+// (bob) and fails on any 'critical' or 'serious' impact violation. 'moderate'/
+// 'minor' are reported but not gating — this is a floor, not full WCAG
+// conformance.
+
+test.describe('AC-10 Accessibility (axe-core)', () => {
+  async function axeScanPortal(browser: Browser, who: 'alice' | 'bob') {
+    const storage = who === 'alice' ? aliceStorage : bobStorage
+    const ctx = await browser.newContext({ ignoreHTTPSErrors: true, storageState: storage })
+    const page = await ctx.newPage()
+    await page.goto('/portal')
+    await page.waitForLoadState('networkidle')
+    const results = await new AxeBuilder({ page }).analyze()
+    await ctx.close()
+    return results
+  }
+
+  test('alice admin portal has no critical/serious violations', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const results = await axeScanPortal(browser, 'alice')
+    const gating = results.violations.filter(v => v.impact === 'critical' || v.impact === 'serious')
+    if (gating.length) {
+      console.log('AC-10 alice violations:', JSON.stringify(gating.map(v => ({
+        id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.length,
+      })), null, 2))
+    }
+    expect(gating, `violations: ${gating.map(v => `${v.id}(${v.impact})`).join(', ')}`).toEqual([])
+  })
+
+  test('bob agent portal has no critical/serious violations', async ({ browser }) => {
+    test.skip(!bobStorage, 'bob session not available')
+    const results = await axeScanPortal(browser, 'bob')
+    const gating = results.violations.filter(v => v.impact === 'critical' || v.impact === 'serious')
+    if (gating.length) {
+      console.log('AC-10 bob violations:', JSON.stringify(gating.map(v => ({
+        id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.length,
+      })), null, 2))
+    }
+    expect(gating, `violations: ${gating.map(v => `${v.id}(${v.impact})`).join(', ')}`).toEqual([])
   })
 })

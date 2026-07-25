@@ -587,7 +587,7 @@ _CSS = """
     border-radius: 2px; transform: rotate(45deg);
   }
   .adm-logo-name { font-size: 15px; font-weight: 800; color: var(--adm-text); letter-spacing: -0.01em; }
-  .adm-logo-sub  { font: 500 9px var(--ff-mono); letter-spacing: 0.16em; color: #5b626c; }
+  .adm-logo-sub  { font: 500 9px var(--ff-mono); letter-spacing: 0.16em; color: #7d838d; }
   .adm-nav-group {
     font: 600 10px var(--ff-mono); letter-spacing: 0.14em; color: #4f565f;
     padding: 14px 10px 6px;
@@ -611,7 +611,11 @@ _CSS = """
   }
   .adm-nav-dot.active { background: var(--adm-blue); opacity: 1; box-shadow: 0 0 8px rgba(79,156,249,0.7); }
   .adm-nav-badge {
-    margin-left: auto; font: 700 10px var(--ff-sans); color: var(--adm-blue);
+    /* WCAG AA: --adm-blue (#4f9cf9) on this badge's tinted background measured
+       4.49:1 — just under the 4.5 minimum for the 10px bold text, flagged by the
+       axe check in AC-10. Lightened to #6bb0fc (5.57:1) here only; the global
+       --adm-blue token is unchanged because it passes at its other, larger sizes. */
+    margin-left: auto; font: 700 10px var(--ff-sans); color: #6bb0fc;
     background: rgba(79,156,249,0.16); padding: 1px 7px; border-radius: 10px;
   }
   .adm-user-panel {
@@ -645,9 +649,9 @@ _CSS = """
   .adm-search-orb {
     width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--adm-blue); flex: none;
   }
-  .adm-search-text { font-size: 12.5px; color: #717983; flex: 1; }
+  .adm-search-text { font-size: 12.5px; color: #868c96; flex: 1; }
   .adm-search-kbd {
-    font: 500 10px var(--ff-mono); color: #5b626c;
+    font: 500 10px var(--ff-mono); color: #7d838d;
     background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 5px;
   }
   .adm-tabs-bar {
@@ -749,7 +753,7 @@ _CSS = """
     grid-template-columns: 2.1fr 2.3fr 1.15fr 1.2fr 1.1fr 0.8fr 100px;
     gap: 12px; padding: 11px 18px;
     border-bottom: 1px solid rgba(255,255,255,0.06);
-    font: 600 10px var(--ff-mono); letter-spacing: 0.08em; color: #5b626c;
+    font: 600 10px var(--ff-mono); letter-spacing: 0.08em; color: #7d838d;
   }
   .srv-tbl-row {
     display: grid;
@@ -871,7 +875,7 @@ _CSS = """
   .portal-logo { display: flex; align-items: center; gap: 10px; }
   .portal-logo-name { font-size: 15px; font-weight: 800; color: var(--adm-text); letter-spacing: -0.01em; }
   .portal-logo-lbl {
-    font: 500 10px var(--ff-mono); letter-spacing: 0.12em; color: #5b626c;
+    font: 500 10px var(--ff-mono); letter-spacing: 0.12em; color: #7d838d;
     background: rgba(255,255,255,0.05); padding: 3px 7px; border-radius: 5px;
   }
   .portal-user-area { display: flex; align-items: center; gap: 14px; }
@@ -898,11 +902,11 @@ _CSS = """
     border-radius: 10px; padding: 9px 12px;
   }
   .portal-find-orb { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--adm-blue); flex: none; }
-  .portal-find-text { font-size: 12.5px; color: #717983; flex: 1; }
+  .portal-find-text { font-size: 12.5px; color: #868c96; flex: 1; }
 
   /* ---- Profile bar ---- */
   .profile-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .profile-lbl { font: 600 10px var(--ff-mono); letter-spacing: 0.12em; color: #5b626c; }
+  .profile-lbl { font: 600 10px var(--ff-mono); letter-spacing: 0.12em; color: #7d838d; }
   .profile-pills { display: flex; gap: 7px; flex-wrap: wrap; }
   .profile-pill {
     display: flex; align-items: center; gap: 7px;
@@ -917,10 +921,10 @@ _CSS = """
   }
   .profile-pill-dot { width: 6px; height: 6px; border-radius: 50%; background: #7aa7ff; }
   .profile-pill-new {
-    border: 1px dashed rgba(255,255,255,0.16); color: #717983;
+    border: 1px dashed rgba(255,255,255,0.16); color: #868c96;
     background: transparent;
   }
-  .profile-summary { font-size: 12px; color: #717983; margin-left: auto; }
+  .profile-summary { font-size: 12px; color: #868c96; margin-left: auto; }
   .profile-summary strong { color: #cbd0d7; }
 
   /* ---- Server summary strip ---- */
@@ -953,11 +957,11 @@ _CSS = """
     display: flex; align-items: center; justify-content: center;
     font: 700 14px var(--ff-sans); color: #cbd0d7; flex: none;
   }
-  .srv-card-icon.dim { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.07); color: #717983; }
+  .srv-card-icon.dim { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.07); color: #868c96; }
   .srv-card-name { font-size: 14px; font-weight: 700; color: var(--adm-text); }
   .srv-card-name.dim { color: #cbd0d7; }
   .srv-card-desc { font-size: 12.5px; color: var(--adm-muted); line-height: 1.4; }
-  .srv-card-desc.dim { color: #717983; }
+  .srv-card-desc.dim { color: #868c96; }
   .srv-card-tools { display: flex; flex-wrap: wrap; gap: 6px; }
   .tool-chip {
     display: inline-flex; align-items: center; gap: 5px;
@@ -967,7 +971,7 @@ _CSS = """
   }
   .tool-chip-dot  { width: 5px; height: 5px; border-radius: 50%; background: #4ade80; }
   .tool-chip-off  {
-    font: 500 11px var(--ff-mono); color: #5b626c;
+    font: 500 11px var(--ff-mono); color: #7d838d;
     border: 1px dashed rgba(255,255,255,0.14); padding: 3px 8px; border-radius: 6px;
   }
   .tool-chip-sus  {
@@ -980,7 +984,7 @@ _CSS = """
   }
   .srv-card-footer-lbl { font-size: 12px; color: var(--adm-muted); }
   .srv-card-footer-link { font-size: 12px; color: #7aa7ff; font-weight: 600; cursor: pointer; text-decoration: none; }
-  .srv-card-footer-pend { font-size: 12px; color: #717983; }
+  .srv-card-footer-pend { font-size: 12px; color: #868c96; }
   .srv-toggle {
     width: 40px; height: 22px; border-radius: 999px; background: var(--adm-blue);
     position: relative; border: none; cursor: pointer; flex: none; transition: background 0.2s;
@@ -992,7 +996,7 @@ _CSS = """
   .srv-toggle.off {
     background: rgba(255,255,255,0.08); cursor: not-allowed; opacity: 0.5;
   }
-  .srv-toggle.off::after { left: 2px; background: #717983; }
+  .srv-toggle.off::after { left: 2px; background: #868c96; }
 
   /* ---- Status pills (portal cards) ---- */
   .cpill {
@@ -1133,8 +1137,9 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
         # "Servers 0" reads as "zero servers", not "zero pending reviews".
         if group["id"] == "servers" and _admin_awaiting_review_count:
             badge_html = f'<span class="adm-nav-badge" title="{_admin_awaiting_review_count} awaiting review">{_admin_awaiting_review_count}</span>'
+        aria_current = ' aria-current="page"' if active_panel else ""
         return (
-            f'<button class="{cls}" onclick="loadAdminTab(\'{esc_py(first_panel)}\')">'
+            f'<button class="{cls}"{aria_current} onclick="loadAdminTab(\'{esc_py(first_panel)}\')">'
             f'<span class="{dot_cls}"></span>{esc_py(group["label"])}{badge_html}</button>'
         )
 
@@ -1199,13 +1204,13 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
           <div>Identity, Prompts, LLM, Git &rarr; <b>Settings</b></div>
         </div>
       </div>
-      <button onclick="_dismissMigrationBanner()" style="background:none;border:none;color:var(--adm-muted);cursor:pointer;font-size:16px;padding:4px 8px">&times;</button>
+      <button onclick="_dismissMigrationBanner()" aria-label="Dismiss" style="background:none;border:none;color:var(--adm-muted);cursor:pointer;font-size:16px;padding:4px 8px">&times;</button>
     </div>
 
     <div class="adm-tabs-bar" id="adm-tabs-bar"></div>
 
     <!-- Content -->
-    <div class="adm-body" id="adm-content"
+    <div class="adm-body" id="adm-content" tabindex="-1" aria-live="polite" aria-busy="false"
          hx-get="/portal/fragments/admin/{esc_py(initial_tab)}"
          hx-trigger="load"
          hx-swap="innerHTML">
@@ -1259,7 +1264,7 @@ def _build_agent_shell(cid: str, roles: list) -> str:
   </div>
 
   <!-- Body -->
-  <div class="portal-body" id="portal-body"
+  <div class="portal-body" id="portal-body" tabindex="-1" aria-live="polite" aria-busy="false"
        hx-get="/portal/fragments/my-access"
        hx-trigger="load"
        hx-swap="innerHTML">
@@ -1555,8 +1560,8 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
     if can_manage_mcp_profiles:
         create_form_html = """
         <div style="margin-top:0.75rem;display:flex;gap:0.5rem">
-          <input id="mcpprof-new-name" placeholder="profile-name (a-z0-9-_)" class="wiz-input" style="max-width:200px">
-          <input id="mcpprof-new-display" placeholder="Display name (optional)" class="wiz-input" style="max-width:220px">
+          <input id="mcpprof-new-name" aria-label="New profile name" placeholder="profile-name (a-z0-9-_)" class="wiz-input" style="max-width:200px">
+          <input id="mcpprof-new-display" aria-label="New profile display name" placeholder="Display name (optional)" class="wiz-input" style="max-width:220px">
           <button class="btn-primary btn-sm" onclick="createMcpProfile()">+ New profile</button>
         </div>
         <div id="mcpprof-new-msg" style="font-size:12px;margin-top:6px"></div>"""
@@ -2010,30 +2015,30 @@ async def _build_portal_access(
             toggle_cls = "srv-toggle"
             footer_lbl = '<span class="srv-card-footer-lbl">Access enabled</span>'
             toggle_html = (
-                f'<button class="srv-toggle" title="Disable {esc_py(svc)}" '
+                f'<button class="srv-toggle" title="Disable {esc_py(svc)}" aria-label="Disable {esc_py(svc)}" '
                 f'hx-post="/portal/actions/profile/{esc_py(svc)}/disable" '
                 f'hx-target="closest .srv-card" hx-swap="outerHTML"></button>'
             )
         elif cstatus == "active" and not enabled:
             footer_lbl = '<span class="srv-card-footer-lbl">Access disabled</span>'
             toggle_html = (
-                f'<button class="srv-toggle off" title="Enable {esc_py(svc)}" '
+                f'<button class="srv-toggle off" title="Enable {esc_py(svc)}" aria-label="Enable {esc_py(svc)}" '
                 f'hx-post="/portal/actions/profile/{esc_py(svc)}/enable" '
                 f'hx-target="closest .srv-card" hx-swap="outerHTML"></button>'
             )
         elif cstatus == "suspended":
             footer_lbl = '<a class="srv-card-footer-link" href="#">Contact admin →</a>'
-            toggle_html = '<button class="srv-toggle off" disabled></button>'
+            toggle_html = f'<button class="srv-toggle off" disabled aria-label="Access to {esc_py(svc)} suspended"></button>'
         elif cstatus == "maintenance":
             footer_lbl = '<span class="srv-card-footer-pend">In maintenance</span>'
-            toggle_html = '<button class="srv-toggle off" disabled></button>'
+            toggle_html = f'<button class="srv-toggle off" disabled aria-label="{esc_py(svc)} is in maintenance"></button>'
         else:  # awaiting
             footer_lbl = '<span class="srv-card-footer-pend">Pending review</span>'
-            toggle_html = '<button class="srv-toggle off" disabled></button>'
+            toggle_html = f'<button class="srv-toggle off" disabled aria-label="{esc_py(svc)} is pending review"></button>'
 
         # Auditor is read-only: no enable/disable toggle.
         if is_auditor:
-            toggle_html = '<button class="srv-toggle off" disabled title="read-only (auditor)"></button>'
+            toggle_html = '<button class="srv-toggle off" disabled title="read-only (auditor)" aria-label="Access toggle unavailable (read-only auditor role)"></button>'
 
         initials = (svc[0].upper() if svc else "?")
         cards_html.append(f"""
@@ -2106,7 +2111,7 @@ async def _build_portal_access(
                 _psid = esc_py(str(sub.get("server_id") or ""))
                 provide_url_form = f"""
                 <div style="display:flex;gap:6px;margin-top:6px">
-                  <input id="provurl-{_psid}" type="url" placeholder="https://your-server.example.com/mcp"
+                  <input id="provurl-{_psid}" type="url" aria-label="Backend URL" placeholder="https://your-server.example.com/mcp"
                          style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;
                                 color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
                   <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.75rem"
@@ -2130,19 +2135,19 @@ async def _build_portal_access(
                 edit_resubmit_form = f"""
                 {_notes_html}
                 <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
-                  <input id="editrepo-{_esid}" type="url" placeholder="GitHub repo URL"
+                  <input id="editrepo-{_esid}" type="url" aria-label="GitHub repo URL" placeholder="GitHub repo URL"
                          value="{esc_py(sub.get('github_repo_url') or '')}"
                          style="background:#0f172a;border:1px solid #334155;border-radius:6px;
                                 color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
-                  <input id="editurl-{_esid}" type="url" placeholder="Backend URL (https://your-server.example.com/mcp)"
+                  <input id="editurl-{_esid}" type="url" aria-label="Backend URL" placeholder="Backend URL (https://your-server.example.com/mcp)"
                          value="{esc_py(sub.get('requested_upstream_url') or '')}"
                          style="background:#0f172a;border:1px solid #334155;border-radius:6px;
                                 color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
-                  <input id="editdesc-{_esid}" type="text" placeholder="Description"
+                  <input id="editdesc-{_esid}" type="text" aria-label="Description" placeholder="Description"
                          value="{esc_py(sub.get('description') or '')}"
                          style="background:#0f172a;border:1px solid #334155;border-radius:6px;
                                 color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
-                  <input id="editaud-{_esid}" type="text" placeholder="Token-exchange audience (e.g. lab-tickets) — only needed for kc_token_exchange/oauth_user_token modes"
+                  <input id="editaud-{_esid}" type="text" aria-label="Token-exchange audience" placeholder="Token-exchange audience (e.g. lab-tickets) — only needed for kc_token_exchange/oauth_user_token modes"
                          value="{esc_py(_audience or '')}"
                          style="background:#0f172a;border:1px solid #334155;border-radius:6px;
                                 color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
@@ -2215,7 +2220,7 @@ async def _build_portal_access(
         MCP config snippet
       </summary>
       <div style="margin-top:8px">
-        <p style="font-size:12px;color:#5b626c;margin-bottom:8px">
+        <p style="font-size:12px;color:#7d838d;margin-bottom:8px">
           Paste into <code style="font-family:var(--ff-mono);color:#7aa7ff">~/.mcp.json</code>.
           {"Append <code style=\"font-family:var(--ff-mono)\">?key=YOUR_API_KEY</code> to pre-fill." if not api_key else "API key pre-filled."}
         </p>
@@ -2274,10 +2279,10 @@ async def _build_portal_access(
       <button class="adm-tab" onclick="ssShowTab('profile')">Profile</button>
     </div>
 
-    <div id="ss-panel-home" class="ss-panel">{home_html}</div>
-    <div id="ss-panel-catalog" class="ss-panel" style="display:none">{catalog_html}</div>
-    <div id="ss-panel-submit" class="ss-panel" style="display:none">{submit_html}</div>
-    <div id="ss-panel-profile" class="ss-panel" style="display:none"></div>
+    <div id="ss-panel-home" class="ss-panel" tabindex="-1">{home_html}</div>
+    <div id="ss-panel-catalog" class="ss-panel" tabindex="-1" style="display:none">{catalog_html}</div>
+    <div id="ss-panel-submit" class="ss-panel" tabindex="-1" style="display:none">{submit_html}</div>
+    <div id="ss-panel-profile" class="ss-panel" tabindex="-1" style="display:none"></div>
     """
 
 
@@ -2577,12 +2582,12 @@ async def fragment_admin_servers(request: Request):
             debug_on = bool(s.debug_mode)
             # R-11: maintainers/debug-mode admin UI on top of the already-built
             # server_registry.py backend (migration V048). Owner/maintainer-only
-            # gate is enforced server-side; a 403 here surfaces as an alert(), not
+            # gate is enforced server-side; a 403 here surfaces as a toast, not
             # a silent no-op.
             maint_json = esc_py(json.dumps(maintainers))
             action_html = (
                 f'<div style="position:relative;text-align:right">'
-                f'<button class="btn-menu" onclick="srvMenuToggle(event,\'{sid}\')">⋯</button>'
+                f'<button class="btn-menu" onclick="srvMenuToggle(event,\'{sid}\')" aria-label="More actions" aria-haspopup="true">⋯</button>'
                 f'<div class="srv-dropdown" id="srv-dd-{sid}" style="display:none">'
                 f'<button onclick="htmx.ajax(\'GET\',\'/portal/fragments/admin/detections?server_id={sid}\','
                 f'{{target:\'#adm-content\',swap:\'innerHTML\'}})">Detections</button>'
@@ -2760,7 +2765,7 @@ async def fragment_admin_identity(request: Request):
     rows_html = "".join(f"""
         <div style="display:grid;grid-template-columns:200px 1fr;gap:12px;
                     padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.05)">
-          <div style="font:600 12px var(--ff-mono);color:#5b626c;
+          <div style="font:600 12px var(--ff-mono);color:#7d838d;
                       text-transform:uppercase;letter-spacing:0.06em">{esc_py(k)}</div>
           <div style="font:400 13px var(--ff-mono);color:#9aa1ab">{esc_py(v)}</div>
         </div>""" for k, v in rows)
@@ -2832,12 +2837,12 @@ async def fragment_admin_limits(request: Request):
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
       <div>
-        <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--adm-dim);display:block;margin-bottom:5px">Rate limit (req/window)</label>
+        <label for="limits-edit-rl" style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--adm-dim);display:block;margin-bottom:5px">Rate limit (req/window)</label>
         <input id="limits-edit-rl" type="number" min="1" max="100000"
                style="width:100%;background:var(--adm-input);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--adm-text);padding:9px 12px;font-size:13px">
       </div>
       <div>
-        <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--adm-dim);display:block;margin-bottom:5px">Anomaly sensitivity</label>
+        <label for="limits-edit-sens" style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--adm-dim);display:block;margin-bottom:5px">Anomaly sensitivity</label>
         <select id="limits-edit-sens"
                 style="width:100%;background:var(--adm-input);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--adm-text);padding:9px 12px;font-size:13px">
           <option value="normal">normal</option>
@@ -3491,24 +3496,24 @@ async def fragment_admin_tools(request: Request, server_id: Optional[str] = Quer
     <form id="reg-form" style="max-width:600px">
       <div class="row">
         <div>
-          <label>Tool Name *</label>
-          <input type="text" name="name" required placeholder="my-tool">
+          <label for="reg-name">Tool Name *</label>
+          <input id="reg-name" type="text" name="name" required placeholder="my-tool">
         </div>
         <div>
-          <label>Version *</label>
-          <input type="text" name="version" required placeholder="1.0.0">
+          <label for="reg-version">Version *</label>
+          <input id="reg-version" type="text" name="version" required placeholder="1.0.0">
         </div>
       </div>
-      <label>Description</label>
-      <input type="text" name="description" placeholder="What does this tool do?">
+      <label for="reg-description">Description</label>
+      <input id="reg-description" type="text" name="description" placeholder="What does this tool do?">
       <div class="row" style="margin-top:0.5rem">
         <div>
-          <label>Upstream URL *</label>
-          <input type="url" name="upstream_url" required placeholder="https://tool.internal">
+          <label for="reg-upstream-url">Upstream URL *</label>
+          <input id="reg-upstream-url" type="url" name="upstream_url" required placeholder="https://tool.internal">
         </div>
         <div>
-          <label>Risk Level</label>
-          <select name="risk_level">
+          <label for="reg-risk-level">Risk Level</label>
+          <select id="reg-risk-level" name="risk_level">
             <option value="low">Low</option>
             <option value="medium">Medium</option>
             <option value="high">High</option>
@@ -3518,8 +3523,8 @@ async def fragment_admin_tools(request: Request, server_id: Optional[str] = Quer
       </div>
       <div class="row" style="margin-top:0.5rem">
         <div>
-          <label>Injection Mode</label>
-          <select name="injection_mode">
+          <label for="reg-injection-mode">Injection Mode</label>
+          <select id="reg-injection-mode" name="injection_mode">
             <option value="none">None</option>
             <option value="header">Header</option>
             <option value="user">User</option>
@@ -3529,8 +3534,8 @@ async def fragment_admin_tools(request: Request, server_id: Optional[str] = Quer
           </select>
         </div>
         <div>
-          <label>Tags (comma-separated)</label>
-          <input type="text" name="tags" placeholder="monitoring, dcim">
+          <label for="reg-tags">Tags (comma-separated)</label>
+          <input id="reg-tags" type="text" name="tags" placeholder="monitoring, dcim">
         </div>
       </div>
       <div style="margin-top:0.75rem">
@@ -3578,7 +3583,7 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
           onsubmit="event.preventDefault();htmx.ajax('GET',
             '/portal/fragments/admin/sbom?q='+encodeURIComponent(this.q.value),
             {{target:'#adm-content',swap:'innerHTML'}})">
-      <input name="q" type="text" placeholder="Search components (name or purl)…"
+      <input name="q" type="text" aria-label="Search components" placeholder="Search components (name or purl)…"
              value="{esc_py(q)}"
              style="flex:1;background:#13161d;border:1px solid #2a2d35;border-radius:7px;
                     padding:7px 11px;color:#cbd0d7;font-size:13px;font-family:var(--ff-sans)"/>
@@ -3978,18 +3983,18 @@ async def fragment_admin_credentials(request: Request):
           <details>
             <summary>Upload / rotate credential</summary>
             <div style="margin-top:0.5rem">
-              <label>Secret</label>
+              <label for="cred-{esc_py(tool_id)}">Secret</label>
               <input type="password" id="cred-{esc_py(tool_id)}" placeholder="Paste secret" autocomplete="new-password">
               <div class="row" style="margin-top:0.5rem">
                 <div>
-                  <label>Owner type</label>
+                  <label for="owner-{esc_py(tool_id)}">Owner type</label>
                   <select id="owner-{esc_py(tool_id)}">
                     <option value="service">service</option>
                     <option value="user">user</option>
                   </select>
                 </div>
                 <div>
-                  <label>Injection mode</label>
+                  <label for="mode-{esc_py(tool_id)}">Injection mode</label>
                   <select id="mode-{esc_py(tool_id)}">
                     <option value="none">none</option>
                     <option value="header">header</option>
@@ -4290,7 +4295,7 @@ async def fragment_admin_access(request: Request):
                 f'<span class="mode-chip" style="display:inline-flex;align-items:center;gap:4px">'
                 f'{esc_py(a["role"])}'
                 f'<button class="role-x-btn" data-client-id="{esc_py(pid)}" data-role="{esc_py(a["role"])}" '
-                f'title="Revoke {esc_py(a["role"])}" '
+                f'title="Revoke {esc_py(a["role"])}" aria-label="Revoke {esc_py(a["role"])} role from {esc_py(pid)}" '
                 f'style="background:none;border:none;color:inherit;cursor:pointer;padding:0;'
                 f'font-size:13px;line-height:1;opacity:0.7">&times;</button>{kc_note}</span>'
             )
@@ -4363,22 +4368,22 @@ async def fragment_admin_access(request: Request):
     </div>
     <form id="grant-create-form" style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.75rem">
       <div>
-        <label style="font-size:11px;color:var(--muted);display:block">client_id</label>
+        <label for="grant-create-client" style="font-size:11px;color:var(--muted);display:block">client_id</label>
         <input id="grant-create-client" type="text" placeholder="my-service-account" required
                style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px">
       </div>
       <div>
-        <label style="font-size:11px;color:var(--muted);display:block">Allowed tools (comma-separated, blank = none)</label>
+        <label for="grant-create-tools" style="font-size:11px;color:var(--muted);display:block">Allowed tools (comma-separated, blank = none)</label>
         <input id="grant-create-tools" type="text" placeholder="ping, echo_args"
                style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px;width:220px">
       </div>
       <div>
-        <label style="font-size:11px;color:var(--muted);display:block">Allowed tags (comma-separated)</label>
+        <label for="grant-create-tags" style="font-size:11px;color:var(--muted);display:block">Allowed tags (comma-separated)</label>
         <input id="grant-create-tags" type="text" placeholder="readonly"
                style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px;width:160px">
       </div>
       <div>
-        <label style="font-size:11px;color:var(--muted);display:block">Max risk</label>
+        <label for="grant-create-risk" style="font-size:11px;color:var(--muted);display:block">Max risk</label>
         <select id="grant-create-risk"
                 style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px">
           <option value="low">low</option><option value="medium">medium</option>
@@ -4428,19 +4433,19 @@ async def fragment_admin_access(request: Request):
     </div>
     <form id="apikey-create-form" style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.75rem">
       <div>
-        <label style="font-size:11px;color:var(--muted);display:block">client_id</label>
+        <label for="apikey-create-client" style="font-size:11px;color:var(--muted);display:block">client_id</label>
         <input id="apikey-create-client" type="text" placeholder="my-new-service" required
                style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px">
       </div>
       <div>
-        <label style="font-size:11px;color:var(--muted);display:block">Role</label>
+        <label for="apikey-create-role" style="font-size:11px;color:var(--muted);display:block">Role</label>
         <select id="apikey-create-role"
                 style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px">
           {valid_roles_options}
         </select>
       </div>
       <div>
-        <label style="font-size:11px;color:var(--muted);display:block">Rate limit (req/min)</label>
+        <label for="apikey-create-ratelimit" style="font-size:11px;color:var(--muted);display:block">Rate limit (req/min)</label>
         <input id="apikey-create-ratelimit" type="number" value="120" min="1"
                style="background:#0f172a;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;font-size:12px;width:80px">
       </div>
@@ -5120,6 +5125,7 @@ async def submit_wizard_page(request: Request):
   {_FAVICON_LINK}
   {_FONTS_LINK}
   {_HTMX_TAG}
+  <script src="/static/portal.js" defer></script>
   <style>
     {_CSS}
     .wiz-shell {{ max-width: 720px; margin: 0 auto; padding: 2rem 1.5rem; }}
@@ -5225,10 +5231,10 @@ function showStep1() {{
     <div class="wiz-card">
       <div style="font-size:17px;font-weight:700;margin-bottom:1.25rem">Tell us about your server</div>
 
-      <label class="wiz-label">Server name (slug, e.g. <code style="color:var(--cyan)">my-analytics</code>)</label>
+      <label class="wiz-label" for="s1-name">Server name (slug, e.g. <code style="color:var(--cyan)">my-analytics</code>)</label>
       <input id="s1-name" class="wiz-input" placeholder="my-mcp-server" value="${{_wiz.name}}">
 
-      <label class="wiz-label" style="margin-top:1rem">Short description <span style="color:#f87171">*</span></label>
+      <label class="wiz-label" for="s1-desc" style="margin-top:1rem">Short description <span style="color:#f87171">*</span></label>
       <input id="s1-desc" class="wiz-input" placeholder="What does this server do? (required — the reviewer approves based on this)" value="${{_wiz.description}}">
 
       <label class="wiz-label" style="margin-top:1.25rem">Where will this run?</label>
@@ -5243,7 +5249,7 @@ function showStep1() {{
         </div>
       </div>
 
-      <label class="wiz-label" style="margin-top:1.25rem">GitHub repository URL<span id="s1-repo-req" style="color:#f87171;display:${{_wiz.self_host ? 'none' : 'inline'}}"> *</span></label>
+      <label class="wiz-label" for="s1-repo" style="margin-top:1.25rem">GitHub repository URL<span id="s1-repo-req" style="color:#f87171;display:${{_wiz.self_host ? 'none' : 'inline'}}"> *</span></label>
       <input id="s1-repo" class="wiz-input" placeholder="https://github.com/your-org/your-repo"
              value="${{_wiz.github_repo_url || ''}}">
       <div class="helper-box" id="clone-helper" style="display:none">
@@ -5253,7 +5259,7 @@ function showStep1() {{
       </div>
 
       <div id="s1-backend-url-wrap" style="display:${{_wiz.self_host ? 'block' : 'none'}}">
-        <label class="wiz-label" style="margin-top:1rem">Backend URL (where does/will this run?) <span style="color:#f87171">*</span></label>
+        <label class="wiz-label" for="s1-backend-url" style="margin-top:1rem">Backend URL (where does/will this run?) <span style="color:#f87171">*</span></label>
         <input id="s1-backend-url" class="wiz-input" placeholder="https://your-server.example.com/mcp"
                value="${{_wiz.requested_upstream_url || ''}}">
         <div style="font-size:11px;color:var(--muted);margin-top:0.35rem">
@@ -5306,16 +5312,16 @@ function submitStep1() {{
   const selfHost = _wiz.self_host;
   const backendUrl = selfHost ? document.getElementById('s1-backend-url').value.trim() : '';
   const nocode = selfHost && document.getElementById('s1-nocode')?.checked;
-  if (!name) {{ alert('Server name is required'); return; }}
+  if (!name) {{ toast('Server name is required', 'error'); return; }}
   if (!/^[a-z0-9][a-z0-9\\-]{{1,62}}$/.test(name)) {{
-    alert('Name must be 2-63 chars, lowercase letters, numbers, and hyphens only'); return;
+    toast('Name must be 2-63 chars, lowercase letters, numbers, and hyphens only', 'error'); return;
   }}
-  if (!desc) {{ alert('Description is required — the reviewer approves your server based on this.'); return; }}
+  if (!desc) {{ toast('Description is required — the reviewer approves your server based on this.', 'error'); return; }}
   if (selfHost && !backendUrl) {{
-    alert('Backend URL is required — a reviewer cannot approve a server they can\\'t locate. No backend yet? Use "Get scaffold" from the self-service tools instead of this wizard.'); return;
+    toast('Backend URL is required — a reviewer cannot approve a server they can\\'t locate. No backend yet? Use "Get scaffold" from the self-service tools instead of this wizard.', 'error'); return;
   }}
   if (!selfHost && !repo) {{
-    alert('A GitHub repository URL is required for the platform to build and deploy your server.'); return;
+    toast('A GitHub repository URL is required for the platform to build and deploy your server.', 'error'); return;
   }}
   _wiz.name = name;
   _wiz.description = desc;
@@ -5399,7 +5405,7 @@ function renderModeConfig(mode) {{
 
   const extras = {{
     kc_token_exchange: `
-      <label class="wiz-label" style="margin-top:1rem">Target audience (service name)</label>
+      <label class="wiz-label" for="cfg-audience" style="margin-top:1rem">Target audience (service name)</label>
       <input class="wiz-input" id="cfg-audience" placeholder="lab-tickets"
              value="${{(_wiz.upstream_idp_config||{{}}).audience||''}}">
       ${{_snippet('What your server needs to implement',
@@ -5418,10 +5424,10 @@ async def get_caller(authorization: str):
       )}}`,
 
     entra_client_credentials: `
-      <label class="wiz-label" style="margin-top:1rem">Tenant ID</label>
+      <label class="wiz-label" for="cfg-tenant" style="margin-top:1rem">Tenant ID</label>
       <input class="wiz-input" id="cfg-tenant" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
              value="${{(_wiz.upstream_idp_config||{{}}).tenant_id||''}}">
-      <label class="wiz-label" style="margin-top:0.75rem">Client ID</label>
+      <label class="wiz-label" for="cfg-client" style="margin-top:0.75rem">Client ID</label>
       <input class="wiz-input" id="cfg-client" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
              value="${{(_wiz.upstream_idp_config||{{}}).client_id||''}}">
       <div class="helper-box" style="margin-top:0.5rem">
@@ -5445,9 +5451,9 @@ async def verify_token(authorization: str = Header()):
       )}}`,
 
     entra_user_token: `
-      <label class="wiz-label" style="margin-top:1rem">Tenant ID</label>
+      <label class="wiz-label" for="cfg-tenant" style="margin-top:1rem">Tenant ID</label>
       <input class="wiz-input" id="cfg-tenant" value="${{(_wiz.upstream_idp_config||{{}}).tenant_id||''}}">
-      <label class="wiz-label" style="margin-top:0.75rem">Required scopes (space-separated)</label>
+      <label class="wiz-label" for="cfg-scopes" style="margin-top:0.75rem">Required scopes (space-separated)</label>
       <input class="wiz-input" id="cfg-scopes" placeholder="User.Read Mail.Read"
              value="${{(_wiz.upstream_idp_config||{{}}).scopes||''}}">
       ${{_snippet('What your server needs to implement',
@@ -5466,10 +5472,10 @@ async def my_tool(authorization: str = Header()):
       )}}`,
 
     service: `
-      <label class="wiz-label" style="margin-top:1rem">Header your server reads</label>
+      <label class="wiz-label" for="cfg-header" style="margin-top:1rem">Header your server reads</label>
       <input class="wiz-input" id="cfg-header" placeholder="Authorization"
              value="${{(_wiz.upstream_idp_config||{{}}).inject_header||'Authorization'}}">
-      <label class="wiz-label" style="margin-top:0.75rem">Token prefix (e.g. Bearer, Token)</label>
+      <label class="wiz-label" for="cfg-prefix" style="margin-top:0.75rem">Token prefix (e.g. Bearer, Token)</label>
       <input class="wiz-input" id="cfg-prefix" placeholder="Bearer"
              value="${{(_wiz.upstream_idp_config||{{}}).inject_prefix||'Bearer'}}">
       ${{_snippet('What your server needs to implement',
@@ -5487,7 +5493,7 @@ async def my_tool(authorization: str = Header()):
       )}}`,
 
     user: `
-      <label class="wiz-label" style="margin-top:1rem">Header your server reads</label>
+      <label class="wiz-label" for="cfg-header" style="margin-top:1rem">Header your server reads</label>
       <input class="wiz-input" id="cfg-header" placeholder="Authorization"
              value="${{(_wiz.upstream_idp_config||{{}}).inject_header||'Authorization'}}">
       ${{_snippet('What your server needs to implement',
@@ -5504,10 +5510,10 @@ async def my_tool(authorization: str = Header()):
       )}}`,
 
     oauth_user_token: `
-      <label class="wiz-label" style="margin-top:1rem">External IdP issuer URL</label>
+      <label class="wiz-label" for="cfg-issuer" style="margin-top:1rem">External IdP issuer URL</label>
       <input class="wiz-input" id="cfg-issuer" placeholder="https://idp.example.com"
              value="${{(_wiz.upstream_idp_config||{{}}).issuer||''}}">
-      <label class="wiz-label" style="margin-top:0.75rem">Client ID</label>
+      <label class="wiz-label" for="cfg-client" style="margin-top:0.75rem">Client ID</label>
       <input class="wiz-input" id="cfg-client" value="${{(_wiz.upstream_idp_config||{{}}).client_id||''}}">
       ${{_snippet('What your server needs to implement',
 `# The gateway fetches and injects a per-user OAuth token
@@ -5539,7 +5545,7 @@ async def my_tool(authorization: str = Header()):
       )}}`,
 
     service_account: `
-      <label class="wiz-label" style="margin-top:1rem">OAuth token endpoint</label>
+      <label class="wiz-label" for="cfg-tokenurl" style="margin-top:1rem">OAuth token endpoint</label>
       <input class="wiz-input" id="cfg-tokenurl" value="${{(_wiz.upstream_idp_config||{{}}).token_url||''}}">`,
   }};
   document.getElementById('mode-config').innerHTML = extras[mode] || '';
@@ -5558,7 +5564,7 @@ function _collectModeConfig(mode) {{
 }}
 
 function submitStep2() {{
-  if (!_wiz.injection_mode) {{ alert('Please select an authentication mode'); return; }}
+  if (!_wiz.injection_mode) {{ toast('Please select an authentication mode', 'error'); return; }}
   _wiz.upstream_idp_config = _collectModeConfig(_wiz.injection_mode);
   showStep3();
 }}
