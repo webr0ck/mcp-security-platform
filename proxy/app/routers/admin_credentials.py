@@ -104,8 +104,12 @@ async def list_tools_with_credential_status(request: Request):
             )
             rows = result.fetchall()
     except Exception as exc:
-        logger.error("DB error in admin/credentials/api: %s", exc)
-        raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(exc)})
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.exception("DB error in admin/credentials/api (request_id=%s)", request_id)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": "Failed to load credential status.", "request_id": request_id},
+        ) from exc
 
     tools = []
     for row in rows:
@@ -151,7 +155,12 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
             )
             tool = result.fetchone()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(exc)})
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.exception("DB error looking up tool %s (request_id=%s)", tool_id, request_id)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": "Failed to look up tool.", "request_id": request_id},
+        ) from exc
 
     if tool is None:
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": f"Tool '{tool_id}' not found."})
@@ -211,8 +220,12 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
             owner_type=owner_type,
         )
     except Exception as exc:
-        logger.error("Credential encryption failed: %s", exc)
-        raise HTTPException(status_code=500, detail={"code": "ENCRYPTION_ERROR", "message": "Failed to encrypt credential."})
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.exception("Credential encryption failed (request_id=%s)", request_id)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "ENCRYPTION_ERROR", "message": "Failed to encrypt credential.", "request_id": request_id},
+        ) from exc
 
     # Upsert into credential_store
     try:
@@ -255,8 +268,12 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
                 )
             await session.commit()
     except Exception as exc:
-        logger.error("DB error storing credential: %s", exc)
-        raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(exc)})
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.exception("DB error storing credential (request_id=%s)", request_id)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": "Failed to store credential.", "request_id": request_id},
+        ) from exc
 
     admin_id = getattr(request.state, "client_id", "unknown")
     logger.info(
@@ -311,7 +328,12 @@ async def revoke_credential(
             deleted = result.rowcount
             await session.commit()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(exc)})
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.exception("DB error revoking credential for tool %s (request_id=%s)", tool_id, request_id)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": "Failed to revoke credential.", "request_id": request_id},
+        ) from exc
 
     admin_id = getattr(request.state, "client_id", "unknown")
     logger.info("Credential revoked", extra={"tool_id": tool_id, "owner_type": owner_type, "admin": admin_id, "count": deleted})
@@ -380,7 +402,12 @@ async def update_injection_mode(
             )
             await session.commit()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(exc)})
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.exception("DB error updating injection mode for tool %s (request_id=%s)", tool_id, request_id)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": "Failed to update injection mode.", "request_id": request_id},
+        ) from exc
 
     admin_id = getattr(request.state, "client_id", "unknown")
     logger.info("Injection mode updated", extra={"tool_id": tool_id, "mode": mode, "admin": admin_id})
