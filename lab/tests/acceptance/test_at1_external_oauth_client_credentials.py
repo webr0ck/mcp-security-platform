@@ -64,13 +64,23 @@ def _encrypt_credential(plaintext: str, user_sub: str, master_bytes: bytes, *,
 
 @pytest.fixture(scope="module", autouse=True)
 def _seed_external_oauth_client_credentials_fixture():
-    """Idempotent: registers lab-echo-external-cc (reuses lab-mcp-echo as the
-    upstream, exactly like echo-dex-external does for external_oauth_user_token)
-    with injection_mode=external_oauth_client_credentials and a real
-    token_endpoint, if not already present from a prior run."""
-    existing = db_query(f"SELECT server_id::text FROM server_registry WHERE name='{SERVER_NAME}'")
-    if existing:
-        return
+    """Idempotent per-row (NOT just per-fixture): checks/inserts server_registry,
+    tool_registry, credential_store, and entitlement independently, reusing
+    whatever already exists from a prior run.
+
+    Why per-row and not a single "does server_registry have this name"
+    existence check (the original approach): the four inserts are not
+    transactional, and db_query() is a fire-and-forget subprocess call with
+    no rollback on a later statement's failure. On a fresh-boot lab this was
+    observed to leave server_registry seeded but tool_registry/
+    credential_store/entitlement all empty (the process presumably died or a
+    later statement errored between inserts) -- and because the guard only
+    checked server_registry, every subsequent run silently skipped reseeding
+    the missing rows forever, so the test failed at invoke time with "Tool
+    'echo-external-cc' not found in registry" instead of at setup. Checking
+    each table independently makes the fixture self-healing: it backfills
+    whatever is missing instead of assuming all-or-nothing."""
+    server_id = db_query(f"SELECT server_id::text FROM server_registry WHERE name='{SERVER_NAME}'")
 
     vault_token = None
     env_lab = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env.lab")
@@ -79,47 +89,64 @@ def _seed_external_oauth_client_credentials_fixture():
             vault_token = line.strip().split("=", 1)[1]
         if line.startswith("DB_PASSWORD="):
             db_password = line.strip().split("=", 1)[1]
-    master_hex = httpx.get(f"{VAULT_ADDR}/v1/secret/data/mcp/broker-master",
-                           headers={"X-Vault-Token": vault_token}, timeout=10
-                           ).json()["data"]["data"]["value"]
-    master_bytes = bytes.fromhex(master_hex)
 
-    approved_config = json.dumps({
-        "token_endpoint": TOKEN_ENDPOINT,
-        "scopes": ["https://graph.microsoft.com/.default"],
-        "client_auth_method": "client_secret_post",
-    })
-    server_id = db_query(
-        "INSERT INTO server_registry (name, service_name, upstream_url, status, trust_tier, "
-        "injection_mode, approved_upstream_idp_config, owner_sub, submission_status, "
-        "approved_at, approved_by, upstream_allowlist_entry, last_rescanned_at) "
-        f"VALUES ('{SERVER_NAME}', '{SERVICE_NAME}', 'http://lab-mcp-echo:8000/mcp', 'approved', 2, "
-        f"'external_oauth_client_credentials', '{approved_config}'::jsonb, 'seeder', 'active', "
-        "now(), 'seeder', '10.89.0.0/16', now()) RETURNING server_id::text"
-    )
-    tool_id = db_query(
-        f"INSERT INTO tool_registry (name, version, description, schema, upstream_url, status, "
-        f"risk_level, registered_by, service_name, injection_mode, server_id) "
-        f"VALUES ('{TOOL_NAME}', '1.0.0', "
-        f"'AT1/T3 external_oauth_client_credentials live fixture -- proxies lab-mcp-echo whoami', "
-        f"'{{}}'::jsonb, 'http://lab-mcp-echo:8000/mcp', 'active', 'low', 'seeder', "
-        f"'{SERVICE_NAME}', 'external_oauth_client_credentials', '{server_id}') RETURNING tool_id::text"
-    )
+    if not server_id:
+        approved_config = json.dumps({
+            "token_endpoint": TOKEN_ENDPOINT,
+            "scopes": ["https://graph.microsoft.com/.default"],
+            "client_auth_method": "client_secret_post",
+        })
+        server_id = db_query(
+            "INSERT INTO server_registry (name, service_name, upstream_url, status, trust_tier, "
+            "injection_mode, approved_upstream_idp_config, owner_sub, submission_status, "
+            "approved_at, approved_by, upstream_allowlist_entry, last_rescanned_at) "
+            f"VALUES ('{SERVER_NAME}', '{SERVICE_NAME}', 'http://lab-mcp-echo:8000/mcp', 'approved', 2, "
+            f"'external_oauth_client_credentials', '{approved_config}'::jsonb, 'seeder', 'active', "
+            "now(), 'seeder', '10.89.0.0/16', now()) RETURNING server_id::text"
+        )
 
-    secret = json.dumps({"client_id": "echo-external-cc-lab-app", "client_secret": "echo-external-cc-lab-secret"})
-    blob = _encrypt_credential(secret, "__service__", master_bytes,
-                               service=SERVICE_NAME, tool_id=tool_id, owner_type="service")
-    blob_hex = blob.hex()
+    tool_id = db_query(f"SELECT tool_id::text FROM tool_registry WHERE name='{TOOL_NAME}' AND deleted_at IS NULL")
+    if not tool_id:
+        tool_id = db_query(
+            f"INSERT INTO tool_registry (name, version, description, schema, upstream_url, status, "
+            f"risk_level, registered_by, service_name, injection_mode, server_id) "
+            f"VALUES ('{TOOL_NAME}', '1.0.0', "
+            f"'AT1/T3 external_oauth_client_credentials live fixture -- proxies lab-mcp-echo whoami', "
+            f"'{{}}'::jsonb, 'http://lab-mcp-echo:8000/mcp', 'active', 'low', 'seeder', "
+            f"'{SERVICE_NAME}', 'external_oauth_client_credentials', '{server_id}') RETURNING tool_id::text"
+        )
+
     cred_id = db_query(
-        "INSERT INTO credential_store (user_sub, service, tool_id, owner_type, credential_type, encrypted_blob) "
-        f"VALUES ('__service__', '{SERVICE_NAME}', '{tool_id}', 'service', "
-        f"'external_oauth_client_secret', decode('{blob_hex}', 'hex')) RETURNING id::text"
+        f"SELECT id::text FROM credential_store WHERE service='{SERVICE_NAME}' AND tool_id='{tool_id}'"
     )
-    db_query(f"UPDATE tool_registry SET credential_id='{cred_id}' WHERE tool_id='{tool_id}'")
-    db_query(
-        f"INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by) "
-        f"VALUES ('{server_id}', 'human:keycloak:alice@corp', 'human', 'seeder')"
+    if not cred_id:
+        master_hex = httpx.get(f"{VAULT_ADDR}/v1/secret/data/mcp/broker-master",
+                               headers={"X-Vault-Token": vault_token}, timeout=10
+                               ).json()["data"]["data"]["value"]
+        master_bytes = bytes.fromhex(master_hex)
+        secret = json.dumps({"client_id": "echo-external-cc-lab-app", "client_secret": "echo-external-cc-lab-secret"})
+        blob = _encrypt_credential(secret, "__service__", master_bytes,
+                                   service=SERVICE_NAME, tool_id=tool_id, owner_type="service")
+        blob_hex = blob.hex()
+        cred_id = db_query(
+            "INSERT INTO credential_store (user_sub, service, tool_id, owner_type, credential_type, encrypted_blob) "
+            f"VALUES ('__service__', '{SERVICE_NAME}', '{tool_id}', 'service', "
+            f"'external_oauth_client_secret', decode('{blob_hex}', 'hex')) RETURNING id::text"
+        )
+        db_query(f"UPDATE tool_registry SET credential_id='{cred_id}' WHERE tool_id='{tool_id}'")
+    else:
+        # credential_id column may still be unset even if the credential_store
+        # row exists (e.g. a partial run died between the two statements).
+        db_query(f"UPDATE tool_registry SET credential_id='{cred_id}' WHERE tool_id='{tool_id}' AND credential_id IS NULL")
+
+    existing_ent = db_query(
+        f"SELECT 1 FROM entitlement WHERE server_id='{server_id}' AND principal_id='human:keycloak:alice@corp'"
     )
+    if not existing_ent:
+        db_query(
+            f"INSERT INTO entitlement (server_id, principal_id, principal_type, granted_by) "
+            f"VALUES ('{server_id}', 'human:keycloak:alice@corp', 'human', 'seeder')"
+        )
 
 
 def test_external_oauth_client_credentials_live_injection(alice_token):

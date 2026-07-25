@@ -111,14 +111,35 @@ for _ in $(seq 1 15); do
 done
 sleep 3
 
+# R2 (2026-07-25): "container running" is NOT "app ready" -- recreating the
+# proxy container above (up -d --no-deps proxy) restarts uvicorn, and its
+# FastAPI app startup (DB pool init, credential broker wiring, etc.) can take
+# a few more seconds than the container itself needs to report "running".
+# Observed live: test_at0_preflight.py::test_proxy_health_all_ok, run
+# immediately after this script inside run_full_acceptance.sh, got HTTP 0
+# (curl couldn't connect yet) even though `podman ps` already showed
+# mcp-proxy as running. Poll /health directly instead of trusting a fixed
+# sleep.
+for _ in $(seq 1 20); do
+  podman exec mcp-proxy curl -s -o /dev/null -w '' http://localhost:8000/health --max-time 5 && break
+  sleep 2
+done
+
 # 4. Confirm the proxy can actually reach + trust lab-gitea-tls before going further.
 podman exec mcp-proxy curl -sk -o /dev/null -w 'lab-gitea-tls reachable: HTTP %{http_code}\n' https://lab-gitea-tls/ --max-time 10
 podman exec mcp-scanner-worker sh -c "curl -sk -o /dev/null -w 'lab-gitea-tls reachable from scanner-worker: HTTP %{http_code}\n' https://lab-gitea-tls/ --max-time 10" \
   || echo "  WARNING: scanner-worker curl check failed (curl may not be installed there; git clone check below is authoritative)"
 
-# 5. Create the two fixture repos under the Gitea admin user (idempotent —
-#    409 on rerun is fine, ignored).
-for repo in malicious-mcp clean-mcp; do
+# 5. Create the fixture repos under the Gitea admin user (idempotent —
+#    409 on rerun is fine, ignored). entra-directory-mcp backs
+#    test_at3_entra_directory_onboarding.py, which references
+#    https://lab-gitea-tls/gitadmin/entra-directory-mcp.git but — until this
+#    fix — nothing ever created or pushed that repo, so the scanner's clone
+#    step failed with "Could not read Username for 'https://lab-gitea-tls'"
+#    (git's own error for "repo not found, treated it as needing auth") and
+#    the test failed at _poll_scan with scan_status=blocked instead of ever
+#    reaching the assertions it's actually testing.
+for repo in malicious-mcp clean-mcp entra-directory-mcp; do
   code=$(curl -s -o /dev/null -w '%{http_code}' -u "${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}" \
     -X POST "http://localhost:3002/api/v1/user/repos" \
     -H 'Content-Type: application/json' \
@@ -130,7 +151,7 @@ done
 #    published HTTP port, untouched by any of the above).
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for repo in malicious-mcp clean-mcp; do
+for repo in malicious-mcp clean-mcp entra-directory-mcp; do
   rm -rf "$WORK/$repo"
   git clone -q "http://${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}@localhost:3002/${GITEA_ADMIN_USER}/${repo}.git" "$WORK/$repo"
   # Glob each extension separately (nullglob) so an optional file that

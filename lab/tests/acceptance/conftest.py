@@ -128,9 +128,19 @@ def proxy_exec_json(path: str, token: str | None = None, timeout: int = 20) -> t
 
 
 def db_query(sql: str, timeout: int = 20) -> str:
-    """Run a SQL statement against the lab DB and return raw stdout (-tAc)."""
+    """Run a SQL statement against the lab DB and return raw stdout (-tAc).
+
+    -q (quiet) is required, not cosmetic: for INSERT/UPDATE/DELETE ... RETURNING
+    statements, -t ("tuples only") suppresses column headers but NOT the
+    command completion tag ("INSERT 0 1" / "DELETE 1") -- that tag is only
+    dropped in quiet mode. Without -q, callers that chain
+    `x = db_query("INSERT ... RETURNING id"); db_query(f"... WHERE id='{x}'")`
+    get a UUID with a literal "\nINSERT 0 1" appended, which fails at the next
+    query with "invalid input syntax for type uuid" -- silently, since the
+    first call's return value looked plausible. Discovered via
+    test_at1_external_oauth_client_credentials.py's fixture."""
     r = subprocess.run(
-        ["podman", "exec", "-i", DB_CONTAINER, "psql", "-U", "mcp_app", "-d", "mcp_security", "-tAc", sql],
+        ["podman", "exec", "-i", DB_CONTAINER, "psql", "-q", "-U", "mcp_app", "-d", "mcp_security", "-tAc", sql],
         capture_output=True, text=True, timeout=timeout,
     )
     if r.returncode != 0:

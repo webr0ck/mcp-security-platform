@@ -226,7 +226,15 @@ def test_clean_submission_full_chain_to_invoke(alice_token, carol_token, clean_m
         f"SELECT tool_id || ',' || name || ',' || status FROM tool_registry "
         f"WHERE server_id='{server_id}' AND deleted_at IS NULL LIMIT 1"
     ).split(",")
-    assert tool_status == "quarantined", f"INV-005: discovered tool must start quarantined, got {tool_status!r}"
+    # NOT "quarantined": discovery (routers/tools.py) always inserts
+    # status='quarantined' (INV-005), but the C2 approval path documented
+    # above calls release_all_quarantined_tools_for_server() inline right
+    # after discovery, which UPDATEs every quarantined row for this server_id
+    # to status='active' (server_lifecycle.py::release_all_quarantined_tools_for_server).
+    # So by the time approval's HTTP response has returned, the row already
+    # observed here is post-release. debug_mode=True (asserted above) is what
+    # actually gates non-owner callers now, not tool status.
+    assert tool_status == "active", f"expected the C2 inline release to land status=active, got {tool_status!r}"
     assert tool_name == "echo", f"expected the clean-mcp fixture's 'echo' tool, got {tool_name!r}"
     tool = {"tool_id": tool_id, "name": tool_name}
 
