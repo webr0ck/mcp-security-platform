@@ -14,7 +14,7 @@
 | 3 | F8 — audit all discovery surfaces (fan-out) | ✅ **done** | 2 no-change verdicts, 3 real fixes; 39/39 acceptance |
 | 4 | F5 — test state hygiene (F3 folded into Stage 2) | ✅ **done** | acceptance 36/0/0 twice; functional 46/1 twice |
 | 5a | A7 — health reports degraded startup subsystems | ✅ **done** | 8 subsystems visible; 9 tests |
-| 5b | A5 — unify the 3 deny-mapping sites | ⏳ pending | unit + functional |
+| 5b | A5 — unify the 3 deny-mapping sites | ✅ **done** | 28 tests; exception-text leak closed |
 | 6a | A1/A3 — delete dead React SPA + design.html | ✅ **done** | acceptance 39/39 after deletion |
 | 6b | A2 — extract portal inline CSS/JS to static/ | ⏳ pending | portal acceptance green |
 | 7 | B1/B2 — toast/confirm, accessibility | ⏳ pending | portal acceptance + a11y pass |
@@ -568,3 +568,34 @@ restart-loop a proxy that is still serving and denying correctly. Pinned by
 
 Verified live: all 8 subsystems reported. functional 46/1 · smoke 4/4 · unit 1627 passed / 42
 failed == HEAD baseline (+9).
+
+---
+
+## Stage 5b — CLOSED 2026-07-25: one deny table, three renderers
+
+`services/deny_map.py::classify_deny(exc) -> DenyInfo | None` now owns the decision (which
+reason, which status, what the caller is told). The three renderers own only the envelope.
+
+**The drift it closes:** `ToolDisabledError` / `ToolQuarantinedError` / `ToolDeprecatedError`
+were mapped ONLY in `tools.py`. Both `/mcp` paths fell through to
+`_err(-32603, f"Tool invocation failed: {exc}")` — losing the deny semantics **and**
+interpolating the exception string into a client-facing message, three branches below a
+comment promising no internals are leaked. Latent only because those statuses are pre-filtered
+at lookup, which is precisely the accident that stops holding after an unrelated refactor.
+
+Both generic fallbacks (and the retry fallback) now return
+`"Tool invocation failed (internal error)."` plus `request_id`. The exception text is in the
+logs, keyed by that id — which is what the caller is given to quote.
+
+`OPAUnavailableError` maps to **503**, not 403: a decision and an outage are different things
+(403 says "no", 503 says "ask again"). Both still deny, per INV-004. `ToolDeprecatedError`
+maps to 410.
+
+28 tests, including a parameterised leakage check asserting no message contains the exception
+text, the tool_id, or the server_id. The first version of that test used a
+guess-the-signature helper that fell through `TypeError`s — it built the wrong objects and made
+the assertions vacuous; exceptions are now constructed explicitly.
+
+### Verification
+functional 46/1 · acceptance 39/39 · unit 1655 passed / 42 failed == HEAD baseline (zero
+regressions, +28) · `make security-check` ALL CHECKS PASSED.

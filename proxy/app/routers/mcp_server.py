@@ -787,8 +787,24 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                     **({"remediation": _help} if _help else {}),
                 },
             )
+        # Shared deny table (services/deny_map.py) — covers tool_disabled /
+        # tool_quarantined / tool_deprecated, which were mapped ONLY in the REST
+        # renderer and fell through here to a generic error carrying the exception
+        # text. Latent (statuses are pre-filtered at lookup) but a drift waiting to
+        # land: a new deny reason added to one renderer silently missed the others.
+        from app.services.deny_map import classify_deny as _classify
+        _deny = _classify(exc)
+        if _deny is not None:
+            logger.info("MCP invoke denied (%s) tool=%s client=%s",
+                        _deny.reason, name, client_id)
+            return _err(req_id, _deny.jsonrpc_code, _deny.message,
+                        data={**_deny.data, "reason": _deny.reason, "request_id": request_id})
         logger.exception("Registry tool invocation error for %s", name)
-        return _err(req_id, -32603, f"Tool invocation failed: {exc}")
+        # No f"{exc}" — the exception text is internals. It is in the logs, keyed by
+        # request_id, which is what the caller is given to quote.
+        return _err(req_id, -32603,
+                    "Tool invocation failed (internal error).",
+                    data={"request_id": request_id})
 
     if "error" in upstream:
         err = upstream["error"]
@@ -814,7 +830,8 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                     )
                 except Exception as retry_exc:
                     logger.exception("Registry tool retry invocation error for %s -> %s", name, resolved_name)
-                    return _err(req_id, -32603, f"Tool invocation failed: {retry_exc}")
+                    return _err(req_id, -32603, "Tool invocation failed (internal error).",
+                                    data={"request_id": request_id})
                 if "error" in upstream:
                     err = upstream["error"]
                     return _err(req_id, err.get("code", -32603), err.get("message", "Upstream error"),
@@ -1227,8 +1244,18 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
                 _text += f"\n\n{_help}"
             _text += f"\n\n(request_id: {request_id})"
             return {"type": "text", "text": _text}
+        from app.services.deny_map import classify_deny as _classify2
+        _deny2 = _classify2(exc)
+        if _deny2 is not None:
+            logger.info("invoke_tool denied (%s) tool=%s client=%s",
+                        _deny2.reason, tool_name, client_id)
+            _txt = _deny2.message
+            if _deny2.data.get("reasons"):
+                _txt += f"\n\nreasons: {', '.join(_deny2.data['reasons'])}"
+            return {"type": "text", "text": f"{_txt}\n\n(request_id: {request_id})"}
         logger.exception("invoke_tool pipeline error for %s", tool_name)
-        return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}
+        return {"type": "text",
+                "text": f"Tool invocation failed (internal error).\n\n(request_id: {request_id})"}
 
 
 async def _handle_list_available_mcps(args: dict, request: Request) -> dict:
