@@ -188,3 +188,69 @@ test_registry_tool_named_like_meta_risk_gate_applies if {
 		}
 	}
 }
+
+# ---------------------------------------------------------------------------
+# 2026-07-25 — self-service meta-tools were MISSING from platform_meta_tool_roles.
+#
+# is_platform_meta_tool requires the name to be IN that map. For these four it was
+# false, so they fell through to the generic allow, whose client_has_invoke_permission
+# recognises agent/user/admin/platform_admin/analyst/platform_internal/server_owner/
+# manager — never viewer or editor. _TOOLS grants exactly those roles, so a viewer or
+# editor SAW them in tools/list and was denied on tools/call.
+#
+# Worst for get_my_profile + enable_mcp_server: they are the recovery path out of a
+# profile lockout. Recovery that works for only some roles is not recovery.
+# ---------------------------------------------------------------------------
+
+_meta_input(name, roles) := {
+	"client_id": "u1",
+	"client_roles": roles,
+	"tool_id": "",
+	"tool_name": name,
+	"tool_status": "active",
+	"tool_risk_level": "low",
+	"params": {},
+	"anomaly_score": 0.0,
+	"is_testing": false,
+	"is_platform_meta": true,
+}
+
+# --- recovery path reachable by the roles that can SEE it -------------------
+test_viewer_can_get_my_profile if {
+	allow with input as _meta_input("get_my_profile", ["viewer"])
+}
+
+test_editor_can_get_my_profile if {
+	allow with input as _meta_input("get_my_profile", ["editor"])
+}
+
+test_editor_can_enable_mcp_server if {
+	allow with input as _meta_input("enable_mcp_server", ["editor"])
+}
+
+test_viewer_can_list_available_mcps if {
+	allow with input as _meta_input("list_available_mcps", ["viewer"])
+}
+
+# --- still denied where _TOOLS does not grant it ---------------------------
+# viewer is absent from enable_mcp_server/_roles, so it must stay denied — the fix
+# must not blanket-allow every meta-tool to every role.
+test_viewer_cannot_enable_mcp_server if {
+	not allow with input as _meta_input("enable_mcp_server", ["viewer"])
+}
+
+test_viewer_cannot_disable_mcp_server if {
+	not allow with input as _meta_input("disable_mcp_server", ["viewer"])
+}
+
+test_agent_cannot_get_my_profile if {
+	not allow with input as _meta_input("get_my_profile", ["agent"])
+}
+
+# --- the marker is still required: no is_platform_meta => no meta-tool path --
+test_get_my_profile_without_meta_marker_is_not_meta_path if {
+	not allow with input as object.union(
+		_meta_input("get_my_profile", ["viewer"]),
+		{"is_platform_meta": false},
+	)
+}

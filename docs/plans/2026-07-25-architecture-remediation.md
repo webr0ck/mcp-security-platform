@@ -11,7 +11,7 @@
 | 0 | Architect decision on the profile fork | ✅ done | 3-critic REJECTED the original diagnosis — verdict below |
 | 1 | **F6/F7/F1 — fail-open, escalation, key mismatch** | ✅ **done** | live repro flips to denied; 46/1/0; 3 mutations caught |
 | 2 | F2/F3/F4 — self-lockout guard, deny-message remediation | ✅ **done** | 400 on self-lockout; remediation live; 3 mutations caught |
-| 3 | F8 — single `list_authorized_tools` across all 4 discovery surfaces | ⏳ pending | cross-surface contract tests |
+| 3 | F8 — audit all discovery surfaces (fan-out) | ✅ **done** | 2 no-change verdicts, 3 real fixes; 39/39 acceptance |
 | 4 | F5 — test state hygiene (F3 folded into Stage 2) | ✅ **done** | acceptance 36/0/0 twice; functional 46/1 twice |
 | 5 | A5/A7 — unify deny mapping, health honesty | ⏳ pending | unit + functional |
 | 6 | A1/A3/A2 — delete dead UI, extract portal assets | ⏳ pending | portal acceptance green |
@@ -383,3 +383,70 @@ with no server response — which is why this sat unexplained. It now prints sta
 |---|---|---|
 | portal acceptance | 34 passed, 1 flaky, 1 skipped | **36 passed, 0 flaky, 0 skipped** — twice back to back |
 | functional | 46 passed, 1 skipped | **46 passed, 1 skipped** — twice back to back |
+
+---
+
+## Stage 3 — CLOSED 2026-07-25 (discovery surfaces, fan-out)
+
+Three agents analysed one surface each in parallel and proposed rather than edited, because the
+surfaces have **different audiences** and a blanket filter would have created new bugs. Two returned
+**no-change** verdicts, which were the right answers. Every claim was re-verified before acting.
+
+### NO CHANGE — `catalog.py`
+Lists **servers**, not tools (`list_entitled_servers`, entitlement-gated). A per-tool profile gate is
+not meaningful at server granularity: a user with 5 of 10 tools disabled should still see the server.
+No live consumer outside unit tests. Adding a join here would buy nothing and invent a
+hide-if-all-disabled policy decision nobody asked for.
+
+### NO CHANGE (profile gate) — platform meta-tools
+**Verified:** the inline meta-tool `opa_input` (`mcp_server.py:1533-1543`) never sets a `profile` key,
+so `mcp_disabled_for_profile` structurally cannot fire for them. Applying a profile filter would break
+the recovery path — `get_my_profile` / `enable_mcp_server` are how a user escapes a lockout, and Stage 2
+made that guarantee load-bearing. Filtering them would have made the self-lockout guard moot.
+
+### FIXED — meta-tool role map had drifted (found by the fan-out, not in the original plan)
+`platform_meta_tool_roles` in `authz.rego` listed only 4 of 9 meta-tools. `is_platform_meta_tool`
+requires membership, so the other five fell through to the generic `allow`, whose
+`client_has_invoke_permission` recognises agent/user/admin/platform_admin/analyst/platform_internal/
+server_owner/manager — **never `viewer` or `editor`**, which `_TOOLS` explicitly grants. A viewer or
+editor SAW `get_my_profile` / `enable_mcp_server` in `tools/list` and was denied on `tools/call`:
+listed-but-denied again, on the recovery path.
+
+Fixed by mirroring `_TOOLS` exactly (`invoke_tool` stays intentionally absent — it runs the full OPA
+pipeline against its *target*). Role sets were read from source, not inferred: a first pass at this
+had `viewer` on `enable_mcp_server` (over-grant) and a too-narrow `list_available_mcps`.
+
+Guarded by `test_meta_tool_role_map_parity.py` — the rego comment has always said this map "MUST
+mirror `_roles`", and a comment is not an enforcement mechanism. Plus 8 policy tests asserting the
+decisions themselves. Bundle re-signed (`make sign-policy-bundle`) — editing `authz.rego` is a no-op
+otherwise. `opa test`: 59/59.
+
+### FIXED — deleted `GET /portal/fragments/catalog`
+Orphaned route that dumped every non-deleted `tool_registry` row with no entitlement, grant or profile
+filtering, gated only by `_require_portal_access` (agent/auditor/admin). Any authenticated portal user
+could enumerate the full tool inventory. Already dead — the Catalog tab renders inline from
+`_build_portal_access`, and `ssShowTab('catalog')` is a client-side toggle, not an `hx-get`. Deleted
+rather than filtered: a second independently-filtered listing surface is what caused the drift.
+
+### FIXED — portal access pill was decorative
+`_build_portal_access` read `mcp_profiles` directly (a fourth un-synced implementation) and, worse,
+keyed the lookup on the **server** name while the table is **tool**-keyed — the key invoke uses. It
+matched nothing, fell back to the `True` default, and rendered "Access enabled" **regardless of actual
+profile state**. Found only because the new e2e test would not go red.
+
+Now resolves per tool through the shared resolver with `profile_uuid` threaded, folded up per card
+(any tool callable = card enabled). The read was also inside a broad `except Exception`, so a DB error
+silently produced "everything enabled" — a fail-open in the UI. It now sits outside that catch and
+`ProfileLookupError` surfaces as a 503.
+
+### New coverage (there was none — this is why the drift survived)
+`AC-09` asserts the pill tracks the profile decision (one tool disabled must NOT flip the card; all
+disabled must), that the self-lockout guard returns 400, and that the deleted fragment 404s.
+
+### Verification
+acceptance **39 passed, 0 flaky, 0 skipped — twice** (was 34/1 flaky/1 skipped at session start) ·
+functional 46/1 · unit 1618 passed / 42 failed == HEAD baseline · `opa test` 59/59 · smoke 4/4.
+
+### Still open
+`GET /api/v1/tools` — the third agent never delivered. Unaudited; likely an admin inventory (in which
+case no change), but unverified, so it stays open rather than being assumed.

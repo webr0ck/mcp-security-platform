@@ -8,7 +8,7 @@ Provides a unified portal UI for all platform roles:
 
 Routes:
   GET /portal                              — full page shell
-  GET /portal/fragments/catalog            — catalog tab fragment
+  (removed 2026-07-25: GET /portal/fragments/catalog — unfiltered inventory dump)
   GET /portal/fragments/my-access          — my-access tab fragment
   GET /portal/fragments/admin              — admin tab fragment (admin only)
   GET /portal/fragments/admin/tools        — admin > tools sub-tab
@@ -1555,145 +1555,23 @@ async def fragment_attention(request: Request):
     return HTMLResponse(html)
 
 
-@router.get("/fragments/catalog", response_class=HTMLResponse)
-async def fragment_catalog(request: Request):
-    """Catalog tab: grid of active tool cards."""
-    _require_portal_access(request)
-    roles = _roles(request)
-    is_auditor = _is_auditor_only(request)
-
-    try:
-        from sqlalchemy import text
-        from app.core.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(text("""
-                SELECT tool_id, name, version, description, status, risk_level, risk_score,
-                       upstream_url, tags, injection_mode, service_name
-                FROM tool_registry
-                WHERE deleted_at IS NULL
-                ORDER BY name
-            """))
-            tools = result.fetchall()
-    except Exception as exc:
-        logger.error("portal catalog DB error: %s", exc)
-        return HTMLResponse(_error_fragment("Failed to load catalog. Database error."))
-
-    if not tools:
-        return HTMLResponse('<div class="empty-state">No tools registered yet.</div>')
-
-    cards = []
-    for t in tools:
-        tool_id = str(t.tool_id)
-        name = t.name or ""
-        version = t.version or ""
-        desc = t.description or "No description provided."
-        status = t.status or "unknown"
-        risk = (t.risk_level or "low").lower()
-        risk_score = t.risk_score
-        mode = (t.injection_mode or "none").lower()
-        tags = t.tags or []
-        tag_str = " ".join(tags)
-
-        status_badge = _badge(status, f"badge-{status}")
-        risk_badge = _badge(risk.upper(), f"badge-risk-{risk}")
-        mode_badge = _badge(mode, f"badge-mode-{mode.replace(' ', '_')}")
-
-        tags_html = "".join(f'<span class="tag">{esc_py(tg)}</span>' for tg in tags)
-
-        # Credential upload form for user-mode tools (auditor is read-only — no upload)
-        if mode in ("user", "oauth_user_token") and not is_auditor:
-            cred_section = f"""
-            <details class="cred-form">
-              <summary>Upload my credential</summary>
-              <div>
-                <label>Secret / Token</label>
-                <div class="row" style="gap:0.5rem;margin-top:0.25rem">
-                  <input type="password" id="cred-{esc_py(tool_id)}" placeholder="Paste secret here" autocomplete="new-password">
-                  <button class="btn-primary btn-sm"
-                    onclick="submitCred('{esc_py(tool_id)}')">Upload</button>
-                </div>
-                <div id="cred-msg-{esc_py(tool_id)}"></div>
-              </div>
-            </details>"""
-        else:
-            cred_section = f'<div style="margin-top:0.5rem;font-size:0.78rem;color:var(--muted)">Injection: {mode_badge}</div>'
-
-        score_html = f'<span style="font-size:0.72rem;color:var(--muted)">&nbsp;score {risk_score}</span>' if risk_score is not None else ""
-
-        cards.append(f"""
-        <div class="tool-card"
-             data-tool-id="{esc_py(tool_id)}"
-             data-name="{esc_py(name)}"
-             data-desc="{esc_py(desc)}"
-             data-tags="{esc_py(tag_str)}"
-             data-risk="{esc_py(risk)}"
-             data-mode="{esc_py(mode)}">
-          <div class="tool-card-header">
-            <div>
-              <div class="tool-name">{esc_py(name)}</div>
-              <div class="tool-version">v{esc_py(version)}</div>
-            </div>
-            <div style="display:flex;gap:0.3rem;flex-wrap:wrap;justify-content:flex-end">
-              {status_badge}
-              {risk_badge}{score_html}
-            </div>
-          </div>
-          <div class="tool-desc">{esc_py(desc)}</div>
-          <div class="tool-tags">{tags_html}</div>
-          {cred_section}
-        </div>""")
-
-    grid = f'<div class="card-grid">{"".join(cards)}</div>'
-
-    html = f"""
-    <div hx-get="/portal/fragments/attention"
-         hx-trigger="load"
-         hx-swap="outerHTML"></div>
-    <div class="filter-bar">
-      <input id="cat-search" type="search" placeholder="Search by name, description, tag..."
-             oninput="filterCatalog()" style="max-width:360px">
-      <select id="cat-risk" onchange="filterCatalog()">
-        <option value="">All risk levels</option>
-        <option value="low">Low</option>
-        <option value="medium">Medium</option>
-        <option value="high">High</option>
-        <option value="critical">Critical</option>
-      </select>
-      <select id="cat-mode" onchange="filterCatalog()">
-        {_injection_mode_filter_options()}
-      </select>
-      <span style="font-size:0.8rem;color:var(--muted)">{len(tools)} tool{"s" if len(tools) != 1 else ""}</span>
-    </div>
-    {grid}
-    <script>
-    function submitCred(toolId) {{
-      const inp = document.getElementById('cred-' + toolId);
-      const msgEl = document.getElementById('cred-msg-' + toolId);
-      const secret = inp ? inp.value.trim() : '';
-      if (!secret) {{ showMsg(msgEl, 'err', 'Please enter a secret.'); return; }}
-      fetch('/portal/credentials/' + toolId, {{
-        method: 'PUT',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{secret: secret}})
-      }}).then(r => r.json().then(d => {{
-        if (r.ok) {{
-          showMsg(msgEl, 'ok', 'Credential uploaded successfully.');
-          inp.value = '';
-        }} else {{
-          const m = (d.detail?.message) || (d.detail) || 'Upload failed.';
-          showMsg(msgEl, 'err', String(m));
-        }}
-      }})).catch(e => showMsg(msgEl, 'err', 'Network error: ' + e));
-    }}
-    function showMsg(el, type, text) {{
-      if (!el) return;
-      el.className = 'msg msg-' + type;
-      el.textContent = text;
-      if (type === 'ok') setTimeout(() => {{ el.textContent = ''; el.className = ''; }}, 4000);
-    }}
-    </script>
-    """
-    return HTMLResponse(html)
+# ---------------------------------------------------------------------------
+# REMOVED 2026-07-25: GET /portal/fragments/catalog
+#
+# An orphaned route that dumped EVERY non-deleted tool_registry row with no
+# per-caller filtering — no entitlement check, no grants check, no profile check —
+# while being gated only by _require_portal_access (agent / auditor / admin). Any
+# authenticated portal user could hit it directly and enumerate the full tool
+# inventory, including tools they were not entitled to and tools their profile
+# disabled. That is the listed-but-denied defect plus an inventory disclosure.
+#
+# It was already dead: the Catalog tab renders inline from _build_portal_access's
+# own filtered cards_html, and ssShowTab('catalog') is a client-side tab toggle,
+# not an hx-get. Nothing referenced this route but its own docstring.
+#
+# Deleted rather than filtered: a second, independently-filtered listing surface is
+# exactly what produced the discovery/invoke drift in the first place.
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -1706,7 +1584,24 @@ async def fragment_my_access(request: Request):
     _require_portal_access(request)
     cid = _client_id(request)
     api_key = request.query_params.get("key", "")
-    return HTMLResponse(await _build_portal_access(cid, api_key, _is_auditor_only(request)))
+    # Thread the caller's bound named profile so the pills reflect the profile they
+    # are actually browsing under, not just their legacy per-identity rows.
+    profile_uuid = getattr(request.state, "profile_uuid", None)
+    from app.services.invocation import ProfileLookupError
+    try:
+        html = await _build_portal_access(
+            cid, api_key, _is_auditor_only(request), profile_uuid=profile_uuid
+        )
+    except ProfileLookupError:
+        # INV-015 fail-closed: we cannot say what this user may call, so we do not
+        # guess. Showing the grid with every server marked enabled would be a
+        # fail-open in the UI.
+        logger.error("portal my-access: profile lookup unavailable for %s", cid)
+        return HTMLResponse(
+            _error_fragment("Access state unavailable right now — retry shortly."),
+            status_code=503,
+        )
+    return HTMLResponse(html)
 
 
 # ---------------------------------------------------------------------------
@@ -2103,8 +1998,22 @@ async def fragment_mcp_profile_manage(name: str, request: Request):
     </script>""")
 
 
-async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = False) -> str:  # noqa: C901
-    """Build the 'Your access' card grid for the user portal."""
+async def _build_portal_access(
+    cid: str,
+    api_key: str = "",
+    is_auditor: bool = False,
+    profile_uuid: str | None = None,
+) -> str:  # noqa: C901
+    """Build the 'Your access' card grid for the user portal.
+
+    `profile_uuid` is the caller's bound named profile (request.state.profile_uuid).
+    It MUST be threaded through: the portal previously read `mcp_profiles` directly and
+    knew nothing about named profiles, so a caller logged in with ?profile=<uuid> saw a
+    green "Access enabled" pill for tools that named profile actually denies at invoke.
+
+    Raises ProfileLookupError (fail-closed) — the caller renders a 503. Rendering an
+    unknown profile state as "enabled" is the fail-open this resolver exists to prevent.
+    """
     from collections import defaultdict
 
     # 1. Load grants from data.json (allowed tool names)
@@ -2168,13 +2077,13 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
                         "in_maintenance": locked_out,
                     }
 
-            # Profile states (enable/disable per server alias)
-            pres = await session.execute(
-                text("SELECT mcp_name, enabled FROM mcp_profiles WHERE profile_id=:cid"),
-                {"cid": cid},
-            )
-            for prow in pres.fetchall():
-                profile_states[prow.mcp_name] = bool(prow.enabled)
+            # Profile states are NOT read here any more — see the resolver call after
+            # this try/except. They used to be a raw `SELECT ... FROM mcp_profiles`
+            # inside this block, which had two faults: it ignored named profiles
+            # entirely (a fourth, un-synced re-implementation of the profile decision),
+            # and being inside the broad `except Exception` below it failed OPEN — a DB
+            # hiccup left profile_states empty, so every server rendered "Access
+            # enabled".
 
             # R-6: caller's own in-flight submissions (not yet active/rejected),
             # so "submitted successfully" isn't the last thing a submitter ever sees.
@@ -2194,6 +2103,37 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
     except Exception as exc:
         logger.error("portal my-access DB error: %s", exc)
         my_submissions = []
+
+    # Resolve the per-server profile state through the SAME resolver the invoke path
+    # and /mcp tools/list use, so the pill the user sees matches what a call will do.
+    # Deliberately OUTSIDE the broad `except Exception` above: ProfileLookupError must
+    # reach fragment_my_access (-> 503), never degrade to "everything enabled".
+    # Resolve per TOOL, then fold up to the server card.
+    #
+    # mcp_profiles is keyed by TOOL name — that is the key the writer uses and the key
+    # invoke_tool resolves with (`_lookup_profile_with_cache(client_id, tool_name, …)`).
+    # The card key `svc` is a SERVER name (`row.srv_name or row.service_name or row.name`).
+    # The previous code looked server names up in a tool-keyed dict, so it matched
+    # nothing and every card fell back to the `True` default: the pill read
+    # "Access enabled" no matter what the profile actually said. Same shape as the
+    # discovery/invoke key mismatch — a lookup keyed on the wrong identifier that fails
+    # silently instead of loudly.
+    #
+    # A card is "enabled" if ANY of its tools is callable; a server with every tool
+    # disabled is genuinely unusable and should say so.
+    from app.services.invocation import _lookup_profile_with_cache as _resolve_profile
+    for _svc, _tools in server_tools.items():
+        _names = [t.get("name") for t in _tools if t.get("name")]
+        if not _names:
+            continue
+        _any_enabled = False
+        for _tn in _names:
+            _p = await _resolve_profile(cid, _tn, profile_uuid=profile_uuid)
+            # None = no row from either source = no restriction = enabled.
+            if _p is None or bool(_p.get("enabled", True)):
+                _any_enabled = True
+                break
+        profile_states[_svc] = _any_enabled
 
     # 3. Determine card-level status
     def _card_status(svc: str) -> str:

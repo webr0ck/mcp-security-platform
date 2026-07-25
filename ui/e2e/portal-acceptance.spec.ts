@@ -493,3 +493,79 @@ test.describe('AC-08 GitHub URL validation', () => {
     await ctx.close()
   })
 })
+
+// ── AC-09: portal access pill reflects the REAL profile decision ──────────────
+//
+// Added 2026-07-25. The portal read `mcp_profiles` directly and knew nothing about
+// named profiles, so it was a fourth un-synced re-implementation of the profile
+// decision and could render a green "Access enabled" pill for a server that denies
+// at invoke. It now resolves through the same function as tools/list and tools/call.
+//
+// There was no e2e coverage asserting card CONTENT at all — only that the fragment
+// loaded — which is why the drift went unnoticed.
+//
+// Targets the fragment directly rather than the rendered page: alice gets the ADMIN
+// shell (which does not embed the access grid), and `agent` — the role that DOES see
+// the agent portal — is excluded from _SELF_SERVICE_ALLOWED_ROLES and cannot toggle
+// its own profile at all.
+test.describe.serial('AC-09 Portal access pill matches invoke decision', () => {
+  const TARGET = 'echo-basic'
+  const FRAGMENT = '/portal/fragments/my-access'
+
+  // lab-echo's full tool set. A card is "enabled" if ANY of its tools is callable,
+  // so a meaningful test must disable them all — and that is also the semantic worth
+  // pinning: a server whose every tool is denied is genuinely unusable.
+  const SERVER_TOOLS = ['ping', 'slow_tool', 'echo-sa', 'echo-basic']
+
+  test('portal pill follows the profile decision, not a stale source', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+
+    for (const t of SERVER_TOOLS) {
+      const r = await ctx.request.post(`/api/v1/profiles/me/mcps/${t}/enable`)
+      expect(r.ok(), `enable ${t} -> ${r.status()}: ${await r.text()}`).toBeTruthy()
+    }
+    const enabledHtml = await (await ctx.request.get(FRAGMENT)).text()
+    expect(enabledHtml).toContain('Access enabled')
+
+    // Disabling ONE tool must NOT flip the card — the server is still usable.
+    await ctx.request.post(`/api/v1/profiles/me/mcps/echo-basic/disable`)
+    const partialHtml = await (await ctx.request.get(FRAGMENT)).text()
+    expect(partialHtml).toContain('Access enabled')
+
+    // Disabling ALL of them must flip it. The portal keyed this lookup on the SERVER
+    // name against a TOOL-keyed table, so it silently defaulted to enabled and the
+    // pill was decorative — it never showed "Access disabled" for any profile state.
+    for (const t of SERVER_TOOLS) {
+      const r = await ctx.request.post(`/api/v1/profiles/me/mcps/${t}/disable`)
+      expect(r.ok(), `disable ${t} -> ${r.status()}: ${await r.text()}`).toBeTruthy()
+    }
+    const disabledHtml = await (await ctx.request.get(FRAGMENT)).text()
+    expect(disabledHtml).toContain('Access disabled')
+
+    // Restore: leave no state behind (the F5 lesson).
+    for (const t of SERVER_TOOLS) {
+      await ctx.request.post(`/api/v1/profiles/me/mcps/${t}/enable`)
+    }
+    await ctx.close()
+  })
+
+  test('recovery tools cannot be self-disabled (self-lockout guard)', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+    const resp = await ctx.request.post('/api/v1/profiles/me/mcps/enable_mcp/disable')
+    const body = await resp.text()
+    expect(resp.status(), body).toBe(400)
+    expect(body).toContain('PROFILE_SELF_LOCKOUT_BLOCKED')
+    await ctx.close()
+  })
+
+  test('the deleted unfiltered catalog fragment is gone', async ({ browser }) => {
+    // GET /portal/fragments/catalog dumped every tool_registry row to any
+    // agent/auditor with no entitlement, grant or profile filtering.
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+    expect((await ctx.request.get('/portal/fragments/catalog')).status()).toBe(404)
+    await ctx.close()
+  })
+})
