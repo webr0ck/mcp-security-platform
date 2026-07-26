@@ -2154,8 +2154,7 @@ async def _build_portal_access(
               <div  class="u16">
                 <span  class="u70">{esc_py(sub.get("name") or "")}</span>
                 <span  class="u71">
-                  <span style="background:{color}22;color:{color};border:1px solid {color}44;
-                               border-radius:20px;padding:1px 8px;font-weight:600">{esc_py(label)}</span>{finding_note}
+                  <span class="chip chip-sm {_chip_cls(color)}">{esc_py(label)}</span>{finding_note}
                 </span>
               </div>
               {backend_note}
@@ -2752,9 +2751,7 @@ async def fragment_admin_identity(request: Request):
 
     return HTMLResponse(f"""
     <!-- Connection status band -->
-    <div style="display:flex;align-items:center;gap:11px;padding:11px 14px;
-                background:rgba(74,222,128,0.07);border:1px solid rgba(74,222,128,0.22);
-                border-radius:11px;{'display:none' if not connected else ''}">
+    <div class="conn-band{'' if connected else ' is-hidden'}">
       <span  class="u106"></span>
       <div  class="u107">
         Connected to <strong  class="u108">Keycloak</strong>
@@ -2911,7 +2908,7 @@ async def fragment_admin_dashboard(request: Request):
         ("Policy engine", "deny-by-default", "OPA fail-closed · signed bundle", "var(--adm-purple)"),
     ]
     tiles = "".join(
-        f'<div class="kpi fu" style="--kpi:{color}">'
+        f'<div class="kpi fu {_KPI_TONE.get(color, "kpi-tone-blue")}">'
         f'<div class="kpi-label">{esc_py(label)}</div>'
         f'<div class="kpi-num">{esc_py(num)}</div>'
         f'<div class="kpi-sub">{esc_py(sub)}</div></div>'
@@ -4815,8 +4812,7 @@ async def fragment_admin_submissions(request: Request):
               <span  class="u239">{esc_py(r.name)}</span>
               <span  class="u240">by {esc_py(r.owner_sub)}</span>
             </div>
-            <span style="background:{color}22;color:{color};border:1px solid {color}44;
-                         border-radius:20px;padding:2px 10px;font-size:12px;font-weight:600">{esc_py(label)}</span>
+            <span class="chip chip-md {_chip_cls(color)}">{esc_py(label)}</span>
           </div>
           {f'<div  class="u241">{esc_py(r.description)}</div>' if r.description else '<div  class="u242">&#x26A0; No description provided — ask the submitter what this server does before approving.</div>'}
           <div  class="u243">
@@ -4842,16 +4838,15 @@ async def fragment_admin_submissions(request: Request):
     count_badge = f'{len(rows)} total' + (f' · {awaiting} awaiting review' if awaiting else '')
 
     # Console funnel: Submit → Scan → Review → Approve (design §4)
-    def _fpill(label, color):
-        return (f'<span style="padding:6px 13px;border-radius:8px;font:600 12px var(--ff-sans);'
-                f'color:{color};background:{color}1f;border:1px solid {color}47">{label}</span>')
+    def _fpill(label, tone):
+        return f'<span class="fpill fpill-{tone}">{label}</span>'
     _arrow = '<span  class="u246">&#8594;</span>'
     funnel = (
         '<div class="fu u247" >'
-        + _fpill("Submit", "var(--adm-blue)") + _arrow
-        + _fpill("Scan", "var(--adm-amber)") + _arrow
-        + _fpill("Review", "var(--adm-purple)") + _arrow
-        + _fpill("Approve", "var(--adm-green)") + '</div>'
+        + _fpill("Submit", "blue") + _arrow
+        + _fpill("Scan", "amber") + _arrow
+        + _fpill("Review", "purple") + _arrow
+        + _fpill("Approve", "green") + '</div>'
     )
     return HTMLResponse(f"""
     <div class="section-title">&#x1F4E5; Submissions <span class="count">{count_badge}</span>
@@ -5203,7 +5198,7 @@ function showStep1() {{
         </div>
       </div>
 
-      <label class="wiz-label u276" for="s1-repo" >GitHub repository URL<span id="s1-repo-req" style="color:#f87171;display:${{_wiz.self_host ? 'none' : 'inline'}}"> *</span></label>
+      <label class="wiz-label u276" for="s1-repo" >GitHub repository URL<span id="s1-repo-req" class="req-star${{_wiz.self_host ? ' is-hidden' : ''}}"> *</span></label>
       <input id="s1-repo" class="wiz-input" placeholder="https://github.com/your-org/your-repo"
              value="${{_wiz.github_repo_url || ''}}">
       <div class="helper-box u4" id="clone-helper" >
@@ -5212,7 +5207,7 @@ function showStep1() {{
         Grant this account <strong>read access</strong> to your repository before submitting.
       </div>
 
-      <div id="s1-backend-url-wrap" style="display:${{_wiz.self_host ? 'block' : 'none'}}">
+      <div id="s1-backend-url-wrap" class="${{_wiz.self_host ? '' : 'is-hidden'}}">
         <label class="wiz-label u48" for="s1-backend-url" >Backend URL (where does/will this run?) <span  class="u94">*</span></label>
         <input id="s1-backend-url" class="wiz-input" placeholder="https://your-server.example.com/mcp"
                value="${{_wiz.requested_upstream_url || ''}}">
@@ -5681,7 +5676,7 @@ function updateRiskPreview() {{
   else if (cats.length > 0) {{ level = 'medium'; color = '#2563eb'; }}
   document.getElementById('risk-preview').innerHTML = cats.length === 0 ? '' :
     `<div  class="u71">Derived risk level:
-       <span style="color:${{color}};font-weight:700;text-transform:uppercase">${{level}}</span>
+       <span class="risk-${{level}}">${{level}}</span>
        — sets the OPA invocation gate for this server
      </div>`;
 }}
@@ -5883,6 +5878,27 @@ def esc_json_attr(*args: Any) -> str:
     """
     import json as _json
     return _json.dumps(list(args)).replace('"', "&quot;")
+
+
+_KPI_TONE = {
+    "var(--adm-blue)": "kpi-tone-blue", "var(--adm-purple)": "kpi-tone-purple",
+    "var(--adm-green)": "kpi-tone-green", "var(--adm-amber)": "kpi-tone-amber",
+    "var(--adm-red)": "kpi-tone-red", "var(--adm-cyan)": "kpi-tone-cyan",
+}
+
+
+def _chip_cls(color: str) -> str:
+    """Map a status-chip hex colour to its CSS class (R1.5).
+
+    The colour lives in _SUB_CHIP / _STATUS_COLOR alongside the label, so those maps
+    stay the single source of truth; this only translates the value the templates
+    used to interpolate into a `style=` attribute. Unknown colours fall back to grey
+    rather than rendering unstyled.
+    """
+    return {
+        "#2563eb": "chip-blue",  "#6b7280": "chip-grey", "#d97706": "chip-amber",
+        "#dc2626": "chip-red",   "#16a34a": "chip-green", "#0891b2": "chip-cyan",
+    }.get(color, "chip-grey")
 
 
 def _slugify(value: str) -> str:

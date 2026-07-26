@@ -1270,3 +1270,40 @@
 .acc-toggle.off { border: 1px solid #4ade80; color: #4ade80; }
 .u-pointer { cursor: pointer; }
 .row-active { background: rgba(59, 130, 246, 0.12); }
+
+/* R1.5 final 8 — per-request values that were interpolated into style=".
+   Each maps a CLOSED set (status chip colour, KPI tone, funnel stage, risk level)
+   to a class, so the palette stays defined in exactly one place. */
+.chip { border-radius: 20px; font-weight: 600; }
+.chip-sm { padding: 1px 8px; }
+.chip-md { padding: 2px 10px; font-size: 12px; }
+.chip-blue  { background: #2563eb22; color: #2563eb; border: 1px solid #2563eb44; }
+.chip-grey  { background: #6b728022; color: #6b7280; border: 1px solid #6b728044; }
+.chip-amber { background: #d9770622; color: #d97706; border: 1px solid #d9770644; }
+.chip-red   { background: #dc262622; color: #dc2626; border: 1px solid #dc262644; }
+.chip-green { background: #16a34a22; color: #16a34a; border: 1px solid #16a34a44; }
+.chip-cyan  { background: #0891b222; color: #0891b2; border: 1px solid #0891b244; }
+
+.conn-band { display: flex; align-items: center; gap: 11px; padding: 11px 14px;
+             background: rgba(74, 222, 128, 0.07); border: 1px solid rgba(74, 222, 128, 0.22);
+             border-radius: 11px; }
+.is-hidden { display: none !important; }
+
+.kpi-tone-blue   { --kpi: var(--adm-blue); }
+.kpi-tone-purple { --kpi: var(--adm-purple); }
+.kpi-tone-green  { --kpi: var(--adm-green); }
+.kpi-tone-amber  { --kpi: var(--adm-amber); }
+.kpi-tone-red    { --kpi: var(--adm-red); }
+.kpi-tone-cyan   { --kpi: var(--adm-cyan); }
+
+.fpill { padding: 6px 13px; border-radius: 8px; font: 600 12px var(--ff-sans); }
+.fpill-blue   { color: var(--adm-blue);   background: color-mix(in srgb, var(--adm-blue) 12%, transparent);   border: 1px solid color-mix(in srgb, var(--adm-blue) 28%, transparent); }
+.fpill-amber  { color: var(--adm-amber);  background: color-mix(in srgb, var(--adm-amber) 12%, transparent);  border: 1px solid color-mix(in srgb, var(--adm-amber) 28%, transparent); }
+.fpill-purple { color: var(--adm-purple); background: color-mix(in srgb, var(--adm-purple) 12%, transparent); border: 1px solid color-mix(in srgb, var(--adm-purple) 28%, transparent); }
+.fpill-green  { color: var(--adm-green);  background: color-mix(in srgb, var(--adm-green) 12%, transparent);  border: 1px solid color-mix(in srgb, var(--adm-green) 28%, transparent); }
+
+.risk-low      { color: #16a34a; font-weight: 700; text-transform: uppercase; }
+.risk-medium   { color: #2563eb; font-weight: 700; text-transform: uppercase; }
+.risk-high     { color: #d97706; font-weight: 700; text-transform: uppercase; }
+.risk-critical { color: #dc2626; font-weight: 700; text-transform: uppercase; }
+.req-star { color: #f87171; }

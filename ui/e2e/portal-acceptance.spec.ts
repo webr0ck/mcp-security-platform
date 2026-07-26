@@ -697,6 +697,10 @@ test.describe('AC-12 Portal Content-Security-Policy', () => {
     // every browser that supports one — it would look protected and not be.
     expect(csp, 'script-src must not carry unsafe-inline alongside a nonce')
       .not.toMatch(/script-src[^;]*'unsafe-inline'/)
+    // style-src still carries 'unsafe-inline' for portal.js's 58 CSSOM writes (R1.7),
+    // NOT for markup: R1.5 removed all 593 inline style= attributes. Asserted as a
+    // known state so that when R1.7 lands, this line is what forces the policy update.
+    expect(csp).toContain("style-src 'self' 'unsafe-inline'")
     expect(csp).toContain("object-src 'none'")
     expect(csp).toContain("base-uri 'none'")
   })

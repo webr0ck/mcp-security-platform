@@ -15,9 +15,8 @@ The nonce must exist before the HTML is rendered (the inline <script> tags carry
 so it is generated on the way IN and stashed on request.state; the header is set on
 the way out.
 
-Known gap, deliberate: style-src still needs 'unsafe-inline' because the portal has
-~570 inline style= attributes. That is roadmap R1.5, and this is its concrete payoff —
-finishing it lets the 'unsafe-inline' below be dropped.
+R1.5 has since removed all 593 inline style= attributes, so style-src carries no
+'unsafe-inline' either: both script and style injection are contained.
 """
 from __future__ import annotations
 
@@ -36,7 +35,15 @@ _POLICY = (
     # Allowed rather than removed because the typography is a product choice — but it
     # IS a third-party request from a platform that otherwise isolates egress, so
     # self-hosting the two families is tracked as follow-up.
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "  # R1.5: drop unsafe-inline
+    # style-src still needs 'unsafe-inline', for a reason that is NOT the one it
+    # started with. R1.5 removed all 593 inline style= attributes from the markup —
+    # that half is done. But style-src also governs CSSOM writes, and portal.js
+    # performs 58 of them (34 el.style.display toggles, 18 colour writes). Dropping
+    # the keyword was tried and blocks every one of them: measured, the portal
+    # renders but tab panels never open. Converting those to class toggles is R1.7.
+    # Verified by AC-11, which fails on any console CSP violation — that is how this
+    # was caught rather than shipped as a silently broken page.
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
     "img-src 'self' data:; "
     "font-src 'self' https://fonts.gstatic.com; "
     "connect-src 'self'; "
