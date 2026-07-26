@@ -44,7 +44,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
-from datetime import UTC
+from datetime import UTC, datetime
 
 
 class ConsentTokenError(Exception):

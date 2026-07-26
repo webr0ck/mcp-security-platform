@@ -784,6 +784,10 @@ async def oidc_session_info(
         return JSONResponse(status_code=401, content={"error": "invalid_session"})
 
     # Enforce JTI revocation — consistent with auth middleware on all other paths.
+    # Imported here rather than at module scope to match the other lazy middleware
+    # imports in this file and avoid an import cycle (auth imports from routers).
+    from app.middleware.auth import _is_session_jti_revoked  # noqa: PLC0415
+
     jti = claims.get("jti")
     if jti and await _is_session_jti_revoked(jti):
         return JSONResponse(status_code=401, content={"error": "session_revoked"})
