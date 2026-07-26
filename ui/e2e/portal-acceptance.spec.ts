@@ -632,6 +632,15 @@ test.describe('AC-11 Delegated actions are all wired', () => {
     const ctx = await authedCtx(browser, 'alice')
     const page = await ctx.newPage()
 
+    // A CSP violation surfaces only as a console error — the page still renders, the
+    // button just silently does nothing. Exactly the failure mode this suite exists
+    // to catch, so collect them rather than trusting the page to look right.
+    const cspErrors: string[] = []
+    page.on('console', m => {
+      const t = m.text()
+      if (/Content Security Policy|Refused to (execute|apply|load|connect)/i.test(t)) cspErrors.push(t)
+    })
+
     const seen = new Set<string>()
     const collect = async () => {
       for (const a of await page.$$eval('[data-act]', els => els.map(e => e.getAttribute('data-act')))) {
@@ -669,5 +678,26 @@ test.describe('AC-11 Delegated actions are all wired', () => {
 
     await ctx.close()
     expect(unresolved, `data-act names with no handler: ${unresolved.join(', ')}`).toEqual([])
+    expect(cspErrors, `CSP violations: ${cspErrors.join(' | ')}`).toEqual([])
+  })
+})
+
+test.describe('AC-12 Portal Content-Security-Policy', () => {
+  test('portal HTML carries a nonce CSP with no unsafe-inline script-src', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+    const page = await ctx.newPage()
+    const resp = await page.goto('/portal')
+    const csp = resp?.headers()['content-security-policy'] || ''
+    await ctx.close()
+
+    expect(csp, 'portal HTML served with no Content-Security-Policy at all').not.toEqual('')
+    expect(csp).toContain("script-src 'self' 'nonce-")
+    // A policy carrying BOTH a nonce and 'unsafe-inline' silently drops the nonce in
+    // every browser that supports one — it would look protected and not be.
+    expect(csp, 'script-src must not carry unsafe-inline alongside a nonce')
+      .not.toMatch(/script-src[^;]*'unsafe-inline'/)
+    expect(csp).toContain("object-src 'none'")
+    expect(csp).toContain("base-uri 'none'")
   })
 })

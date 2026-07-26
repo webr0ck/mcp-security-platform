@@ -1372,8 +1372,8 @@ document.body.addEventListener('htmx:afterSettle', function(evt) {
 // Allowlisted NAMES, resolved to functions at click time — deliberately NOT a
 // snapshot of function references taken at registration. Many handlers here are
 // declared inside blocks rather than at top level, so they are not yet defined as
-// globals when this file finishes executing: measured at load, only 44 of 56 names
-// resolved. A snapshot would have silently dropped the other 12, leaving buttons
+// globals when this file finishes executing: measured at load, only 56 of 64 names
+// resolved. A snapshot would have silently dropped the other 8, leaving buttons
 // that look normal and do nothing. Late lookup by name is what makes this correct;
 // the Set still constrains which names are callable at all.
 const PORTAL_ACTIONS = new Set();
@@ -1383,7 +1383,11 @@ function registerPortalActions(names) {
   // Exposed for the AC-11 acceptance check; a top-level `const` is not a window
   // property, so without this the test cannot see the allowlist at all.
   window.PORTAL_ACTIONS = PORTAL_ACTIONS;
+  // Accumulates across every registerPortalActions call — assigning here would
+  // report only the last batch, which is exactly the kind of number that ends up
+  // quoted in a comment and is wrong.
   window.__PORTAL_ACTIONS_DEFINED_AT_LOAD__ =
+    (window.__PORTAL_ACTIONS_DEFINED_AT_LOAD__ || 0) +
     names.filter(function(n) { return typeof window[n] === 'function'; }).length;
 }
 
@@ -1401,6 +1405,7 @@ document.body.addEventListener('click', function(e) {
     return;
   }
   if (el.dataset.pd === '1') { e.preventDefault(); }
+  if (el.dataset.stop === '1') { e.stopPropagation(); }
 
   let args;
   if (el.dataset.json !== undefined) {
@@ -1468,3 +1473,21 @@ registerPortalActions([
   'srvMenuToggle', 'ssShowTab', 'submitStep1', 'submitStep2', 'testLlm', 'toggleCat',
   'toggleDisplay', 'toggleStatus', 'uploadCred',
 ]);
+
+function showEl(id)  { toggleDisplay(id, true); }
+function hideEl(id)  { toggleDisplay(id, false); }
+function toggleEl(id) { toggleDisplay(id); }
+
+registerPortalActions([
+  'showEl', 'hideEl', 'toggleEl', 'htmxGet', 'toggleDisplay', 'copyText', 'copyElementText',
+  'adminSetMaintainers', 'adminEditEndpoint', 'adminSetPublic', 'savePrompt', 'resetPrompt',
+]);
+
+// Async webfont swap — replaces onload="this.media='all'" on the Google Fonts <link>,
+// which the portal CSP blocks (inline handlers cannot carry a nonce). Checks .sheet
+// first because this file is deferred and the stylesheet may already have loaded, in
+// which case the load event has been and gone.
+document.querySelectorAll('link[data-media-swap]').forEach(function(l) {
+  if (l.sheet) { l.media = 'all'; }
+  else { l.addEventListener('load', function() { l.media = 'all'; }); }
+});

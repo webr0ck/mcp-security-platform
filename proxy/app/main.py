@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
 from app.middleware.auth import AuthMiddleware
+from app.middleware.csp import CSPMiddleware
 from app.middleware.rbac import RBACMiddleware
 from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
 from app.routers import metrics as metrics_router
@@ -318,6 +319,10 @@ app = FastAPI(
 #
 # Registration order (reverse of above):
 # ============================================================================
+# CSP: registered first => outermost of this group, so the nonce is on
+# request.state before any portal handler renders, and the header is applied
+# to whatever response comes back (including auth redirects).
+app.add_middleware(CSPMiddleware)
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(AuditMiddleware)

@@ -151,7 +151,9 @@ _FONTS_LINK = (
     # the window load event when fonts.googleapis.com is unreachable (lab network).
     '<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800'
     '&family=JetBrains+Mono:wght@400;500;600&display=swap"'
-    ' rel="stylesheet" media="print" onload="this.media=\'all\'">'
+    # data-media-swap replaces an inline onload= handler: inline event handlers are
+    # blocked by the portal CSP and cannot be nonce'd. portal.js does the swap.
+    ' rel="stylesheet" media="print" data-media-swap>'
 )
 
 
@@ -1537,7 +1539,7 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
         manage_btn = (
             f'<button class="btn-secondary btn-sm" hx-get="/portal/fragments/mcp-profile/{esc_py(p["name"])}" '
             f'hx-target="#mcpprof-detail-{esc_py(_slugify(p["name"]))}" hx-swap="innerHTML" '
-            f'onclick="document.getElementById(\'mcpprof-detail-{esc_py(_slugify(p["name"]))}\').style.display=\'block\'">Manage</button>'
+            f'data-act="showEl" data-a0="mcpprof-detail-{esc_py(_slugify(p["name"]))}">Manage</button>'
             if can_manage_mcp_profiles else ""
         )
         profile_rows_html.append(f"""
@@ -1549,7 +1551,7 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
               <div style="font-size:11px;color:var(--muted);margin-top:4px">Tools: {tools_html}</div>
             </div>
             <div style="display:flex;align-items:center;gap:0.5rem">
-              <button class="btn-secondary btn-sm" onclick="navigator.clipboard.writeText('{esc_py(login_base + p['name'])}').then(()=>{{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy login link',1500)}})">Copy login link</button>
+              <button class="btn-secondary btn-sm" data-act="copyText" data-a0="{esc_py(login_base + p['name'])}">Copy login link</button>
               {manage_btn}
             </div>
           </div>
@@ -2225,10 +2227,7 @@ async def _build_portal_access(
           {"Append <code style=\"font-family:var(--ff-mono)\">?key=YOUR_API_KEY</code> to pre-fill." if not api_key else "API key pre-filled."}
         </p>
         <div class="code-block" id="mcp-config-block">{esc_py(mcp_json)}</div>
-        <button class="btn-secondary btn-sm" style="margin-top:0.5rem" onclick="
-          navigator.clipboard.writeText(document.getElementById('mcp-config-block').textContent).then(()=>{{
-            this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',2000);
-          }})">Copy</button>
+        <button class="btn-secondary btn-sm" style="margin-top:0.5rem" data-act="copyElementText" data-a0="mcp-config-block">Copy</button>
       </div>
     </details>"""
 
@@ -2589,26 +2588,25 @@ async def fragment_admin_servers(request: Request):
                 f'<div style="position:relative;text-align:right">'
                 f'<button class="btn-menu" data-act="srvMenuToggle" data-evt="1" data-a0="{sid}" aria-label="More actions" aria-haspopup="true">⋯</button>'
                 f'<div class="srv-dropdown" id="srv-dd-{sid}" style="display:none">'
-                f'<button onclick="htmx.ajax(\'GET\',\'/portal/fragments/admin/detections?server_id={sid}\','
-                f'{{target:\'#adm-content\',swap:\'innerHTML\'}})">Detections</button>'
-                f'<button onclick="adminSetMaintainers(\'{sid}\',{maint_json})">Maintainers…</button>'
+                f'<button data-act="htmxGet" data-a0="/portal/fragments/admin/detections?server_id={sid}">Detections</button>'
+                f'<button data-act="adminSetMaintainers" data-json="{esc_json_attr(sid, maintainers)}">Maintainers…</button>'
                 # PRD-0012 C3/C4: self-hosted-only actions. Edit endpoint/config
                 # re-routes through POST /request-change (quarantine+demote+
                 # re-verify, never a silent overwrite); Update-from-git calls
                 # the ops-agent rebuild path (git-pull + restart), same
                 # request-change re-review contract on the backend side.
-                + (f'<button onclick="adminEditEndpoint(\'{sid}\',{esc_py(json.dumps(s.upstream_url or ""))})">'
+                + (f'<button data-act="adminEditEndpoint" data-json="{esc_json_attr(sid, s.upstream_url or "")}">'
                    f'Edit endpoint/config…</button>' if s.is_self_hosted else '')
                 + (f'<button data-act="adminRebuildSrv" data-a0="{sid}">Update from git &amp; rebuild</button>'
                    if s.is_self_hosted and s.github_repo_url else '')
                 + (f'<button data-act="adminVerifySrv" data-a0="{sid}">Retry verification</button>' if debug_on else '')
-                + f'<button onclick="adminToggleDebug(\'{sid}\',{"false" if debug_on else "true"})">'
+                + f'<button data-act="adminToggleDebug" data-json="{esc_json_attr(sid, not debug_on)}">'
                 f'{"Go live / exit maintenance" if debug_on else "Enable debug mode"}</button>'
                 # WS-A: view container logs — only offered while in debug/maintenance
                 # mode, matching the server-side debug_mode gate on the logs endpoint.
                 + (f'<button data-act="adminViewLogs" data-a0="{sid}">View logs</button>' if debug_on else '')
                 + (
-                    f'<button onclick="adminSetPublic(\'{sid}\',{"false" if s.public_to_authenticated else "true"})">'
+                    f'<button data-act="adminSetPublic" data-json="{esc_json_attr(sid, not s.public_to_authenticated)}">'
                     f'{"Make private" if s.public_to_authenticated else "Make public (all users)"}</button>'
                     if not s.has_write_ops else
                     '<button disabled title="Write-capable servers cannot be public" '
@@ -2792,11 +2790,11 @@ async def fragment_admin_identity(request: Request):
 
     <div style="display:flex;gap:10px;margin-top:4px">
       <button class="btn-register-srv" style="font-size:12px;padding:7px 12px"
-              onclick="document.getElementById('oidc-reconfig-note').style.display=document.getElementById('oidc-reconfig-note').style.display==='none'?'block':'none'">Reconfigure</button>
+              data-act="toggleEl" data-a0="oidc-reconfig-note">Reconfigure</button>
       <button style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);
                      color:#9aa1ab;font-size:12px;padding:7px 12px;border-radius:8px;cursor:pointer;
                      font-family:var(--ff-sans)"
-              onclick="document.getElementById('oidc-reconfig-note').style.display=document.getElementById('oidc-reconfig-note').style.display==='none'?'block':'none'">Test connection</button>
+              data-act="toggleEl" data-a0="oidc-reconfig-note">Test connection</button>
     </div>
     <div id="oidc-reconfig-note" style="display:none;margin-top:12px;padding:14px 16px;
          background:var(--adm-surface);border:1px solid var(--adm-border);border-radius:12px;font-size:12.5px;color:var(--adm-muted);line-height:1.6">
@@ -3198,8 +3196,7 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
     # Window toggle
     def _win_btn(d: int, label: str) -> str:
         active = 'background:rgba(255,255,255,0.08);' if d == days else ''
-        return (f'<button onclick="htmx.ajax(\'GET\',\'/portal/fragments/admin/detections?days={d}\','
-                f'{{target:\'#adm-content\',swap:\'innerHTML\'}})" '
+        return (f'<button data-act="htmxGet" data-a0="/portal/fragments/admin/detections?days={d}" '
                 f'style="{active}background:none;border:none;cursor:pointer;padding:5px 10px;'
                 f'border-radius:6px;color:#9aa1ab;font-size:12px;font-family:var(--ff-sans)">{label}</button>')
 
@@ -3225,7 +3222,7 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
         row_active = 'background:rgba(59,130,246,0.12)' if reason_key == reason else ''
         top_rows_html += f"""
         <tr style="cursor:pointer;{row_active}" title="Filter feed to this detection"
-            onclick="htmx.ajax('GET','{_filter_url}',{{target:'#adm-content',swap:'innerHTML'}})">
+            data-act="htmxGet" data-a0="{_filter_url}">
           <td>{esc_py(name)}</td>
           <td><span style="font-family:var(--ff-mono);font-size:0.75rem;color:var(--muted)">{esc_py(reason_key)}</span></td>
           <td>{sev_badge}</td>
@@ -3270,9 +3267,9 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
 
         eid = str(row.event_id)
         server_cell = (
-            f'<a href="#" onclick="event.stopPropagation();htmx.ajax(\'GET\','
-            f'\'/portal/fragments/admin/detections?days={days}&server_id={esc_py(str(row.server_id))}\','
-            f'{{target:\'#adm-content\',swap:\'innerHTML\'}});return false" style="color:var(--cyan)">'
+            f'<a href="#" data-act="htmxGet" data-pd="1" data-stop="1" '
+            f'data-a0="/portal/fragments/admin/detections?days={days}&amp;server_id={esc_py(str(row.server_id))}" '
+            f'style="color:var(--cyan)">'
             f'{esc_py(row.server_name or "server")}</a>'
         ) if row.server_id else '<span style="color:var(--muted)">unattributed</span>'
 
@@ -3305,8 +3302,7 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
         filter_pill = f"""
         <div style="margin-bottom:0.5rem;font-size:12px;color:var(--muted)">
           Filtered by {' &middot; '.join(parts)}
-          <a href="#" onclick="htmx.ajax('GET','/portal/fragments/admin/detections?days={days}',
-             {{target:'#adm-content',swap:'innerHTML'}});return false" style="color:var(--cyan);margin-left:6px">&times; clear</a>
+          <a href="#" data-act="htmxGet" data-pd="1" data-a0="/portal/fragments/admin/detections?days={days}" style="color:var(--cyan);margin-left:6px">&times; clear</a>
         </div>"""
 
     feed_table = f"""
@@ -3324,9 +3320,9 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
         <div id="det-drawer-rule-hdr" style="font-size:11px;color:var(--muted);margin-bottom:0.4rem"></div>
         <pre id="det-drawer-rule-src" style="margin:0;font-size:11px;line-height:1.6;color:#93c5fd;overflow-x:auto;white-space:pre"></pre>
       </div>
-      <button class="btn-secondary btn-sm" style="margin-top:0.5rem" onclick="document.getElementById('det-drawer').style.display='none'">Close</button>
+      <button class="btn-secondary btn-sm" style="margin-top:0.5rem" data-act="hideEl" data-a0="det-drawer">Close</button>
     </div>
-    <script>
+    <script nonce="{getattr(request.state, 'csp_nonce', '')}">
       // Per-request data (drawer_data) — the only piece of this fragment's
       // JS that can't live in the static bundle. _escHtml/openDetectionDrawer/
       // viewPolicyRule that read this are defined once in portal.js.
@@ -3714,8 +3710,7 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
             gen_cell = f'<span style="color:var(--muted);font-size:0.78rem">{r.generated_at.strftime("%Y-%m-%d %H:%M")}</span>'
             action_cell = (  # ponytail: htmx.ajax swap — no full-page reload needed
                 f'<button class="btn-secondary btn-sm" '
-                f'onclick="htmx.ajax(\'GET\',\'/portal/fragments/admin/sbom/{esc_py(tool_id)}\','
-                f'{{target:\'#adm-content\',swap:\'innerHTML\'}})">Components</button>'
+                f'data-act="htmxGet" data-a0="/portal/fragments/admin/sbom/{esc_py(tool_id)}">Components</button>'
                 f' <a class="btn-secondary btn-sm" target="_blank" rel="noopener" '
                 f'href="/api/v1/tools/{esc_py(tool_id)}/sbom">JSON</a>'
                 f' <button class="btn-secondary btn-sm sbom-gen-btn" data-tool-id="{esc_py(tool_id)}">Refresh</button>'
@@ -4332,7 +4327,7 @@ async def fragment_admin_access(request: Request):
                       hx-get="/portal/fragments/admin/access/{esc_py(pid)}"
                       hx-target="#access-detail-{esc_py(_slugify(pid))}"
                       hx-swap="innerHTML"
-                      onclick="document.getElementById('access-detail-{esc_py(_slugify(pid))}').style.display='block'">
+                      data-act="showEl" data-a0="access-detail-{esc_py(_slugify(pid))}">
                 Manage MCP &amp; tool access
               </button>
             </div>
@@ -4964,9 +4959,9 @@ async def fragment_admin_prompts(request: Request):
                         >{esc_py(p["text"])}</textarea>
               <div style="display:flex;gap:0.5rem;margin-top:0.4rem">
                 <button class="btn-primary" style="font-size:11px;padding:0.25rem 0.7rem"
-                        onclick="savePrompt('{esc_py(p["key"])}')">Save</button>
+                        data-act="savePrompt" data-a0="{esc_py(p["key"])}">Save</button>
                 <button class="btn-secondary" style="font-size:11px;padding:0.25rem 0.7rem"
-                        onclick="resetPrompt('{esc_py(p["key"])}')">Reset to default</button>
+                        data-act="resetPrompt" data-a0="{esc_py(p["key"])}">Reset to default</button>
               </div>
             </div>""")
         label = _PROMPT_MODE_LABELS.get(mode, mode)
@@ -5199,7 +5194,7 @@ async def submit_wizard_page(request: Request):
   </div>
 </div>
 
-<script>
+<script nonce="{getattr(request.state, 'csp_nonce', '')}">
 // Wizard state — accumulated across steps, submitted in one shot
 const _wiz = {{
   name: '', description: '', github_repo_url: null, requested_upstream_url: null,
@@ -5581,46 +5576,53 @@ function showGuidedQuestions() {{
 
 function _qRender(question, options) {{
   const opts = options.map(([label, fn]) =>
-    `<button class="q-btn" onclick="${{fn}}">${{label}}</button>`).join('');
-  document.getElementById('q-content').innerHTML =
+    `<button class="q-btn">${{label}}</button>`).join('');
+  const host = document.getElementById('q-content');
+  host.innerHTML =
     `<div class="q-text">${{question}}</div><div class="q-opts">${{opts}}</div>`;
+  // Bind real listeners rather than emitting onclick=: inline handlers are blocked
+  // by any CSP without 'unsafe-inline' and cannot be rescued by a nonce (R1.4).
+  host.querySelectorAll('.q-btn').forEach((b, i) => {{
+    const handler = options[i] && options[i][1];
+    b.addEventListener('click', typeof handler === 'function' ? handler : function() {{}});
+  }});
 }}
 
 function askQ1() {{
   _qRender('Does your server call any upstream system that requires authentication?', [
-    ['Yes — it calls an external or internal API', 'askQ2()'],
-    ['No — it uses its own data or needs no auth',  "recommendMode('none')"],
+    ['Yes — it calls an external or internal API', askQ2],
+    ['No — it uses its own data or needs no auth',  () => recommendMode('none')],
   ]);
 }}
 function askQ2() {{
   _qRender('Is the upstream system protected by the <strong>same Keycloak instance</strong> this platform uses?', [
-    ['Yes — same Keycloak realm',   "recommendMode('kc_token_exchange')"],
-    ['No — external or different IdP', 'askQ3()'],
+    ['Yes — same Keycloak realm',   () => recommendMode('kc_token_exchange')],
+    ['No — external or different IdP', askQ3],
   ]);
 }}
 function askQ3() {{
   _qRender('What type of credential does the upstream system accept?', [
-    ['Microsoft Entra / Azure AD', 'askQ4Entra()'],
-    ['API key or static bearer token', 'askQ5Static()'],
-    ['OAuth (different IdP)', 'askQ6OAuth()'],
+    ['Microsoft Entra / Azure AD', askQ4Entra],
+    ['API key or static bearer token', askQ5Static],
+    ['OAuth (different IdP)', askQ6OAuth],
   ]);
 }}
 function askQ4Entra() {{
   _qRender('Is this a machine-to-machine call (app identity) or per-user (delegated)?', [
-    ['Machine / app identity — one app credential for all callers', "recommendMode('entra_client_credentials')"],
-    ['Per-user delegated — each user has their own Entra identity',  "recommendMode('entra_user_token')"],
+    ['Machine / app identity — one app credential for all callers', () => recommendMode('entra_client_credentials')],
+    ['Per-user delegated — each user has their own Entra identity',  () => recommendMode('entra_user_token')],
   ]);
 }}
 function askQ5Static() {{
   _qRender('Is one credential shared across all callers, or does each user have their own?', [
-    ['Shared — one service account for everyone', "recommendMode('service')"],
-    ['Per-user — each user has their own token',  "recommendMode('user')"],
+    ['Shared — one service account for everyone', () => recommendMode('service')],
+    ['Per-user — each user has their own token',  () => recommendMode('user')],
   ]);
 }}
 function askQ6OAuth() {{
   _qRender('Is one token shared across all callers, or per-user?', [
-    ['Shared OAuth token', "recommendMode('service_account')"],
-    ['Per-user OAuth token', "recommendMode('oauth_user_token')"],
+    ['Shared OAuth token', () => recommendMode('service_account')],
+    ['Per-user OAuth token', () => recommendMode('oauth_user_token')],
   ]);
 }}
 
@@ -5915,6 +5917,18 @@ def esc_py(value: Any) -> str:
     """HTML-escape a value for safe insertion into HTML attributes and text nodes."""
     import html
     return html.escape(str(value) if value is not None else "", quote=True)
+
+
+def esc_json_attr(*args: Any) -> str:
+    """Render positional handler arguments as a JSON array safe for a data-json attribute.
+
+    R1.4: the delegated dispatcher reads data-json when any argument is not a string —
+    a bare data-a0="false" would arrive in JS as the truthy string "false". json.dumps
+    emits double quotes, which would terminate the attribute, so they are escaped to
+    &quot; (the browser decodes them before JSON.parse sees the value).
+    """
+    import json as _json
+    return _json.dumps(list(args)).replace('"', "&quot;")
 
 
 def _slugify(value: str) -> str:
