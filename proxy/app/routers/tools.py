@@ -17,20 +17,22 @@ Endpoints:
 """
 from __future__ import annotations
 
+import logging
 import uuid
-from typing import Annotated, Optional
+from datetime import UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.services.auditor import run_audit, LLMAuditRequiredError
-from app.services.ssrf import validate_server_url, SSRFError
-from app.services.server_onboarding import revalidate_upstream_ip_at_invoke, UpstreamRevalidationError
+from app.services.auditor import LLMAuditRequiredError, run_audit
 from app.services.pinned_transport import PinnedIPTransport
-
-import logging
+from app.services.server_onboarding import (
+    UpstreamRevalidationError,
+    revalidate_upstream_ip_at_invoke,
+)
+from app.services.ssrf import SSRFError, validate_server_url
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +64,14 @@ async def register_tool(
     """
     import json
     import logging
-    from datetime import datetime, timezone
+    from datetime import datetime
     from uuid import uuid4
 
     from sqlalchemy import text
 
     from app.models.tool import ToolCreate
-    from app.services.auditor import run_audit as _run_audit, LLMAuditRequiredError
+    from app.services.auditor import LLMAuditRequiredError
+    from app.services.auditor import run_audit as _run_audit
     from app.services.sbom import generate_cyclonedx_sbom, publish_to_artifactory
 
     logger = logging.getLogger(__name__)
@@ -189,7 +192,7 @@ async def register_tool(
 
     sbom_id = str(uuid4())
     bom_serial = str(uuid4())
-    registered_at = datetime.now(timezone.utc)
+    registered_at = datetime.now(UTC)
 
     try:
         # Persist tool_registry
@@ -350,9 +353,9 @@ async def register_tool(
 @router.get("/")
 async def list_tools(
     request: Request,
-    status: Optional[str] = Query(None, pattern="^(active|quarantined|deprecated|disabled)$"),
-    risk_level: Optional[str] = Query(None, pattern="^(low|medium|high|critical)$"),
-    tag: Optional[list[str]] = Query(None),
+    status: str | None = Query(None, pattern="^(active|quarantined|deprecated|disabled)$"),
+    risk_level: str | None = Query(None, pattern="^(low|medium|high|critical)$"),
+    tag: list[str] | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -361,8 +364,8 @@ async def list_tools(
     List registered tools. Response fields filtered by caller role.
     Required role: admin, auditor, readonly (readonly gets name/version only).
     """
-    import json
     import logging
+
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -451,8 +454,8 @@ async def get_tool(
     Per RBAC.md: readonly omits schema, upstream_url, source_commit, risk_reasons.
     Required role: admin, auditor, readonly, agent.
     """
-    import json
     import logging
+
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -547,6 +550,7 @@ async def update_tool(
     import json
     import logging
     from uuid import uuid4
+
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1008,6 +1012,7 @@ async def delete_tool(
     Historical audit references remain valid.
     """
     import logging
+
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1040,7 +1045,7 @@ async def delete_tool(
             {"id": str(tool_id)},
         )
         await db.commit()
-    except Exception as exc:
+    except Exception:
         raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Delete failed."})
 
     try:
@@ -1073,6 +1078,7 @@ async def get_tool_audit(
     Required role: admin, auditor.
     """
     import logging
+
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1132,6 +1138,7 @@ async def rerun_audit(
     """
     import logging
     from uuid import uuid4
+
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1169,7 +1176,7 @@ async def rerun_audit(
             {"job_id": job_id, "reference_id": str(tool_id), "created_by": client_id},
         )
         await db.commit()
-    except Exception as exc:
+    except Exception:
         raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Failed to queue job."})
 
     try:
@@ -1201,7 +1208,7 @@ async def rerun_audit(
 async def get_tool_sbom(
     tool_id: uuid.UUID,
     request: Request,
-    format: Optional[str] = Query("cyclonedx", pattern="^(cyclonedx|spdx)$"),
+    format: str | None = Query("cyclonedx", pattern="^(cyclonedx|spdx)$"),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """
@@ -1211,6 +1218,7 @@ async def get_tool_sbom(
     """
     import json
     import logging
+
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1283,7 +1291,9 @@ async def _generate_and_store_sbom(db: AsyncSession, tool_row) -> None:
     """
     import json
     from uuid import uuid4
+
     from sqlalchemy import text
+
     from app.services.sbom import generate_cyclonedx_sbom
 
     schema = tool_row.schema if isinstance(tool_row.schema, dict) else json.loads(tool_row.schema or "{}")
@@ -1444,15 +1454,17 @@ async def invoke_tool(
     INV-004: Returns 503 if OPA is unreachable (fail-closed).
     INV-005: Quarantined tools blocked before OPA evaluation.
     """
+    from app.services.entitlement import NotEntitledError
     from app.services.invocation import (
         ServerInMaintenanceError,
         TaintFloorDenyError,
         ToolDeprecatedError,
         ToolDisabledError,
         ToolQuarantinedError,
+    )
+    from app.services.invocation import (
         invoke_tool as _invoke,
     )
-    from app.services.entitlement import NotEntitledError
     from app.services.policy import OPADenyError, OPAUnavailableError
 
     client_roles: list[str] = getattr(request.state, "client_roles", [])
@@ -1609,7 +1621,8 @@ async def invoke_tool(
             # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
             profile_uuid=getattr(request.state, "profile_uuid", None),
         )
-        from app.services.trust_labeler import get_labeler as _get_labeler, TRUST_ENVELOPE_KEY as _TEK
+        from app.services.trust_labeler import TRUST_ENVELOPE_KEY as _TEK
+        from app.services.trust_labeler import get_labeler as _get_labeler
         _tl = _get_labeler()
         if _tl is not None and isinstance(response.get("result"), dict):
             _resp_meta = response.get("meta", {})
@@ -1933,10 +1946,12 @@ async def _run_tool_discovery(
     """
     import json
     import logging
-    from sqlalchemy import text
-    import httpx
 
-    from app.services.auditor import run_audit as _run_audit, LLMAuditRequiredError
+    import httpx
+    from sqlalchemy import text
+
+    from app.services.auditor import LLMAuditRequiredError
+    from app.services.auditor import run_audit as _run_audit
     from app.services.sbom import generate_cyclonedx_sbom
 
     logger = logging.getLogger(__name__)

@@ -50,13 +50,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
 from typing import Any
 
 import jwt as _jwt
 from sqlalchemy import text
-from app.credential_broker.token_assert import assert_exchanged_token, ExchangedTokenError
+
 from app.credential_broker.keycloak_client import get_public_key_for_token
+from app.credential_broker.token_assert import ExchangedTokenError, assert_exchanged_token
+
 # WP-A5 (CR-02 completion): InjectionMode is a direct alias of the canonical
 # AuthMode enum — see the note further below, right where the class used to
 # live, for why this is a behavior-preserving rename.
@@ -616,7 +617,7 @@ async def _inject_basic_auth(
             "username, which RFC 7617 forbids; re-provision it (fail-closed)."
         )
 
-    b64 = base64.b64encode(f"{username}:{secret}".encode("utf-8")).decode("ascii")
+    b64 = base64.b64encode(f"{username}:{secret}".encode()).decode("ascii")
     return {inject_header: f"Basic {b64}"}
 
 
@@ -626,8 +627,8 @@ async def _inject_service_account_token(
     inject_prefix: str,
 ) -> dict[str, str]:
     """Obtain a Keycloak service-account token for the tool's KC client."""
-    from app.credential_broker.keycloak_client import get_service_account_token
     from app.credential_broker.approaches.approach_a import decrypt_credential
+    from app.credential_broker.keycloak_client import get_service_account_token
 
     kc_client_id = tool_record.get("kc_client_id")
     # CRITICAL-1 fix (cross-user credential bleed): the credential lookup key must
@@ -675,8 +676,11 @@ async def _inject_service_account_token(
     # audience-string allowlist below (see oauth_policy module docstring —
     # collapsing these into one allowlist previously broke every
     # service_account tool, including this one).
-    from app.services.oauth_policy import validate_service_account_scope, ServiceAccountScopeViolation
     from app.core.config import get_settings as _get_sa_settings
+    from app.services.oauth_policy import (
+        ServiceAccountScopeViolation,
+        validate_service_account_scope,
+    )
 
     try:
         validate_service_account_scope(
@@ -852,6 +856,7 @@ async def _inject_entra_client_credentials(
     Fail-closed: if credential_id is missing or credential_store lookup fails, raise.
     """
     import httpx
+
     from app.services.credential_storage import retrieve_credential
     from app.services.invocation import broker_instance
 
@@ -1039,9 +1044,9 @@ async def _inject_entra_user_token(
     aborted with an actionable "enroll first" message — never silently downgrade
     to app-only (which would broaden identity from the user to the application).
     """
-    from app.services.invocation import broker_instance
     from app.credential_broker.broker import CredentialNotEnrolledError
     from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
+    from app.services.invocation import broker_instance
 
     if broker_instance is None:
         raise CredentialInjectionError(
@@ -1123,9 +1128,9 @@ async def _inject_external_oauth_user_token(
     silently downgrade to app-only, never fall back to a different service's
     adapter.
     """
-    from app.services.invocation import broker_instance
     from app.credential_broker.broker import CredentialNotEnrolledError
     from app.credential_broker.principal_resolution import CrossTypePrincipalMismatch
+    from app.services.invocation import broker_instance
 
     if broker_instance is None:
         raise CredentialInjectionError(
@@ -1189,6 +1194,7 @@ async def _inject_external_oauth_client_credentials(
     CredentialInjectionError — never forward unauthenticated.
     """
     import httpx
+
     from app.services.credential_storage import retrieve_credential
     from app.services.invocation import broker_instance
 

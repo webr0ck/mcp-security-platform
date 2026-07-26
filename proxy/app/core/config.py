@@ -12,7 +12,7 @@ import logging
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AnyHttpUrl, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -522,7 +522,7 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
-    def _reject_placeholders_in_production(self) -> "Settings":
+    def _reject_placeholders_in_production(self) -> Settings:
         """
         Fail startup if any security-sensitive secret still has a dev
         placeholder value in a production deployment. Catching this at
@@ -643,7 +643,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _enforce_staging_parity(self) -> "Settings":
+    def _enforce_staging_parity(self) -> Settings:
         """
         AUTH-F5 / Task 1.8: staging must enforce the same OIDC audience and
         session-cookie security constraints as production.  Development is
@@ -677,7 +677,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _enforce_token_exchange_audience(self) -> "Settings":
+    def _enforce_token_exchange_audience(self) -> Settings:
         """
         S-2 (PRD-0002): when KC token exchange is enabled, OIDC_AUDIENCE must be
         a single, non-blank value REGARDLESS of ENVIRONMENT. The existing
@@ -701,7 +701,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _enforce_vault_tls(self) -> "Settings":
+    def _enforce_vault_tls(self) -> Settings:
         """
         CB-002: the Vault master secret protects every credential at rest.
         It must never transit a plaintext channel outside local development.
@@ -738,7 +738,7 @@ def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
 
 
-def get_rate_limit_for_roles(roles: list[str], settings: "Settings") -> int:
+def get_rate_limit_for_roles(roles: list[str], settings: Settings) -> int:
     """Most-permissive per-role rate limit (requests/min). Fallback: most restrictive."""
     role_map = {
         "admin": settings.RATE_LIMIT_ADMIN,

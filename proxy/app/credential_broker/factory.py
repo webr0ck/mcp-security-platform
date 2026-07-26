@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def build_broker(settings: "Settings", redis_client):
+def build_broker(settings: Settings, redis_client):
     """
     Build and return a CredentialBroker, or None if Vault is not configured.
 
@@ -49,10 +49,10 @@ def build_broker(settings: "Settings", redis_client):
         )
         return None
 
+    from app.credential_broker.adapters.registry import build_adapters
     from app.credential_broker.broker import CredentialBroker
     from app.credential_broker.kms import VaultKMSClient
     from app.credential_broker.session import SessionStore
-    from app.credential_broker.adapters.registry import build_adapters
 
     kms = VaultKMSClient(
         addr=settings.VAULT_ADDR,

@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html import escape as html_escape
 from typing import Annotated
 from uuid import uuid4
@@ -92,8 +92,8 @@ async def enrollment_status(service: str, request: Request) -> JSONResponse:
     try:
         from app.core.database import AsyncSessionLocal
         from app.credential_broker.principal_resolution import (
-            resolve_credential_owner,
             CrossTypePrincipalMismatch,
+            resolve_credential_owner,
         )
 
         async with AsyncSessionLocal() as session:
@@ -498,8 +498,8 @@ async def enroll_consent(
 
     D2: PKCE state (oauth_flow: key) is ONLY written here, after valid consent.
     """
-    from app.core.redis_client import redis_pool
     from app.core.redis_atomic import get_and_delete
+    from app.core.redis_client import redis_pool
 
     redis = redis_pool.client
 
@@ -818,8 +818,8 @@ async def callback(service: str, code: str, state: str, request: Request) -> HTM
             },
         ) from exc
 
-    from app.credential_broker.kms import VaultKMSClient
     from app.credential_broker.approaches.approach_a import encrypt
+    from app.credential_broker.kms import VaultKMSClient
     settings = get_settings()
     kms = VaultKMSClient(
         addr=settings.VAULT_ADDR,
@@ -927,7 +927,7 @@ async def _emit_credential_audit(request: Request, client_id: str, service: str)
         from app.core.database import engine as _db_engine
 
         event_id = str(uuid4())
-        ts = datetime.now(timezone.utc)
+        ts = datetime.now(UTC)
         sha256_hash = hashlib.sha256(
             f"{event_id}|CREDENTIAL_ENROLLED|{client_id}|{service}|{ts.isoformat()}".encode()
         ).hexdigest()
@@ -983,7 +983,7 @@ async def _emit_consent_grant_audit(
         from app.core.database import engine as _db_engine
 
         event_id = str(uuid4())
-        ts = datetime.now(timezone.utc)
+        ts = datetime.now(UTC)
         # Payload hash covers consent-event fields — not raw scopes (INV-002)
         sha256_hash = hashlib.sha256(
             f"{event_id}|CREDENTIAL_CONSENT|{client_id}|{service}|{scopes_hash}|{ts.isoformat()}".encode()
@@ -1041,7 +1041,7 @@ async def _emit_consent_denied_audit(
         from app.core.database import engine as _db_engine
 
         event_id = str(uuid4())
-        ts = datetime.now(timezone.utc)
+        ts = datetime.now(UTC)
         sha256_hash = hashlib.sha256(
             f"{event_id}|{event_type}|{client_id}|{service}|{reason}|{ts.isoformat()}".encode()
         ).hexdigest()

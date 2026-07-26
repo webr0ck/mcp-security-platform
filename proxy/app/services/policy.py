@@ -15,6 +15,7 @@ Interfaces:
 from __future__ import annotations
 
 import logging
+from datetime import UTC
 from typing import Any
 
 import httpx
@@ -143,14 +144,14 @@ async def manual_evaluate(input_data: dict[str, Any]) -> dict[str, Any]:
     Returns the OPA decision with an evaluated_at timestamp.
     Raises OPAUnavailableError if OPA cannot be reached.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     from uuid import uuid4
 
     result = await evaluate_policy(input_data)
     return {
         "allow": result["allow"],
         "reasons": result["reasons"],
-        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        "evaluated_at": datetime.now(UTC).isoformat(),
         # Propagate the real OPA decision_id when present (decision logging enabled);
         # fall back to a locally-generated placeholder only if OPA did not emit one.
         "opa_decision_id": result.get("decision_id") or f"dec_{uuid4().hex[:16]}",

@@ -30,6 +30,8 @@ from typing import Any
 
 from app.credential_broker.approaches.approach_a import (
     decrypt as approach_a_decrypt,
+)
+from app.credential_broker.approaches.approach_a import (
     encrypt as approach_a_encrypt,
 )
 

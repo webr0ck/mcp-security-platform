@@ -28,13 +28,13 @@ import logging
 import socket
 from urllib.parse import urlparse
 
+from app.services.auth_modes import all_mode_values
 from app.services.ssrf import (
-    _is_blocked_ip,
-    _is_floor_blocked,
     _METADATA_FLOOR_V4,
     _METADATA_FLOOR_V6,
+    _is_blocked_ip,
+    _is_floor_blocked,
 )
-from app.services.auth_modes import all_mode_values
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ def validate_mode_and_idp(
             )
         if not upstream_idp_config:
             raise InvalidOnboardingConfig(
-                f"injection_mode='entra_user_token' requires upstream_idp_config "
+                "injection_mode='entra_user_token' requires upstream_idp_config "
                 "with issuer and client_id"
             )
 
@@ -120,7 +120,7 @@ def validate_mode_and_idp(
             )
         if not upstream_idp_config:
             raise InvalidOnboardingConfig(
-                f"injection_mode='entra_client_credentials' requires upstream_idp_config "
+                "injection_mode='entra_client_credentials' requires upstream_idp_config "
                 "with issuer and client_id"
             )
 
@@ -272,8 +272,8 @@ def validate_upstream_idp_config(
 
 
 def _cidr_floor_overlap(
-    net: "ipaddress.IPv4Network | ipaddress.IPv6Network",
-) -> "ipaddress.IPv4Network | ipaddress.IPv6Network | None":
+    net: ipaddress.IPv4Network | ipaddress.IPv6Network,
+) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
     """
     Return the floor network *net* overlaps with, if any (single source of
     truth: app.services.ssrf._METADATA_FLOOR_V4/V6), else None.
@@ -289,8 +289,8 @@ def _cidr_floor_overlap(
 
 
 def _cidr_is_subset_of_floor(
-    net: "ipaddress.IPv4Network | ipaddress.IPv6Network",
-    floor_net: "ipaddress.IPv4Network | ipaddress.IPv6Network",
+    net: ipaddress.IPv4Network | ipaddress.IPv6Network,
+    floor_net: ipaddress.IPv4Network | ipaddress.IPv6Network,
 ) -> bool:
     """True if *net* is equal to or a subnet of *floor_net* (i.e. net can
     ONLY ever resolve inside the floor — never a legitimate broad range that
@@ -600,21 +600,20 @@ async def validate_upstream_url_ssrf(
                 extra={"host": host},
             )
         return matched_entry
-    else:
-        # Legacy path: block any private IP (no allowlist)
-        if _is_dev_http:
-            # No allowlist configured → no provenance record is possible, so
-            # dev-mode HTTP has nothing safe to bind to. Fail closed.
+    # Legacy path: block any private IP (no allowlist)
+    if _is_dev_http:
+        # No allowlist configured → no provenance record is possible, so
+        # dev-mode HTTP has nothing safe to bind to. Fail closed.
+        raise InvalidOnboardingConfig(
+            f"Plain-HTTP upstream '{host}' requires UPSTREAM_PRIVATE_CIDR_ALLOWLIST "
+            "to be configured with the CIDR covering the private target. "
+            "Use HTTPS for public upstreams."
+        )
+    for ip_str in ip_addresses:
+        if _is_blocked_ip(ip_str):
             raise InvalidOnboardingConfig(
-                f"Plain-HTTP upstream '{host}' requires UPSTREAM_PRIVATE_CIDR_ALLOWLIST "
-                "to be configured with the CIDR covering the private target. "
-                "Use HTTPS for public upstreams."
+                f"Hostname '{host}' resolves to blocked private/reserved IP '{ip_str}'"
             )
-        for ip_str in ip_addresses:
-            if _is_blocked_ip(ip_str):
-                raise InvalidOnboardingConfig(
-                    f"Hostname '{host}' resolves to blocked private/reserved IP '{ip_str}'"
-                )
 
     logger.info(f"Validated upstream URL SSRF: {upstream_url}")
     return None

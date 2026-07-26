@@ -92,7 +92,21 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "S", "B", "A", "C4", "DTZ", "T20", "RET", "SIM"]
-ignore = ["S101"]  # Allow assert in tests
+ignore = [
+    "S101",  # assert — used throughout the tests
+    # B008 function-call-in-default-argument: 26 hits, all FastAPI's own
+    # `x = Depends(get_db)` / `Query(...)` idiom, which is the documented way to
+    # declare dependencies. Flagging it here is pure noise against a framework
+    # convention, so it is off globally rather than silenced site by site.
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 561 of the 1030 remaining E501 hits are this one file: it renders HTML inside
+# Python f-strings, where a "line" is a chunk of markup and wrapping it hurts
+# readability rather than helping. Ignored HERE rather than raising the global
+# line-length, so every other module stays held to 100 columns.
+"app/routers/portal.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -22,16 +22,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 
+from app.core.telemetry import telemetry
 from app.credential_broker.broker import CredentialBroker
 from app.credential_broker.registry import Registry
-from app.core.telemetry import telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,7 @@ async def _lookup_profile_with_cache(
       ProfileLookupError: if DB is unreachable and no cached profile available.
     """
     import json as _json
+
     from app.core.redis_client import redis_pool
 
     # Cache key disambiguates named-profile path from legacy path.
@@ -128,8 +129,9 @@ async def _lookup_profile_with_cache(
     profile_data: dict | None = None
     db_succeeded = False
     try:
-        from app.core.database import AsyncSessionLocal
         from sqlalchemy import text
+
+        from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as _db:
             if profile_uuid:
                 # Task 4.3: named-profile path — query by profile_uuid FK
@@ -222,6 +224,7 @@ async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
         available.
     """
     import json as _json
+
     from app.core.redis_client import redis_pool
 
     cache_key = f"mcp_profile:uuid:{profile_uuid}:__has_bindings__"
@@ -251,8 +254,9 @@ async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
     has_binding: bool | None = None
     db_succeeded = False
     try:
-        from app.core.database import AsyncSessionLocal
         from sqlalchemy import text
+
+        from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as _db:
             row = await _db.execute(
                 text("SELECT COUNT(*) AS cnt FROM mcp_profiles WHERE profile_uuid=:uuid"),
@@ -330,6 +334,7 @@ async def _record_connection_result(
         return  # unlinked tool — nothing to flag
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
@@ -439,7 +444,6 @@ async def invoke_tool(
         OPADenyError: If OPA denies the invocation.
         OPAUnavailableError: If OPA is unreachable (returns 503).
     """
-    from app.services.anomaly import evaluate_anomaly
     from app.services.policy import OPADenyError, OPAUnavailableError, evaluate_policy
 
     tool_id = tool_record["tool_id"]
@@ -470,8 +474,9 @@ async def invoke_tool(
     # to a server someone deliberately locked down).
     # -------------------------------------------------------------------------
     if tool_server_id:
-        from app.core.database import AsyncSessionLocal as _MaintDBSession
         from sqlalchemy import text as _maint_sql
+
+        from app.core.database import AsyncSessionLocal as _MaintDBSession
 
         try:
             async with _MaintDBSession() as _mconn:
@@ -502,10 +507,12 @@ async def invoke_tool(
     # When SCAN_FRESHNESS_ENFORCED=False (default), only a warning is emitted.
     # -------------------------------------------------------------------------
     if tool_server_id:
+        from datetime import timedelta
+
+        from sqlalchemy import text as _sql_text
+
         from app.core.config import settings as _scan_settings
         from app.core.database import AsyncSessionLocal
-        from datetime import timedelta
-        from sqlalchemy import text as _sql_text
 
         try:
             async with AsyncSessionLocal() as _conn:
@@ -518,7 +525,7 @@ async def invoke_tool(
                 )
                 _scan_row = _row.fetchone()
             _last = _scan_row[0] if _scan_row else None
-            _age_limit = datetime.now(timezone.utc) - timedelta(hours=_scan_settings.SCAN_MAX_AGE_HOURS)
+            _age_limit = datetime.now(UTC) - timedelta(hours=_scan_settings.SCAN_MAX_AGE_HOURS)
             _stale = _last is None or _last < _age_limit
             if _stale:
                 if _scan_settings.SCAN_FRESHNESS_ENFORCED:
@@ -541,12 +548,11 @@ async def invoke_tool(
                         session_jti=session_jti,
                     )
                     raise ScanFreshnessError(tool_id, tool_name, _last)
-                else:
-                    logger.warning(
-                        "Scan freshness stale for server %s (last=%s) — warn-only "
-                        "(SCAN_FRESHNESS_ENFORCED=False)",
-                        tool_server_id, _last,
-                    )
+                logger.warning(
+                    "Scan freshness stale for server %s (last=%s) — warn-only "
+                    "(SCAN_FRESHNESS_ENFORCED=False)",
+                    tool_server_id, _last,
+                )
         except ScanFreshnessError:
             raise
         except Exception as _sf_exc:
@@ -888,8 +894,9 @@ async def invoke_tool(
         # upstream_allowlist_entry was not pre-fetched in tool_record (e.g. SELECT *
         # from tool_registry does not carry server_registry columns). Fetch it once.
         try:
-            from app.core.database import AsyncSessionLocal as _ASL
             from sqlalchemy import text as _text
+
+            from app.core.database import AsyncSessionLocal as _ASL
             async with _ASL() as _db:
                 _sr = await _db.execute(
                     _text(
@@ -943,7 +950,8 @@ async def invoke_tool(
     # enforcement, or the credentials-in-URL check.
     # -------------------------------------------------------------------------
     from app.core.config import settings
-    from app.services.ssrf import SSRFError, validate_server_url as _validate_server_url
+    from app.services.ssrf import SSRFError
+    from app.services.ssrf import validate_server_url as _validate_server_url
 
     try:
         _validate_server_url(
@@ -964,8 +972,8 @@ async def invoke_tool(
     # tools. CredentialInjectionError is re-raised after emitting a deny audit.
     # -------------------------------------------------------------------------
     from app.credential_broker.dispatcher import (
-        CredentialInjectionError,
         CredentialEnrollmentRequiredError,
+        CredentialInjectionError,
         CrossTypePrincipalFallbackDenied,
     )
 
@@ -1115,7 +1123,7 @@ async def invoke_tool(
     # -------------------------------------------------------------------------
     # (credential injection was moved to Step 3c-pre, before DNS-rebind)
 
-    start_ts = datetime.now(timezone.utc)
+    start_ts = datetime.now(UTC)
     upstream_response: dict[str, Any] = {}
     upstream_error: Exception | None = None
     upstream_challenge: dict[str, Any] | None = None
@@ -1277,7 +1285,7 @@ async def invoke_tool(
             if credential is not None:
                 credential.zero()
 
-        end_ts = datetime.now(timezone.utc)
+        end_ts = datetime.now(UTC)
         latency_ms = int((end_ts - start_ts).total_seconds() * 1000)
 
         # -------------------------------------------------------------------------
@@ -1422,9 +1430,9 @@ async def invoke_tool(
     # processes them as content, so they must be screened here before return.
     # -------------------------------------------------------------------------
     from app.services.response_filter import (
-        screen_response,
         BLOCK_ON_MATCH,
         INJECTION_DETECTED_RESPONSE,
+        screen_response,
     )
 
     screened_text = json.dumps(upstream_response.get("result", upstream_response))
@@ -1483,8 +1491,9 @@ async def _lookup_server_trust(server_id: str) -> tuple[int | None, str | None]:
     """
     if not server_id:
         return (None, None)
-    from app.core.database import AsyncSessionLocal
     from sqlalchemy import text
+
+    from app.core.database import AsyncSessionLocal
 
     try:
         async with AsyncSessionLocal() as _db:
@@ -1642,9 +1651,11 @@ def _compute_hmac_signature(sha256_hash: str, event: Any) -> str | None:
     may omit the key; the checker falls back to plain hash verification).
     """
     try:
-        import hmac as _hmac
         import hashlib as _hashlib
+        import hmac as _hmac
+
         from mcp_audit_logger.hasher import canonical_audit_json as _canonical_audit_json
+
         from app.core.config import settings as _settings
 
         # Use settings (not os.environ) so secrets injected via Vault agent,
@@ -1717,7 +1728,7 @@ async def _emit_audit_event(
             is reserved for reasons a request was actually denied.
     """
     try:
-        from mcp_audit_logger import AuditEvent, AuditEventType, AuditOutcome, MCPAuditLogger
+        from mcp_audit_logger import AuditEvent, AuditEventType, AuditOutcome
 
         outcome_map = {
             "allow": AuditOutcome.ALLOW,
@@ -1773,6 +1784,7 @@ async def _emit_audit_event(
         # a nullable UUID FK, so NULL is valid; cast is applied only for non-None.
         try:
             from sqlalchemy import text as _text
+
             from app.core.database import engine as _db_engine
             async with _db_engine.begin() as conn:
                 await conn.execute(

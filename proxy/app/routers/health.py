@@ -9,7 +9,7 @@ See docs/API.md Section 2.1 for full specification.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from fastapi import APIRouter
@@ -70,7 +70,7 @@ async def liveness() -> JSONResponse:
         content={
             "status": overall,
             "version": settings.PLATFORM_VERSION,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "services": services,
         },
     )

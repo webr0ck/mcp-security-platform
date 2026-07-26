@@ -25,7 +25,7 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -241,6 +241,7 @@ async def oidc_login(
     # Persist PKCE state in DB
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             await session.execute(
@@ -299,6 +300,7 @@ async def oidc_callback(
     # Look up PKCE state
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -384,6 +386,7 @@ async def oidc_callback(
     if _requested_profile_name:
         try:
             from sqlalchemy import text as _satext
+
             from app.core.database import AsyncSessionLocal as _ASLS
             async with _ASLS() as _pdb:
                 _prow = await _pdb.execute(
@@ -460,10 +463,12 @@ async def oidc_callback(
     # Decode ID token claims — verify signature using JWKS (Bug 3 fix).
     # Falls back to unverified decode only when JWKS is unavailable (fail-open).
     try:
+        import json as _json
+
         import jwt as jose_jwt
         from jwt.algorithms import RSAAlgorithm
         from jwt.exceptions import InvalidTokenError as JWTError
-        import json as _json
+
         from app.middleware.auth import _fetch_jwks
 
         try:
@@ -568,8 +573,8 @@ async def oidc_callback(
         profile_uuid=_profile_uuid,
     )
 
-    expires_at = datetime.now(timezone.utc).replace(microsecond=0)
-    expires_at = datetime.fromtimestamp(time.time() + settings.SESSION_JWT_EXPIRE_SECONDS, tz=timezone.utc)
+    expires_at = datetime.now(UTC).replace(microsecond=0)
+    expires_at = datetime.fromtimestamp(time.time() + settings.SESSION_JWT_EXPIRE_SECONDS, tz=UTC)
 
     # AUTH-007: encrypt KC tokens at rest before persisting.
     # Reuses the platform's AES-256-GCM helper (approach_a) with the same
@@ -593,6 +598,7 @@ async def oidc_callback(
     # Update session record with identity + tokens + optional profile binding (Task 4.3)
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             await session.execute(
@@ -643,6 +649,7 @@ async def oidc_callback(
     # source of truth for KC-mapped roles).
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             for role in proxy_roles:
@@ -701,13 +708,15 @@ async def oidc_logout(
             subject = claims.get("sub")
             # Revoke in DB
             try:
+                from datetime import datetime
+
                 from sqlalchemy import text
+
                 from app.core.database import AsyncSessionLocal
-                from datetime import datetime, timezone
                 async with AsyncSessionLocal() as session:
                     await session.execute(
                         text("UPDATE oidc_sessions SET revoked_at = :now WHERE session_jwt_jti = :jti"),
-                        {"now": datetime.now(timezone.utc), "jti": jti},
+                        {"now": datetime.now(UTC), "jti": jti},
                     )
                     await session.commit()
             except Exception as exc:
@@ -722,6 +731,7 @@ async def oidc_logout(
             if jti:
                 try:
                     import math
+
                     from app.core.redis_client import redis_pool
                     exp = claims.get("exp", 0)
                     remaining_ttl = max(math.ceil(exp - time.time()), 1)
@@ -774,6 +784,10 @@ async def oidc_session_info(
         return JSONResponse(status_code=401, content={"error": "invalid_session"})
 
     # Enforce JTI revocation — consistent with auth middleware on all other paths.
+    # Imported here rather than at module scope to match the other lazy middleware
+    # imports in this file and avoid an import cycle (auth imports from routers).
+    from app.middleware.auth import _is_session_jti_revoked  # noqa: PLC0415
+
     jti = claims.get("jti")
     if jti and await _is_session_jti_revoked(jti):
         return JSONResponse(status_code=401, content={"error": "session_revoked"})
@@ -823,6 +837,7 @@ async def token_refresh(
     # Look up the stored KC refresh token
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as db:
             result = await db.execute(
@@ -847,7 +862,8 @@ async def token_refresh(
     if not _raw_rt_blob:
         return JSONResponse(status_code=400, content={"error": "no_refresh_token_stored"})
     try:
-        from app.credential_broker.approaches.approach_a import decrypt as _dec, encrypt as _enc
+        from app.credential_broker.approaches.approach_a import decrypt as _dec
+        from app.credential_broker.approaches.approach_a import encrypt as _enc
         from app.credential_broker.kms import load_master_secret_standalone
         _master_rt = await load_master_secret_standalone()
         # subject comes from the row; fall back to JWT claims if missing.
@@ -865,7 +881,7 @@ async def token_refresh(
             row.session_id, dec_exc,
         )
         try:
-            _revoke_ts = datetime.now(timezone.utc)
+            _revoke_ts = datetime.now(UTC)
             async with AsyncSessionLocal() as _revoke_db:
                 await _revoke_db.execute(
                     text(
@@ -884,6 +900,7 @@ async def token_refresh(
             # if DB revocation write failed silently after decrypt-else-revoke).
             try:
                 import math as _math
+
                 from app.core.redis_client import redis_pool as _redis_pool
                 _jti = jti  # jti decoded from claims earlier in this function (line 712)
                 _exp = claims.get("exp", 0)
@@ -959,7 +976,7 @@ async def token_refresh(
     # Falls back to SESSION_JWT_EXPIRE_SECONDS when KC doesn't return expires_in.
     _kc_expires_in: int = token_data.get("expires_in", settings.SESSION_JWT_EXPIRE_SECONDS)
     _new_expires_at = datetime.fromtimestamp(
-        time.time() + _kc_expires_in, tz=timezone.utc
+        time.time() + _kc_expires_in, tz=UTC
     )
 
     # Update DB: rotate jti + refresh token, store new KC access token.

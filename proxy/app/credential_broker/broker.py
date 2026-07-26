@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.credential_broker.adapters.base import TokenExchangeError
+from app.credential_broker.approaches.approach_a import decrypt, encrypt
 from app.credential_broker.kms import VaultKMSClient
 from app.credential_broker.models import CredentialResult
 from app.credential_broker.session import SessionStore
-from app.credential_broker.approaches.approach_a import decrypt, encrypt
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +43,12 @@ class CredentialBroker:
         self._master_secret_fetched_at: datetime | None = None
 
     @property
-    def vault_client(self) -> "VaultKMSClient":
+    def vault_client(self) -> VaultKMSClient:
         """Public accessor used by dispatcher helpers (entra_client_credentials path)."""
         return self._kms
 
     @property
-    def db_pool(self) -> "async_sessionmaker":
+    def db_pool(self) -> async_sessionmaker:
         """Public accessor used by dispatcher helpers (entra_client_credentials path)."""
         return self._db_factory
 
@@ -63,7 +62,7 @@ class CredentialBroker:
         from app.core.config import get_settings
         settings = get_settings()
         ttl = timedelta(seconds=settings.BROKER_MASTER_SECRET_TTL_SECONDS)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         expired = (
             self._master_secret_fetched_at is None
@@ -99,7 +98,7 @@ class CredentialBroker:
         cached = await self._session.get(session_id, service)
         if cached:
             exp = datetime.fromisoformat(cached["expires_at"])
-            if exp > datetime.now(timezone.utc):
+            if exp > datetime.now(UTC):
                 return CredentialResult(
                     token=cached["value"],
                     expires_at=exp,
@@ -135,6 +134,7 @@ class CredentialBroker:
         principal_type: str | None = None,
     ) -> CredentialResult:
         from sqlalchemy import text
+
         from app.credential_broker.principal_resolution import resolve_credential_owner
 
         async with self._db_factory() as db:
@@ -237,7 +237,7 @@ class CredentialBroker:
             )
             await db.commit()
 
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
         return CredentialResult(
             token=access_token,
             expires_at=expires_at,

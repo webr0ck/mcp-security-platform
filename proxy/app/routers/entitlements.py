@@ -31,7 +31,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import logging
-from typing import Literal, Optional
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -232,7 +232,7 @@ async def _emit_entitlement_audit(
     """
     try:
         event_id = str(uuid4())
-        ts = datetime.datetime.now(datetime.timezone.utc)
+        ts = datetime.datetime.now(datetime.UTC)
         # Preimage encodes all relevant fields — sha256_hash in audit_events
         # acts as a tamper-evident seal.
         sha256_hash = hashlib.sha256(

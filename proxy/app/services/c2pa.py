@@ -13,7 +13,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-
 C2PA_ASSERTION_TYPE = "io.mcp-security-platform.ai-provenance"
 C2PA_ASSERTION_OID = "1.3.6.1.4.1.60000.mcp.c2pa.ai-provenance"
 

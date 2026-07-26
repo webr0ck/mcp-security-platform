@@ -16,9 +16,9 @@ back to detection-only (log + audit, allow through).
 """
 from __future__ import annotations
 
-import re
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)

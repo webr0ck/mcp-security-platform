@@ -10,7 +10,7 @@ import json
 import logging
 
 from app.core.asyncpg_pool import asyncpg_pool
-from app.core.redis_client import redis_pool, get_anomaly_window_with_timestamps
+from app.core.redis_client import get_anomaly_window_with_timestamps, redis_pool
 from app.services.anomaly import _score_window
 
 logger = logging.getLogger(__name__)

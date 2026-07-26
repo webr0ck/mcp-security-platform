@@ -30,7 +30,7 @@ def _disable_core_dumps() -> None:
     try:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         logger.info("Core dumps disabled")
-    except (ValueError, resource.error) as exc:
+    except (OSError, ValueError) as exc:
         logger.warning("Could not disable core dumps: %s", exc)
 
 

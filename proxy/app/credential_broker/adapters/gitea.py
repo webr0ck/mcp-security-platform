@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 from app.credential_broker.adapters.base import BaseAdapter
 from app.credential_broker.models import Token
@@ -18,7 +18,7 @@ class GiteaAdapter(BaseAdapter):
     async def provision(self, user_sub: str, session_id: str) -> Token:
         return Token(
             value=self._token,
-            expires_at=datetime.now(timezone.utc) + timedelta(days=3650),
+            expires_at=datetime.now(UTC) + timedelta(days=3650),
             token_id="static",
         )
 

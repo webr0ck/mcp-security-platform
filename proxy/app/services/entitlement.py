@@ -240,8 +240,9 @@ async def get_owned_server_ids(principal_id: str) -> list[str]:
     'human' and 'agent' principals that carry a server_owner/manager role in any principal_type
     column are included. This is intentional: the OPA rule is role-based, not type-based.
     """
-    from app.core.redis_client import redis_pool
     import json
+
+    from app.core.redis_client import redis_pool
 
     cache_key = f"owned_servers:{principal_id}"
 

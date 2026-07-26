@@ -39,6 +39,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+
 from app.credential_broker.dispatcher import (
     CredentialEnrollmentRequiredError,
     ServiceCredentialMissingError,
@@ -141,6 +142,7 @@ async def _get_enrollment_status(client_id: str, base_url: str) -> list[dict]:
     credential in credential_store. Returns a list of status dicts.
     """
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
 
     base = base_url.rstrip("/")
@@ -346,6 +348,7 @@ async def _load_grants_data(client_id: str) -> tuple[dict, dict]:
       2. Empty grants dict — tools/list is best-effort; OPA enforces on invoke
     """
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     from app.core.redis_client import redis_pool
 
@@ -418,11 +421,13 @@ async def _lookup_profile_row(profile_id: str, mcp_name: str):
     Separate function so tests can patch it cleanly.
     """
     import json as _json
+
+    from redis.exceptions import RedisError
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     from app.core.redis_client import redis_pool
     from app.services.invocation import ProfileLookupError
-    from redis.exceptions import RedisError
 
     cache_key = f"profile_row:{profile_id}:{mcp_name}"
     _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
@@ -503,11 +508,13 @@ async def _lookup_profile_mcp_binding(profile_uuid: str, mcp_name: str):
     Separate function so tests can patch it cleanly.
     """
     import json as _json
+
+    from redis.exceptions import RedisError
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     from app.core.redis_client import redis_pool
     from app.services.invocation import ProfileLookupError
-    from redis.exceptions import RedisError
 
     cache_key = f"profile_binding:{profile_uuid}:{mcp_name}"
     _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
@@ -610,6 +617,7 @@ async def _registered_tools_for_client(
     tools/list handler which returns a JSON-RPC 503 error.
     """
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     from app.services.entitlement import check_entitlement
 
@@ -809,7 +817,9 @@ async def _resolve_upstream_subtool_name(
 async def _route_to_registry(name: str, args: dict, request: Request, req_id: Any) -> dict:
     """Route a direct tools/call for a registry tool through the full security pipeline."""
     from uuid import uuid4
+
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
 
     client_id = getattr(request.state, "client_id", "unknown")
@@ -853,7 +863,11 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             logger.info("MCP invoke denied (not entitled) tool=%s client=%s reason=%s",
                         name, client_id, exc.reason)
             return _err(req_id, -32003, "Access denied: not entitled to this tool's server")
-        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError, ServerInMaintenanceError
+        from app.services.invocation import (
+            ScanFreshnessError,
+            ServerInMaintenanceError,
+            TaintFloorDenyError,
+        )
         if isinstance(exc, ScanFreshnessError):
             logger.warning("MCP invoke denied (stale scan) tool=%s client=%s", name, client_id)
             return _err(req_id, -32003, "Access denied: server supply-chain scan is stale")
@@ -968,7 +982,8 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
     content = upstream.get("result", {}).get("content", [])
     if not content:
         content = [{"type": "text", "text": json.dumps(upstream.get("result", {}))}]
-    from app.services.trust_labeler import get_labeler as _get_labeler, build_envelope_result as _build_envelope_result
+    from app.services.trust_labeler import build_envelope_result as _build_envelope_result
+    from app.services.trust_labeler import get_labeler as _get_labeler
     _upstream_meta = upstream.get("meta", {})
     _server_id = _upstream_meta.get("server_id", "")
     _result_payload = _build_envelope_result(
@@ -1067,6 +1082,7 @@ async def _handle_enrollment_status(args: dict, request: Request) -> dict:
 async def _handle_list_registered_tools(args: dict, request: Request) -> dict:
     status_filter = args.get("status", "all")
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     try:
         async with AsyncSessionLocal() as session:
@@ -1107,7 +1123,9 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
     quarantine check → OPA policy → anomaly → credential injection → upstream MCP server → audit log.
     """
     from uuid import uuid4
+
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     from app.services import invocation as inv_svc
 
@@ -1296,7 +1314,11 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
             logger.info("invoke_tool denied (not entitled) tool=%s client=%s reason=%s",
                         tool_name, client_id, exc.reason)
             return {"type": "text", "text": "Access denied: not entitled to this tool's server"}
-        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError, ServerInMaintenanceError
+        from app.services.invocation import (
+            ScanFreshnessError,
+            ServerInMaintenanceError,
+            TaintFloorDenyError,
+        )
         if isinstance(exc, ScanFreshnessError):
             logger.warning("invoke_tool denied (stale scan) tool=%s client=%s", tool_name, client_id)
             return {"type": "text", "text": "Access denied: server supply-chain scan is stale"}
@@ -1342,6 +1364,7 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
 async def _handle_list_available_mcps(args: dict, request: Request) -> dict:
     client_id: str = getattr(request.state, "client_id", "")
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     try:
         async with AsyncSessionLocal() as db:
@@ -1386,6 +1409,7 @@ async def _handle_list_available_mcps(args: dict, request: Request) -> dict:
 async def _handle_get_my_profile(args: dict, request: Request) -> dict:
     principal: str = getattr(request.state, "client_id", "")
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     try:
         async with AsyncSessionLocal() as db:
@@ -1425,8 +1449,14 @@ async def _handle_enable_mcp_server(args: dict, request: Request) -> dict:
     server_name: str = args.get("server_name", "").strip()
     if not server_name:
         return {"type": "text", "text": "Error: server_name is required"}
-    from app.routers.profiles import _assert_mcp_exists, _get_profile_row, _upsert_profile_row, _invalidate_profile_cache
     from fastapi import HTTPException
+
+    from app.routers.profiles import (
+        _assert_mcp_exists,
+        _get_profile_row,
+        _invalidate_profile_cache,
+        _upsert_profile_row,
+    )
     try:
         await _assert_mcp_exists(server_name)
     except HTTPException as exc:
@@ -1457,8 +1487,14 @@ async def _handle_disable_mcp_server(args: dict, request: Request) -> dict:
     server_name: str = args.get("server_name", "").strip()
     if not server_name:
         return {"type": "text", "text": "Error: server_name is required"}
-    from app.routers.profiles import _assert_mcp_exists, _get_profile_row, _upsert_profile_row, _invalidate_profile_cache
     from fastapi import HTTPException
+
+    from app.routers.profiles import (
+        _assert_mcp_exists,
+        _get_profile_row,
+        _invalidate_profile_cache,
+        _upsert_profile_row,
+    )
     try:
         await _assert_mcp_exists(server_name)
     except HTTPException as exc:
@@ -1616,9 +1652,10 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
         # OPA policy check for internal platform tools.
         # 'invoke_tool' runs its own full pipeline — skip here to avoid double-evaluation.
         if name != "invoke_tool":
-            from app.services.policy import evaluate_policy
-            from app.services.invocation import emit_internal_tool_event
             from uuid import uuid4
+
+            from app.services.invocation import emit_internal_tool_event
+            from app.services.policy import evaluate_policy
             # 6.1: evaluate OPA under the REAL caller identity, not a hardcoded
             # platform_internal/platform_admin principal. authz.rego authorizes
             # platform meta-tools by role (platform_meta_tool_roles) without
@@ -1672,8 +1709,9 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
 
             # Emit audit for internal tools only (invoke_tool audits internally)
             if name != "invoke_tool":
-                from app.services.invocation import emit_internal_tool_event
                 from uuid import uuid4
+
+                from app.services.invocation import emit_internal_tool_event
                 await emit_internal_tool_event(
                     tool_name=name,
                     client_id=client_id,
@@ -1683,7 +1721,8 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
                     latency_ms=latency_ms,
                     opa_decision_id=f"dec_{uuid4().hex[:16]}",
                 )
-            from app.services.trust_labeler import get_labeler as _get_labeler, build_envelope_result as _build_envelope_result
+            from app.services.trust_labeler import build_envelope_result as _build_envelope_result
+            from app.services.trust_labeler import get_labeler as _get_labeler
             _platform_payload = _build_envelope_result(
                 content=[content],
                 labeler=_get_labeler(),
@@ -1716,7 +1755,7 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
             # be swallowed into a JSON-RPC tool-execution error. The meta-tools
             # are read-only, so a post-execution 500 has no side effect to undo.
             raise
-        except Exception as exc:
+        except Exception:
             logger.exception("Tool handler error: %s", name)
             return _err(req_id, -32603, "Tool execution error (internal). Check server logs.")
 
@@ -1749,7 +1788,7 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
     # theoretical case where client_id is None so no request can slip through unlimited.
     client_id = getattr(request.state, "client_id", None)
     rl_key_id = client_id or (request.client.host if request.client else "unknown")
-    from app.core.config import get_settings, get_rate_limit_for_roles
+    from app.core.config import get_rate_limit_for_roles, get_settings
     from app.services.limits import get_rate_limit
     _roles = getattr(request.state, "client_roles", [])
     _role_default = get_rate_limit_for_roles(_roles, get_settings())

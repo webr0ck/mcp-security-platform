@@ -118,7 +118,7 @@ def _embedded_v4s(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
 
 def _is_blocked_ip(
     addr: str,
-    allowed_cidr: "ipaddress.IPv4Network | ipaddress.IPv6Network | None" = None,
+    allowed_cidr: ipaddress.IPv4Network | ipaddress.IPv6Network | None = None,
 ) -> bool:
     """
     True if *addr* is a private/reserved IP that should be blocked.
@@ -141,10 +141,7 @@ def _is_blocked_ip(
         # IPv6: re-check any embedded IPv4 (mapped/6to4/Teredo/NAT64/v4-compatible)
         # against the V4 blocklist so a globally-routable wrapper cannot smuggle a
         # private/loopback/metadata IPv4 target through.
-        if any(_v4_blocked(v4) for v4 in _embedded_v4s(ip)):
-            blocked = True
-        # Explicit IPv6 blocklist (loopback, unspecified, ULA, link-local, AWS v6 metadata).
-        elif any(ip in net for net in _BLOCKED_V6):
+        if any(_v4_blocked(v4) for v4 in _embedded_v4s(ip)) or any(ip in net for net in _BLOCKED_V6):
             blocked = True
         else:
             # Deny-by-default: only a globally-routable IPv6 may be an upstream
@@ -170,8 +167,8 @@ def _is_blocked_ip(
 
 
 def _candidate_in_cidr(
-    ip: "ipaddress.IPv4Address | ipaddress.IPv6Address",
-    net: "ipaddress.IPv4Network | ipaddress.IPv6Network",
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    net: ipaddress.IPv4Network | ipaddress.IPv6Network,
 ) -> bool:
     """Version-safe membership check — never raises across mismatched families."""
     try:
@@ -224,7 +221,7 @@ def validate_server_url(
     # never silently degrade to "no exemption" nor "everything exempt".
     # Parsed before the scheme check: the dev-mode raw-IP gate below must also
     # honor the registered allowlist entry.
-    _allowed_net: "ipaddress.IPv4Network | ipaddress.IPv6Network | None" = None
+    _allowed_net: ipaddress.IPv4Network | ipaddress.IPv6Network | None = None
     if allowed_cidr:
         try:
             _allowed_net = ipaddress.ip_network(allowed_cidr, strict=False)
@@ -246,7 +243,7 @@ def validate_server_url(
         # allowlisted private CIDRs, and this gate must not re-block it.
         # Raw PUBLIC IPs over http stay blocked (the isdigit clause), same as before.
         try:
-            _host_ip: "ipaddress.IPv4Address | ipaddress.IPv6Address | None" = ipaddress.ip_address(host)
+            _host_ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = ipaddress.ip_address(host)
         except ValueError:
             _host_ip = None
         allowlisted_raw_ip = (

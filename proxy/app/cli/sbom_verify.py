@@ -35,6 +35,7 @@ async def verify_sbom_for_tool(tool_id: str) -> int:
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as session:
@@ -79,13 +80,12 @@ async def verify_sbom_for_tool(tool_id: str) -> int:
             f"(sbom_id={sbom_id})"
         )
         return 0
-    else:
-        print(  # noqa: T201
-            f"FAIL: SBOM signature INVALID for tool '{tool_name}' v{tool_version} "
-            f"(sbom_id={sbom_id}). INV-006 violation.",
-            file=sys.stderr,
-        )
-        return 1
+    print(  # noqa: T201
+        f"FAIL: SBOM signature INVALID for tool '{tool_name}' v{tool_version} "
+        f"(sbom_id={sbom_id}). INV-006 violation.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def main() -> None:

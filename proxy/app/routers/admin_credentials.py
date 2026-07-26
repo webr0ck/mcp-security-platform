@@ -14,8 +14,6 @@ Credentials are encrypted with AES-256-GCM (Approach A) before storage.
 from __future__ import annotations
 
 import logging
-import os
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -80,6 +78,7 @@ async def list_tools_with_credential_status(request: Request):
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -140,6 +139,7 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
     # Validate tool exists
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -196,8 +196,8 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
 
     # Encrypt with Approach A
     try:
-        from app.credential_broker.kms import load_master_secret_standalone
         from app.credential_broker.approaches.approach_a import encrypt
+        from app.credential_broker.kms import load_master_secret_standalone
 
         master = await load_master_secret_standalone()
         blob = encrypt(
@@ -217,6 +217,7 @@ async def upload_credential(request: Request, tool_id: str, body: CredentialUplo
     # Upsert into credential_store
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -298,6 +299,7 @@ async def revoke_credential(
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -354,6 +356,7 @@ async def update_injection_mode(
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             await session.execute(
@@ -415,6 +418,7 @@ async def _emit_credential_audit(
     try:
         from mcp_audit_logger import AuditEvent, AuditEventType, MCPAuditLogger
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
 
         event = AuditEvent(

@@ -19,9 +19,8 @@ The proxy API endpoint creates an audit_jobs row and delegates to a background t
 """
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -45,7 +44,7 @@ async def run_compliance_check(
         Compliance report dict matching the API.md Section 2.6 schema.
     """
     report_id = f"rpt_{uuid4().hex[:16]}"
-    run_at = datetime.now(timezone.utc)
+    run_at = datetime.now(UTC)
     period_end = run_at
     from datetime import timedelta
 

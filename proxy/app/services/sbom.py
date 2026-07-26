@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -72,7 +72,7 @@ def generate_cyclonedx_sbom(
     bom_ref = f"sbom_{uuid4().hex[:16]}"
     schema_json = json.dumps(schema, sort_keys=True)
     schema_hash = sha256_of(schema_json)
-    audit_timestamp = datetime.now(timezone.utc).isoformat()
+    audit_timestamp = datetime.now(UTC).isoformat()
 
     external_refs = []
     if source_repo:

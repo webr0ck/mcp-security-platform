@@ -21,7 +21,7 @@ from app.services import platform_secrets
 _LLM_TOKEN_NAME = "llm-api"
 
 _CACHE_TTL = 30.0
-_cache: "LlmSettings | None" = None
+_cache: LlmSettings | None = None
 _cache_at: float = 0.0
 
 

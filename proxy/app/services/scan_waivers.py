@@ -15,9 +15,8 @@ reuses directly rather than re-inventing the emit path).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,7 +65,7 @@ async def create_waiver(
         raise InvalidWaiverRequest(f"principal_type must be one of {sorted(_VALID_PRINCIPAL_TYPES)}")
     if not principal_id or not principal_id.strip():
         raise InvalidWaiverRequest("waived_by principal_id is required — a waiver must be attributable")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if expires_at <= now:
         raise InvalidWaiverRequest("expires_at must be in the future — an already-expired waiver is a no-op")
 
