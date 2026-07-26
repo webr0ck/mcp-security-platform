@@ -260,7 +260,7 @@
       const active = p === activeName;
       return '<button class="adm-tab' + (active ? ' active' : '') + '"' +
              (active ? ' aria-current="page"' : '') + ' ' +
-             'onclick="loadAdminTab(\'' + p + '\')">' + (_TAB_MAP[p] || p) + '</button>';
+             'data-act="loadAdminTab" data-a0="' + p + '">' + (_TAB_MAP[p] || p) + '</button>';
     }).join('');
   }
   function loadAdminTab(name, opts) {
@@ -754,10 +754,10 @@
         document.getElementById('det-drawer-rule').style.display = 'none';
         const reasonsHtml = d.reasons.map(r =>
           '<code style="font-size:11px;background:rgba(255,255,255,0.06);border-radius:4px;padding:1px 5px;margin-right:4px">' + _escHtml(r) + '</code>' +
-          '<a href="#" style="font-size:11px;color:var(--cyan);margin-right:10px" onclick="viewPolicyRule(' + JSON.stringify(r) + ');return false">view rule</a>'
+          '<a href="#" class="pol-rule-link" data-act="viewPolicyRule" data-pd="1" data-json="' + _escHtml(JSON.stringify([r])) + '">view rule</a>'
         ).join(' ');
         const serverHtml = d.server_id
-          ? '<a href="#" style="color:var(--cyan)" onclick="htmx.ajax(\'GET\',\'/portal/fragments/admin/servers\',{target:\'#adm-content\',swap:\'innerHTML\'});return false">' + _escHtml(d.server_name) + '</a>'
+          ? '<a href="#" class="srv-link" data-act="htmxGet" data-pd="1" data-a0="/portal/fragments/admin/servers">' + _escHtml(d.server_name) + '</a>'
           : '<span style="color:var(--muted)">unattributed (legacy row or tool deleted)</span>';
         document.getElementById('det-drawer-body').innerHTML =
           '<div><strong>Time</strong> — ' + _escHtml(d.ts) + '</div>' +
@@ -1343,3 +1343,128 @@ document.body.addEventListener('htmx:afterSettle', function(evt) {
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// R1.4 — delegated action dispatcher (replaces inline onclick= attributes)
+//
+// Inline event-handler attributes are unconditionally blocked by any CSP that
+// does not include 'unsafe-inline', and unlike inline <script> they cannot be
+// rescued by a nonce. They were also invisible to every JS tool: the handler
+// bodies lived inside Python f-strings, so a typo surfaced only as a dead
+// button in the browser.
+//
+// Markup contract, emitted by portal.py:
+//     data-act="fnName"     required — key into PORTAL_ACTIONS below
+//     data-a0 / data-a1…    positional STRING arguments, in order
+//     data-json='[…]'       positional arguments as a JSON array; used instead
+//                           of data-aN when any argument is not a string
+//                           (booleans and embedded JSON would otherwise arrive
+//                           as the truthy strings "false" / "[object Object]")
+//     data-evt="1"          pass the DOM event as the FIRST argument
+//     data-self="1"         pass the clicked element as the FIRST argument
+//     data-pd="1"           preventDefault (the old `; return false` idiom)
+//
+// PORTAL_ACTIONS is an explicit allowlist rather than a `window[name]` lookup.
+// The markup is server-rendered and escaped, so this is defence in depth, but
+// a name-indexed global lookup turns any injected data-act into a call into
+// arbitrary page globals — a needless second gadget for one saved line.
+// ---------------------------------------------------------------------------
+// Allowlisted NAMES, resolved to functions at click time — deliberately NOT a
+// snapshot of function references taken at registration. Many handlers here are
+// declared inside blocks rather than at top level, so they are not yet defined as
+// globals when this file finishes executing: measured at load, only 44 of 56 names
+// resolved. A snapshot would have silently dropped the other 12, leaving buttons
+// that look normal and do nothing. Late lookup by name is what makes this correct;
+// the Set still constrains which names are callable at all.
+const PORTAL_ACTIONS = new Set();
+
+function registerPortalActions(names) {
+  names.forEach(function(n) { PORTAL_ACTIONS.add(n); });
+  // Exposed for the AC-11 acceptance check; a top-level `const` is not a window
+  // property, so without this the test cannot see the allowlist at all.
+  window.PORTAL_ACTIONS = PORTAL_ACTIONS;
+  window.__PORTAL_ACTIONS_DEFINED_AT_LOAD__ =
+    names.filter(function(n) { return typeof window[n] === 'function'; }).length;
+}
+
+document.body.addEventListener('click', function(e) {
+  const el = e.target.closest && e.target.closest('[data-act]');
+  if (!el) { return; }
+  const name = el.dataset.act;
+  if (!PORTAL_ACTIONS.has(name)) {
+    console.error('portal: data-act="' + name + '" is not in the action allowlist');
+    return;
+  }
+  const fn = window[name];
+  if (typeof fn !== 'function') {
+    console.error('portal: no handler defined for data-act="' + name + '"');
+    return;
+  }
+  if (el.dataset.pd === '1') { e.preventDefault(); }
+
+  let args;
+  if (el.dataset.json !== undefined) {
+    try {
+      args = JSON.parse(el.dataset.json);
+    } catch (err) {
+      console.error('portal: bad data-json on action ' + name, err);
+      return;
+    }
+  } else {
+    args = [];
+    for (let i = 0; el.dataset['a' + i] !== undefined; i++) { args.push(el.dataset['a' + i]); }
+  }
+  if (el.dataset.self === '1') { args.unshift(el); }
+  if (el.dataset.evt === '1') { args.unshift(e); }
+  fn.apply(el, args);
+});
+
+// --- Named helpers for handlers that used to be inline expressions ---------
+// Each of these replaced a raw JS expression in an onclick attribute. They are
+// deliberately tiny; the point is that the behaviour is now in a linted file
+// with a name, not that the abstraction earns its keep.
+
+function htmxGet(url, target) {
+  htmx.ajax('GET', url, { target: target || '#adm-content', swap: 'innerHTML' });
+}
+
+function toggleDisplay(id, shown) {
+  const el = document.getElementById(id);
+  if (!el) { return; }
+  const show = shown !== undefined ? shown : (el.style.display === 'none' || !el.style.display);
+  el.style.display = show ? 'block' : 'none';
+}
+
+function copyText(text, doneLabel) {
+  const btn = this instanceof Element ? this : null;
+  navigator.clipboard.writeText(text).then(function() {
+    if (!btn) { return; }
+    const prev = btn.textContent;
+    btn.textContent = doneLabel || 'Copied!';
+    setTimeout(function() { btn.textContent = prev; }, 1500);
+  });
+}
+
+function copyElementText(sourceId, doneLabel) {
+  const src = document.getElementById(sourceId);
+  copyText.call(this, src ? src.textContent : '', doneLabel);
+}
+
+// Allowlist of every function reachable from a data-act attribute. Generated from
+// the conversion of the original inline onclick handlers (roadmap R1.4); add a name
+// here when you add a new data-act, or the dispatcher logs and refuses to call it.
+registerPortalActions([
+  'viewPolicyRule',
+  '_dismissMigrationBanner', 'activateAdminTab', 'addClient', 'adminApproveSrv',
+  'adminDeleteSrv', 'adminManageServerTools', 'adminQuarantineSrv', 'adminRebuildSrv',
+  'adminRejectSrv', 'adminReleaseSrv', 'adminToggleDebug', 'adminVerifySrv',
+  'adminViewLogs', 'applyRecommendation', 'copyElementText', 'copyText',
+  'createMcpProfile', 'delGitToken', 'delLlmToken', 'doSubmit', 'editAndResubmit',
+  'filterSrv', 'htmxGet', 'limitsCloseDrawer', 'limitsRefresh', 'limitsReset',
+  'limitsSave', 'loadAdminTab', 'openDetectionDrawer', 'pickHosting', 'pickMode',
+  'portalSignOut', 'providePendingUrl', 'registerTool', 'reviewAction', 'revokeCred',
+  'saveGit', 'saveGitToken', 'saveGrants', 'saveLlm', 'saveLlmToken',
+  'showGuidedQuestions', 'showStep1', 'showStep2', 'showStep3', 'showStep4',
+  'srvMenuToggle', 'ssShowTab', 'submitStep1', 'submitStep2', 'testLlm', 'toggleCat',
+  'toggleDisplay', 'toggleStatus', 'uploadCred',
+]);

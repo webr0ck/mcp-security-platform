@@ -900,3 +900,7 @@
   }
   .confirm-dialog-msg { margin: 0 0 18px; font-size: 14px; line-height: 1.55; user-select: text; }
   .confirm-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* R1.4: links whose styling used to be an inline style= on a generated anchor. */
+.pol-rule-link { font-size: 11px; color: var(--cyan); margin-right: 10px; }
+.srv-link      { color: var(--cyan); }

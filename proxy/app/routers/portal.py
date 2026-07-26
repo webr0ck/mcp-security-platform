@@ -1139,7 +1139,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
             badge_html = f'<span class="adm-nav-badge" title="{_admin_awaiting_review_count} awaiting review">{_admin_awaiting_review_count}</span>'
         aria_current = ' aria-current="page"' if active_panel else ""
         return (
-            f'<button class="{cls}"{aria_current} onclick="loadAdminTab(\'{esc_py(first_panel)}\')">'
+            f'<button class="{cls}"{aria_current} data-act="loadAdminTab" data-a0="{esc_py(first_panel)}">'
             f'<span class="{dot_cls}"></span>{esc_py(group["label"])}{badge_html}</button>'
         )
 
@@ -1170,7 +1170,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
 
     {nav_html}
 
-    <div class="adm-user-panel" onclick="loadAdminTab('profile')" style="cursor:pointer" title="View profile">
+    <div class="adm-user-panel" data-act="loadAdminTab" data-a0="profile" style="cursor:pointer" title="View profile">
       <div class="adm-avatar">{esc_py(initials)}</div>
       <div>
         <div class="adm-user-name">{esc_py(display_name)}</div>
@@ -1204,7 +1204,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
           <div>Identity, Prompts, LLM, Git &rarr; <b>Settings</b></div>
         </div>
       </div>
-      <button onclick="_dismissMigrationBanner()" aria-label="Dismiss" style="background:none;border:none;color:var(--adm-muted);cursor:pointer;font-size:16px;padding:4px 8px">&times;</button>
+      <button data-act="_dismissMigrationBanner" aria-label="Dismiss" style="background:none;border:none;color:var(--adm-muted);cursor:pointer;font-size:16px;padding:4px 8px">&times;</button>
     </div>
 
     <div class="adm-tabs-bar" id="adm-tabs-bar"></div>
@@ -1562,7 +1562,7 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
         <div style="margin-top:0.75rem;display:flex;gap:0.5rem">
           <input id="mcpprof-new-name" aria-label="New profile name" placeholder="profile-name (a-z0-9-_)" class="wiz-input" style="max-width:200px">
           <input id="mcpprof-new-display" aria-label="New profile display name" placeholder="Display name (optional)" class="wiz-input" style="max-width:220px">
-          <button class="btn-primary btn-sm" onclick="createMcpProfile()">+ New profile</button>
+          <button class="btn-primary btn-sm" data-act="createMcpProfile">+ New profile</button>
         </div>
         <div id="mcpprof-new-msg" style="font-size:12px;margin-top:6px"></div>"""
 
@@ -1609,7 +1609,7 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
       <div style="margin-top:1.5rem;display:flex;gap:0.5rem">
         {'<button class="btn-secondary" hx-get="' + esc_py(back_target) + '" hx-target="#portal-body" hx-swap="innerHTML">&#x2190; Back</button>' if back_target else ''}
         <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:13px;padding:0.5rem 1rem"
-                onclick="portalSignOut()">Sign out</button>
+                data-act="portalSignOut">Sign out</button>
       </div>
     </div>
 
@@ -2115,7 +2115,7 @@ async def _build_portal_access(
                          style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;
                                 color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
                   <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.75rem"
-                          onclick="providePendingUrl('{_psid}')">Go live</button>
+                          data-act="providePendingUrl" data-a0="{_psid}">Go live</button>
                 </div>"""
             edit_resubmit_form = ""
             if st == "changes_requested":
@@ -2152,7 +2152,7 @@ async def _build_portal_access(
                          style="background:#0f172a;border:1px solid #334155;border-radius:6px;
                                 color:var(--text);padding:0.35rem 0.6rem;font-size:12px">
                   <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.75rem;align-self:flex-start"
-                          onclick="editAndResubmit('{_esid}')">Save &amp; resubmit for review</button>
+                          data-act="editAndResubmit" data-a0="{_esid}">Save &amp; resubmit for review</button>
                 </div>"""
             rows_html.append(f"""
             <div style="padding:0.5rem 0;border-bottom:1px solid #1e293b">
@@ -2198,11 +2198,11 @@ async def _build_portal_access(
       <div class="srv-strip-item"><span class="dot-amber"></span>{n_awaiting} awaiting approval</div>
     </div>
     <div class="ss-home-tiles">
-      <div class="ss-home-tile" onclick="ssShowTab('catalog')">
+      <div class="ss-home-tile" data-act="ssShowTab" data-a0="catalog">
         <div class="ss-home-tile-val">{len(granted_svcs)}</div>
         <div class="ss-home-tile-label">Servers you can use</div>
       </div>
-      <div class="ss-home-tile" onclick="ssShowTab('submit')">
+      <div class="ss-home-tile" data-act="ssShowTab" data-a0="submit">
         <div class="ss-home-tile-val" style="color:var(--amber)">{n_awaiting}</div>
         <div class="ss-home-tile-label">Submissions in review</div>
       </div>
@@ -2273,10 +2273,10 @@ async def _build_portal_access(
     </div>
 
     <div class="ss-tabs-bar" id="ss-tabs-bar">
-      <button class="adm-tab active" onclick="ssShowTab('home')">Home</button>
-      <button class="adm-tab" onclick="ssShowTab('catalog')">Catalog</button>
-      <button class="adm-tab" onclick="ssShowTab('submit')">Submit</button>
-      <button class="adm-tab" onclick="ssShowTab('profile')">Profile</button>
+      <button class="adm-tab active" data-act="ssShowTab" data-a0="home">Home</button>
+      <button class="adm-tab" data-act="ssShowTab" data-a0="catalog">Catalog</button>
+      <button class="adm-tab" data-act="ssShowTab" data-a0="submit">Submit</button>
+      <button class="adm-tab" data-act="ssShowTab" data-a0="profile">Profile</button>
     </div>
 
     <div id="ss-panel-home" class="ss-panel" tabindex="-1">{home_html}</div>
@@ -2408,10 +2408,10 @@ async def fragment_admin(request: Request):
     html = """
     <div class="section-title">&#x1F6E1;&#xFE0F; Admin Panel</div>
     <div class="inner-tabs">
-      <button class="inner-tab-btn" data-itab="servers"      onclick="activateAdminTab('servers')">MCP Servers</button>
-      <button class="inner-tab-btn" data-itab="tools"        onclick="activateAdminTab('tools')">Tools</button>
-      <button class="inner-tab-btn active" data-itab="credentials" onclick="activateAdminTab('credentials')">Credentials</button>
-      <button class="inner-tab-btn"        data-itab="grants"      onclick="activateAdminTab('grants')">Grants</button>
+      <button class="inner-tab-btn" data-itab="servers"      data-act="activateAdminTab" data-a0="servers">MCP Servers</button>
+      <button class="inner-tab-btn" data-itab="tools"        data-act="activateAdminTab" data-a0="tools">Tools</button>
+      <button class="inner-tab-btn active" data-itab="credentials" data-act="activateAdminTab" data-a0="credentials">Credentials</button>
+      <button class="inner-tab-btn"        data-itab="grants"      data-act="activateAdminTab" data-a0="grants">Grants</button>
     </div>
     <div id="admin-inner-content"
          hx-get="/portal/fragments/admin/servers"
@@ -2546,7 +2546,7 @@ async def fragment_admin_servers(request: Request):
         _stats = tool_stats.get(str(s.server_id), {"not_active": 0, "risk": "low"})
         risk_badge = _badge(_stats["risk"].upper(), f"badge-risk-{_stats['risk']}")
         attention_link = (
-            f' <a href="#" onclick="adminManageServerTools(\'{sid}\');return false" '
+            f' <a href="#" data-act="adminManageServerTools" data-pd="1" data-a0="{sid}" '
             f'style="color:#fbbf24;font-size:11px;font-weight:600;text-decoration:none" '
             f'title="Open this server\'s tools in the Tools tab">'
             f'&#x26A0; {_stats["not_active"]} tool{"s" if _stats["not_active"] != 1 else ""} disabled/quarantined</a>'
@@ -2567,14 +2567,14 @@ async def fragment_admin_servers(request: Request):
         if st == "pending":
             action_html = (
                 f'<div style="display:flex;gap:6px;justify-content:flex-end">'
-                f'<button class="btn-approve" onclick="adminApproveSrv(\'{sid}\')">Approve</button>'
-                f'<button class="btn-reject" onclick="adminRejectSrv(\'{sid}\')">Reject</button>'
+                f'<button class="btn-approve" data-act="adminApproveSrv" data-a0="{sid}">Approve</button>'
+                f'<button class="btn-reject" data-act="adminRejectSrv" data-a0="{sid}">Reject</button>'
                 f'</div>'
             )
         elif st == "quarantined":
             action_html = (
                 f'<div style="text-align:right">'
-                f'<button class="btn-release" onclick="adminReleaseSrv(\'{sid}\')">Release</button>'
+                f'<button class="btn-release" data-act="adminReleaseSrv" data-a0="{sid}">Release</button>'
                 f'</div>'
             )
         else:
@@ -2587,7 +2587,7 @@ async def fragment_admin_servers(request: Request):
             maint_json = esc_py(json.dumps(maintainers))
             action_html = (
                 f'<div style="position:relative;text-align:right">'
-                f'<button class="btn-menu" onclick="srvMenuToggle(event,\'{sid}\')" aria-label="More actions" aria-haspopup="true">⋯</button>'
+                f'<button class="btn-menu" data-act="srvMenuToggle" data-evt="1" data-a0="{sid}" aria-label="More actions" aria-haspopup="true">⋯</button>'
                 f'<div class="srv-dropdown" id="srv-dd-{sid}" style="display:none">'
                 f'<button onclick="htmx.ajax(\'GET\',\'/portal/fragments/admin/detections?server_id={sid}\','
                 f'{{target:\'#adm-content\',swap:\'innerHTML\'}})">Detections</button>'
@@ -2599,14 +2599,14 @@ async def fragment_admin_servers(request: Request):
                 # request-change re-review contract on the backend side.
                 + (f'<button onclick="adminEditEndpoint(\'{sid}\',{esc_py(json.dumps(s.upstream_url or ""))})">'
                    f'Edit endpoint/config…</button>' if s.is_self_hosted else '')
-                + (f'<button onclick="adminRebuildSrv(\'{sid}\')">Update from git &amp; rebuild</button>'
+                + (f'<button data-act="adminRebuildSrv" data-a0="{sid}">Update from git &amp; rebuild</button>'
                    if s.is_self_hosted and s.github_repo_url else '')
-                + (f'<button onclick="adminVerifySrv(\'{sid}\')">Retry verification</button>' if debug_on else '')
+                + (f'<button data-act="adminVerifySrv" data-a0="{sid}">Retry verification</button>' if debug_on else '')
                 + f'<button onclick="adminToggleDebug(\'{sid}\',{"false" if debug_on else "true"})">'
                 f'{"Go live / exit maintenance" if debug_on else "Enable debug mode"}</button>'
                 # WS-A: view container logs — only offered while in debug/maintenance
                 # mode, matching the server-side debug_mode gate on the logs endpoint.
-                + (f'<button onclick="adminViewLogs(\'{sid}\')">View logs</button>' if debug_on else '')
+                + (f'<button data-act="adminViewLogs" data-a0="{sid}">View logs</button>' if debug_on else '')
                 + (
                     f'<button onclick="adminSetPublic(\'{sid}\',{"false" if s.public_to_authenticated else "true"})">'
                     f'{"Make private" if s.public_to_authenticated else "Make public (all users)"}</button>'
@@ -2614,8 +2614,8 @@ async def fragment_admin_servers(request: Request):
                     '<button disabled title="Write-capable servers cannot be public" '
                     'style="opacity:0.5;cursor:not-allowed">Make public (write-op — blocked)</button>'
                 )
-                + f'<button onclick="adminQuarantineSrv(\'{sid}\')">Quarantine</button>'
-                f'<button class="danger" onclick="adminDeleteSrv(\'{sid}\')">Delete</button>'
+                + f'<button data-act="adminQuarantineSrv" data-a0="{sid}">Quarantine</button>'
+                f'<button class="danger" data-act="adminDeleteSrv" data-a0="{sid}">Delete</button>'
                 f'</div></div>'
             )
 
@@ -2669,9 +2669,9 @@ async def fragment_admin_servers(request: Request):
                     {(" — " + esc_py(_last_err)) if _last_err else ""}
                   </span>
                   <div style="display:flex;gap:6px">
-                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminViewLogs('{sid}')">View logs</button>
-                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminVerifySrv('{sid}')">Retry verification</button>
-                    <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminToggleDebug('{sid}',false)">Go live</button>
+                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" data-act="adminViewLogs" data-a0="{sid}">View logs</button>
+                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" data-act="adminVerifySrv" data-a0="{sid}">Retry verification</button>
+                    <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.7rem" data-act="adminToggleDebug" data-json="[&quot;{sid}&quot;, false]">Go live</button>
                   </div>
                 </div>"""
             else:
@@ -2681,9 +2681,9 @@ async def fragment_admin_servers(request: Request):
                   <span style="font-size:13px;color:#fbbf24;font-weight:600">&#x1F527; In maintenance{esc_py(staleness)}</span>
                   <span style="font-size:12px;color:#d1a35c;flex:1">Verify (view logs / retry verification), then go live.{verify_note}</span>
                   <div style="display:flex;gap:6px">
-                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminViewLogs('{sid}')">View logs</button>
-                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminVerifySrv('{sid}')">Retry verification</button>
-                    <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.7rem" onclick="adminToggleDebug('{sid}',false)">Go live</button>
+                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" data-act="adminViewLogs" data-a0="{sid}">View logs</button>
+                    <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.7rem" data-act="adminVerifySrv" data-a0="{sid}">Retry verification</button>
+                    <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.7rem" data-act="adminToggleDebug" data-json="[&quot;{sid}&quot;, false]">Go live</button>
                   </div>
                 </div>"""
 
@@ -2715,12 +2715,12 @@ async def fragment_admin_servers(request: Request):
       <div class="srv-count-chip">{total}</div>
       <div style="flex:1"></div>
       <div class="srv-seg-group" id="srv-seg">
-        <button class="srv-seg-btn active" onclick="filterSrv(this,'')">All</button>
-        <button class="srv-seg-btn" onclick="filterSrv(this,'approved')">Approved</button>
-        <button class="srv-seg-btn" onclick="filterSrv(this,'pending')">Pending</button>
-        <button class="srv-seg-btn" onclick="filterSrv(this,'quarantined')">Quarantined</button>
+        <button class="srv-seg-btn active" data-act="filterSrv" data-self="1" data-a0="">All</button>
+        <button class="srv-seg-btn" data-act="filterSrv" data-self="1" data-a0="approved">Approved</button>
+        <button class="srv-seg-btn" data-act="filterSrv" data-self="1" data-a0="pending">Pending</button>
+        <button class="srv-seg-btn" data-act="filterSrv" data-self="1" data-a0="quarantined">Quarantined</button>
       </div>
-      <button class="btn-register-srv" onclick="loadAdminTab('submissions')">
+      <button class="btn-register-srv" data-act="loadAdminTab" data-a0="submissions">
         <span>+</span>Register server
       </button>
     </div>
@@ -2823,7 +2823,7 @@ async def fragment_admin_limits(request: Request):
 <div id="limits-root">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
     <div style="font-size:14px;font-weight:700;color:#e7e9ec">Request Limits</div>
-    <button class="btn-primary btn-sm" onclick="limitsRefresh()">&#x21BB; Refresh</button>
+    <button class="btn-primary btn-sm" data-act="limitsRefresh">&#x21BB; Refresh</button>
   </div>
 
   <div id="limits-table-wrap">
@@ -2852,12 +2852,12 @@ async def fragment_admin_limits(request: Request):
       </div>
     </div>
     <div style="display:flex;gap:8px">
-      <button class="btn-primary btn-sm" onclick="limitsSave()">Save</button>
-      <button class="btn-sm" onclick="limitsReset('both')"
+      <button class="btn-primary btn-sm" data-act="limitsSave">Save</button>
+      <button class="btn-sm" data-act="limitsReset" data-a0="both"
               style="background:var(--adm-btn-secondary);border:1px solid rgba(255,255,255,0.12);color:#cdd6ea;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:12px">
         Reset counters
       </button>
-      <button class="btn-sm" onclick="limitsCloseDrawer()"
+      <button class="btn-sm" data-act="limitsCloseDrawer"
               style="background:transparent;border:1px solid rgba(255,255,255,0.14);color:var(--adm-muted);padding:8px 14px;border-radius:8px;cursor:pointer;font-size:12px">
         Cancel
       </button>
@@ -3287,7 +3287,7 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
         }
 
         feed_html_rows.append(f"""
-        <tr style="cursor:pointer" onclick="openDetectionDrawer('{esc_py(eid)}')">
+        <tr style="cursor:pointer" data-act="openDetectionDrawer" data-a0="{esc_py(eid)}">
           <td style="white-space:nowrap;color:var(--muted);font-size:0.78rem">{esc_py(ts)}</td>
           <td style="font-family:var(--ff-mono);font-size:0.78rem">{esc_py(row.client_id or "—")}</td>
           <td style="font-size:0.78rem">{esc_py(row.tool_name or "—")}</td>
@@ -3445,7 +3445,7 @@ async def fragment_admin_tools(request: Request, server_id: Optional[str] = Quer
         filter_banner = (
             f'<div style="margin-bottom:0.75rem;font-size:12px;color:var(--muted)">'
             f'Filtered to server <strong style="color:var(--text)">{srv_label}</strong> &middot; '
-            f'<a href="#" onclick="loadAdminTab(\'tools\');return false" style="color:var(--cyan)">'
+            f'<a href="#" data-act="loadAdminTab" data-pd="1" data-a0="tools" style="color:var(--cyan)">'
             f'&times; clear filter</a></div>'
         )
 
@@ -3473,7 +3473,7 @@ async def fragment_admin_tools(request: Request, server_id: Optional[str] = Quer
           <td style="color:var(--muted);font-size:0.75rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{esc_py(t.upstream_url or "—")}</td>
           <td>
             <button class="btn-secondary btn-sm" style="{'background:#7f1d1d;color:#fca5a5' if status == 'active' else ''}"
-                    onclick="toggleStatus('{esc_py(tool_id)}', '{esc_py(toggle_action)}')">{esc_py(toggle_label)}</button>
+                    data-act="toggleStatus" data-a0="{esc_py(tool_id)}" data-a1="{esc_py(toggle_action)}">{esc_py(toggle_label)}</button>
           </td>
         </tr>""")
 
@@ -3539,7 +3539,7 @@ async def fragment_admin_tools(request: Request, server_id: Optional[str] = Quer
         </div>
       </div>
       <div style="margin-top:0.75rem">
-        <button type="button" class="btn-primary" onclick="registerTool()">Register Tool</button>
+        <button type="button" class="btn-primary" data-act="registerTool">Register Tool</button>
       </div>
       <div id="reg-msg"></div>
     </form>
@@ -3576,7 +3576,7 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
     q = q.strip()
     search_box_clear = (
         '<button type="button" class="btn-secondary btn-sm" '
-        'onclick="loadAdminTab(\'sbom\')">Clear</button>' if q else ""
+        'data-act="loadAdminTab" data-a0="sbom">Clear</button>' if q else ""
     )
     search_box = f"""
     <form style="margin-bottom:1rem;display:flex;gap:0.5rem;align-items:center"
@@ -3838,7 +3838,7 @@ async def fragment_admin_sbom_detail(tool_id: str, request: Request):
 
     back = (
         '<button class="btn-secondary btn-sm" style="margin-bottom:1rem" '
-        'onclick="loadAdminTab(\'sbom\')">&#8592; Back to inventory</button>'
+        'data-act="loadAdminTab" data-a0="sbom">&#8592; Back to inventory</button>'
     )
     dl_link = (
         f'<a class="btn-secondary btn-sm" target="_blank" rel="noopener" '
@@ -4006,8 +4006,8 @@ async def fragment_admin_credentials(request: Request):
                 </div>
               </div>
               <div style="display:flex;gap:0.5rem;margin-top:0.75rem">
-                <button class="btn-primary btn-sm" onclick="uploadCred('{esc_py(tool_id)}')">Upload</button>
-                <button class="btn-danger btn-sm" onclick="revokeCred('{esc_py(tool_id)}')">Revoke</button>
+                <button class="btn-primary btn-sm" data-act="uploadCred" data-a0="{esc_py(tool_id)}">Upload</button>
+                <button class="btn-danger btn-sm" data-act="revokeCred" data-a0="{esc_py(tool_id)}">Revoke</button>
               </div>
               <div id="cred-msg-{esc_py(tool_id)}"></div>
             </div>
@@ -4103,8 +4103,8 @@ async def fragment_admin_grants(request: Request):
     <div id="grant-cards">{"".join(cards)}</div>
 
     <div style="margin-top:0.5rem;display:flex;gap:0.75rem;align-items:center">
-      <button class="btn-primary" onclick="saveGrants()">Save All Grants</button>
-      <button class="btn-secondary" onclick="addClient()">+ Add Identity</button>
+      <button class="btn-primary" data-act="saveGrants">Save All Grants</button>
+      <button class="btn-secondary" data-act="addClient">+ Add Identity</button>
       <span id="grants-msg" style="font-size:0.83rem"></span>
     </div>
 
@@ -4459,7 +4459,7 @@ async def fragment_admin_access(request: Request):
     <p style="color:var(--muted);font-size:0.82rem;margin:0 0 1rem">
       Effective access to a tool is <strong>entitlement AND profile-enabled</strong> — both layers
       must allow it. Per-server entitlement grant/revoke lives on each server's card in
-      <a href="#" onclick="loadAdminTab('servers');return false" style="color:var(--cyan)">MCP Servers</a>.
+      <a href="#" data-act="loadAdminTab" data-pd="1" data-a0="servers" style="color:var(--cyan)">MCP Servers</a>.
     </p>
     {write_note}
 
@@ -4767,11 +4767,11 @@ async def fragment_admin_submissions(request: Request):
                                color:var(--text);padding:0.4rem 0.6rem;font-size:12px;resize:vertical;min-height:48px"></textarea>
               <div style="display:flex;flex-direction:column;gap:0.4rem">
                 <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.75rem"
-                        onclick="reviewAction('{esc_py(sid)}','approve')">Approve</button>
+                        data-act="reviewAction" data-a0="{esc_py(sid)}" data-a1="approve">Approve</button>
                 <button class="btn-secondary" style="font-size:12px;padding:0.3rem 0.75rem"
-                        onclick="reviewAction('{esc_py(sid)}','request-changes')">Request Changes</button>
+                        data-act="reviewAction" data-a0="{esc_py(sid)}" data-a1="request-changes">Request Changes</button>
                 <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:12px;padding:0.3rem 0.75rem"
-                        onclick="reviewAction('{esc_py(sid)}','reject')">Reject</button>
+                        data-act="reviewAction" data-a0="{esc_py(sid)}" data-a1="reject">Reject</button>
               </div>
             </div>
             {high_risk_html}
@@ -5023,16 +5023,16 @@ async def fragment_admin_llm(request: Request):
         style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
       <label style="display:flex;align-items:center;gap:0.5rem"><input id="llm-enabled" type="checkbox" {"checked" if eff.enabled else ""}> Enabled</label>
       <div style="display:flex;gap:0.5rem">
-        <button class="btn-primary" style="font-size:12px;padding:0.35rem 0.9rem" onclick="saveLlm()">Save settings</button>
-        <button class="btn-secondary" style="font-size:12px;padding:0.35rem 0.9rem" onclick="testLlm()">Test connection</button>
+        <button class="btn-primary" style="font-size:12px;padding:0.35rem 0.9rem" data-act="saveLlm">Save settings</button>
+        <button class="btn-secondary" style="font-size:12px;padding:0.35rem 0.9rem" data-act="testLlm">Test connection</button>
       </div>
       <hr style="border-color:#1e293b;width:100%">
       <div>API token: {token_state}</div>
       <label>Set / replace token (write-only)<input id="llm-token" type="password" placeholder="paste token — leave blank to keep current"
         style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
       <div style="display:flex;gap:0.5rem">
-        <button class="btn-primary" style="font-size:12px;padding:0.35rem 0.9rem" onclick="saveLlmToken()">Save token</button>
-        <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:12px;padding:0.35rem 0.9rem" onclick="delLlmToken()">Remove token</button>
+        <button class="btn-primary" style="font-size:12px;padding:0.35rem 0.9rem" data-act="saveLlmToken">Save token</button>
+        <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:12px;padding:0.35rem 0.9rem" data-act="delLlmToken">Remove token</button>
       </div>
       <div id="llm-test-out" style="font-size:12px;color:var(--muted)"></div>
     </div>
@@ -5081,14 +5081,14 @@ async def fragment_admin_git(request: Request):
             <label style="display:flex;align-items:center;gap:0.5rem"><input id="git-priv-{prov}" type="checkbox" {"checked" if allow_priv else ""}>
               Allow private/internal host (RFC1918) — <span style="color:#d97706">widens SSRF surface; audited</span></label>
             <div style="display:flex;gap:0.5rem">
-              <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.8rem" onclick="saveGit('{prov}')">Save</button>
+              <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.8rem" data-act="saveGit" data-a0="{prov}">Save</button>
             </div>
             <div>Token: {token_state}</div>
             <label>Set token (write-only)<input id="git-token-{prov}" type="password" placeholder="paste clone token"
               style="width:100%;background:#0b1220;border:1px solid #334155;border-radius:6px;color:var(--text);padding:0.4rem 0.6rem;margin-top:2px"></label>
             <div style="display:flex;gap:0.5rem">
-              <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.8rem" onclick="saveGitToken('{prov}')">Save token</button>
-              <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:12px;padding:0.3rem 0.8rem" onclick="delGitToken('{prov}')">Remove token</button>
+              <button class="btn-primary" style="font-size:12px;padding:0.3rem 0.8rem" data-act="saveGitToken" data-a0="{prov}">Save token</button>
+              <button style="background:#7f1d1d;color:#fca5a5;border:none;border-radius:6px;cursor:pointer;font-size:12px;padding:0.3rem 0.8rem" data-act="delGitToken" data-a0="{prov}">Remove token</button>
             </div>
           </div>
         </details>""")
@@ -5239,11 +5239,11 @@ function showStep1() {{
 
       <label class="wiz-label" style="margin-top:1.25rem">Where will this run?</label>
       <div class="mode-grid" style="margin-top:0.4rem">
-        <div class="mode-card ${{_wiz.self_host ? 'selected' : ''}}" id="hosting-self" onclick="pickHosting(true)">
+        <div class="mode-card ${{_wiz.self_host ? 'selected' : ''}}" id="hosting-self" data-act="pickHosting" data-json="[true]">
           <div class="mode-card-title">I&rsquo;ll self-host it</div>
           <div class="mode-card-desc">You run the backend yourself. You give us the URL now; a reviewer verifies it before it goes live.</div>
         </div>
-        <div class="mode-card ${{_wiz.self_host ? '' : 'selected'}}" id="hosting-platform" onclick="pickHosting(false)">
+        <div class="mode-card ${{_wiz.self_host ? '' : 'selected'}}" id="hosting-platform" data-act="pickHosting" data-json="[false]">
           <div class="mode-card-title">Deploy it for me</div>
           <div class="mode-card-desc">The platform builds and hosts it from your repo. No backend URL needed — one is assigned once it's deployed.</div>
         </div>
@@ -5274,7 +5274,7 @@ function showStep1() {{
       </div>
 
       <div style="margin-top:1.5rem;display:flex;justify-content:flex-end">
-        <button class="btn-primary" onclick="submitStep1()">Next &#x2192;</button>
+        <button class="btn-primary" data-act="submitStep1">Next &#x2192;</button>
       </div>
     </div>`;
 
@@ -5356,7 +5356,7 @@ function showStep2() {{
   _setStep(2);
   const cards = _MODE_CARDS.map(m => `
     <div class="mode-card ${{_wiz.injection_mode === m.id ? 'selected' : ''}}"
-         id="mc-${{m.id}}" onclick="pickMode('${{m.id}}')">
+         id="mc-${{m.id}}" data-act="pickMode" data-a0="${{m.id}}">
       <div class="mode-card-title">${{m.title}}</div>
       <div class="mode-card-desc">${{m.desc}}</div>
     </div>`).join('');
@@ -5367,7 +5367,7 @@ function showStep2() {{
       <div style="font-size:12px;color:var(--muted);margin-bottom:1.25rem">
         Pick a mode directly, or
         <button style="background:none;border:none;color:var(--cyan);cursor:pointer;font-size:12px;padding:0"
-                onclick="showGuidedQuestions()">help me choose &#x25BC;</button>
+                data-act="showGuidedQuestions">help me choose &#x25BC;</button>
       </div>
 
       <div class="mode-grid">${{cards}}</div>
@@ -5375,8 +5375,8 @@ function showStep2() {{
       <div id="mode-config" style="margin-top:1.25rem"></div>
 
       <div style="margin-top:1.5rem;display:flex;justify-content:space-between">
-        <button class="btn-secondary" onclick="showStep1()">&#x2190; Back</button>
-        <button class="btn-primary" onclick="submitStep2()">Next &#x2192;</button>
+        <button class="btn-secondary" data-act="showStep1">&#x2190; Back</button>
+        <button class="btn-primary" data-act="submitStep2">Next &#x2192;</button>
       </div>
     </div>
     <div id="guided-panel" style="margin-top:1rem"></div>`;
@@ -5642,8 +5642,8 @@ function recommendMode(mode) {{
       <div class="rec-mode">${{label}}</div>
       <div class="rec-reason">${{reason}}</div>
       <div style="margin-top:0.75rem;display:flex;gap:0.5rem">
-        <button class="btn-primary" onclick="applyRecommendation('${{mode}}')">Use this</button>
-        <button class="btn-secondary" onclick="showStep2()">Override</button>
+        <button class="btn-primary" data-act="applyRecommendation" data-a0="${{mode}}">Use this</button>
+        <button class="btn-secondary" data-act="showStep2">Override</button>
       </div>
     </div>`;
 }}
@@ -5670,7 +5670,7 @@ function showStep3() {{
   _setStep(3);
   const cats = _CATEGORIES.map(([id, label]) => `
     <div class="cat-item ${{_wiz.data_categories.includes(id) ? 'selected' : ''}}"
-         id="cat-${{id}}" onclick="toggleCat('${{id}}')">
+         id="cat-${{id}}" data-act="toggleCat" data-a0="${{id}}">
       <span>${{label}}</span>
     </div>`).join('');
 
@@ -5698,8 +5698,8 @@ function showStep3() {{
       <div id="risk-preview" style="margin-top:1rem"></div>
 
       <div style="margin-top:1.5rem;display:flex;justify-content:space-between">
-        <button class="btn-secondary" onclick="showStep2()">&#x2190; Back</button>
-        <button class="btn-primary" onclick="showStep4()">Next &#x2192;</button>
+        <button class="btn-secondary" data-act="showStep2">&#x2190; Back</button>
+        <button class="btn-primary" data-act="showStep4">Next &#x2192;</button>
       </div>
     </div>`;
 
@@ -5770,8 +5770,8 @@ function showStep4() {{
       <div id="submit-error" style="color:#fca5a5;font-size:13px;margin-top:0.75rem;display:none"></div>
 
       <div style="margin-top:1.5rem;display:flex;justify-content:space-between;align-items:center">
-        <button class="btn-secondary" onclick="showStep3()">&#x2190; Back</button>
-        <button class="btn-primary" id="submit-btn" onclick="doSubmit()">
+        <button class="btn-secondary" data-act="showStep3">&#x2190; Back</button>
+        <button class="btn-primary" id="submit-btn" data-act="doSubmit">
           Submit for review &#x2192;
         </button>
       </div>

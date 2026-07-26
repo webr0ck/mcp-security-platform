@@ -613,3 +613,61 @@ test.describe('AC-10 Accessibility (axe-core)', () => {
     expect(gating, `violations: ${gating.map(v => `${v.id}(${v.impact})`).join(', ')}`).toEqual([])
   })
 })
+
+/*
+ * AC-11 — every data-act in rendered markup resolves to a registered handler.
+ *
+ * R1.4 replaced 80 inline onclick= attributes with data-act delegation. The failure
+ * mode of that change is silent: a renamed or unregistered handler leaves a button
+ * that looks completely normal and does nothing when clicked. Nothing else in this
+ * suite would catch it — the old inline handlers had the same weakness, which is
+ * why several were only ever verified by hand.
+ *
+ * This walks the admin tabs, collects every [data-act] the server actually renders,
+ * and asserts each one is callable.
+ */
+test.describe('AC-11 Delegated actions are all wired', () => {
+  test('every rendered data-act resolves to a registered function', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+    const page = await ctx.newPage()
+
+    const seen = new Set<string>()
+    const collect = async () => {
+      for (const a of await page.$$eval('[data-act]', els => els.map(e => e.getAttribute('data-act')))) {
+        if (a) seen.add(a)
+      }
+    }
+
+    await page.goto('/portal')
+    await page.waitForLoadState('networkidle')
+    await collect()
+
+    // Walk the admin tabs so fragment-rendered actions are covered too, not just
+    // the ones present on the initial shell.
+    for (const tab of ['servers', 'tools', 'credentials', 'grants', 'policy', 'audit', 'profile']) {
+      const btn = page.locator(`[data-act="loadAdminTab"][data-a0="${tab}"]`).first()
+      if (await btn.count()) {
+        await btn.click().catch(() => {})
+        await page.waitForTimeout(400)
+        await collect()
+      }
+    }
+
+    expect(seen.size, 'no data-act attributes found at all — the probe is not exercising the portal').toBeGreaterThan(10)
+
+    console.log('AC-11 data-act names rendered:', seen.size,
+      '| allowlist:', await page.evaluate(() => (window as any).PORTAL_ACTIONS.size),
+      '| handlers defined at script-end:', await page.evaluate(() => (window as any).__PORTAL_ACTIONS_DEFINED_AT_LOAD__))
+
+    const unresolved = await page.evaluate((names: string[]) => {
+      const reg = (window as any).PORTAL_ACTIONS
+      // Must be BOTH allowlisted and actually defined — checking only one of the two
+      // is how the first version of this passed against a completely dead dispatcher.
+      return names.filter(n => !(reg && reg.has(n)) || typeof (window as any)[n] !== 'function')
+    }, [...seen])
+
+    await ctx.close()
+    expect(unresolved, `data-act names with no handler: ${unresolved.join(', ')}`).toEqual([])
+  })
+})
