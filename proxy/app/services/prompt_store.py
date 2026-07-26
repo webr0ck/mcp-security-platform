@@ -12,7 +12,6 @@ hot read path (design-assist / prompts endpoints) doesn't hit the DB per call.
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 from app.services.scaffold_generator import _PROMPTS, _SHARED_PROMPTS
 

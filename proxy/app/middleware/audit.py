@@ -29,8 +29,8 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from app.core.security import generate_request_id
 from app.core.redis_client import redis_pool
+from app.core.security import generate_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +107,11 @@ class AuditMiddleware(BaseHTTPMiddleware):
             try:
                 from uuid import uuid4
 
-                from app.services.invocation import _emit_audit_event
-
                 # Redact the path: it may contain token-shaped segments
                 # supplied by the attacker (e.g. /api/v1/tools/eyJ...).
                 from mcp_audit_logger.redaction import redact_string as _redact
+
+                from app.services.invocation import _emit_audit_event
                 raw_path = f"{request.method} {request.url.path}"
                 safe_tool_name = f"[{response.status_code}] {_redact(raw_path)}"
 

@@ -14,10 +14,11 @@ See docs/ARCHITECTURE.md Section 8.2 for Jira integration design.
 from __future__ import annotations
 
 import logging
+from datetime import UTC
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +26,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import verify_jira_webhook
-from fastapi import Depends
 
 logger = logging.getLogger(__name__)
 
@@ -255,12 +255,13 @@ async def jira_webhook(
     # Emit TOOL_STATUS_CHANGED audit event (INV-001: audit before response).
     request_id: str = getattr(request.state, "request_id", "unknown")
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
         from uuid import uuid4
+
         from app.core.database import engine as _db_engine
 
         audit_event_id = str(uuid4())
-        audit_ts = datetime.now(timezone.utc)
+        audit_ts = datetime.now(UTC)
 
         # Use a separate DB connection for the audit write to ensure it commits
         # even if the outer transaction were rolled back.

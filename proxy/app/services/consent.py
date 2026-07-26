@@ -42,7 +42,9 @@ import hmac
 import json
 import secrets
 import time
-from dataclasses import dataclass, fields as dataclass_fields
+from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
+from datetime import UTC
 
 
 class ConsentTokenError(Exception):
@@ -287,7 +289,7 @@ async def persist_consent_token(
     new_mode: str,
     owner_sub: str,
     payload_hash: str,
-    expires_at: "datetime",
+    expires_at: datetime,
     old_cred_ref: str | None = None,
     new_cred_ref: str | None = None,
 ) -> None:
@@ -300,6 +302,7 @@ async def persist_consent_token(
     and replay is possible for the full TTL window.
     """
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
@@ -336,9 +339,11 @@ async def consume_consent_token(jti: str) -> bool:
     IMPORTANT: Returns False if the jti was never persisted (not found). Callers must
     treat False as replay/invalid and raise a 409, never silently allow-through.
     """
+    from datetime import datetime
+
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
-    from datetime import datetime, timezone
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -347,7 +352,7 @@ async def consume_consent_token(jti: str) -> bool:
                 SET consumed_at = :now
                 WHERE jti = :jti AND consumed_at IS NULL
             """),
-            {"jti": jti, "now": datetime.now(timezone.utc)},
+            {"jti": jti, "now": datetime.now(UTC)},
         )
         await db.commit()
         return result.rowcount > 0
@@ -391,7 +396,7 @@ def verify_approve_consent_token(
     token: str,
     expected_server_id: str,
     expected_owner_sub: str,
-) -> "ConsentPayload":
+) -> ConsentPayload:
     """
     Verify a consent token issued for the 'approve' action.
 

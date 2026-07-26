@@ -37,7 +37,6 @@ import json
 import logging
 import re
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -45,8 +44,10 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
+from app.credential_broker.adapters.healthcheck import HealthcheckFailed, get_healthcheck
+from app.services import oauth_provider_profile as oauth_provider_profile_svc
+from app.services.auth_modes import all_mode_values
 from app.services.consent import (
-    ConsentTokenAlreadyConsumedError,
     ConsentTokenError,
     consume_consent_token,
     issue_approve_consent_token,
@@ -59,13 +60,10 @@ from app.services.server_onboarding import (
     revalidate_upstream_ip_at_invoke,
     upstream_idp_type_for_mode,
     validate_mode_and_idp,
-    validate_upstream_url_ssrf,
     validate_upstream_idp_config,
+    validate_upstream_url_ssrf,
 )
-from app.services import oauth_provider_profile as oauth_provider_profile_svc
-from app.services.ssrf import SSRFError, validate_server_url
-from app.credential_broker.adapters.healthcheck import get_healthcheck, HealthcheckFailed
-from app.services.auth_modes import all_mode_values
+from app.services.ssrf import SSRFError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -162,8 +160,8 @@ class ServerCreate(BaseModel):
     name: str
     upstream_url: str
     injection_mode: str = "none"
-    service_name: Optional[str] = None
-    owner_sub: Optional[str] = None  # defaults to request.state.client_id
+    service_name: str | None = None
+    owner_sub: str | None = None  # defaults to request.state.client_id
 
     @field_validator("injection_mode")
     @classmethod
@@ -178,9 +176,9 @@ class ServerCreate(BaseModel):
 
 
 class ServerUpdate(BaseModel):
-    name: Optional[str] = None
-    upstream_url: Optional[str] = None
-    service_name: Optional[str] = None
+    name: str | None = None
+    upstream_url: str | None = None
+    service_name: str | None = None
     # SEP-1913 trust_tier rank (2026-07-15): no endpoint previously existed to
     # raise a server's trust_tier after activation — the only path was a raw
     # SQL UPDATE. Every newly-discovered server defaults to trust_tier=0
@@ -191,11 +189,11 @@ class ServerUpdate(BaseModel):
     # once they'd actually verified it — found while onboarding
     # test-api-noauth/basicauth and entra-id-directory. See taint_floor.py's
     # SEP-1913 rank table for the meaning of each value.
-    trust_tier: Optional[int] = None
+    trust_tier: int | None = None
 
     @field_validator("trust_tier")
     @classmethod
-    def trust_tier_range(cls, v: Optional[int]) -> Optional[int]:
+    def trust_tier_range(cls, v: int | None) -> int | None:
         if v is not None and not (0 <= v <= 4):
             raise ValueError("trust_tier must be 0-4 (SEP-1913: 0=untrustedPublic, "
                               "1=trustedPublic, 2=internal, 3=user, 4=system)")
@@ -220,10 +218,10 @@ class ServerRegister(BaseModel):
     service_name: str
     upstream_url: str
     injection_mode: str = "none"
-    upstream_idp_type: Optional[str] = None
-    upstream_idp_config: Optional[dict] = None
-    adapter_name: Optional[str] = None
-    oauth_provider_profile_id: Optional[str] = None
+    upstream_idp_type: str | None = None
+    upstream_idp_config: dict | None = None
+    adapter_name: str | None = None
+    oauth_provider_profile_id: str | None = None
 
     @field_validator("service_name")
     @classmethod
@@ -593,8 +591,8 @@ async def set_server_debug_mode(server_id: str, body: DebugModeUpdate, request: 
 
 class RequestChangeBody(BaseModel):
     """Request body for POST /api/v1/servers/{id}/request-change (PRD-0012 C3)."""
-    new_upstream_url: Optional[str] = None
-    new_github_repo_url: Optional[str] = None
+    new_upstream_url: str | None = None
+    new_github_repo_url: str | None = None
     # Submitter-asserted claim that only the endpoint address changed, not the
     # code. Default False (conservative — full re-review) per the PRD's
     # fail-safe-toward-more-review rule: an unasserted or wrongly-asserted
@@ -871,7 +869,7 @@ async def mint_consent_token(server_id: str, body: ConsentRequest, request: Requ
     # Persist the jti so consume_consent_token() can mark it used on first verification.
     # Without this, consume_consent_token() silently no-ops and replay is possible.
     payload_hash = hashlib.sha256(token_str.encode()).hexdigest()
-    expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=900)
+    expires_at = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=900)
     await persist_consent_token(
         jti=jti,
         server_id=server_id,

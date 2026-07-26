@@ -240,8 +240,9 @@ async def _scan_risk_floor(tool_id: str) -> dict[str, Any]:
     error, or no server link, returns floor=0 (manifest-only, unchanged).
     """
     from sqlalchemy import text as _text
-    from app.core.database import AsyncSessionLocal as _S
+
     from app.core.config import get_settings as _gs
+    from app.core.database import AsyncSessionLocal as _S
     zero = {"floor": 0, "scanned_at": None, "scan_commit": None, "reason": None}
     try:
         async with _S() as db:

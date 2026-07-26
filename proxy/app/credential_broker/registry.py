@@ -43,8 +43,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
-from uuid import UUID
 
 import asyncpg
 
@@ -70,7 +68,7 @@ class ServerConfig:
     upstream_url: str
     injection_mode: str
     status: str
-    credential_id: Optional[str] = None  # str representation of UUID or None
+    credential_id: str | None = None  # str representation of UUID or None
 
 
 class Registry:
@@ -104,7 +102,7 @@ class Registry:
         self.db_pool = db_pool
         self.refresh_interval_secs = refresh_interval_secs
         self._servers: dict[str, ServerConfig] = {}
-        self._refresh_task: Optional[asyncio.Task[None]] = None
+        self._refresh_task: asyncio.Task[None] | None = None
 
     async def refresh(self) -> None:
         """
@@ -157,7 +155,7 @@ class Registry:
         except Exception as exc:
             logger.error("registry_refresh_failed", extra={"error": str(exc)})
 
-    def get_config(self, service_name: str) -> Optional[ServerConfig]:
+    def get_config(self, service_name: str) -> ServerConfig | None:
         """
         Retrieve a server's config by service_name.
 

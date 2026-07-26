@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -34,7 +34,7 @@ class NetboxAdapter(BaseAdapter):
 
     async def provision(self, user_sub: str, session_id: str) -> Token:
         username = self._sub_to_username(user_sub)
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=28800)
+        expires_at = datetime.now(UTC) + timedelta(seconds=28800)
         payload = {
             "user": username,
             "description": f"mcp-session-{session_id}",

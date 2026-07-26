@@ -22,7 +22,6 @@ Usage:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import asyncpg
 
@@ -34,7 +33,7 @@ class AsyncpgPool:
 
     def __init__(self) -> None:
         """Initialize the wrapper (does not create the pool yet)."""
-        self._pool: Optional[asyncpg.Pool] = None
+        self._pool: asyncpg.Pool | None = None
 
     async def initialize(self, dsn: str | None = None) -> None:
         """

@@ -154,8 +154,8 @@ async def _run_service_adapter_verify(server_id: str) -> tuple[str, str | None]:
             return "not_applicable", None  # no service credential provisioned yet — nothing to verify
 
     from app.credential_broker.dispatcher import (
-        _inject_external_oauth_client_credentials,
         CredentialInjectionError,
+        _inject_external_oauth_client_credentials,
     )
     try:
         headers = await _inject_external_oauth_client_credentials(
@@ -172,8 +172,8 @@ async def _run_service_adapter_verify(server_id: str) -> tuple[str, str | None]:
     if not access_token:
         return "not_applicable", None
 
-    from app.credential_broker.adapters.service_adapter_registry import get_service_adapter
     from app.credential_broker.adapters.service_adapter import RuntimeContext
+    from app.credential_broker.adapters.service_adapter_registry import get_service_adapter
 
     ctx = row.get("service_context") or {}
     runtime_context = RuntimeContext(

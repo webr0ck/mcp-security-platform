@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -98,9 +97,9 @@ async def list_anomaly_baselines(
 @router.get("/alerts")
 async def list_anomaly_alerts(
     request: Request,
-    client_id: Optional[str] = Query(None),
+    client_id: str | None = Query(None),
     resolved: bool = Query(False),
-    from_date: Optional[str] = Query(None, alias="from"),
+    from_date: str | None = Query(None, alias="from"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),

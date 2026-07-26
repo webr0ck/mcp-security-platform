@@ -127,6 +127,7 @@ async def decrypt_credential(
     Returns plaintext string or None if not found/decryption fails.
     """
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     from app.credential_broker.kms import load_master_secret_standalone
 

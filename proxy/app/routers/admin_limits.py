@@ -12,13 +12,13 @@ All mutations are recorded in the HMAC-signed audit chain via admin_audit.py.
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.core.redis_client import get_anomaly_window_with_timestamps, redis_pool
 from app.core.config import get_rate_limit_for_roles, get_settings
+from app.core.redis_client import get_anomaly_window_with_timestamps, redis_pool
 from app.services import limits as limits_svc
 from app.services.admin_audit import emit_admin_config_event
 
@@ -73,7 +73,7 @@ async def _rate_count(client_id: str) -> int:
 # ---------------------------------------------------------------------------
 
 class LimitUpdate(BaseModel):
-    rate_limit: Optional[int] = Field(default=None, ge=1, le=100000)
+    rate_limit: int | None = Field(default=None, ge=1, le=100000)
     anomaly_sensitivity: Literal["normal", "lenient", "off"] = "normal"
 
 

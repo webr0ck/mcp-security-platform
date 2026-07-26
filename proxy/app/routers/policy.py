@@ -10,7 +10,7 @@ Endpoints:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -162,7 +162,7 @@ async def _fetch_opa_policy_metadata() -> list[dict[str, Any]] | None:
                     "package": known.get("package", package_name),
                     "description": rule_desc or known.get("description", rule_title),
                     "enabled": known.get("enabled", True),
-                    "last_loaded_at": datetime.now(timezone.utc).isoformat(),
+                    "last_loaded_at": datetime.now(UTC).isoformat(),
                 })
         else:
             # No annotations — emit a package-level entry for each known rule in this package
@@ -170,7 +170,7 @@ async def _fetch_opa_policy_metadata() -> list[dict[str, Any]] | None:
             for r in package_rules:
                 live_rules.append({
                     **r,
-                    "last_loaded_at": datetime.now(timezone.utc).isoformat(),
+                    "last_loaded_at": datetime.now(UTC).isoformat(),
                 })
 
     return live_rules if live_rules else None
@@ -223,7 +223,7 @@ async def list_policy_rules(
     # Try live OPA metadata; fall back to static list.
     live_rules = await _fetch_opa_policy_metadata()
     all_rules: list[dict[str, Any]] = live_rules if live_rules is not None else [
-        {**r, "last_loaded_at": datetime.now(timezone.utc).isoformat()}
+        {**r, "last_loaded_at": datetime.now(UTC).isoformat()}
         for r in _KNOWN_RULES
     ]
 

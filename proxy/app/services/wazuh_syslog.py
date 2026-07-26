@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ def emit(
         else:
             priority = 8 * 1 + 6   # user.info   = 14
 
-        ts = datetime.now(timezone.utc).strftime("%b %d %H:%M:%S")
+        ts = datetime.now(UTC).strftime("%b %d %H:%M:%S")
 
         payload: dict[str, Any] = {
             "client_id": client_id,

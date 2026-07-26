@@ -37,8 +37,9 @@ from __future__ import annotations
 import importlib
 import logging
 import pkgutil
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ _NON_ADAPTER_MODULES = frozenset({"__init__", "base", "registry", "healthcheck"}
 
 # Keyed by (approach, name) so re-importing a module is idempotent (the spec is
 # overwritten in place rather than appended twice).
-_SPECS: dict[tuple[str, str], "AdapterSpec"] = {}
+_SPECS: dict[tuple[str, str], AdapterSpec] = {}
 _discovered = False
 
 
@@ -125,7 +126,7 @@ def all_specs() -> list[AdapterSpec]:
     return list(_SPECS.values())
 
 
-def get_spec(name: str, approach: Optional[str] = None) -> Optional[AdapterSpec]:
+def get_spec(name: str, approach: str | None = None) -> AdapterSpec | None:
     """Look up a spec by service name (optionally constraining the approach)."""
     discover_adapters()
     if approach is not None:

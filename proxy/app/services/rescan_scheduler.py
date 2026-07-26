@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import text
 
@@ -61,7 +61,7 @@ async def _rescan_all() -> None:
             continue
 
         # No source repo — nothing to scan; mark fresh directly (no job needed).
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         async with AsyncSessionLocal() as session:
             await session.execute(text(
                 """

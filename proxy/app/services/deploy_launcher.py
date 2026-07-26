@@ -102,7 +102,7 @@ async def _run_podman(cmd: list[str], timeout: int = 60) -> tuple[int, str, str]
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         await proc.communicate()
         return 1, "", "podman command timed out"

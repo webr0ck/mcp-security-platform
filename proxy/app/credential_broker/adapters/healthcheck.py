@@ -160,7 +160,6 @@ def get_healthcheck(
     """
     if adapter_name == "gitea":
         return GiteaHealthcheck(upstream_url, pinned_ip=pinned_ip, original_hostname=original_hostname)
-    elif adapter_name == "m365":
+    if adapter_name == "m365":
         return M365Healthcheck(upstream_url, pinned_ip=pinned_ip, original_hostname=original_hostname)
-    else:
-        raise ValueError(f"Unknown adapter: {adapter_name}")
+    raise ValueError(f"Unknown adapter: {adapter_name}")

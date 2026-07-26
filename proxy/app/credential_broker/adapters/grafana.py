@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -33,7 +33,7 @@ class GrafanaAdapter(BaseAdapter):
             resp.raise_for_status()
             data = resp.json()
 
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=28800)
+        expires_at = datetime.now(UTC) + timedelta(seconds=28800)
         return Token(value=data["key"], expires_at=expires_at, token_id=str(data["id"]))
 
     async def revoke(self, token_id: str) -> None:

@@ -115,8 +115,8 @@ class SessionSUKCustodian(KeyCustodian):
         return len(b).to_bytes(4, "big") + b
 
     def _derive_suk(self, hkdf_salt: bytes, principal_id: str, server_id: str) -> bytes:
-        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
         from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
         session_secret = self._require_live_session()
         info = (
             self._encode_info_component(principal_id)

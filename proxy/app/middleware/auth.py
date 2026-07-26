@@ -26,8 +26,6 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-import ipaddress
-
 from app.core.config import settings
 from app.core.security import hash_api_key
 
@@ -220,7 +218,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if session_token:
                 try:
                     import jwt as jose_jwt
-                    from jwt.exceptions import InvalidTokenError as JWTError
                     claims = jose_jwt.decode(
                         session_token,
                         settings.PROXY_SECRET_KEY,
@@ -255,7 +252,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     # 3a. Try internal session JWT (issued by /auth/oidc/callback)
                     try:
                         import jwt as jose_jwt
-                        from jwt.exceptions import InvalidTokenError as JWTError
                         claims = jose_jwt.decode(
                             token,
                             settings.PROXY_SECRET_KEY,
@@ -305,6 +301,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             accept = request.headers.get("accept", "")
             if "text/html" in accept and settings.OIDC_ENABLED:
                 from urllib.parse import quote
+
                 from starlette.responses import RedirectResponse as _Redirect
                 redirect_to = quote(str(request.url.path), safe="")
                 return _Redirect(
@@ -454,6 +451,7 @@ async def _resolve_active_profile_uuid(profile_ref: str) -> str | None:
     except (ValueError, AttributeError, TypeError):
         return None
     from sqlalchemy import text as _sqltext
+
     from app.core.database import AsyncSessionLocal as _ASL
     async with _ASL() as _db:
         _r = await _db.execute(
@@ -477,8 +475,10 @@ async def _db_jti_lookup(jti: str):
     Extracted as a separate function so tests can monkeypatch it cleanly.
     """
     from types import SimpleNamespace
-    from app.core.database import AsyncSessionLocal
+
     from sqlalchemy import text as sa_text
+
+    from app.core.database import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
         row = await db.execute(
             sa_text(
@@ -607,6 +607,7 @@ def _get_jwks_base_url() -> str:
 async def _fetch_jwks() -> list[dict]:
     """Fetch and cache the JWKS from the configured OIDC issuer using discovery."""
     import time
+
     import httpx
 
     now = time.monotonic()
@@ -769,6 +770,7 @@ async def _resolve_api_key(token: str) -> str | None:
     # Step 3: PostgreSQL lookup
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as session:
@@ -832,6 +834,7 @@ async def _load_roles(client_id: str) -> list[str]:
     # PostgreSQL role_assignments lookup
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as session:
@@ -897,6 +900,7 @@ async def _ensure_self_service_entitlement(principal_id: str, principal_type: st
         pass  # cache miss on Redis error — fall through and just do the DB check
 
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
     try:
         async with AsyncSessionLocal() as session:

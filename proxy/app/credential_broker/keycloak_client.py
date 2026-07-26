@@ -205,9 +205,10 @@ async def get_public_key_for_token(token: str):
     Fetch KC JWKS and return the RSA public key matching the token's kid header.
     Used by S-5 to verify exchanged tokens before trusting any claim.
     """
-    from jwt.algorithms import RSAAlgorithm
     import json as _json
+
     import jwt as _jwt
+    from jwt.algorithms import RSAAlgorithm
 
     jwks = await discover_jwks_uri()
     keys = jwks.get("keys", [])

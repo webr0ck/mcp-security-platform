@@ -18,20 +18,47 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.core.asyncpg_pool import asyncpg_pool
+from app.core.config import settings
+from app.core.database import check_database_health
+from app.core.hardening import apply_process_hardening
+from app.core.log_filter import RedactingFilter
+from app.core.redis_client import redis_pool
+from app.core.telemetry import telemetry
+from app.credential_broker.factory import build_broker
 from app.middleware.audit import AuditMiddleware, IPRateLimitMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.rbac import RBACMiddleware
-from app.routers import anomaly, audit, auth, compliance, health, integrations, mcp_server, oauth, oauth_metadata, policy, tools
+from app.routers import (
+    admin_credentials,
+    admin_git,
+    admin_grants,
+    admin_limits,
+    admin_llm,
+    admin_ops,
+    admin_prompts,
+    anomaly,
+    audit,
+    auth,
+    catalog,
+    compliance,
+    entitlements,
+    health,
+    integrations,
+    lab_links,
+    mcp_server,
+    oauth,
+    oauth_metadata,
+    oauth_provider_profiles,
+    oidc_browser,
+    policy,
+    portal,
+    profiles,
+    server_registry,
+    submission,
+    tools,
+)
 from app.routers import metrics as metrics_router
-from app.routers import oidc_browser, admin_credentials, admin_grants, admin_limits, admin_prompts, admin_llm, admin_git, admin_ops, portal, server_registry, catalog, lab_links, entitlements, profiles, submission, oauth_provider_profiles
-from app.core.config import settings
-from app.core.database import check_database_health
-from app.core.log_filter import RedactingFilter
-from app.core.hardening import apply_process_hardening
-from app.core.redis_client import redis_pool
-from app.core.telemetry import telemetry
-from app.core.asyncpg_pool import asyncpg_pool
-from app.credential_broker.factory import build_broker
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +167,8 @@ async def lifespan(app: FastAPI):
         )
 
     # Step 5: Initialize OPA data sync service (push grants to OPA immediately)
-    from app.services.opa_data_sync import OPADataSync
     from app.services import opa_data_sync as opa_data_sync_svc
+    from app.services.opa_data_sync import OPADataSync
     opa_data_sync = None
     try:
         pool = asyncpg_pool.get()

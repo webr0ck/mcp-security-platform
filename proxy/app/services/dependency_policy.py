@@ -28,7 +28,7 @@ blocked > error > review_required > passed precedence.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -213,7 +213,7 @@ def evaluate_dependency_findings(raw_findings: list[dict], waivers: list[dict] |
     this directly instead of the raw per-scanner findings list.
     """
     waivers = waivers or []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     active_waivers = [w for w in waivers if _waiver_active(w, now)]
     threshold = block_on or _load_block_on()
 

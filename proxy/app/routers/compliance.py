@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -38,9 +37,9 @@ def _require_roles(request: Request, allowed: set[str]) -> None:
 @router.get("/reports")
 async def list_compliance_reports(
     request: Request,
-    status: Optional[str] = Query(None, pattern="^(pass|fail|in_progress|error)$"),
-    from_date: Optional[str] = Query(None, alias="from"),
-    to_date: Optional[str] = Query(None, alias="to"),
+    status: str | None = Query(None, pattern="^(pass|fail|in_progress|error)$"),
+    from_date: str | None = Query(None, alias="from"),
+    to_date: str | None = Query(None, alias="to"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),

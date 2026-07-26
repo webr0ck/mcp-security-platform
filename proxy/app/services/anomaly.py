@@ -21,9 +21,6 @@ labelled as the heuristic it is.)
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime, timezone
-from typing import Any
 from uuid import uuid4
 
 from app.core.redis_client import push_anomaly_invocation
@@ -184,6 +181,7 @@ async def _persist_alert(
     correlation on client_id + recency, not exact).
     """
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
 
     alert_id = uuid4()

@@ -19,7 +19,6 @@ Enabled via PROXY_INGRESS_ALLOWLIST_ENABLED=true. The trusted ingress hostnames
 """
 from __future__ import annotations
 
-import ipaddress
 import logging
 import os
 import socket

@@ -580,6 +580,7 @@ async def create_api_key(body: ApiKeyCreate, request: Request) -> dict[str, Any]
     in this platform).
     """
     import secrets
+
     from app.core.security import hash_api_key
 
     _require_admin(request)
@@ -589,24 +590,23 @@ async def create_api_key(body: ApiKeyCreate, request: Request) -> dict[str, Any]
     raw_key = secrets.token_hex(32)
     key_hash = hash_api_key(raw_key)
 
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            key_row = await conn.fetchrow(
-                """
+    async with pool.acquire() as conn, conn.transaction():
+        key_row = await conn.fetchrow(
+            """
                 INSERT INTO api_keys (key_hash, client_id, roles, rate_limit_rpm, created_by)
                 VALUES ($1, $2, $3, $4, $5)
                 RETURNING key_id, created_at
                 """,
-                key_hash, body.client_id, body.roles, body.rate_limit_rpm, caller,
-            )
-            for role in body.roles:
-                await conn.execute(
-                    """
+            key_hash, body.client_id, body.roles, body.rate_limit_rpm, caller,
+        )
+        for role in body.roles:
+            await conn.execute(
+                """
                     INSERT INTO role_assignments (client_id, role, granted_by)
                     VALUES ($1, $2, $3)
                     """,
-                    body.client_id, role, caller,
-                )
+                body.client_id, role, caller,
+            )
 
     try:
         from app.core.redis_client import redis_pool

@@ -23,9 +23,9 @@ import logging
 import os
 import re
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -42,6 +42,7 @@ def _injection_mode_filter_options() -> str:
     labelled with each mode's human-facing label. Excludes the deprecated
     oauth_user_token alias (kc_token_exchange covers the same filter intent)."""
     from html import escape as _esc
+
     from app.services.auth_modes import AuthMode
 
     opts = ['<option value="">All injection modes</option>']
@@ -1157,6 +1158,7 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
 
     try:
         from sqlalchemy import text as _sidebar_text
+
         from app.core.database import AsyncSessionLocal as _SidebarSession
         async with _SidebarSession() as _sidebar_session:
             _admin_awaiting_review_count = (await _sidebar_session.execute(_sidebar_text(
@@ -1424,6 +1426,7 @@ async def upload_own_credential(request: Request, tool_id: str):
     # Validate tool exists
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -1441,8 +1444,8 @@ async def upload_own_credential(request: Request, tool_id: str):
 
     # Encrypt
     try:
-        from app.credential_broker.kms import load_master_secret_standalone
         from app.credential_broker.approaches.approach_a import encrypt
+        from app.credential_broker.kms import load_master_secret_standalone
 
         master = await load_master_secret_standalone()
         blob = encrypt(secret, user_sub, master, service=service_name, tool_id=tool_id, owner_type="user")
@@ -1453,6 +1456,7 @@ async def upload_own_credential(request: Request, tool_id: str):
     # Upsert — user-mode credentials keyed on (tool_id, user_sub)
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             await session.execute(
@@ -1492,6 +1496,7 @@ async def fragment_attention(request: Request):
     items = []
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
@@ -1564,6 +1569,7 @@ async def fragment_catalog(request: Request):
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
@@ -1721,8 +1727,8 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
 
     session_info = None
     try:
-        from app.routers.oidc_browser import _decode_session_jwt
         from app.core.config import settings
+        from app.routers.oidc_browser import _decode_session_jwt
         token = request.cookies.get(settings.SESSION_COOKIE_NAME)
         if token:
             session_info = _decode_session_jwt(token)
@@ -1736,7 +1742,7 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
 
     if session_info:
         exp = session_info.get("exp")
-        exp_str = datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if exp else "—"
+        exp_str = datetime.fromtimestamp(exp, tz=UTC).strftime("%Y-%m-%d %H:%M UTC") if exp else "—"
         auth_method = session_info.get("auth_method", "—")
         session_html = f"""
         <div style="margin-top:0.4rem;font-size:13px;color:var(--muted)">
@@ -1750,7 +1756,7 @@ async def _build_profile_fragment(request: Request, back_target: str) -> str:
     # their session to at login (?profile=<name>) so their MCP client only
     # sees that subset instead of everything they're entitled to.
     try:
-        from app.routers.profiles import _list_named_profiles, _get_profile_mcp_bindings
+        from app.routers.profiles import _get_profile_mcp_bindings, _list_named_profiles
         mcp_profiles = await _list_named_profiles(active_only=True)
         for p in mcp_profiles:
             p["bindings"] = await _get_profile_mcp_bindings(str(p["id"]))
@@ -1992,9 +1998,11 @@ async def fragment_mcp_profile_manage(name: str, request: Request):
 
     try:
         from collections import defaultdict
-        from app.routers.profiles import _get_named_profile, _get_profile_mcp_bindings
+
         from sqlalchemy import text as _sql_text
+
         from app.core.database import AsyncSessionLocal as _ASL
+        from app.routers.profiles import _get_named_profile, _get_profile_mcp_bindings
         profile = await _get_named_profile(name)
         if profile is None:
             return HTMLResponse('<div style="color:#fca5a5;font-size:12px">Profile not found.</div>')
@@ -2125,6 +2133,7 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             # All tools (not just granted — we show all servers the user can see)
@@ -2277,7 +2286,7 @@ async def _build_portal_access(cid: str, api_key: str = "", is_auditor: bool = F
         ungrantred = [t["name"] for t in tools if not t["granted"]]
         if ungrantred:
             chip_items.append(f'<span class="tool-chip-off">{esc_py(ungrantred[0])}</span>')
-        chips_html = "".join(chip_items) if chip_items else f'<span class="tool-chip-off">no tools</span>'
+        chips_html = "".join(chip_items) if chip_items else '<span class="tool-chip-off">no tools</span>'
 
         # Footer
         if cstatus == "active" and enabled:
@@ -2766,6 +2775,7 @@ async def fragment_admin_servers(request: Request):
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
@@ -3524,6 +3534,7 @@ async def fragment_admin_dashboard(request: Request):
     """PRD-0006 R-5: console posture dashboard — 6 KPI tiles + recent detections."""
     _require_admin(request)
     from sqlalchemy import text
+
     from app.core.database import AsyncSessionLocal
 
     async def _scalar(session, sql, **p):
@@ -3725,6 +3736,7 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             # A) rollup by OPA reason
@@ -4102,7 +4114,7 @@ async def fragment_admin_detections(request: Request, days: int = 7, server_id: 
 # ---------------------------------------------------------------------------
 
 @router.get("/fragments/admin/tools", response_class=HTMLResponse)
-async def fragment_admin_tools(request: Request, server_id: Optional[str] = Query(None)):
+async def fragment_admin_tools(request: Request, server_id: str | None = Query(None)):
     """Admin tools management sub-tab. Optional server_id filters to one
     server's tools — the deep link the MCP Servers tab uses so a reviewer
     who sees a disabled/high-risk tool on a server card lands directly on
@@ -4111,6 +4123,7 @@ async def fragment_admin_tools(request: Request, server_id: Optional[str] = Quer
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
@@ -4330,6 +4343,7 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
         pat = f"%{q.lower().replace('%', '').replace('_', '')}%"
         try:
             from sqlalchemy import text
+
             from app.core.database import AsyncSessionLocal
             async with AsyncSessionLocal() as session:
                 result = await session.execute(text("""
@@ -4388,6 +4402,7 @@ async def fragment_admin_sbom(request: Request, q: str = ""):
     # --- Normal inventory mode ---
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
@@ -4592,6 +4607,7 @@ async def fragment_admin_sbom_detail(tool_id: str, request: Request):
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             row = await session.execute(text("""
@@ -4722,6 +4738,7 @@ async def fragment_admin_credentials(request: Request):
 
     try:
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("""
@@ -5139,7 +5156,12 @@ async def fragment_admin_access(request: Request):
         # (e.g. rescan_scheduler → submission_scanner), and avoids the latency/
         # cookie-forwarding fragility of looping a request back through the
         # network stack. Both callees re-check RBAC on this same `request`.
-        from app.routers.admin_grants import list_principals, list_grants, list_role_assignments, list_api_keys
+        from app.routers.admin_grants import (
+            list_api_keys,
+            list_grants,
+            list_principals,
+            list_role_assignments,
+        )
         principals = (await list_principals(request)).get("principals", [])
         grants = (await list_grants(request)).get("grants", [])
         roles_resp = await list_role_assignments(request)
@@ -5552,7 +5574,9 @@ async def fragment_admin_access_detail(principal: str, request: Request):
 
     try:
         import json as _json
+
         from sqlalchemy import text as _sql_text
+
         from app.core.database import AsyncSessionLocal as _ASL
         from app.routers.profiles import list_profile_mcps
         resp = await list_profile_mcps(principal, request)
@@ -5650,7 +5674,9 @@ async def fragment_admin_submissions(request: Request):
     _require_submission_reviewer(request)
     try:
         from collections import defaultdict
+
         from sqlalchemy import text
+
         from app.core.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             rows = (await session.execute(text("""
@@ -5856,7 +5882,7 @@ async def fragment_admin_submissions(request: Request):
                 github_link = (f'<a href="{esc_py(_safe_repo)}" target="_blank" rel="noopener noreferrer" '
                                f'style="color:var(--cyan);font-size:12px">&#x1F517; {esc_py(_safe_repo)}</a>')
             else:
-                github_link = f'<span style="color:#fca5a5;font-size:12px">&#x26A0; invalid repo URL</span>'
+                github_link = '<span style="color:#fca5a5;font-size:12px">&#x26A0; invalid repo URL</span>'
 
         # R-12: SBOM link gets equal visual weight to the repo link — once R-9
         # (manifest parsing) + R-10 (auto-provisioning) land, an approved
@@ -6195,8 +6221,8 @@ async def fragment_admin_llm(request: Request):
 async def fragment_admin_git(request: Request):
     """Configure git providers (host/account/token/allow_private) for repo cloning."""
     _require_admin(request)
-    from app.services import platform_secrets as _ps
     from app.core.asyncpg_pool import asyncpg_pool
+    from app.services import platform_secrets as _ps
     pool = asyncpg_pool.get()
     if pool is None:
         return HTMLResponse('<div class="section-title">Git Providers</div>'

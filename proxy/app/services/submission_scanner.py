@@ -49,9 +49,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
-from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         await proc.communicate()
         return 1, "", "timed out"

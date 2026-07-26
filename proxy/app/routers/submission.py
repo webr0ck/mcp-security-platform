@@ -17,7 +17,6 @@ Admin review (admin / platform_admin role):
 """
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import logging
@@ -27,20 +26,19 @@ import shutil
 import tempfile
 import uuid
 import zipfile
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import text
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
-from app.services import submission_scanner
+from app.services import prompt_store, scan_queue, submission_scanner
 from app.services.admin_audit import emit_admin_config_event
-from app.services.scaffold_generator import generate_prompts, generate_scaffold
-from app.services import prompt_store
+from app.services.auth_modes import self_service_mode_values
+from app.services.scaffold_generator import generate_scaffold
 from app.services.server_onboarding import (
     InvalidOnboardingConfig,
     validate_mode_and_idp,
@@ -48,8 +46,6 @@ from app.services.server_onboarding import (
     validate_upstream_url_ssrf,
 )
 from app.services.submission_scanner import GITHUB_CLONE_ACCOUNT
-from app.services import scan_queue
-from app.services.auth_modes import self_service_mode_values
 
 # R-2: cheap structural guard at submit time — well-formed https URL, no
 # embedded credentials, no whitespace/control chars. The authoritative
@@ -246,7 +242,7 @@ async def _clone_and_read_repo(
                     truncated = True
                     continue
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         content = f.read()
                 except (UnicodeDecodeError, OSError):
                     continue  # binary or unreadable — listed in tree, no contents
@@ -272,7 +268,7 @@ async def _get_submission(server_id: str, owner_sub: str | None = None) -> dict[
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
-def _validate_github_url(v: Optional[str]) -> Optional[str]:
+def _validate_github_url(v: str | None) -> str | None:
     """Cheap structural guard at submit time (R-2): require a well-formed https
     URL with a bare host path and no embedded credentials. The authoritative
     provider-host allowlist + SSRF check runs asynchronously in the submission
@@ -300,7 +296,7 @@ class DraftCreate(BaseModel):
 
     name: str
     description: str = ""
-    github_repo_url: Optional[str] = None  # None = no-code path
+    github_repo_url: str | None = None  # None = no-code path
     # PRD-0012 discriminator: True (default) = self-hosted — the submitter
     # runs their own backend and supplies requested_upstream_url at submit
     # (C1). False = platform-deployed — the platform builds/deploys the repo
@@ -320,7 +316,7 @@ class DraftCreate(BaseModel):
 
     @field_validator("github_repo_url")
     @classmethod
-    def validate_github_url(cls, v: Optional[str]) -> Optional[str]:
+    def validate_github_url(cls, v: str | None) -> str | None:
         return _validate_github_url(v)
 
 
@@ -330,27 +326,27 @@ class DraftUpdate(BaseModel):
     # silently dropping them — same rationale as DraftCreate above.
     model_config = ConfigDict(extra="forbid")
 
-    description: Optional[str] = None
-    github_repo_url: Optional[str] = None
-    injection_mode: Optional[str] = None
-    requested_upstream_url: Optional[str] = None
+    description: str | None = None
+    github_repo_url: str | None = None
+    injection_mode: str | None = None
+    requested_upstream_url: str | None = None
     # PRD-0012: allow changing deployment intent while still in draft/
     # changes_requested (e.g. the wizard's step-1 choice was wrong) — same
     # semantics as DraftCreate.self_host.
-    self_host: Optional[bool] = None
+    self_host: bool | None = None
 
     @field_validator("github_repo_url")
     @classmethod
-    def validate_github_url(cls, v: Optional[str]) -> Optional[str]:
+    def validate_github_url(cls, v: str | None) -> str | None:
         return _validate_github_url(v)
-    upstream_idp_type: Optional[str] = None
-    upstream_idp_config: Optional[dict] = None
-    mode_override_reason: Optional[str] = None
+    upstream_idp_type: str | None = None
+    upstream_idp_config: dict | None = None
+    mode_override_reason: str | None = None
     # Fix 4 (§4): data_categories enum surfaced via json_schema_extra so it
     # is discoverable in the generated OpenAPI schema (and by any client/tool
     # that introspects it), not just in a 422 error message after a failed
     # guess.
-    data_categories: Optional[list[str]] = Field(
+    data_categories: list[str] | None = Field(
         default=None,
         json_schema_extra={"items": {"enum": sorted(_VALID_CATEGORIES)}},
         description=(
@@ -358,7 +354,7 @@ class DraftUpdate(BaseModel):
             + ", ".join(sorted(_VALID_CATEGORIES))
         ),
     )
-    has_write_ops: Optional[bool] = None
+    has_write_ops: bool | None = None
 
     @field_validator("injection_mode")
     @classmethod
@@ -401,8 +397,8 @@ class ReviewAction(BaseModel):
     # Optional reviewer override of the approved kc_token_exchange audience /
     # scopes; when omitted, the requested upstream_idp_config values are used
     # as-is (still subject to oauth_policy validation below).
-    approved_token_audience: Optional[str] = None
-    approved_token_scopes: Optional[list[str]] = None
+    approved_token_audience: str | None = None
+    approved_token_scopes: list[str] | None = None
 
 
 # ── Self-service endpoints ────────────────────────────────────────────────────
@@ -418,7 +414,7 @@ async def create_draft(body: DraftCreate, request: Request) -> JSONResponse:
             "SELECT 1 FROM server_registry WHERE name = :name AND owner_sub = :owner AND deleted_at IS NULL"
         ), {"name": body.name, "owner": owner})).fetchone()
         if existing:
-            raise HTTPException(status_code=409, detail="you already have a server named '{}'".format(body.name))
+            raise HTTPException(status_code=409, detail=f"you already have a server named '{body.name}'")
 
         await session.execute(text("""
             INSERT INTO server_registry
@@ -699,6 +695,7 @@ async def download_sbom(server_id: str, request: Request) -> JSONResponse:
     """R-5: download the CycloneDX SBOM captured at scan time (reviewer/admin)."""
     _require_submission_reviewer(request)
     from sqlalchemy import text as _text
+
     from app.core.database import AsyncSessionLocal as _S
     async with _S() as session:
         row = (await session.execute(_text(
@@ -814,7 +811,7 @@ def _parse_idp_config(raw: Any) -> dict | None:
 async def _validate_oauth_policy_at_approval(
     session: AsyncSession,
     sub: dict[str, Any],
-    body: "ReviewAction",
+    body: ReviewAction,
 ) -> dict[str, Any]:
     """
     WP-A2 (CR-13 + CR-03 fold-in): approval-time OAuth/IdP policy gate.
@@ -1481,7 +1478,7 @@ async def design_assist_scaffold(request: Request, mode: str = "none") -> JSONRe
 
 
 @router.get("/api/v1/design-assist")
-async def design_assist(request: Request, mode: Optional[str] = None) -> JSONResponse:
+async def design_assist(request: Request, mode: str | None = None) -> JSONResponse:
     """
     Returns a structured set of questions an AI agent should ask a user before
     implementing an MCP server.  mode=<injection_mode> to get mode-specific
