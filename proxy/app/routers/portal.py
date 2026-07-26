@@ -5873,11 +5873,18 @@ def esc_json_attr(*args: Any) -> str:
 
     R1.4: the delegated dispatcher reads data-json when any argument is not a string —
     a bare data-a0="false" would arrive in JS as the truthy string "false". json.dumps
-    emits double quotes, which would terminate the attribute, so they are escaped to
-    &quot; (the browser decodes them before JSON.parse sees the value).
+    emits double quotes, which would terminate the attribute, so the whole payload is
+    HTML-escaped (the browser decodes it before JSON.parse sees the value).
+
+    Escape with esc_py, NOT a bare .replace('"', "&quot;"). The replace form leaves `&`
+    untouched, so a value containing the literal text `&quot;` survives json.dumps
+    unchanged (it holds no quote character), survives the replace, and is then decoded by
+    the browser into a real `"` — closing the JSON string and appending attacker-chosen
+    elements to the parsed array. esc_py escapes `&` first, so `&quot;` becomes
+    `&amp;quot;` and decodes back to the harmless literal it started as.
     """
     import json as _json
-    return _json.dumps(list(args)).replace('"', "&quot;")
+    return esc_py(_json.dumps(list(args)))
 
 
 _KPI_TONE = {
