@@ -80,3 +80,7 @@ graphify-out/
 .ops-agent-git-workdirs/
 .superpowers/
 dep-audit-report.json
+
+# Rendered lab config: contains the host-specific PROXY_BASE_URL (a real LAN/Tailscale
+# address). Template is lab/dex/config.lab.yaml; render via lab/scripts/render_dex_config.sh.
+lab/dex/config.rendered.yaml
