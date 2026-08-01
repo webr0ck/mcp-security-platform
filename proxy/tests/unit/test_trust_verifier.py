@@ -76,15 +76,18 @@ def _make_leaf(sub_ca_key, sub_ca_cert, ttl_minutes=15, eku_oids=None, not_befor
     return key, cert
 
 
-def _build_envelope(leaf_key, leaf_cert, sub_ca_cert, content, trust_tier=0, signed_at=None, tool_name="web_search", server_id="srv-1", result_id="rid-1", sensitivity_label="low"):
-    """Build a valid SPEC-0001 §5 envelope."""
+def _build_envelope(leaf_key, leaf_cert, sub_ca_cert, content, trust_tier=0, signed_at=None, tool_name="web_search", server_id="srv-1", result_id="rid-1", sensitivity_label="low", attribution=None):
+    """Build a valid SPEC-0001 §5 envelope.
+
+    `attribution` overrides the labeler self-attribution so a test can sign with one leaf
+    while naming another (see TestAttributionBinding)."""
     from app.services.trust_labeler import _TRUST_TIER_LABELS
     safe_tier = trust_tier if 0 <= trust_tier <= 4 else 0
     label = {
         "source": _TRUST_TIER_LABELS[safe_tier],
         "integrity_rank": safe_tier,
         "sensitivity": sensitivity_label,
-        "attribution": [{"principal": leaf_cert.subject.rfc4514_string(), "cert_fp": "sha256:" + leaf_cert.fingerprint(hashes.SHA256()).hex()}],
+        "attribution": attribution if attribution is not None else [{"principal": leaf_cert.subject.rfc4514_string(), "cert_fp": "sha256:" + leaf_cert.fingerprint(hashes.SHA256()).hex()}],
     }
     canonical_payload = jcs_tool_result(content=content, structured_content=None)
     content_hash = "sha256:" + hashlib.sha256(canonical_payload).hexdigest()
@@ -161,6 +164,72 @@ class TestHappyPath:
         verifier = TrustVerifier(sub_ca_cert=pki["sub_ca_cert"])
         v = verifier.verify(result, tool_name="t", server_id="s", result_id="r")
         assert v.accepted is True
+
+
+# ── Attribution binding (the label's named labeler MUST be the presenting cert) ──
+
+class TestAttributionBinding:
+    def test_attribution_naming_a_different_leaf_rejected(self, pki, verifier):
+        """A SECOND leaf under the same pinned sub-CA signs, but attributes the assertion
+        to the FIRST leaf. Chain, EKU, freshness, signature and content hash all pass -
+        only the attribution binding catches it.
+
+        This is the realistic shape: a rotated key, a second region, another tenant, or
+        any leaf minted from the same sub-CA. Without this check the envelope proves only
+        'some key under the pinned anchor asserted this', while the label claims a
+        specific named labeler did."""
+        other_key, other_cert = _make_leaf(pki["sub_ca_key"], pki["sub_ca_cert"])
+        content = [{"type": "text", "text": "safe data"}]
+        impersonated = [{
+            "principal": pki["leaf_cert"].subject.rfc4514_string(),
+            "cert_fp": "sha256:" + pki["leaf_cert"].fingerprint(hashes.SHA256()).hex(),
+        }]
+        envelope = _build_envelope(other_key, other_cert, pki["sub_ca_cert"], content,
+                                   attribution=impersonated)
+        v = verifier.verify(_make_tool_result(content, envelope),
+                            tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is False
+        assert v.reason == "attribution_mismatch"
+
+    def test_absent_attribution_rejected(self, pki, verifier):
+        """No attribution at all: nothing to bind, so the 'named labeler' claim cannot be
+        made. Fail closed rather than accept an unattributed assertion."""
+        content = [{"type": "text", "text": "safe data"}]
+        envelope = _build_envelope(pki["leaf_key"], pki["leaf_cert"], pki["sub_ca_cert"],
+                                   content, attribution=[])
+        v = verifier.verify(_make_tool_result(content, envelope),
+                            tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is False
+        assert v.reason == "attribution_missing"
+
+    def test_honest_first_entry_with_forged_second_rejected(self, pki, verifier):
+        """The index-shift version of the same attack: attribution[0] honestly names the
+        signing leaf, so a check that only binds element 0 passes - and a forged element 1
+        names a different labeler from INSIDE the signed label, inheriting the signature's
+        authority for any consumer that reads the field as the list it is declared to be."""
+        content = [{"type": "text", "text": "safe data"}]
+        honest_then_forged = [
+            {
+                "principal": pki["leaf_cert"].subject.rfc4514_string(),
+                "cert_fp": "sha256:" + pki["leaf_cert"].fingerprint(hashes.SHA256()).hex(),
+            },
+            {"principal": "CN=mcp-labeler.platform.internal", "cert_fp": "sha256:deadbeef"},
+        ]
+        envelope = _build_envelope(pki["leaf_key"], pki["leaf_cert"], pki["sub_ca_cert"],
+                                   content, attribution=honest_then_forged)
+        v = verifier.verify(_make_tool_result(content, envelope),
+                            tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is False
+        assert v.reason == "attribution_multi"
+
+    def test_self_attributed_envelope_still_accepted(self, pki, verifier):
+        """Non-vacuity: the normal labeler-signs-and-names-itself path still passes."""
+        content = [{"type": "text", "text": "safe data"}]
+        envelope = _build_envelope(pki["leaf_key"], pki["leaf_cert"], pki["sub_ca_cert"],
+                                   content, trust_tier=2)
+        v = verifier.verify(_make_tool_result(content, envelope),
+                            tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is True and v.integrity_rank == 2
 
 
 # ── D4: body-swap (content hash mismatch) ─────────────────────────────────

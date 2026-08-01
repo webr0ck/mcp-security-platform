@@ -191,6 +191,30 @@ class TrustVerifier:
         if MCP_LABELER_OID not in eku_oids:
             return self._reject("missing_labeler_eku")
 
+        # ── Step 3b: Attribution binding ─────────────────────────────────
+        # `label.attribution` names the labeler that asserted this. It sits inside
+        # `label`, so it IS signed - but a valid signature only proves that SOME key
+        # chaining to the pinned sub-CA signed it. Without this comparison any sibling
+        # leaf (a rotated key, a second region, another tenant) can attribute its
+        # assertion to a DIFFERENT principal and verify clean, so "the named labeler
+        # asserted this" would be unproven. Bind the name to the cert presenting it.
+        attribution = label.get("attribution")
+        if not isinstance(attribution, list) or not attribution:
+            return self._reject("attribution_missing")
+        # Exactly one. Binding only attribution[0] would leave the rest unbound, and every
+        # extra entry sits INSIDE the signed label - so a sibling leaf could self-attribute
+        # at index 0 (passing the check below) and forge a second entry naming a different
+        # labeler, which then carries the signature's authority to anything that reads
+        # `attribution` as the list it is declared to be. Same lie, one index over.
+        if len(attribution) != 1:
+            return self._reject("attribution_multi")
+        signer = attribution[0] if isinstance(attribution[0], dict) else {}
+        leaf_fp = "sha256:" + leaf_cert.fingerprint(hashes.SHA256()).hex()
+        if signer.get("cert_fp") != leaf_fp:
+            return self._reject("attribution_mismatch")
+        if signer.get("principal") != leaf_cert.subject.rfc4514_string():
+            return self._reject("attribution_mismatch")
+
         # ── Step 4: Signature verify (ES256, hardcoded — never dispatched) ─
         try:
             padding = "=" * (-len(sig_value) % 4)
