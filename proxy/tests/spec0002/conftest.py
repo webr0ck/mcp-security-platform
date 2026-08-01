@@ -4,7 +4,7 @@ Markers (registered here so `pytest -m ...` works without warnings):
   oracle      — pure spec-logic test against spec_oracle.py (no gateway, always runs)
   substrate   — exercises the REAL implemented SPEC-0001 libs (labeler/verifier/taint)
   live        — requires a running proxy on $SPEC0002_PROXY_URL (auto-skipped if down)
-  conformance — SPEC-0002 §4–§6 gateway integration; skips until implemented
+  conformance — SPEC-0002 §5–§7 gateway integration; skips until implemented
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def pytest_configure(config: pytest.Config) -> None:
         ("oracle", "pure SPEC-0002 spec-logic test (no gateway)"),
         ("substrate", "exercises the implemented SPEC-0001 libs (no containers)"),
         ("live", "requires a running proxy (auto-skipped if unavailable)"),
-        ("conformance", "SPEC-0002 §4-6 gateway integration (skips until implemented)"),
+        ("conformance", "SPEC-0002 §5-7 gateway integration (skips until implemented)"),
         ("redteam", "tracks a known vulnerability; passes while bug persists, fails when fixed"),
     ):
         config.addinivalue_line("markers", f"{name}: {desc}")

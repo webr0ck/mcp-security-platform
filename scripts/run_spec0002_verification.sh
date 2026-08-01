@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # SPEC-0002 verification runner — one command, offline-first, auto-detects a live
-# gateway. See docs/rfc/SPEC-0002-verification-plan.md for the full plan.
+# gateway. See github.com/webr0ck/security-specs for the specification itself.
 #
-#   Layer 1 (oracle)     : pure SPEC-0002 §4-6 decision logic vs Appendix B vectors
+#   Layer 1 (oracle)     : pure SPEC-0002 §5-7 decision logic vs Appendix B vectors
 #   Layer 2 (substrate)  : the REAL implemented SPEC-0001 labeler/verifier/taint
 #   Layer 3 (demo)       : scripts/demo_trust_envelope.py round-trip smoke
-#   Layer 4 (conformance): SPEC-0002 §4-6 gateway integration — SKIP until built
+#   Layer 4 (conformance): SPEC-0002 §5-7 gateway integration — SKIP until built
 #   Layer 5 (live)       : end-to-end vs a running proxy (auto-skipped if down)
 #
 # Exit code: non-zero ONLY on real failures/errors. Skips (unbuilt features, no
@@ -118,8 +118,8 @@ say "demo   : $( [ "${DEMO_RC}" -eq 0 ] && echo "${c_grn}PASS${c_off}" || echo "
   echo
   echo "## What passed vs what is pending"
   echo
-  echo "- **Oracle (SPEC-0002 §4-6 logic)** and **Substrate (SPEC-0001)** layers should be all-green."
-  echo "- **Conformance §4-6** skips are the implementation backlog (each skip names the module/file to build)."
+  echo "- **Oracle (SPEC-0002 §5-7 logic)** and **Substrate (SPEC-0001)** layers should be all-green."
+  echo "- **Conformance §5-7** skips are the implementation backlog (each skip names the module/file to build)."
   echo "- **Live** skips mean no running gateway was detected."
   echo
   echo "### Skips (backlog + environment)"

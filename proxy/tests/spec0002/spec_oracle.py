@@ -2,7 +2,7 @@
 
 THIS IS NOT THE GATEWAY IMPLEMENTATION. As of this draft, the gateway implements
 only the SPEC-0001 / §3.2 signed-envelope substrate (TrustLabeler, TrustVerifier,
-taint floor). SPEC-0002 §4 (content classification / BLP), §5 (federation / trust
+taint floor). SPEC-0002 §5 (content classification / BLP), §6 (federation / trust
 list / trust scope), and §6 (AI provenance / pipeline taint) have NO code in the
 gateway yet.
 
@@ -17,8 +17,8 @@ deterministic functions so that:
   3. When the gateway eventually implements §4–§6, this oracle is the conformance
      target: the gateway's decisions MUST match the oracle's for every vector.
 
-Everything here is traceable to a section of
-docs/rfc/SPEC-0002-mcp-content-classification-federated-trust-ai-provenance.md.
+Everything here is traceable to a section of SPEC-0002, published at
+https://github.com/webr0ck/security-specs/blob/main/specs/0002-mcp-content-classification-federated-trust-ai-provenance.md.
 No gateway/runtime dependency — pure stdlib.
 """
 from __future__ import annotations

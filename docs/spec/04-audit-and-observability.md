@@ -301,9 +301,10 @@ The persisted `audit_events` row additionally carries `hmac_signature`,
 2. **`AUDIT_ARCHIVAL_RUN`** appears in the compliance checker's stdout emission
    but is **not** a member of the `AuditEventType` enum (§8.1). It is not a
    schema-validated event.
-3. **SPEC-0002 §5.4** is cited by `transparency_log.py`, but no RFC document exists
-   in the repo at HEAD — the citation is a code-comment anchor. The module is a
-   fail-closed stub (§4).
+3. **SPEC-0002 §6.4** is cited by `transparency_log.py`. The specification is
+   published at <https://github.com/webr0ck/security-specs> and the section
+   resolves there, but the module itself is a fail-closed stub (§4) — the
+   section is specified, not implemented.
 
 ---
 

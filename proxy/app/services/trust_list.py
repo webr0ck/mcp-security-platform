@@ -1,4 +1,4 @@
-"""SPEC-0002 §5 — Federated Trust Architecture.
+"""SPEC-0002 §6 — Federated Trust Architecture.
 
 Minimal Trust List loader + trust-scope enforcer.
 Federation is SPECIFIED for the lab; full M-of-N governance, transparency-log

@@ -1,4 +1,4 @@
-"""Normal-vs-malicious activity scenarios for SPEC-0002 §4–§6 decision logic.
+"""Normal-vs-malicious activity scenarios for SPEC-0002 §5–§7 decision logic.
 
 Each malicious scenario maps to a threat in SPEC-0002 Appendix C (T-xx) and asserts
 the spec's logic DENIES it; each normal scenario asserts a legitimate flow is
