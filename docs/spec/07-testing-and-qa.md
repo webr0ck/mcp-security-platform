@@ -27,7 +27,7 @@ expected scale at `2f6430c`.
 | 1 | **Unit** | `proxy/tests/unit/` (+ `unit/credential_broker/`) | ~98 files / ~1131 tests green per commit | No — pure, deterministic |
 | 2 | **Integration** | `proxy/tests/integration/` | ~21 scenarios (`-m integration`) | Yes — full stack up |
 | 3 | **Security invariant / regression** | `proxy/tests/security/` + `make security-check` | invariant + tamper + sandbox-escape | Partly (static gates need no stack) |
-| 4 | **Trust-envelope (RFC-0002) oracle-parity + red-team** | `proxy/tests/rfc0002/` | oracle-parity + adversarial regression | No — self-contained |
+| 4 | **Trust-envelope (SPEC-0002) oracle-parity + red-team** | `proxy/tests/spec0002/` | oracle-parity + adversarial regression | No — self-contained |
 | 5 | **Containerized red-team harness** | `sandbox/tests/red_team/` + lab MCP probes | 11 containment probes + MCP backend-isolation probe | Yes — podman + sandbox/lab net |
 | 6 | **Lab functional gate-chain** | `lab/tests/functional_test.py` | headline E2E acceptance chain | Yes — `make lab-up` |
 | — | **UI e2e (Playwright)** | `ui/e2e/*.spec.ts` | portal (~4) + acceptance (~32) specs | Yes — portal + backend |
@@ -158,8 +158,8 @@ Two proof types are BOTH REQUIRED and are not interchangeable:
   `test_supply_chain.sh`, `test_prompt_injection_wazuh.sh`). The same probes MUST also run against a real
   lab MCP server (`test_mcp_platform_backend_isolation.sh`, RT-MCP-001) — isolating the generic sandbox
   is not enough; the actual server container MUST be proven unable to reach platform backends.
-- **RFC-0002 malicious-MCP catalogue** — the trust-envelope red-team regression
-  (`proxy/tests/rfc0002/test_redteam_regression.py`) plus oracle-parity
+- **SPEC-0002 malicious-MCP catalogue** — the trust-envelope red-team regression
+  (`proxy/tests/spec0002/test_redteam_regression.py`) plus oracle-parity
   (`test_scenarios_oracle.py`, `test_gateway_parity.py`, `test_appendix_b_vectors.py`) MUST prove the
   verifier's verdicts match the spec oracle on the adversarial vector set and that known-bad envelopes
   stay rejected.
@@ -269,8 +269,8 @@ python3 -m pytest tests/unit -q                 # full unit suite (~1131 tests)
 python3 -m pytest tests/unit tests/security -q  # unit + security invariants
 python3 -m pytest tests/unit/test_redaction.py -q   # a single file
 
-# ── Trust envelope (RFC-0002), self-contained ────────────────────
-python3 -m pytest tests/rfc0002 -q
+# ── Trust envelope (SPEC-0002), self-contained ────────────────────
+python3 -m pytest tests/spec0002 -q
 
 # ── Via the stack (containers) ───────────────────────────────────
 make test              # everything, inside the proxy container

@@ -1,4 +1,4 @@
-"""PKI + envelope helpers for the RFC-0002 substrate tests.
+"""PKI + envelope helpers for the SPEC-0002 substrate tests.
 
 Cloned from scripts/demo_trust_envelope.py (a known-good labeler→verifier path):
 a self-signed sub-CA + a labeler leaf carrying the MCP labeler EKU, plus a helper

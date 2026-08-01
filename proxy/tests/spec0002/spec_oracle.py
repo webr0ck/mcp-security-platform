@@ -1,8 +1,8 @@
-"""RFC-0002 SPECIFICATION ORACLE — reference decision logic for §4–§6.
+"""SPEC-0002 SPECIFICATION ORACLE — reference decision logic for §4–§6.
 
 THIS IS NOT THE GATEWAY IMPLEMENTATION. As of this draft, the gateway implements
-only the RFC-0001 / §3.2 signed-envelope substrate (TrustLabeler, TrustVerifier,
-taint floor). RFC-0002 §4 (content classification / BLP), §5 (federation / trust
+only the SPEC-0001 / §3.2 signed-envelope substrate (TrustLabeler, TrustVerifier,
+taint floor). SPEC-0002 §4 (content classification / BLP), §5 (federation / trust
 list / trust scope), and §6 (AI provenance / pipeline taint) have NO code in the
 gateway yet.
 
@@ -18,7 +18,7 @@ deterministic functions so that:
      target: the gateway's decisions MUST match the oracle's for every vector.
 
 Everything here is traceable to a section of
-docs/rfc/RFC-0002-mcp-content-classification-federated-trust-ai-provenance.md.
+docs/rfc/SPEC-0002-mcp-content-classification-federated-trust-ai-provenance.md.
 No gateway/runtime dependency — pure stdlib.
 """
 from __future__ import annotations

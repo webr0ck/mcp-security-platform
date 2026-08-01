@@ -1,11 +1,11 @@
-"""Normal-vs-malicious activity scenarios for RFC-0002 §4–§6 decision logic.
+"""Normal-vs-malicious activity scenarios for SPEC-0002 §4–§6 decision logic.
 
-Each malicious scenario maps to a threat in RFC-0002 Appendix C (T-xx) and asserts
+Each malicious scenario maps to a threat in SPEC-0002 Appendix C (T-xx) and asserts
 the spec's logic DENIES it; each normal scenario asserts a legitimate flow is
 ALLOWED (no over-blocking). Pure oracle — runs everywhere, no gateway needed.
 
 These are the policy-layer twin of the cryptographic/substrate scenarios in
-test_substrate_rfc0001.py (which exercise the real implemented labeler/verifier).
+test_substrate_spec0001.py (which exercise the real implemented labeler/verifier).
 """
 from __future__ import annotations
 

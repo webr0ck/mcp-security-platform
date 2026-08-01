@@ -1,4 +1,4 @@
-"""RFC-0002 §5/6 BEHAVIOURAL parity: app.services.* MUST match spec_oracle on every
+"""SPEC-0002 §5/6 BEHAVIOURAL parity: app.services.* MUST match spec_oracle on every
 Appendix B vector. This is the test the conformance skip-messages always promised."""
 from __future__ import annotations
 

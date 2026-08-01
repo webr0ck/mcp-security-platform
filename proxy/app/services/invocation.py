@@ -776,7 +776,7 @@ async def _gate_taint_floor(ctx: "InvocationContext") -> None:
     tool_record = ctx.tool_record
     tool_server_id = ctx.tool_server_id
 
-    # Step 1.6: B-coarse taint floor (RFC-0001 §8.1, PRD-0001 M2).
+    # Step 1.6: B-coarse taint floor (SPEC-0001 §8.1, PRD-0001 M2).
     # Order: INV-005 quarantine -> taint-floor -> INV-004 OPA. A session tainted
     # by a prior untrusted result cannot invoke a high-sensitivity or credential-
     # injecting sink. Fail-closed (INV-015); the deny is audited (INV-001) before
@@ -789,7 +789,7 @@ async def _gate_taint_floor(ctx: "InvocationContext") -> None:
     # PRD-0010 Phase 0: taint-floor action is mode-selected via TAINT_FLOOR_MODE.
     #   "notify"  (default) — allow the call, attach a disclaimer notice; never blocks.
     #   "enforce"           — hard-DENY via TaintFloorDenyError (routers map to 403 /
-    #                         JSON-RPC error), audited as a deny. RFC-0001 §8.1.
+    #                         JSON-RPC error), audited as a deny. SPEC-0001 §8.1.
     # See docs/prd/PRD-0010-taint-floor-mode-delegation.md for the mode/delegation roadmap.
     _taint_notice: str | None = None
     if _tf_settings.TAINT_FLOOR_ENABLED:
@@ -816,7 +816,7 @@ async def _gate_taint_floor(ctx: "InvocationContext") -> None:
         _decision = taint_floor_decision(tainted=_tainted, required_integrity=_required)
         _action = resolve_taint_action(_decision, _tf_settings.TAINT_FLOOR_MODE)
         if _action == TAINT_ACTION_BLOCK:
-            # ENFORCE mode: hard deny (RFC-0001 §8.1). Audit the deny (INV-001) BEFORE
+            # ENFORCE mode: hard deny (SPEC-0001 §8.1). Audit the deny (INV-001) BEFORE
             # raising, mirroring the entitlement gate above, then let the router map
             # TaintFloorDenyError to a 403 / JSON-RPC error. Fail-closed (INV-015).
             await _emit_audit_event(
@@ -1811,7 +1811,7 @@ async def invoke_tool(
         }
 
     # -------------------------------------------------------------------------
-    # Write-before-forward (RFC-0001 §8.1, PRD-0001 M2). A real result came back
+    # Write-before-forward (SPEC-0001 §8.1, PRD-0001 M2). A real result came back
     # from the upstream server. If that server is untrusted (binary integrity 0;
     # fail-closed when trust_tier is unknown), taint the principal's session BEFORE
     # the result is forwarded — and BEFORE the response-injection screen below, so a
@@ -2427,7 +2427,7 @@ class ServerInMaintenanceError(Exception):
 class TaintFloorDenyError(Exception):
     """Raised when the B-coarse taint floor denies a sink in a tainted session.
 
-    RFC-0001 §8.1 / PRD-0001 M2. App-layer deny, pre-OPA, fail-closed — the deny
+    SPEC-0001 §8.1 / PRD-0001 M2. App-layer deny, pre-OPA, fail-closed — the deny
     is audited (INV-001) before this propagates. Routers map it to a deny response.
     """
 

@@ -1,6 +1,6 @@
 # mcp-trust-verifier
 
-The **independent** verifier for MCP signed trust envelopes (RFC-0001 §6.3), packaged for
+The **independent** verifier for MCP signed trust envelopes (SPEC-0001 §6.3), packaged for
 out-of-tree consumers — e.g. an agent harness (fast-agent) that receives a tool result
 through the gateway and must decide whether to act on it.
 

@@ -1,4 +1,4 @@
-"""Trust envelope labeler (PRD-0001 M3 / RFC-0001 §5).
+"""Trust envelope labeler (PRD-0001 M3 / SPEC-0001 §5).
 
 Signing failure returns None — never raises (W3.5). Enforcement (taint floor)
 is independent of signing.

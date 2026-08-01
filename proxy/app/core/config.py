@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     # registration blocks.  See docs/ARCHITECTURE.md §5.4.
     REQUIRE_LLM_AUDIT: bool = False
 
-    # PRD-0001 M2 — B-coarse taint floor (RFC-0001 §8.1). When True, a session
+    # PRD-0001 M2 — B-coarse taint floor (SPEC-0001 §8.1). When True, a session
     # tainted by an untrusted (server trust_tier-derived) result is denied any
     # high-sensitivity / credential-injecting sink, enforced in invocation.py and
     # audited (INV-001). Default False so the control is dark until the V038
@@ -141,7 +141,7 @@ class Settings(BaseSettings):
     # session hits a high-integrity sink.
     #   "notify"  — allow the call, attach a disclaimer notice (Phase-0 default, never blocks)
     #   "enforce" — DENY the call (raise TaintFloorDenyError → router 403/JSON-RPC error),
-    #               audited (INV-001). Fail-closed, RFC-0001 §8.1 hard-deny.
+    #               audited (INV-001). Fail-closed, SPEC-0001 §8.1 hard-deny.
     # Only consulted when TAINT_FLOOR_ENABLED is True. An unrecognised value is treated
     # as "notify" (fail-safe-for-availability at this dark-launch stage; see resolve_taint_action).
     TAINT_FLOOR_MODE: str = "notify"
@@ -156,10 +156,10 @@ class Settings(BaseSettings):
     WAZUH_SYSLOG_HOST: str = ""          # e.g. "lab-wazuh-manager" — empty = disabled
     WAZUH_SYSLOG_PORT: int = 514         # UDP syslog port on Wazuh manager
 
-    # Trust envelope labeler (PRD-0001 M3 / RFC-0001)
+    # Trust envelope labeler (PRD-0001 M3 / SPEC-0001)
     TRUST_ENVELOPE_ENABLED: bool = False
     # Layer B: MIME-style in-band advisory wrapper for non-conformant LLM consumers.
-    # Advisory only — never the security boundary (RFC-0001 §3, P2).
+    # Advisory only — never the security boundary (SPEC-0001 §3, P2).
     LAYER_B_ENABLED: bool = False
     LABELER_CERT_PATH: str = "/labeler/leaf.crt"
     LABELER_KEY_PATH: str = "/labeler/leaf.key"

@@ -1,9 +1,9 @@
-"""RFC-0002 red-team findings as tracked regression tests.
+"""SPEC-0002 red-team findings as tracked regression tests.
 
 Each test asserts the VULNERABILITY IS PRESENT TODAY (passes while the bug exists).
 Comments show the inverted assertion to swap in when the fix lands.
 
-Run with: pytest tests/rfc0002 -m redteam -v
+Run with: pytest tests/spec0002 -m redteam -v
 """
 from __future__ import annotations
 

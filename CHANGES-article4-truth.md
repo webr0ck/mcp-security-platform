@@ -47,7 +47,7 @@ content_hash_mismatch`); stale/EKU-rejected/malformed-timestamp/empty-x5c/etc. w
 replaced the `startswith(allowlist)` condition with it. `VerifierVerdict` is exhaustively
 fail-closed, so `not accepted` is the complete, drift-proof deny set.
 
-**Test:** `proxy/tests/rfc0002/test_substrate_rfc0001.py` — WI-3 cases build a REAL stale envelope
+**Test:** `proxy/tests/spec0002/test_substrate_spec0001.py` — WI-3 cases build a REAL stale envelope
 and a REAL EKU-rejected envelope via the shipped verifier, and prove (a) the OLD 4-reason allowlist
 would NOT have denied them (`_old_enforce_would_deny(...) is False`), and (b) the NEW predicate DOES
 (`trust_enforce_denies(True, verdict) is True`) — a non-vacuous behavior change. Plus: an accepted
@@ -75,7 +75,7 @@ Documented in code at the enforce seam (`proxy/app/routers/mcp_server.py`, above
 ## Sanity
 
 - `proxy/.venv/bin/python scripts/demo_trust_envelope.py` → ALL DEMOS PASSED (3/3).
-- `proxy/.venv/bin/python -m pytest tests/unit/test_taint_floor.py tests/rfc0002/test_substrate_rfc0001.py tests/integration/test_taint_floor_invoke.py` → green.
+- `proxy/.venv/bin/python -m pytest tests/unit/test_taint_floor.py tests/spec0002/test_substrate_spec0001.py tests/integration/test_taint_floor_invoke.py` → green.
 
 ## Files changed (platform)
 
@@ -86,7 +86,7 @@ Documented in code at the enforce seam (`proxy/app/routers/mcp_server.py`, above
 - `proxy/app/routers/tools.py` — REST-path signer-only scope comment
 - `proxy/tests/unit/test_taint_floor.py` — `resolve_taint_action` tests
 - `proxy/tests/unit/services/test_invocation_taint_notices.py` — enforce e2e test + stub update
-- `proxy/tests/rfc0002/test_substrate_rfc0001.py` — WI-3 stale/EKU deny tests
+- `proxy/tests/spec0002/test_substrate_spec0001.py` — WI-3 stale/EKU deny tests
 
 WI-2 (fast-agent real conformance) is in the **mcp-envelope-harness** repo — see its
 `docs/ROADMAP.md` Loop 5.

@@ -1,4 +1,4 @@
-"""RFC-0002 §5.4 — Transparency Log (inclusion-proof verification, stub).
+"""SPEC-0002 §5.4 — Transparency Log (inclusion-proof verification, stub).
 
 Full Rekor/Sigstore inclusion-proof verification is Future Work (§12).
 This module provides the client interface so the gateway conformance tests

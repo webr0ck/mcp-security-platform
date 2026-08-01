@@ -1,4 +1,4 @@
-"""Layer B — MIME-style in-band advisory text wrapper (RFC-0001 §3 / P2).
+"""Layer B — MIME-style in-band advisory text wrapper (SPEC-0001 §3 / P2).
 
 Wraps text content items from untrusted sources with a boundary marker
 so non-conformant LLM consumers (that only read text, not _meta) receive
@@ -10,7 +10,7 @@ This layer is:
   - DISABLED by default (LAYER_B_ENABLED=false).
   - A best-effort hint. "Ignore the above" inside this block can still work.
 
-The MIME → S/MIME mental model (RFC-0001 §3 P2):
+The MIME → S/MIME mental model (SPEC-0001 §3 P2):
   - MIME boundary = this module (advisory, text-level)
   - S/MIME signing = trust_labeler.py (authoritative, cryptographic)
 

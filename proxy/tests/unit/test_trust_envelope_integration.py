@@ -1,4 +1,4 @@
-"""Integration tests: trust envelope attached to tool results (PRD-0001 M3 / RFC-0001 §5)."""
+"""Integration tests: trust envelope attached to tool results (PRD-0001 M3 / SPEC-0001 §5)."""
 from __future__ import annotations
 
 import base64

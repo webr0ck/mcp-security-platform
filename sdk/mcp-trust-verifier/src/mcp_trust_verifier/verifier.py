@@ -2,7 +2,7 @@
 # source of truth. Kept in sync by hand (both are small + RFC-pinned). Upgrade path to
 # kill drift: make the proxy import this wheel instead of holding its own copy. The
 # tests/test_roundtrip.py self-check fails loudly if this diverges from the format.
-"""Independent trust-envelope verifier (PRD-0001 M4 / RFC-0001 §6.3).
+"""Independent trust-envelope verifier (PRD-0001 M4 / SPEC-0001 §6.3).
 
 A process that did NOT produce the envelope verifies it (D4/D5/D6).
 Fail-closed: any failure → VerifierVerdict(accepted=False, integrity_rank=0).
@@ -50,7 +50,7 @@ class VerifierVerdict:
 
 
 class TrustVerifier:
-    """RFC-0001 §6.3 conformant verifier.
+    """SPEC-0001 §6.3 conformant verifier.
 
     Pinned to a specific sub-CA cert (SPKI anchor, not DN, not system store).
     """

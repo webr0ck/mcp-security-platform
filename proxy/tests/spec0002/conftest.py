@@ -1,10 +1,10 @@
-"""Shared fixtures + markers for the RFC-0002 verification suite.
+"""Shared fixtures + markers for the SPEC-0002 verification suite.
 
 Markers (registered here so `pytest -m ...` works without warnings):
   oracle      — pure spec-logic test against spec_oracle.py (no gateway, always runs)
-  substrate   — exercises the REAL implemented RFC-0001 libs (labeler/verifier/taint)
-  live        — requires a running proxy on $RFC0002_PROXY_URL (auto-skipped if down)
-  conformance — RFC-0002 §4–§6 gateway integration; skips until implemented
+  substrate   — exercises the REAL implemented SPEC-0001 libs (labeler/verifier/taint)
+  live        — requires a running proxy on $SPEC0002_PROXY_URL (auto-skipped if down)
+  conformance — SPEC-0002 §4–§6 gateway integration; skips until implemented
 """
 from __future__ import annotations
 
@@ -15,15 +15,15 @@ import pytest
 
 from ._pki import make_pki  # noqa: F401  (re-exported for convenience)
 
-PROXY_URL = os.environ.get("RFC0002_PROXY_URL", "http://localhost:8000")
+PROXY_URL = os.environ.get("SPEC0002_PROXY_URL", "http://localhost:8000")
 
 
 def pytest_configure(config: pytest.Config) -> None:
     for name, desc in (
-        ("oracle", "pure RFC-0002 spec-logic test (no gateway)"),
-        ("substrate", "exercises the implemented RFC-0001 libs (no containers)"),
+        ("oracle", "pure SPEC-0002 spec-logic test (no gateway)"),
+        ("substrate", "exercises the implemented SPEC-0001 libs (no containers)"),
         ("live", "requires a running proxy (auto-skipped if unavailable)"),
-        ("conformance", "RFC-0002 §4-6 gateway integration (skips until implemented)"),
+        ("conformance", "SPEC-0002 §4-6 gateway integration (skips until implemented)"),
         ("redteam", "tracks a known vulnerability; passes while bug persists, fails when fixed"),
     ):
         config.addinivalue_line("markers", f"{name}: {desc}")
@@ -60,6 +60,6 @@ def live_proxy_url() -> str:
     if not _proxy_health():
         pytest.skip(
             f"no live proxy at {PROXY_URL} — start the lab "
-            f"(see RFC-0002-verification-plan.md §5) or set RFC0002_PROXY_URL"
+            f"(see SPEC-0002-verification-plan.md §5) or set SPEC0002_PROXY_URL"
         )
     return PROXY_URL

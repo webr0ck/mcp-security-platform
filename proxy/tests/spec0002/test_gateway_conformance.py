@@ -1,7 +1,7 @@
-"""RFC-0002 §4–§6 GATEWAY conformance backlog + live substrate probes.
+"""SPEC-0002 §4–§6 GATEWAY conformance backlog + live substrate probes.
 
 Reality check (verified by grep on this repo): the gateway implements only the
-RFC-0001 / §3.2 signed-envelope substrate. RFC-0002 §4 (content classification),
+SPEC-0001 / §3.2 signed-envelope substrate. SPEC-0002 §4 (content classification),
 §5 (federation), and §6 (AI provenance) have NO implementation yet.
 
 Rather than test APIs that don't exist (which is exactly the failure mode that
@@ -55,7 +55,7 @@ def test_s4_content_class_registry_present_and_valid():
     )
     if reg is None:
         pytest.skip(
-            "RFC-0002 §4.2 NOT IMPLEMENTED: no content-class-registry.json found. "
+            "SPEC-0002 §4.2 NOT IMPLEMENTED: no content-class-registry.json found. "
             "Implement the registry (classes → conf_floor, allowlist_required) and this "
             "test will validate it against spec_oracle.CONTENT_CLASS_REGISTRY."
         )
@@ -69,7 +69,7 @@ def test_s4_content_class_registry_present_and_valid():
 
 
 # §4.6/§5.3 hasattr checks removed — behavioural parity coverage now lives in
-# tests/rfc0002/test_gateway_parity.py (B1 vectors + B3 trust-scope xfail).
+# tests/spec0002/test_gateway_parity.py (B1 vectors + B3 trust-scope xfail).
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -81,7 +81,7 @@ def test_s4_content_class_registry_present_and_valid():
 def test_s5_transparency_log_client_present():
     if not (_module_exists("app.services.transparency_log") or _first_existing("infra/rekor")):
         pytest.skip(
-            "RFC-0002 §5.4 NOT IMPLEMENTED: no transparency-log/Rekor inclusion-proof "
+            "SPEC-0002 §5.4 NOT IMPLEMENTED: no transparency-log/Rekor inclusion-proof "
             "client. Implement inclusion-proof verification (fail-closed for uncached "
             "sub-CAs when the log is down) before relying on cross-org trust."
         )
@@ -95,7 +95,7 @@ def test_s5_transparency_log_client_present():
 def test_s6_artifact_provenance_envelope_present():
     if not _module_exists("app.services.artifact_provenance"):
         pytest.skip(
-            "RFC-0002 §6.2 NOT IMPLEMENTED: no app.services.artifact_provenance (APE). "
+            "SPEC-0002 §6.2 NOT IMPLEMENTED: no app.services.artifact_provenance (APE). "
             "Implement APE signing (artifact_hash binding, model_provenance, pipeline_path) "
             "then this asserts pipeline rank == spec_oracle.pipeline_integrity_rank (B.2)."
         )
@@ -107,7 +107,7 @@ def test_s6_artifact_provenance_envelope_present():
 def test_s6_c2pa_assertion_builder_present():
     if not _module_exists("app.services.c2pa"):
         pytest.skip(
-            "RFC-0002 §6.4 NOT IMPLEMENTED: no C2PA assertion embedding "
+            "SPEC-0002 §6.4 NOT IMPLEMENTED: no C2PA assertion embedding "
             "(io.mcp-security-platform.ai-provenance)."
         )
 
@@ -123,7 +123,7 @@ def test_s7_envelope_schema_version():
     if TRUST_ENVELOPE_KEY.endswith("/v0.2"):
         pytest.fail("v0.2 key present but §4-6 conformance tests still skipping — wire them up")
     assert TRUST_ENVELOPE_KEY.endswith("/v0.1"), (
-        "expected the implemented v0.1 envelope; v0.2 is the RFC-0002 target"
+        "expected the implemented v0.1 envelope; v0.2 is the SPEC-0002 target"
     )
 
 
@@ -154,7 +154,7 @@ def test_live_oauth_discovery_exposed(live_proxy_url):
 def test_live_end_to_end_envelope_over_the_wire(live_proxy_url):
     pytest.skip(
         "Live end-to-end envelope verification needs the OAuth/mTLS client harness "
-        "(see RFC-0002-verification-plan.md §6.3). The offline substrate tests already "
+        "(see SPEC-0002-verification-plan.md §6.3). The offline substrate tests already "
         "verify the labeler→verifier round-trip deterministically; this is the on-wire "
         "confirmation, pending an authenticated MCP test client in the runner."
     )

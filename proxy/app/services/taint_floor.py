@@ -1,10 +1,10 @@
-"""B-coarse taint-floor decision core (PRD-0001 M2 / RFC-0001 §8.1).
+"""B-coarse taint-floor decision core (PRD-0001 M2 / SPEC-0001 §8.1).
 
 Pure, deterministic, services-free security logic. The Redis taint store
 (`taint_store.py`) and the `invocation.py` gate wire these together; keeping the
 decisions here makes them unit-testable without Postgres/Redis/OPA.
 
-Binary integrity model (RFC-0001 §4.1):
+Binary integrity model (SPEC-0001 §4.1):
     SEP-1913 trust_tier rank  -> binary integrity
         untrustedPublic = 0   -> 0 (untrusted)
         trustedPublic   = 1   -> 0 (untrusted)

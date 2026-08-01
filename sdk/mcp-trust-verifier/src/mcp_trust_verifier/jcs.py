@@ -1,7 +1,7 @@
 """RFC 8785 JCS canonicalization helpers for the trust envelope (PRD-0001 M3).
 
 Uses the `jcs` package (RFC 8785) — never use json.dumps for canonicalization.
-The two helpers produce the exact byte strings defined in RFC-0001 §5.2–5.3.
+The two helpers produce the exact byte strings defined in SPEC-0001 §5.2–5.3.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def jcs_tool_result(
     content: list,
     structured_content: dict | None,
 ) -> bytes:
-    """Canonical bytes for the content-hash input (RFC-0001 §5.2).
+    """Canonical bytes for the content-hash input (SPEC-0001 §5.2).
 
     structuredContent is ALWAYS emitted explicitly (as null when absent) to
     prevent a hash mismatch between signer and verifier.
@@ -35,7 +35,7 @@ def jcs_signed_input(
     tool_name: str,
     server_id: str,
 ) -> bytes:
-    """Canonical bytes for the ES256 signature input (RFC-0001 §5.3)."""
+    """Canonical bytes for the ES256 signature input (SPEC-0001 §5.3)."""
     payload = {
         "content_hash": content_hash,
         "label": label,

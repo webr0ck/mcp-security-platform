@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# RFC-0002 verification runner — one command, offline-first, auto-detects a live
-# gateway. See docs/rfc/RFC-0002-verification-plan.md for the full plan.
+# SPEC-0002 verification runner — one command, offline-first, auto-detects a live
+# gateway. See docs/rfc/SPEC-0002-verification-plan.md for the full plan.
 #
-#   Layer 1 (oracle)     : pure RFC-0002 §4-6 decision logic vs Appendix B vectors
-#   Layer 2 (substrate)  : the REAL implemented RFC-0001 labeler/verifier/taint
+#   Layer 1 (oracle)     : pure SPEC-0002 §4-6 decision logic vs Appendix B vectors
+#   Layer 2 (substrate)  : the REAL implemented SPEC-0001 labeler/verifier/taint
 #   Layer 3 (demo)       : scripts/demo_trust_envelope.py round-trip smoke
-#   Layer 4 (conformance): RFC-0002 §4-6 gateway integration — SKIP until built
+#   Layer 4 (conformance): SPEC-0002 §4-6 gateway integration — SKIP until built
 #   Layer 5 (live)       : end-to-end vs a running proxy (auto-skipped if down)
 #
 # Exit code: non-zero ONLY on real failures/errors. Skips (unbuilt features, no
 # live proxy) never fail the run.
 #
 # Usage:
-#   scripts/run_rfc0002_verification.sh                # everything (auto-detect)
-#   RFC0002_PROXY_URL=http://host:8000 scripts/run_rfc0002_verification.sh
-#   scripts/run_rfc0002_verification.sh --offline      # skip live detection
+#   scripts/run_spec0002_verification.sh                # everything (auto-detect)
+#   SPEC0002_PROXY_URL=http://host:8000 scripts/run_spec0002_verification.sh
+#   scripts/run_spec0002_verification.sh --offline      # skip live detection
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROXY_DIR="${REPO_ROOT}/proxy"
-RESULTS_DIR="${RFC0002_RESULTS_DIR:-${PROXY_DIR}/tests/rfc0002/_results}"
-PROXY_URL="${RFC0002_PROXY_URL:-http://localhost:8000}"
+RESULTS_DIR="${SPEC0002_RESULTS_DIR:-${PROXY_DIR}/tests/spec0002/_results}"
+PROXY_URL="${SPEC0002_PROXY_URL:-http://localhost:8000}"
 STAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
 mkdir -p "${RESULTS_DIR}"
-JUNIT="${RESULTS_DIR}/rfc0002-junit-${STAMP}.xml"
-LOG="${RESULTS_DIR}/rfc0002-run-${STAMP}.log"
-REPORT="${RESULTS_DIR}/rfc0002-report-${STAMP}.md"
+JUNIT="${RESULTS_DIR}/spec0002-junit-${STAMP}.xml"
+LOG="${RESULTS_DIR}/spec0002-run-${STAMP}.log"
+REPORT="${RESULTS_DIR}/spec0002-report-${STAMP}.md"
 
 OFFLINE=0
 [ "${1:-}" = "--offline" ] && OFFLINE=1
@@ -49,7 +49,13 @@ cd "${PROXY_DIR}" || { say "${c_red}cannot cd ${PROXY_DIR}${c_off}"; exit 2; }
 
 # ── Phase 0: preflight ───────────────────────────────────────────────────────
 hdr "Phase 0 — preflight"
-PYBIN="${PYTHON:-python3}"
+# Prefer the proxy venv — a bare `python3` usually lacks the proxy's deps
+# (opentelemetry et al.) and every conformance test errors at setup.
+if [ -z "${PYTHON:-}" ] && [ -x "${PROXY_DIR}/.venv/bin/python" ]; then
+  PYBIN="${PROXY_DIR}/.venv/bin/python"
+else
+  PYBIN="${PYTHON:-python3}"
+fi
 "${PYBIN}" --version || { say "${c_red}python3 not found${c_off}"; exit 2; }
 miss=0
 for mod in pytest cryptography jcs; do
@@ -68,7 +74,7 @@ say "${c_grn}preflight OK${c_off}  (results → ${RESULTS_DIR})"
 # ── Phases 1-4 + live: single pytest pass over the suite ─────────────────────
 # A single invocation keeps one coherent junit/report; markers tag the layers.
 hdr "Phases 1-5 — pytest (oracle + substrate + conformance + live)"
-PYTEST_ARGS=(tests/rfc0002 -rs -ra --tb=short --junitxml="${JUNIT}" -o "junit_family=xunit2")
+PYTEST_ARGS=(tests/spec0002 -rs -ra --tb=short --junitxml="${JUNIT}" -o "junit_family=xunit2")
 if [ "${OFFLINE}" -eq 1 ]; then
   PYTEST_ARGS+=(-m "not live")
   say "${c_yel}--offline: live layer disabled${c_off}"
@@ -84,7 +90,7 @@ set -o pipefail
 "${PYBIN}" -m pytest "${PYTEST_ARGS[@]}" 2>&1 | tee "${LOG}"
 PYTEST_RC=${PIPESTATUS[0]}
 
-# ── Demo smoke (the implemented RFC-0001 round-trip) ─────────────────────────
+# ── Demo smoke (the implemented SPEC-0001 round-trip) ─────────────────────────
 hdr "Demo smoke — scripts/demo_trust_envelope.py"
 DEMO_RC=0
 if [ -f "${REPO_ROOT}/scripts/demo_trust_envelope.py" ]; then
@@ -101,7 +107,7 @@ say "pytest : ${SUMMARY_LINE:-<no summary parsed>}"
 say "demo   : $( [ "${DEMO_RC}" -eq 0 ] && echo "${c_grn}PASS${c_off}" || echo "${c_red}FAIL${c_off}" )"
 
 {
-  echo "# RFC-0002 Verification Report"
+  echo "# SPEC-0002 Verification Report"
   echo
   echo "- **Run (UTC):** ${STAMP}"
   echo "- **Proxy URL:** ${PROXY_URL} ($( [ "${OFFLINE}" -eq 1 ] && echo offline || echo auto-detect ))"
@@ -112,7 +118,7 @@ say "demo   : $( [ "${DEMO_RC}" -eq 0 ] && echo "${c_grn}PASS${c_off}" || echo "
   echo
   echo "## What passed vs what is pending"
   echo
-  echo "- **Oracle (RFC-0002 §4-6 logic)** and **Substrate (RFC-0001)** layers should be all-green."
+  echo "- **Oracle (SPEC-0002 §4-6 logic)** and **Substrate (SPEC-0001)** layers should be all-green."
   echo "- **Conformance §4-6** skips are the implementation backlog (each skip names the module/file to build)."
   echo "- **Live** skips mean no running gateway was detected."
   echo
@@ -128,8 +134,8 @@ RC=0
 if [ "${PYTEST_RC}" -ne 0 ] && [ "${PYTEST_RC}" -ne 5 ]; then RC=1; fi
 [ "${DEMO_RC}" -ne 0 ] && RC=1
 if [ "${RC}" -eq 0 ]; then
-  say "${c_grn}RFC-0002 verification: PASS (skips are expected backlog/live-absent)${c_off}"
+  say "${c_grn}SPEC-0002 verification: PASS (skips are expected backlog/live-absent)${c_off}"
 else
-  say "${c_red}RFC-0002 verification: FAILURES present — see ${LOG}${c_off}"
+  say "${c_red}SPEC-0002 verification: FAILURES present — see ${LOG}${c_off}"
 fi
 exit "${RC}"

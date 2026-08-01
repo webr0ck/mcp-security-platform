@@ -14,7 +14,7 @@ proxy/tests/
   unit/         # no external services — the bulk of coverage (fast, deterministic)
   integration/  # require a running stack (marked `-m integration`)
   security/     # invariant / sandbox-escape / tamper regression tests
-  rfc0002/      # trust-envelope oracle-parity + red-team regression
+  spec0002/      # trust-envelope oracle-parity + red-team regression
   performance/  # throughput tests (make test-perf)
 sandbox/tests/red_team/   # containerized adversarial harness (network/credential/fs isolation)
 lab/tests/                # lab functional gate-chain (functional_test.py) + lab MCP server tests

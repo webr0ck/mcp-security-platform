@@ -1,4 +1,4 @@
-"""Unit tests for the B-coarse taint-floor decision core (PRD-0001 M2 / RFC-0001 §8.1).
+"""Unit tests for the B-coarse taint-floor decision core (PRD-0001 M2 / SPEC-0001 §8.1).
 
 Pure, services-free security logic:
   - binary integrity from a SEP-1913 trust_tier rank (fail-closed on NULL/unknown)

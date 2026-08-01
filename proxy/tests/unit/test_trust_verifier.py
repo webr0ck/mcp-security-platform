@@ -1,4 +1,4 @@
-"""D4/D5/D6 + F-1..F-8 trust envelope verifier tests (PRD-0001 M4 / RFC-0001 §6.3, §17)."""
+"""D4/D5/D6 + F-1..F-8 trust envelope verifier tests (PRD-0001 M4 / SPEC-0001 §6.3, §17)."""
 from __future__ import annotations
 
 import base64
@@ -77,7 +77,7 @@ def _make_leaf(sub_ca_key, sub_ca_cert, ttl_minutes=15, eku_oids=None, not_befor
 
 
 def _build_envelope(leaf_key, leaf_cert, sub_ca_cert, content, trust_tier=0, signed_at=None, tool_name="web_search", server_id="srv-1", result_id="rid-1", sensitivity_label="low"):
-    """Build a valid RFC-0001 §5 envelope."""
+    """Build a valid SPEC-0001 §5 envelope."""
     from app.services.trust_labeler import _TRUST_TIER_LABELS
     safe_tier = trust_tier if 0 <= trust_tier <= 4 else 0
     label = {

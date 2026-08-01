@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mcp-trust-verifier"
 version = "0.1.0"
-description = "Independent verifier for MCP signed trust envelopes (RFC-0001 §6.3) — for out-of-tree consumers"
+description = "Independent verifier for MCP signed trust envelopes (SPEC-0001 §6.3) — for out-of-tree consumers"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [

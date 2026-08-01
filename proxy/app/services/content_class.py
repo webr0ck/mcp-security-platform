@@ -1,4 +1,4 @@
-"""RFC-0002 §4 — Content Classification (BLP axis).
+"""SPEC-0002 §4 — Content Classification (BLP axis).
 
 evaluate_sink_policy() is the gateway's authoritative BLP + Biba two-axis
 policy enforcer. Logic mirrors spec_oracle.evaluate_sink_policy exactly so the

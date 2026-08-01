@@ -1,4 +1,4 @@
-"""RFC-0002 Appendix B test vectors, evaluated against the spec oracle.
+"""SPEC-0002 Appendix B test vectors, evaluated against the spec oracle.
 
 These prove the paper's normative algorithms are internally self-consistent —
 every Appendix B row produces exactly the decision the paper claims. They run

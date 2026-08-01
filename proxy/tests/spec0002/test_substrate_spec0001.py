@@ -1,10 +1,10 @@
-"""Substrate verification — the IMPLEMENTED RFC-0001 / §3.2 layer that RFC-0002
+"""Substrate verification — the IMPLEMENTED SPEC-0001 / §3.2 layer that SPEC-0002
 builds on. These import the real gateway services (TrustLabeler, TrustVerifier,
-taint floor) and run with no containers. If RFC-0002 §4–§6 is ever built, these
+taint floor) and run with no containers. If SPEC-0002 §4–§6 is ever built, these
 remain the foundation its tests sit on.
 
 Mirrors the D4/D5/D6 + footgun matrix already in tests/unit/test_trust_verifier.py
-but framed as the RFC-0002 verification plan's "normal vs malicious" substrate
+but framed as the SPEC-0002 verification plan's "normal vs malicious" substrate
 scenarios so the whole story runs from one runner.
 """
 from __future__ import annotations

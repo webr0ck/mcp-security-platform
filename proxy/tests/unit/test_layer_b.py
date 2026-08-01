@@ -1,4 +1,4 @@
-"""Unit tests for Layer B MIME-style in-band advisory wrapper (RFC-0001 §3)."""
+"""Unit tests for Layer B MIME-style in-band advisory wrapper (SPEC-0001 §3)."""
 import pytest
 from app.services.layer_b import wrap_content_layer_b, LAYER_B_BOUNDARY_PREFIX
 
