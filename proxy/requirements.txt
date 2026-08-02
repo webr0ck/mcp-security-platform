@@ -15,7 +15,7 @@ redis[asyncio]==5.2.1
 httpx==0.28.1
 cyclonedx-python-lib==7.6.1
 starlette==0.46.2
-cryptography==44.0.3
+cryptography==49.0.0
 jcs==0.1.0
 jsonschema==4.26.0
 PyJWT[crypto]==2.10.1
