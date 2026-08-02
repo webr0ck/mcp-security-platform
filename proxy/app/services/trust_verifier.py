@@ -10,6 +10,8 @@ Verification steps (RFC §6.3):
      built-in verifiers require TLS EKUs the labeler OID can't satisfy): issuer-DN
      match + leaf signature verify against the pinned sub-CA key + leaf validity at
      signed_at. No system trust store consulted.
+  2b. Leaf extension policy — BasicConstraints ca=FALSE, KeyUsage digitalSignature,
+     and rejection of any unrecognized critical extension (RFC 5280 6.1.4/6.1.5)
   3. EKU check — require labeler OID; reject anyExtendedKeyUsage
   4. Signature verify — ECDSA(SHA-256), hardcoded (never dispatched from sig.alg)
   5. Content hash recomputation — JCS({content, structuredContent}); compare
@@ -32,6 +34,15 @@ logger = logging.getLogger(__name__)
 
 MCP_LABELER_OID = x509.ObjectIdentifier("1.3.6.1.4.1.99999.1.1")
 ANY_EKU_OID = x509.ObjectIdentifier("2.5.29.37.0")
+
+# RFC 5280 6.1.4/6.1.5: a cert carrying a CRITICAL extension the verifier does not
+# process MUST be rejected. This is the whole set we process on the leaf - anything
+# else marked critical is, by definition, a constraint we would be ignoring.
+RECOGNIZED_CRITICAL_OIDS = frozenset({
+    x509.oid.ExtensionOID.BASIC_CONSTRAINTS,
+    x509.oid.ExtensionOID.KEY_USAGE,
+    x509.oid.ExtensionOID.EXTENDED_KEY_USAGE,
+})
 TRUST_ENVELOPE_KEY = "io.mcp-security-platform/trust-envelope/v0.1"
 
 MAX_ENVELOPE_AGE_SECONDS: int = 600   # §6.3(4): 10 min
@@ -154,9 +165,18 @@ class TrustVerifier:
         # We use manual chain validation instead of PolicyBuilder.build_client_verifier()
         # because the cryptography library's built-in verifiers enforce TLS-specific EKUs
         # (id-kp-clientAuth / id-kp-serverAuth) which our custom MCP labeler OID does not
-        # satisfy. The security properties are equivalent: we verify the leaf signature using
-        # the pinned sub-CA's public key (SPKI anchor), check issuer matching, and validate
-        # the leaf cert's validity window at signed_at. No system trust store is consulted.
+        # satisfy. No system trust store is consulted.
+        #
+        # This is NOT full RFC 5280 path validation, and an earlier version of this comment
+        # claimed it was. What we do: issuer-DN match, leaf signature verified with the
+        # pinned sub-CA's public key, leaf validity window at signed_at, then the leaf
+        # extension policy in step 2b (BasicConstraints, KeyUsage, unknown-critical) and
+        # the EKU check in step 3. What we still DO NOT do: revocation - there is no
+        # CRL/OCSP here, mitigated only by the 15-minute leaf lifetime.
+        # Path length and name constraints are genuinely moot rather than skipped: the path
+        # is exactly one hop. `intermediates` above is parsed for shape validation and then
+        # DELIBERATELY UNUSED - nothing but a leaf directly issued by the pinned sub-CA can
+        # ever verify, so an attacker-supplied intermediate has no route to being trusted.
         try:
             # 1. Leaf must be issued by the pinned sub-CA (issuer DN match + signature verify)
             if leaf_cert.issuer != self._sub_ca_cert.subject:
@@ -178,6 +198,33 @@ class TrustVerifier:
             #    in certificate stores). We only validate the leaf's validity window.
         except Exception:
             return self._reject("chain_validation_failed")
+
+        # ── Step 2b: leaf extension policy (RFC 5280 hygiene) ────────────
+        try:
+            basic_constraints = leaf_cert.extensions.get_extension_for_class(
+                x509.BasicConstraints
+            ).value
+        except x509.ExtensionNotFound:
+            return self._reject("missing_basic_constraints")
+        if basic_constraints.ca:
+            # A leaf that asserts ca=TRUE is a signing-capable cert masquerading as an
+            # end entity - it could mint siblings under a chain we would then accept.
+            return self._reject("leaf_is_ca")
+
+        try:
+            key_usage = leaf_cert.extensions.get_extension_for_class(x509.KeyUsage).value
+        except x509.ExtensionNotFound:
+            return self._reject("missing_key_usage")
+        if not key_usage.digital_signature:
+            return self._reject("key_usage_not_digital_signature")
+
+        unknown_critical = sorted(
+            ext.oid.dotted_string
+            for ext in leaf_cert.extensions
+            if ext.critical and ext.oid not in RECOGNIZED_CRITICAL_OIDS
+        )
+        if unknown_critical:
+            return self._reject(f"unknown_critical_extension:{unknown_critical[0]}")
 
         # ── Step 3: EKU check (parsed OID; reject anyExtendedKeyUsage) ───
         try:

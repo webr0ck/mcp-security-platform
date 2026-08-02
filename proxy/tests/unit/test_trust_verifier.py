@@ -50,30 +50,42 @@ def _make_sub_ca(key=None):
     return key, cert
 
 
-def _make_leaf(sub_ca_key, sub_ca_cert, ttl_minutes=15, eku_oids=None, not_before=None):
+def _make_leaf(
+    sub_ca_key, sub_ca_cert, ttl_minutes=15, eku_oids=None, not_before=None,
+    ca=False, digital_signature=True, omit_basic_constraints=False,
+    omit_key_usage=False, extra_extensions=(),
+):
+    """Build a labeler leaf. The keyword flags exist so the leaf-extension-policy
+    tests can produce a cert that is valid in every respect *except* the one under
+    test - otherwise an earlier check would reject it and prove nothing."""
     if eku_oids is None:
         eku_oids = [MCP_LABELER_OID]
     key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "mcp-labeler.platform.internal")])
     now = datetime.now(UTC)
     nb = not_before if not_before is not None else now
-    cert = (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(subject).issuer_name(sub_ca_cert.subject)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(nb).not_valid_after(nb + timedelta(minutes=ttl_minutes))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(x509.KeyUsage(
-            digital_signature=True, key_cert_sign=False, crl_sign=False,
+    )
+    if not omit_basic_constraints:
+        builder = builder.add_extension(
+            x509.BasicConstraints(ca=ca, path_length=0 if ca else None), critical=True
+        )
+    if not omit_key_usage:
+        builder = builder.add_extension(x509.KeyUsage(
+            digital_signature=digital_signature, key_cert_sign=ca, crl_sign=False,
             content_commitment=False, key_encipherment=False,
             data_encipherment=False, key_agreement=False,
             encipher_only=False, decipher_only=False,
         ), critical=True)
-        .add_extension(x509.ExtendedKeyUsage(eku_oids), critical=False)
-        .sign(sub_ca_key, hashes.SHA256())
-    )
-    return key, cert
+    builder = builder.add_extension(x509.ExtendedKeyUsage(eku_oids), critical=False)
+    for ext, critical in extra_extensions:
+        builder = builder.add_extension(ext, critical=critical)
+    return key, builder.sign(sub_ca_key, hashes.SHA256())
 
 
 def _build_envelope(leaf_key, leaf_cert, sub_ca_cert, content, trust_tier=0, signed_at=None, tool_name="web_search", server_id="srv-1", result_id="rid-1", sensitivity_label="low", attribution=None):
@@ -245,6 +257,65 @@ class TestD4BodySwap:
         v = verifier.verify(result, tool_name="web_search", server_id="srv-1", result_id="rid-1")
         assert v.accepted is False
         assert v.integrity_rank == 0
+
+
+# ── Leaf extension policy (RFC 5280 6.1.4/6.1.5 hygiene) ─────────────────
+
+class TestLeafExtensionPolicy:
+    """Each leaf here is issued by the pinned sub-CA, in-window, with the labeler EKU
+    and a signature that verifies - so the only thing that can reject it is the
+    extension under test. Without that, a pass would be indistinguishable from the
+    chain check firing first."""
+
+    def _verdict(self, pki, **leaf_kwargs):
+        leaf_key, leaf_cert = _make_leaf(pki["sub_ca_key"], pki["sub_ca_cert"], **leaf_kwargs)
+        content = [{"type": "text", "text": "hello"}]
+        envelope = _build_envelope(leaf_key, leaf_cert, pki["sub_ca_cert"], content)
+        verifier = TrustVerifier(sub_ca_cert=pki["sub_ca_cert"])
+        return verifier.verify(
+            _make_tool_result(content, envelope),
+            tool_name="web_search", server_id="srv-1", result_id="rid-1",
+        )
+
+    def test_baseline_leaf_accepted(self, pki):
+        """Control: the same builder with no flags set is accepted - so a rejection
+        below is attributable to the flag, not to the helper."""
+        assert self._verdict(pki).accepted is True
+
+    def test_leaf_asserting_ca_true_rejected(self, pki):
+        v = self._verdict(pki, ca=True)
+        assert v.accepted is False and v.integrity_rank == 0
+        assert v.reason == "leaf_is_ca"
+
+    def test_leaf_without_basic_constraints_rejected(self, pki):
+        v = self._verdict(pki, omit_basic_constraints=True)
+        assert v.accepted is False
+        assert v.reason == "missing_basic_constraints"
+
+    def test_leaf_without_key_usage_rejected(self, pki):
+        v = self._verdict(pki, omit_key_usage=True)
+        assert v.accepted is False
+        assert v.reason == "missing_key_usage"
+
+    def test_leaf_without_digital_signature_rejected(self, pki):
+        v = self._verdict(pki, digital_signature=False)
+        assert v.accepted is False
+        assert v.reason == "key_usage_not_digital_signature"
+
+    def test_unknown_critical_extension_rejected(self, pki):
+        v = self._verdict(pki, extra_extensions=[
+            (x509.SubjectAlternativeName([x509.DNSName("labeler.platform.internal")]), True),
+        ])
+        assert v.accepted is False
+        assert v.reason.startswith("unknown_critical_extension:")
+
+    def test_same_extension_non_critical_accepted(self, pki):
+        """Non-critical is the whole distinction - RFC 5280 says an unprocessed
+        extension is only fatal when the issuer marked it critical."""
+        v = self._verdict(pki, extra_extensions=[
+            (x509.SubjectAlternativeName([x509.DNSName("labeler.platform.internal")]), False),
+        ])
+        assert v.accepted is True
 
 
 # ── D5: forged label (attacker signs with own cert) ───────────────────────

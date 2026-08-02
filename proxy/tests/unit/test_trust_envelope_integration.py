@@ -38,6 +38,12 @@ def _make_labeler(tmp_path: Path) -> TrustLabeler:
         .serial_number(x509.random_serial_number())
         .not_valid_before(now).not_valid_after(now + timedelta(minutes=15))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.KeyUsage(
+            digital_signature=True, key_cert_sign=False, crl_sign=False,
+            content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False,
+            encipher_only=False, decipher_only=False,
+        ), critical=True)
         .add_extension(x509.ExtendedKeyUsage([MCP_LABELER_OID]), critical=False)
         .sign(sub_key, hashes.SHA256())
     )
