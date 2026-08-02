@@ -304,6 +304,23 @@ platform_meta_tool_roles := {
     "security_pulse_summary": {"admin", "analyst"},
     "list_registered_tools":  {"admin", "analyst"},
     "enrollment_status":      {"admin", "analyst", "viewer"},
+    # 2026-07-25: these four were MISSING, so is_platform_meta_tool was false for
+    # them and they fell through to the generic allow, which requires
+    # client_has_invoke_permission — a rule that recognises agent/user/admin/
+    # platform_admin/analyst/platform_internal/server_owner/manager and NEVER
+    # viewer or editor. Meanwhile _TOOLS grants exactly those roles. Result: a
+    # viewer or editor SAW these in tools/list and was denied on tools/call —
+    # the same listed-but-denied class as the discovery/invoke drift.
+    #
+    # This matters most for get_my_profile + enable_mcp_server: they are the
+    # RECOVERY PATH out of a profile lockout (see _RECOVERY_MCPS in
+    # routers/profiles.py). Recovery that only works for some roles is not
+    # recovery. Sets below mirror _TOOLS[i]["_roles"] exactly, as the comment
+    # above this map has always required.
+    "list_available_mcps":    {"admin", "analyst", "viewer", "editor", "platform_admin", "agent"},
+    "get_my_profile":         {"admin", "analyst", "viewer", "editor", "platform_admin", "agent"},
+    "enable_mcp_server":      {"admin", "analyst", "editor", "platform_admin", "agent"},
+    "disable_mcp_server":     {"admin", "analyst", "editor", "platform_admin", "agent"},
 }
 
 # A request is a platform meta-tool ONLY when the inline /mcp meta dispatch

@@ -117,6 +117,29 @@ def test_entra_directory_self_service_onboarding_before_and_after(
     tenant, client_id, secret = real_entra_creds
     name = f"at3-entra-dir-{uuid.uuid4().hex[:8]}"
 
+    # Self-heal against tool_registry's UNIQUE(name, version) constraint
+    # having no `WHERE deleted_at IS NULL` clause (see the cleanup-step
+    # comment at the bottom of this test). _TOOL_NAMES are fixed strings, not
+    # per-run-suffixed, so any PRIOR run of this test that failed/errored
+    # before reaching its own cleanup step (observed live while root-causing
+    # R2.6: an interrupted run left non-deleted list_users/get_user/...
+    # rows attached to a stale server_id) permanently blocks discovery for
+    # every subsequent run with "name already registered", masking whatever
+    # this run is actually trying to prove. Soft-delete any such leftovers
+    # from a DIFFERENT (not-yet-created) server before submitting.
+    for row in db_query(
+        "SELECT tool_id::text || ':' || server_id::text FROM tool_registry "
+        f"WHERE name IN ({','.join(chr(39) + n + chr(39) for n in _TOOL_NAMES)}) AND deleted_at IS NULL"
+    ).splitlines():
+        if not row.strip():
+            continue
+        stale_tool_id, stale_server_id = row.split(":", 1)
+        db_query(
+            f"UPDATE tool_registry SET name = 'superseded-' || substring(tool_id::text, 1, 8), "
+            f"deleted_at = now() WHERE tool_id='{stale_tool_id}'"
+        )
+        db_query(f"UPDATE server_registry SET deleted_at=now() WHERE server_id='{stale_server_id}' AND deleted_at IS NULL")
+
     # ── BEFORE: no tool by this run's name exists anywhere in the registry ──
     before_count = db_query(
         f"SELECT count(*) FROM tool_registry WHERE name='list_users' AND deleted_at IS NULL "
@@ -162,20 +185,36 @@ def test_entra_directory_self_service_onboarding_before_and_after(
     assert submission_status == "awaiting_review"
 
     # ── Admin (carol) approves — dual control, not self-service ──
+    # high_risk_scopes_approved=true: submission.py's OAuth policy gate (see
+    # ApproveSubmissionRequest.high_risk_scopes_approved, ~line 400) requires
+    # a reviewer's EXPLICIT acknowledgment before approving a submission that
+    # requests a high-risk scope — 'https://graph.microsoft.com/.default' is
+    # one (full app-only Graph access). Without this flag the approve call
+    # 422s with OAUTH_POLICY_VIOLATION before ever reaching the assertions
+    # this test is actually about; this is a real, intentional reviewer
+    # safeguard (also surfaced as a checkbox in portal.py's admin UI), not
+    # something to work around.
     approve = _rest("POST", f"/api/v1/admin/submissions/{server_id}/approve", carol_token,
-                     json={"notes": "AT3 automated acceptance run"})
+                     json={"notes": "AT3 automated acceptance run", "high_risk_scopes_approved": True})
     assert approve.status_code == 200, approve.text
-    assert approve.json()["submission_status"] == "approved_pending_url"
+    # PRD-0012 C2 (submission.py::approve_submission docstring, see the
+    # identical fix already applied to test_at3_onboarding.py): a self-hosted,
+    # repo-backed submission no longer parks at 'approved_pending_url' — the
+    # owner already supplied the real upstream_url at submit time, so approval
+    # runs SSRF-validate -> discover -> release INLINE and lands 'active'
+    # directly. The separate provide-url step below is inapplicable for this
+    # flow (there's no pending URL left to provide) and was never reached
+    # under the old assertion.
+    assert approve.json()["submission_status"] == "active", approve.json()
 
-    # ── Owner (alice) provides the real running URL -> auto-discovers tools ──
-    provide = _rest("POST", f"/api/v1/submissions/{server_id}/provide-url", alice_token,
-                     json={"upstream_url": entra_directory_fixture_container})
-    assert provide.status_code == 200, provide.text
-    provide_body = provide.json()
-    assert provide_body["submission_status"] == "active"
-    assert provide_body["tools_provisioned"] == len(_TOOL_NAMES), provide_body
+    provisioned = db_query(
+        f"SELECT count(*) FROM tool_registry WHERE server_id='{server_id}' AND deleted_at IS NULL")
+    assert int(provisioned) == len(_TOOL_NAMES), (
+        f"expected {len(_TOOL_NAMES)} tools discovered inline at approval, got {provisioned}")
 
-    # ── Admin activates each discovered (quarantined) tool + uploads the real credential ──
+    # ── Admin activates each discovered tool (already released from quarantine
+    # to 'active' by the inline C2 release above; PATCH is idempotent here) and
+    # uploads the real credential ──
     tool_ids = {}
     for row in db_query(
         f"SELECT name || ':' || tool_id FROM tool_registry WHERE server_id='{server_id}' AND deleted_at IS NULL"
@@ -195,6 +234,22 @@ def test_entra_directory_self_service_onboarding_before_and_after(
         )
         log_http_call("PATCH", f"/api/v1/tools/{tid} (activate {tname})", int(act.stdout.strip() or 0), "")
         assert act.stdout.strip() == "200", f"activation failed for {tname}: {act.stdout} {act.stderr}"
+
+        # admin_credentials.py requires entra_tenant_id/entra_client_id to be
+        # set via this endpoint FIRST — uploading credential_type=
+        # entra_client_secret before this 400s with VALIDATION_ERROR ("Set
+        # entra_tenant_id and entra_client_id via PUT .../injection-mode
+        # before uploading the client secret"), which this test previously
+        # never reached (it always failed earlier in the chain).
+        injmode = subprocess.run(
+            ["podman", "exec", "mcp-proxy", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "-X", "PUT", f"http://localhost:8000/admin/credentials/{tid}/injection-mode"
+                          f"?mode=entra_client_credentials&entra_tenant_id={tenant}&entra_client_id={client_id}",
+             "-H", f"Authorization: Bearer {alice_token}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        log_http_call("PUT", f"/admin/credentials/{tid}/injection-mode ({tname})", int(injmode.stdout.strip() or 0), "")
+        assert injmode.stdout.strip() == "200", f"injection-mode set failed for {tname}: {injmode.stdout} {injmode.stderr}"
 
         cred_payload = json.dumps({
             "secret": cred_json, "credential_type": "entra_client_secret",

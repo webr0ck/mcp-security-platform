@@ -161,7 +161,7 @@ async def test_entitled_server_a_only_sees_a_tools():
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", side_effect=fake_check), \
          patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
-         patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
             client_id="alice",
@@ -197,16 +197,22 @@ async def test_profile_disabled_mcp_hidden():
     async def fake_check(principal_type, principal_id, server_id):
         return _entitled(SERVER_A)
 
-    async def fake_profile_lookup(profile_id: str, mcp_name: str):
+    seen_keys: list[str] = []
+
+    async def fake_profile_lookup(client_id: str, tool_name: str, *, profile_uuid=None):
+        # Records the identity key discovery resolves with. The legacy gate used to be
+        # keyed by principal_id ("human:{issuer}:{sub}") while the writer and the invoke
+        # gate key by the bare client_id — so it never matched and nothing was filtered.
+        seen_keys.append(client_id)
         # tool-alpha is disabled; tool-beta is enabled
-        if profile_id == "alice" and mcp_name == "tool-alpha":
+        if client_id == "alice" and tool_name == "tool-alpha":
             return disabled_profile
         return enabled_profile
 
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", side_effect=fake_check), \
          patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
-         patch("app.routers.mcp_server._lookup_profile_row", side_effect=fake_profile_lookup):
+         patch("app.routers.mcp_server._resolve_profile", side_effect=fake_profile_lookup):
 
         result = await _registered_tools_for_client(
             client_id="alice",
@@ -218,6 +224,13 @@ async def test_profile_disabled_mcp_hidden():
     names = {t["name"] for t in result}
     assert "tool-alpha" not in names, "profile-disabled tool must be hidden"
     assert "tool-beta" in names, "enabled tool must be visible"
+    # Regression guard: discovery must resolve on the bare client_id, the same key the
+    # writer and the invoke gate use. Resolving on principal_id here silently matched
+    # nothing and listed every disabled tool.
+    assert seen_keys, "profile resolver was never called — the filter is not wired"
+    assert set(seen_keys) == {"alice"}, (
+        f"discovery resolved profiles with {set(seen_keys)}, expected the bare client_id"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +253,7 @@ async def test_admin_filtered_same_as_regular_user():
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", side_effect=fake_check), \
          patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
-         patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
             client_id="admin-user",
@@ -273,7 +286,7 @@ async def test_null_server_id_tool_grants_visible():
          patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=(
              {"alice": {"allowed_tools": ["tool-unlinked"], "allowed_tags": []}}, {}
          ))), \
-         patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
             client_id="alice",
@@ -303,7 +316,7 @@ async def test_null_server_id_tool_no_grant_invisible():
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", new=AsyncMock()), \
          patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
-         patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
             client_id="bob",
@@ -337,7 +350,7 @@ async def test_discovery_equals_invoke_set():
     with patch("app.core.database.AsyncSessionLocal", return_value=_FakeSession(all_rows)), \
          patch("app.services.entitlement.check_entitlement", side_effect=fake_check), \
          patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
-         patch("app.routers.mcp_server._lookup_profile_row", new=AsyncMock(return_value=None)):
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
 
         result = await _registered_tools_for_client(
             client_id="alice",

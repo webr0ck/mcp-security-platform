@@ -178,6 +178,50 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 5: no server stuck in auto-quarantine (R4.3)
+#
+# invocation.py auto-flips a server to debug_mode=true (debug_enabled_by=
+# 'system:auto-health-check') after 3 consecutive connection-class failures,
+# and NEVER auto-clears it (deliberate, fail-closed). While debug_mode=true,
+# ONLY the owner/maintainers may invoke that server's tools — everyone else
+# gets SERVER_IN_MAINTENANCE (services/invocation.py). This already happened
+# live to the platform's own 'self-service' server and silently denied every
+# non-owner caller platform-wide; it was only found by wiping the lab.
+#
+# Scope: debug_enabled_by = 'system:auto-health-check' specifically, NOT
+# "any server with debug_mode=true" — that would false-positive constantly,
+# since a freshly-approved self-hosted submission legitimately lands in
+# debug_mode=true (owner-only, pending an explicit "go live") as part of the
+# normal PRD-0012 C2 approval flow (debug_enabled_by is the approving
+# reviewer's client_id in that case, e.g. 'carol@corp' — confirmed live in
+# this lab: 18 servers were debug_mode=true from normal AT3 approvals when
+# this check was written, only ONE (lab-m365) was the system auto-flag).
+# Also NOT scoped to just 'self-service' — lab-m365 is live proof the same
+# auto-quarantine already hits an arbitrary onboarded server, not only the
+# platform's bundled one, so any such row is worth failing loudly on.
+#
+# debug_enabled_by isn't exposed by GET /api/v1/admin/servers today, so this
+# queries server_registry directly (same pattern lab/tests/acceptance's
+# conftest.py::db_query uses) rather than adding an endpoint.
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 5: no server auto-quarantined (debug_enabled_by='system:auto-health-check')"
+DB_CONTAINER="${DB_CONTAINER:-mcp-db}"
+AUTO_QUARANTINED=$(
+    podman exec "${DB_CONTAINER}" psql -q -U mcp_app -d mcp_security -tAc \
+        "SELECT name FROM server_registry WHERE debug_mode = true \
+         AND debug_enabled_by = 'system:auto-health-check' AND deleted_at IS NULL \
+         ORDER BY name" 2>/dev/null || true
+)
+if [[ -z "${AUTO_QUARANTINED}" ]]; then
+    run_test "No server auto-quarantined" "pass" ""
+else
+    NAMES="$(echo "${AUTO_QUARANTINED}" | tr '\n' ',' | sed 's/,$//')"
+    run_test "No server auto-quarantined" "fail" \
+        "Auto-quarantined (debug_mode=true, never auto-clears): ${NAMES} — EVERY non-owner caller is denied SERVER_IN_MAINTENANCE for these servers platform-wide. Clear via POST /api/v1/servers/{server_id}/debug-mode {\"enabled\": false} (platform_admin may disable even though only the owner/maintainers may enable) or the portal's admin 'Go live' action."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

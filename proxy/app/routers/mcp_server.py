@@ -39,7 +39,6 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-
 from app.credential_broker.dispatcher import (
     CredentialEnrollmentRequiredError,
     ServiceCredentialMissingError,
@@ -142,7 +141,6 @@ async def _get_enrollment_status(client_id: str, base_url: str) -> list[dict]:
     credential in credential_store. Returns a list of status dicts.
     """
     from sqlalchemy import text
-
     from app.core.database import AsyncSessionLocal
 
     base = base_url.rstrip("/")
@@ -250,7 +248,7 @@ _TOOLS: list[dict[str, Any]] = [
             "and (if configured) which individual functions within each server you can use."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "_roles": {"admin", "analyst", "viewer", "editor", "platform_admin"},
+        "_roles": {"admin", "analyst", "viewer", "editor", "platform_admin", "agent"},
     },
     {
         "name": "enable_mcp_server",
@@ -265,7 +263,7 @@ _TOOLS: list[dict[str, Any]] = [
             },
             "required": ["server_name"],
         },
-        "_roles": {"admin", "analyst", "editor", "platform_admin"},
+        "_roles": {"admin", "analyst", "editor", "platform_admin", "agent"},
     },
     {
         "name": "disable_mcp_server",
@@ -280,7 +278,7 @@ _TOOLS: list[dict[str, Any]] = [
             },
             "required": ["server_name"],
         },
-        "_roles": {"admin", "analyst", "editor", "platform_admin"},
+        "_roles": {"admin", "analyst", "editor", "platform_admin", "agent"},
     },
 ]
 
@@ -348,7 +346,6 @@ async def _load_grants_data(client_id: str) -> tuple[dict, dict]:
       2. Empty grants dict — tools/list is best-effort; OPA enforces on invoke
     """
     from sqlalchemy import text
-
     from app.core.database import AsyncSessionLocal
     from app.core.redis_client import redis_pool
 
@@ -404,179 +401,25 @@ async def _load_grants_data(client_id: str) -> tuple[dict, dict]:
         return {}, tools_meta
 
 
-async def _lookup_profile_row(profile_id: str, mcp_name: str):
-    """Return the mcp_profiles row for (profile_id, mcp_name), or None if absent.
+async def _resolve_profile(
+    client_id: str,
+    tool_name: str,
+    *,
+    profile_uuid: str | None = None,
+) -> dict | None:
+    """Thin indirection over the shared profile resolver.
 
-    Absence means no explicit restriction — platform default applies (enabled=true,
-    all functions).  A row with enabled=False means this MCP is disabled for the
-    caller's profile.
+    Discovery MUST NOT implement its own profile query. This module used to carry
+    two bespoke lookups (_lookup_profile_row / _lookup_profile_mcp_binding); they
+    drifted from the invoke path on both the identity key and the table, producing
+    a listed-but-denied bug and a hidden-but-callable fail-open. Both are deleted;
+    this is the only seam, and it delegates to the same function invoke_tool uses.
 
-    INV-015: fail-closed semantics.
-      DB success:             write-through to Redis (TTL 120s), return row or None.
-      DB error + cache hit:   return cached value (last-known-state).
-      DB error + cache miss:  raise ProfileLookupError → caller converts to 503.
-      Redis exception:        treat as _SENTINEL_FAIL_CLOSED — never fall through
-                              to a live DB call on Redis exception.
-
-    Separate function so tests can patch it cleanly.
+    Raises ProfileLookupError (fail-closed) — callers must let it propagate.
     """
-    import json as _json
+    from app.services.invocation import _lookup_profile_with_cache
 
-    from redis.exceptions import RedisError
-    from sqlalchemy import text
-
-    from app.core.database import AsyncSessionLocal
-    from app.core.redis_client import redis_pool
-    from app.services.invocation import ProfileLookupError
-
-    cache_key = f"profile_row:{profile_id}:{mcp_name}"
-    _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
-
-    # ── Try DB first ────────────────────────────────────────────────────────
-    db_raised = False
-    db_row = None
-    try:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                text(
-                    "SELECT enabled FROM mcp_profiles "
-                    "WHERE profile_id = :pid AND mcp_name = :mcp_name LIMIT 1"
-                ),
-                {"pid": profile_id, "mcp_name": mcp_name},
-            )
-            db_row = result.mappings().fetchone()
-
-        # DB succeeded — write-through to Redis (best-effort)
-        try:
-            redis = redis_pool.client
-            value = _json.dumps(dict(db_row)) if db_row is not None else _SENTINEL_NO_ROW
-            await redis.setex(cache_key, 120, value)
-        except Exception as _cache_exc:
-            logger.debug(
-                "profile_row cache write-through failed profile_id=%s mcp_name=%s: %s",
-                profile_id, mcp_name, _cache_exc,
-            )
-        return db_row
-
-    except Exception as exc:
-        db_raised = True
-        logger.warning(
-            "mcp_profiles lookup failed profile_id=%s mcp_name=%s: %s",
-            profile_id, mcp_name, exc,
-        )
-
-    # ── DB failed — try Redis cache (SENTINEL pattern, INV-015) ────────────
-    cached = _SENTINEL_FAIL_CLOSED
-    try:
-        redis = redis_pool.client
-        cached = await redis.get(cache_key)
-    except RedisError as _redis_exc:
-        logger.warning(
-            "profile_row Redis fallback failed profile_id=%s mcp_name=%s: %s",
-            profile_id, mcp_name, _redis_exc,
-        )
-        cached = _SENTINEL_FAIL_CLOSED
-
-    if cached is _SENTINEL_FAIL_CLOSED or (db_raised and cached is None):
-        raise ProfileLookupError(
-            f"DB unreachable and no cached mcp_profiles row for {profile_id}/{mcp_name}"
-        )
-
-    if cached == _SENTINEL_NO_ROW:
-        return None  # cached "no row" — default allow
-    try:
-        return _json.loads(cached)
-    except Exception:
-        raise ProfileLookupError(
-            f"Malformed cache entry for mcp_profiles {profile_id}/{mcp_name}"
-        )
-
-
-async def _lookup_profile_mcp_binding(profile_uuid: str, mcp_name: str):
-    """Return the profile_mcp_bindings row for (profile_uuid, mcp_name), or None if absent.
-
-    Task 4.3: named-profile binding lookup. Absence = default (enabled=true, all functions).
-    A row with enabled=False means this MCP is disabled for the profile.
-
-    INV-015: fail-closed semantics (same pattern as _lookup_profile_row).
-      DB success:             write-through to Redis (TTL 120s), return row or None.
-      DB error + cache hit:   return cached value (last-known-state).
-      DB error + cache miss:  raise ProfileLookupError → caller converts to 503.
-      Redis exception:        treat as _SENTINEL_FAIL_CLOSED — never fall through
-                              to a live DB call on Redis exception.
-
-    Separate function so tests can patch it cleanly.
-    """
-    import json as _json
-
-    from redis.exceptions import RedisError
-    from sqlalchemy import text
-
-    from app.core.database import AsyncSessionLocal
-    from app.core.redis_client import redis_pool
-    from app.services.invocation import ProfileLookupError
-
-    cache_key = f"profile_binding:{profile_uuid}:{mcp_name}"
-    _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
-
-    # ── Try DB first ────────────────────────────────────────────────────────
-    db_raised = False
-    db_row = None
-    try:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                text(
-                    "SELECT enabled, allowed_functions FROM profile_mcp_bindings "
-                    "WHERE profile_id = :pid AND mcp_name = :mcp_name LIMIT 1"
-                ),
-                {"pid": profile_uuid, "mcp_name": mcp_name},
-            )
-            db_row = result.mappings().fetchone()
-
-        # DB succeeded — write-through to Redis (best-effort)
-        try:
-            redis = redis_pool.client
-            value = _json.dumps(dict(db_row)) if db_row is not None else _SENTINEL_NO_ROW
-            await redis.setex(cache_key, 120, value)
-        except Exception as _cache_exc:
-            logger.debug(
-                "profile_binding cache write-through failed profile_uuid=%s mcp_name=%s: %s",
-                profile_uuid, mcp_name, _cache_exc,
-            )
-        return db_row
-
-    except Exception as exc:
-        db_raised = True
-        logger.warning(
-            "profile_mcp_bindings lookup failed profile_uuid=%s mcp_name=%s: %s",
-            profile_uuid, mcp_name, exc,
-        )
-
-    # ── DB failed — try Redis cache (SENTINEL pattern, INV-015) ────────────
-    cached = _SENTINEL_FAIL_CLOSED
-    try:
-        redis = redis_pool.client
-        cached = await redis.get(cache_key)
-    except RedisError as _redis_exc:
-        logger.warning(
-            "profile_binding Redis fallback failed profile_uuid=%s mcp_name=%s: %s",
-            profile_uuid, mcp_name, _redis_exc,
-        )
-        cached = _SENTINEL_FAIL_CLOSED
-
-    if cached is _SENTINEL_FAIL_CLOSED or (db_raised and cached is None):
-        raise ProfileLookupError(
-            f"DB unreachable and no cached profile_mcp_bindings row for {profile_uuid}/{mcp_name}"
-        )
-
-    if cached == _SENTINEL_NO_ROW:
-        return None  # cached "no row" — default allow
-    try:
-        return _json.loads(cached)
-    except Exception:
-        raise ProfileLookupError(
-            f"Malformed cache entry for profile_mcp_bindings {profile_uuid}/{mcp_name}"
-        )
+    return await _lookup_profile_with_cache(client_id, tool_name, profile_uuid=profile_uuid)
 
 
 async def _registered_tools_for_client(
@@ -617,7 +460,6 @@ async def _registered_tools_for_client(
     tools/list handler which returns a JSON-RPC 503 error.
     """
     from sqlalchemy import text
-
     from app.core.database import AsyncSessionLocal
     from app.services.entitlement import check_entitlement
 
@@ -665,22 +507,24 @@ async def _registered_tools_for_client(
                 continue
 
         # ── Profile gate ────────────────────────────────────────────────────
-        # Task 4.3: when profile_uuid is set, check profile_mcp_bindings first.
-        # Absence of a binding row = default (enabled=true, not filtered).
-        if profile_uuid:
-            pmb = await _lookup_profile_mcp_binding(profile_uuid, row["name"])
-            if pmb is not None and not pmb["enabled"]:
-                continue
-        elif principal_id:
-            # Legacy path: mcp_profiles.enabled check keyed by principal_id.
-            # Only meaningful when we have a resolvable principal identity.
-            # Absence of a profile row = platform default (enabled=true).
-            profile = await _lookup_profile_row(
-                profile_id=principal_id,
-                mcp_name=row["name"],
-            )
-            if profile is not None and not profile["enabled"]:
-                continue
+        # Resolve through the SAME resolver the invoke path uses, so discovery and
+        # invoke cannot disagree. This replaced two bespoke per-surface lookups
+        # (_lookup_profile_row / _lookup_profile_mcp_binding) on 2026-07-25.
+        #
+        # The legacy lookup here was keyed by `principal_id`
+        # ("human:{issuer}:{sub}"), while both the WRITER (profiles.py
+        # _upsert_profile_row) and the invoke gate key by the bare `client_id`
+        # ("alice@corp"). It therefore never matched a row and every legacy-disabled
+        # tool was listed anyway — the caller saw tools that denied on call.
+        #
+        # INV-015: ProfileLookupError is deliberately NOT caught — it propagates to
+        # the tools/list handler, which returns a JSON-RPC 503. A partially filtered
+        # list would be a fail-open.
+        profile = await _resolve_profile(
+            client_id, row["name"], profile_uuid=profile_uuid
+        )
+        if profile is not None and not profile.get("enabled", True):
+            continue
 
         # required_roles: discovery-time role gate (Part C of the reviewer-
         # tools design). Absent/empty = unrestricted, matching every existing
@@ -817,9 +661,7 @@ async def _resolve_upstream_subtool_name(
 async def _route_to_registry(name: str, args: dict, request: Request, req_id: Any) -> dict:
     """Route a direct tools/call for a registry tool through the full security pipeline."""
     from uuid import uuid4
-
     from sqlalchemy import text
-
     from app.core.database import AsyncSessionLocal
 
     client_id = getattr(request.state, "client_id", "unknown")
@@ -863,11 +705,7 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             logger.info("MCP invoke denied (not entitled) tool=%s client=%s reason=%s",
                         name, client_id, exc.reason)
             return _err(req_id, -32003, "Access denied: not entitled to this tool's server")
-        from app.services.invocation import (
-            ScanFreshnessError,
-            ServerInMaintenanceError,
-            TaintFloorDenyError,
-        )
+        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError, ServerInMaintenanceError
         if isinstance(exc, ScanFreshnessError):
             logger.warning("MCP invoke denied (stale scan) tool=%s client=%s", name, client_id)
             return _err(req_id, -32003, "Access denied: server supply-chain scan is stale")
@@ -935,9 +773,38 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             # reason list a client would get calling the tool directly.
             logger.info("MCP invoke denied (OPA) tool=%s client=%s reasons=%s",
                         name, client_id, exc.reasons)
-            return _err(req_id, -32003, "Access denied by policy", data={"reasons": exc.reasons})
+            from app.services.policy import deny_remediation as _deny_help
+            _help = _deny_help(exc.reasons)
+            # Put remediation IN THE MESSAGE, not only in `data`: MCP clients render
+            # `message` and frequently ignore `data` (same reasoning as the credential
+            # enrollment deny below). request_id makes the deny reportable.
+            _msg = "Access denied by policy" + (f". {_help}" if _help else "")
+            return _err(
+                req_id, -32003, _msg,
+                data={
+                    "reasons": exc.reasons,
+                    "request_id": request_id,
+                    **({"remediation": _help} if _help else {}),
+                },
+            )
+        # Shared deny table (services/deny_map.py) — covers tool_disabled /
+        # tool_quarantined / tool_deprecated, which were mapped ONLY in the REST
+        # renderer and fell through here to a generic error carrying the exception
+        # text. Latent (statuses are pre-filtered at lookup) but a drift waiting to
+        # land: a new deny reason added to one renderer silently missed the others.
+        from app.services.deny_map import classify_deny as _classify
+        _deny = _classify(exc)
+        if _deny is not None:
+            logger.info("MCP invoke denied (%s) tool=%s client=%s",
+                        _deny.reason, name, client_id)
+            return _err(req_id, _deny.jsonrpc_code, _deny.message,
+                        data={**_deny.data, "reason": _deny.reason, "request_id": request_id})
         logger.exception("Registry tool invocation error for %s", name)
-        return _err(req_id, -32603, f"Tool invocation failed: {exc}")
+        # No f"{exc}" — the exception text is internals. It is in the logs, keyed by
+        # request_id, which is what the caller is given to quote.
+        return _err(req_id, -32603,
+                    "Tool invocation failed (internal error).",
+                    data={"request_id": request_id})
 
     if "error" in upstream:
         err = upstream["error"]
@@ -963,7 +830,8 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
                     )
                 except Exception as retry_exc:
                     logger.exception("Registry tool retry invocation error for %s -> %s", name, resolved_name)
-                    return _err(req_id, -32603, f"Tool invocation failed: {retry_exc}")
+                    return _err(req_id, -32603, "Tool invocation failed (internal error).",
+                                    data={"request_id": request_id})
                 if "error" in upstream:
                     err = upstream["error"]
                     return _err(req_id, err.get("code", -32603), err.get("message", "Upstream error"),
@@ -982,8 +850,7 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
     content = upstream.get("result", {}).get("content", [])
     if not content:
         content = [{"type": "text", "text": json.dumps(upstream.get("result", {}))}]
-    from app.services.trust_labeler import build_envelope_result as _build_envelope_result
-    from app.services.trust_labeler import get_labeler as _get_labeler
+    from app.services.trust_labeler import get_labeler as _get_labeler, build_envelope_result as _build_envelope_result
     _upstream_meta = upstream.get("meta", {})
     _server_id = _upstream_meta.get("server_id", "")
     _result_payload = _build_envelope_result(
@@ -997,6 +864,24 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
     )
     # M4 W4.2: passive inline observer — verify the envelope we just built.
     # Never blocks or raises; advisory only (D4/D5/D6 demo scenarios).
+    # A2: the ENFORCE deny path below is GATED by TRUST_OBSERVER_ENABLED — enforce only
+    # fires when the observer is also on. A deployment that wants denial must enable both
+    # TRUST_OBSERVER_ENABLED and TRUST_ENVELOPE_ENFORCE (and TRUST_ENVELOPE_ENABLED to sign).
+    #
+    # WI-4 ENFORCE-SEMANTICS DECISION (what this seam does and does NOT protect against):
+    #   The gateway signs the result (above) and then, under ENFORCE, verifies THAT SAME
+    #   freshly-signed envelope before returning. Because it is verifying its own signature
+    #   over bytes it just produced, this seam CANNOT detect a downstream man-in-the-middle
+    #   that tampers with the result AFTER it leaves the gateway — such a tamper happens
+    #   past this point, and any re-sign by an attacker fails chain validation only at a
+    #   party that INDEPENDENTLY verifies (the consumer), not here. What ENFORCE here DOES
+    #   catch: a malformed/absent/forged envelope or content_hash_mismatch arising BEFORE or
+    #   AT signing (e.g. a non-conformant labeler, a bug, an upstream that pre-populated a
+    #   bad _meta), and it makes the gateway fail-closed rather than emit an unverifiable
+    #   result. End-to-end integrity against a wire MITM is the INDEPENDENT CONSUMER's job
+    #   (mcp-envelope-harness TrustGate verifying against a pinned anchor). The article must
+    #   NOT conflate the two: gateway ENFORCE = "don't emit a result we can't self-verify";
+    #   consumer verify = "don't trust a result that was altered in transit".
     from app.core.config import get_settings as _gs
     if _gs().TRUST_OBSERVER_ENABLED:
         from app.services.trust_observer import observe_result as _observe
@@ -1008,13 +893,16 @@ async def _route_to_registry(name: str, args: dict, request: Request, req_id: An
             server_id=_server_id,
             result_id=request_id,
         )
-        # TRUST_ENVELOPE_ENFORCE (opt-in, default off): promote a subset of
-        # fail-closed verifier reasons from advisory-log to a real deny. Scoped
-        # to the reasons that indicate the envelope itself is untrustworthy
-        # (forged/absent/broken chain), not transient/config reasons.
-        if _gs().TRUST_ENVELOPE_ENFORCE and not _verdict.accepted and (_verdict.reason or "").startswith(
-            ("signature_invalid", "no_envelope", "chain_validation_failed")
-        ):
+        # TRUST_ENVELOPE_ENFORCE (opt-in, default off): promote fail-closed verifier
+        # reasons from advisory-log to a real deny. FULL REASON COVERAGE (WI-3): deny on
+        # ANY non-accepted verdict, not a hand-maintained reason allowlist. VerifierVerdict
+        # is exhaustively fail-closed (trust_verifier.py: every reject path — signature,
+        # no/absent envelope, broken chain, content_hash_mismatch, stale/future/malformed
+        # timestamp, empty x5c, missing/wildcard EKU, sig-decode, unexpected_error —
+        # returns accepted=False), so `not accepted` is the complete, drift-proof deny set.
+        # A previously-advisory reason (e.g. stale, EKU-rejected) now denies too.
+        # Predicate extracted to trust_enforce_denies() so the deny set is unit-testable.
+        if trust_enforce_denies(_gs().TRUST_ENVELOPE_ENFORCE, _verdict):
             return _err(
                 req_id, -32603,
                 "Tool result rejected: trust envelope verification failed",
@@ -1082,7 +970,6 @@ async def _handle_enrollment_status(args: dict, request: Request) -> dict:
 async def _handle_list_registered_tools(args: dict, request: Request) -> dict:
     status_filter = args.get("status", "all")
     from sqlalchemy import text
-
     from app.core.database import AsyncSessionLocal
     try:
         async with AsyncSessionLocal() as session:
@@ -1123,9 +1010,7 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
     quarantine check → OPA policy → anomaly → credential injection → upstream MCP server → audit log.
     """
     from uuid import uuid4
-
     from sqlalchemy import text
-
     from app.core.database import AsyncSessionLocal
     from app.services import invocation as inv_svc
 
@@ -1314,11 +1199,7 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
             logger.info("invoke_tool denied (not entitled) tool=%s client=%s reason=%s",
                         tool_name, client_id, exc.reason)
             return {"type": "text", "text": "Access denied: not entitled to this tool's server"}
-        from app.services.invocation import (
-            ScanFreshnessError,
-            ServerInMaintenanceError,
-            TaintFloorDenyError,
-        )
+        from app.services.invocation import TaintFloorDenyError, ScanFreshnessError, ServerInMaintenanceError
         if isinstance(exc, ScanFreshnessError):
             logger.warning("invoke_tool denied (stale scan) tool=%s client=%s", tool_name, client_id)
             return {"type": "text", "text": "Access denied: server supply-chain scan is stale"}
@@ -1356,15 +1237,30 @@ async def _handle_invoke_tool_real(args: dict, request: Request) -> dict:
         if isinstance(exc, OPADenyError):
             logger.info("invoke_tool denied (OPA) tool=%s client=%s reasons=%s",
                         tool_name, client_id, exc.reasons)
-            return {"type": "text", "text": f"Access denied by policy: {', '.join(exc.reasons)}"}
+            from app.services.policy import deny_remediation as _deny_help
+            _help = _deny_help(exc.reasons)
+            _text = f"Access denied by policy: {', '.join(exc.reasons)}"
+            if _help:
+                _text += f"\n\n{_help}"
+            _text += f"\n\n(request_id: {request_id})"
+            return {"type": "text", "text": _text}
+        from app.services.deny_map import classify_deny as _classify2
+        _deny2 = _classify2(exc)
+        if _deny2 is not None:
+            logger.info("invoke_tool denied (%s) tool=%s client=%s",
+                        _deny2.reason, tool_name, client_id)
+            _txt = _deny2.message
+            if _deny2.data.get("reasons"):
+                _txt += f"\n\nreasons: {', '.join(_deny2.data['reasons'])}"
+            return {"type": "text", "text": f"{_txt}\n\n(request_id: {request_id})"}
         logger.exception("invoke_tool pipeline error for %s", tool_name)
-        return {"type": "text", "text": "Tool invocation failed (internal error). Check server logs."}
+        return {"type": "text",
+                "text": f"Tool invocation failed (internal error).\n\n(request_id: {request_id})"}
 
 
 async def _handle_list_available_mcps(args: dict, request: Request) -> dict:
     client_id: str = getattr(request.state, "client_id", "")
     from sqlalchemy import text
-
     from app.core.database import AsyncSessionLocal
     try:
         async with AsyncSessionLocal() as db:
@@ -1409,7 +1305,6 @@ async def _handle_list_available_mcps(args: dict, request: Request) -> dict:
 async def _handle_get_my_profile(args: dict, request: Request) -> dict:
     principal: str = getattr(request.state, "client_id", "")
     from sqlalchemy import text
-
     from app.core.database import AsyncSessionLocal
     try:
         async with AsyncSessionLocal() as db:
@@ -1444,19 +1339,52 @@ async def _handle_get_my_profile(args: dict, request: Request) -> dict:
     }
 
 
+def _sa_blocked_for_profile_mutation(request: Request) -> dict | None:
+    """P1-2 at the meta-tool seam. Returns an error payload if the caller is a
+    service account, else None.
+
+    profiles.py bars machine tokens from mutating profiles via
+    _assert_not_service_account, reached through _assert_may_write on the REST
+    routes. But _handle_enable_mcp_server / _handle_disable_mcp_server call
+    _upsert_profile_row DIRECTLY, so they never reach that guard — a service
+    account holding any role in the tool's _roles set could self-enable an MCP
+    over /mcp and expand its own reach, which is exactly the escalation P1-2
+    exists to stop (automated credential compromise -> scope expansion).
+
+    Latent rather than live before 2026-07-25 only because no service account in
+    this lab happened to hold admin/analyst/editor/platform_admin. It becomes
+    reachable the moment one does — or, as here, the moment `agent` is added to
+    those _roles so agent-only MCP clients can recover their own profile.
+
+    Reading your own profile (get_my_profile) is NOT blocked: it mutates nothing.
+    """
+    if getattr(request.state, "is_service_account", False):
+        caller = getattr(request.state, "client_id", "") or "unknown"
+        logger.warning(
+            "META_TOOL_SA_BLOCKED: service-account %s attempted profile mutation "
+            "via an MCP meta-tool — denied (P1-2)", caller,
+        )
+        return {
+            "type": "text",
+            "text": (
+                "Profile changes are a human governance action — a service account "
+                "cannot enable or disable MCP servers for itself. Ask an "
+                "administrator to change this profile."
+            ),
+        }
+    return None
+
+
 async def _handle_enable_mcp_server(args: dict, request: Request) -> dict:
+    _sa_denied = _sa_blocked_for_profile_mutation(request)
+    if _sa_denied is not None:
+        return _sa_denied
     principal: str = getattr(request.state, "client_id", "")
     server_name: str = args.get("server_name", "").strip()
     if not server_name:
         return {"type": "text", "text": "Error: server_name is required"}
+    from app.routers.profiles import _assert_mcp_exists, _get_profile_row, _upsert_profile_row, _invalidate_profile_cache
     from fastapi import HTTPException
-
-    from app.routers.profiles import (
-        _assert_mcp_exists,
-        _get_profile_row,
-        _invalidate_profile_cache,
-        _upsert_profile_row,
-    )
     try:
         await _assert_mcp_exists(server_name)
     except HTTPException as exc:
@@ -1483,18 +1411,15 @@ async def _handle_enable_mcp_server(args: dict, request: Request) -> dict:
 
 
 async def _handle_disable_mcp_server(args: dict, request: Request) -> dict:
+    _sa_denied = _sa_blocked_for_profile_mutation(request)
+    if _sa_denied is not None:
+        return _sa_denied
     principal: str = getattr(request.state, "client_id", "")
     server_name: str = args.get("server_name", "").strip()
     if not server_name:
         return {"type": "text", "text": "Error: server_name is required"}
+    from app.routers.profiles import _assert_mcp_exists, _get_profile_row, _upsert_profile_row, _invalidate_profile_cache
     from fastapi import HTTPException
-
-    from app.routers.profiles import (
-        _assert_mcp_exists,
-        _get_profile_row,
-        _invalidate_profile_cache,
-        _upsert_profile_row,
-    )
     try:
         await _assert_mcp_exists(server_name)
     except HTTPException as exc:
@@ -1546,6 +1471,14 @@ def _err(req_id: Any, code: int, message: str, data: Any = None) -> dict:
     if data is not None:
         err["data"] = data
     return {"jsonrpc": "2.0", "id": req_id, "error": err}
+
+
+def trust_enforce_denies(enforce_enabled: bool, verdict) -> bool:
+    """WI-3 full reason coverage: under TRUST_ENVELOPE_ENFORCE, deny on ANY non-accepted
+    verifier verdict — no hand-maintained reason allowlist. VerifierVerdict is exhaustively
+    fail-closed, so `not verdict.accepted` is the complete, drift-proof deny set (stale,
+    EKU-rejected, malformed-timestamp, empty-x5c, etc. all deny, not just the old 4)."""
+    return bool(enforce_enabled) and not verdict.accepted
 
 
 async def _dispatch(body: dict, request: Request) -> dict | None:
@@ -1606,7 +1539,22 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
         platform_tools = _visible_tools(roles)
         principal_id: str | None = getattr(request.state, "principal_id", None)
         principal_type: str | None = getattr(request.state, "principal_type", None)
+
+        # Conservative preflight for meta-tools: a bound NAMED profile may disable them
+        # (including the self-service ones — see the tools/call gate below), so a
+        # locked-down profile must not advertise what it will deny. Only applies when a
+        # named profile is bound; the default per-identity profile leaves meta-tools
+        # visible so recovery stays discoverable.
+        _lp = getattr(request.state, "profile_uuid", None)
         try:
+            if _lp and platform_tools:
+                from app.services.invocation import _lookup_profile_with_cache as _rp
+                _kept = []
+                for _pt in platform_tools:
+                    _r = await _rp(client_id, _pt["name"], profile_uuid=_lp)
+                    if _r is None or _r.get("enabled", True):
+                        _kept.append(_pt)
+                platform_tools = _kept
             registry_tools = await _registered_tools_for_client(
                 client_id=client_id,
                 roles=roles,
@@ -1645,6 +1593,42 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
         if name in _PLATFORM_NAMES and not _can_call(name, roles):
             return _err(req_id, -32003, "Authorization denied")
 
+        # A BOUND NAMED PROFILE may lock down the self-service meta-tools.
+        #
+        # Meta-tools are dispatched inline and their OPA input never carries a
+        # `profile` key, so mcp_disabled_for_profile cannot fire for them — they were
+        # role-gated only. That made a named profile an escape hatch: an admin could
+        # curate a locked-down profile, and a caller bound to it could still call
+        # enable_mcp_server and unlock themselves back out of it.
+        #
+        # Gated ONLY when a named profile is bound (profile_uuid set). The default
+        # per-identity profile deliberately stays ungated here, which is what keeps
+        # recovery possible for a user who has disabled their own tools — and is why
+        # would_self_lockout() protects the recovery set on THAT path but not on the
+        # named-binding path. The two halves are the same policy seen from both ends:
+        #   default profile -> you can never lock yourself out
+        #   named profile   -> an admin CAN lock you all the way down, on purpose
+        _bound_profile = getattr(request.state, "profile_uuid", None)
+        if _bound_profile and name in _PLATFORM_NAMES:
+            from app.services.invocation import ProfileLookupError, _lookup_profile_with_cache
+            _rid = getattr(request.state, "request_id", "")
+            try:
+                _mp = await _lookup_profile_with_cache(client_id, name, profile_uuid=_bound_profile)
+            except ProfileLookupError:
+                # INV-015 fail-closed: cannot resolve the restriction => deny.
+                logger.error("meta-tool profile lookup unavailable tool=%s client=%s", name, client_id)
+                return _err(req_id, -32603, "Profile lookup unavailable — service degraded")
+            if _mp is not None and not _mp.get("enabled", True):
+                logger.info("meta-tool denied by named profile tool=%s client=%s profile=%s",
+                            name, client_id, _bound_profile)
+                return _err(
+                    req_id, -32003,
+                    "Access denied by policy. This tool is disabled by the profile you are "
+                    "bound to. Only an administrator can change a named profile — including "
+                    "the self-service tools, which a locked-down profile may disable on purpose.",
+                    data={"reasons": ["mcp_disabled_for_profile"], "request_id": _rid},
+                )
+
         # Registry tool — route directly through the security pipeline
         if not _can_call(name, roles):
             return await _route_to_registry(name, args, request, req_id)
@@ -1652,10 +1636,9 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
         # OPA policy check for internal platform tools.
         # 'invoke_tool' runs its own full pipeline — skip here to avoid double-evaluation.
         if name != "invoke_tool":
-            from uuid import uuid4
-
-            from app.services.invocation import emit_internal_tool_event
             from app.services.policy import evaluate_policy
+            from app.services.invocation import emit_internal_tool_event
+            from uuid import uuid4
             # 6.1: evaluate OPA under the REAL caller identity, not a hardcoded
             # platform_internal/platform_admin principal. authz.rego authorizes
             # platform meta-tools by role (platform_meta_tool_roles) without
@@ -1709,9 +1692,8 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
 
             # Emit audit for internal tools only (invoke_tool audits internally)
             if name != "invoke_tool":
-                from uuid import uuid4
-
                 from app.services.invocation import emit_internal_tool_event
+                from uuid import uuid4
                 await emit_internal_tool_event(
                     tool_name=name,
                     client_id=client_id,
@@ -1721,8 +1703,7 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
                     latency_ms=latency_ms,
                     opa_decision_id=f"dec_{uuid4().hex[:16]}",
                 )
-            from app.services.trust_labeler import build_envelope_result as _build_envelope_result
-            from app.services.trust_labeler import get_labeler as _get_labeler
+            from app.services.trust_labeler import get_labeler as _get_labeler, build_envelope_result as _build_envelope_result
             _platform_payload = _build_envelope_result(
                 content=[content],
                 labeler=_get_labeler(),
@@ -1755,7 +1736,7 @@ async def _dispatch(body: dict, request: Request) -> dict | None:
             # be swallowed into a JSON-RPC tool-execution error. The meta-tools
             # are read-only, so a post-execution 500 has no side effect to undo.
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("Tool handler error: %s", name)
             return _err(req_id, -32603, "Tool execution error (internal). Check server logs.")
 
@@ -1788,7 +1769,7 @@ async def mcp_post(request: Request) -> JSONResponse | StreamingResponse:
     # theoretical case where client_id is None so no request can slip through unlimited.
     client_id = getattr(request.state, "client_id", None)
     rl_key_id = client_id or (request.client.host if request.client else "unknown")
-    from app.core.config import get_rate_limit_for_roles, get_settings
+    from app.core.config import get_settings, get_rate_limit_for_roles
     from app.services.limits import get_rate_limit
     _roles = getattr(request.state, "client_roles", [])
     _role_default = get_rate_limit_for_roles(_roles, get_settings())

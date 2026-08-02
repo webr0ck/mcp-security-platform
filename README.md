@@ -122,7 +122,7 @@ The honest summary — full per-control detail (with code anchors) in **[docs/en
 
 | Area | Enforced today | Roadmap |
 |---|---|---|
-| **Policy (OPA/Rego)** | Deny-by-default on REST + `/mcp`; signed bundles by default; discovery==invoke entitlement | unlinked tools governed by OPA only |
+| **Policy (OPA/Rego)** | Deny-by-default on REST + `/mcp`; signed bundles by default; discovery is a *conservative preflight* of invoke (entitlement + profile), re-enforced on every call | unlinked tools governed by OPA only |
 | **Identity** | mTLS + gateway-secret trust (fail-closed; prod requires the secret); PKCE enrollment | self-service cert issuance; prod `:443` mTLS split |
 | **OIDC login** | Keycloak PKCE S256, session JWT, JTI revocation, Grafana SSO, RFC 9207 `iss` | some Bearer/`aud` dev-only fallbacks |
 | **Credential broker** | wired at startup, fail-closed; HKDF KEK + AES-256-GCM + AAD row-binding | approach-B adapters orphaned |

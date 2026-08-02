@@ -138,6 +138,26 @@ async def snapshot_tool_schema(session: AsyncSession, server_id: str) -> list[di
     return [{"name": r["name"], "schema": r["schema"]} for r in rows]
 
 
+def _decode_mcp_body(resp: httpx.Response) -> dict:
+    """
+    Decode an MCP JSON-RPC response that may arrive as either plain JSON or SSE.
+
+    FastMCP answers with `text/event-stream` when the client offers it (this probe does,
+    and must, since some backends require it). `.json()` then raises on the `data: `
+    framing. That failure was silent here: it surfaced as "probe failed" -> None ->
+    "uncertain", which the C3 classifier treats as fail-safe (escalate to full review),
+    so nothing ever looked broken — the IP-only fast path simply never matched.
+
+    Mirrors the invoke path's own SSE handling (invocation.py step 4).
+    """
+    if "text/event-stream" in resp.headers.get("content-type", ""):
+        for line in resp.text.splitlines():
+            if line.startswith("data:"):
+                return json.loads(line[5:].strip())
+        raise ValueError("SSE response contained no data: frame")
+    return resp.json()
+
+
 async def fetch_live_tool_schema(
     upstream_url: str, allowlist_entry: str | None,
 ) -> list[dict] | None:
@@ -150,10 +170,25 @@ async def fetch_live_tool_schema(
     fail-safe toward the full re-review path, never toward auto-approval.
     """
     try:
-        validate_server_url(
+        # Use the SAME SSRF mechanism as provide-url / create_server (the R-10 rule:
+        # exactly one validation path, never two that drift). This probe previously
+        # used validate_server_url, which rejects ALL plain HTTP — so against an
+        # internal HTTP backend it always returned None. For the C3 classifier that
+        # merely escalated to full re-review (fail-safe, invisible). For the R6.1
+        # attestation sweep it would have been fatal: the control would log
+        # "unreachable — skipping" forever and never attest anything, while looking
+        # perfectly healthy. A decorative security control is worse than none.
+        #
+        # This is a strengthening in production, not a loosening: validate_upstream_url_ssrf
+        # is the stricter check (every resolved IP must be public or inside ONE allowlist
+        # CIDR; mixed resolution denied), and allow_http_dev is False unless
+        # ENVIRONMENT == "development".
+        from app.core.config import settings as _settings
+
+        await validate_upstream_url_ssrf(
             upstream_url,
-            allow_http_localhost=False,
-            allowed_cidr=allowlist_entry,
+            private_cidr_allowlist=_settings.upstream_private_cidr_allowlist_parsed,
+            allow_http_dev=(_settings.ENVIRONMENT == "development"),
         )
         pinned_ips = await revalidate_upstream_ip_at_invoke(
             upstream_url=upstream_url, registered_allowlist_entry=allowlist_entry,
@@ -192,8 +227,9 @@ async def fetch_live_tool_schema(
                 headers=list_headers, timeout=_PROBE_TIMEOUT_SECONDS,
             )
             list_resp.raise_for_status()
-            tools = list_resp.json().get("result", {}).get("tools", [])
-    except (SSRFError, UpstreamRevalidationError, httpx.HTTPError, ValueError) as exc:
+            tools = _decode_mcp_body(list_resp).get("result", {}).get("tools", [])
+    except (SSRFError, UpstreamRevalidationError, httpx.HTTPError, ValueError,
+            InvalidOnboardingConfig) as exc:
         logger.warning("fetch_live_tool_schema failed url=%s: %s", upstream_url, exc)
         return None
 
@@ -231,6 +267,66 @@ def tool_schemas_identical(live: list[dict] | None, last_good: Any) -> bool:
     return (
         json.dumps(normalized_live, sort_keys=True)
         == json.dumps(normalized_last_good, sort_keys=True)
+    )
+
+
+async def record_attestation_baseline(server_id: str, live_schema: list[dict]) -> None:
+    """
+    Persist a live probe as the attestation baseline (R6.1).
+
+    Called after a server is (re-)approved and its live surface has been verified, and
+    by the sweep's trust-on-first-use branch. Refreshing on re-approval is what stops a
+    legitimately-changed server from being demoted on every subsequent sweep.
+    """
+    async with AsyncSessionLocal() as session:
+        await session.execute(text(
+            """
+            UPDATE server_registry
+            SET attested_tool_schema = CAST(:schema AS jsonb),
+                attested_at          = now(),
+                updated_at           = now()
+            WHERE server_id = :sid
+            """
+        ), {"schema": json.dumps(live_schema), "sid": server_id})
+        await session.commit()
+
+
+def live_schema_drift(live: list[dict], baseline: Any) -> list[str]:
+    """
+    Tool names that differ between a fresh live probe and the recorded attestation
+    baseline. Empty list == attested unchanged. R6.1.
+
+    BOTH SIDES MUST COME FROM fetch_live_tool_schema. The first version of this compared
+    a live probe against tool_registry (via snapshot_tool_schema) and reported drift for
+    every tool of every server — because `tool_registry.name` is a platform-side alias
+    (a lab server exposing `echo_args` upstream is registered as `echo-basic`/`echo-sa`)
+    and `tool_registry.schema` is a normalized rewrite of the upstream inputSchema, not
+    a copy of it. Caught only by running the sweep against the real lab; synthetic
+    fixtures that build both sides the same way cannot surface it.
+
+    Note this is also why tool_schemas_identical() — which compares a live probe against
+    last_good_tool_schema, itself filled from snapshot_tool_schema — can effectively
+    never return True. That makes C3's ip_only auto-approve unreachable in practice.
+    Harmless (it fail-safes to full re-review) but tracked; not fixed here.
+
+    `live` must be a real fetch; a failed probe is None at the call site and means
+    UNCERTAIN, never drift.
+    """
+    def _by_name(entries: Any) -> dict[str, str]:
+        if isinstance(entries, str):
+            try:
+                entries = json.loads(entries)
+            except (TypeError, ValueError):
+                return {}
+        return {
+            e["name"]: json.dumps(e.get("schema"), sort_keys=True)
+            for e in (entries or []) if e.get("name")
+        }
+
+    live_map, base_map = _by_name(live), _by_name(baseline)
+    return sorted(
+        name for name in (live_map.keys() | base_map.keys())
+        if live_map.get(name) != base_map.get(name)
     )
 
 
@@ -347,6 +443,31 @@ async def approve_self_hosted_server(
             {"schema": json.dumps(tool_schema), "sid": server_id},
         )
         await session.commit()
+
+    # R6.1: re-baseline the attested LIVE surface on every approval. Without this a
+    # server that legitimately changed would drift-demote on every subsequent sweep,
+    # and the reviewer's approval would never "stick". Probe failure here is non-fatal —
+    # the approval already committed, and the sweep's trust-on-first-use branch will
+    # record a baseline on its next pass.
+    # Broad except on purpose: the approval above has ALREADY COMMITTED, so nothing here
+    # may raise. fetch_live_tool_schema catches its own expected failures but not every
+    # transport-layer surprise (an anyio TLS AttributeError got through and broke
+    # approval outright). Failing to record a baseline costs one sweep of delay; failing
+    # an approval that already committed leaves the server in an inconsistent state.
+    try:
+        _live = await fetch_live_tool_schema(target_upstream_url, allowlist_entry)
+        if _live is not None:
+            await record_attestation_baseline(server_id, _live)
+        else:
+            logger.warning(
+                "approve_self_hosted_server: could not probe %s for an attestation "
+                "baseline; the sweep will record one on its next pass", server_id,
+            )
+    except Exception as _exc:
+        logger.warning(
+            "approve_self_hosted_server: attestation baseline capture failed for %s "
+            "(approval stands): %s", server_id, _exc,
+        )
 
     logger.info(
         "approve_self_hosted_server succeeded server_id=%s actor=%s tools_released=%s",

@@ -43,13 +43,22 @@ ALLOWED_PROXY_PEERS = {
     # IdP services legitimately on gateway-net in multi-tier deploys
     "keycloak", "keycloak-seeder",
 }
-PAIRWISE = {
+# Expected pairwise network per backend. A value may be a set when tiers name the
+# same network differently: docker-compose.yml uses the `proxy-<svc>-net`
+# convention, while podman-compose.lab.yml names ALL of its per-server pairwise
+# nets `mcp-<svc>-net` (mcp-echo-net, mcp-notes-net, …). Both are internally
+# consistent and the control is identical — the proxy reaches the backend over one
+# dedicated pairwise network and nothing else. Only the label differs, so the gate
+# accepts either rather than forcing a rename that would change no security
+# property. What is still asserted, exactly as before: the shared set is EXACTLY
+# one network, and it is the expected one.
+PAIRWISE: dict[str, str | set[str]] = {
     "opa": "proxy-opa-net",
     "ollama": "proxy-ollama-net",
     "redis": "proxy-redis-net",
     "db": "proxy-db-net",
     "vault": "vault-net",
-    "self-service": "proxy-self-service-net",
+    "self-service": {"proxy-self-service-net", "mcp-self-service-net"},
     "lab-ops-agent": "proxy-ops-agent-net",
     "prometheus": "proxy-metrics-net",
     "otel-collector": "proxy-otel-net",
@@ -305,8 +314,12 @@ def _check_proxy_isolation(c: dict, fails: list[str]) -> None:
                   f"proxy has no networks defined in this file (overlay context).")
             continue
         shared = proxy_nets & set(be_nets if isinstance(be_nets, list) else be_nets.keys())
-        chk(f"proxy<->{be} reachable via {pn} only (got {sorted(shared)})",
-            shared == {pn})
+        # Accept any one of the permitted names, but STILL require exactly one shared
+        # network — a backend reachable over two nets is the violation this gate exists
+        # to catch, and widening the name set must not weaken that.
+        accepted = pn if isinstance(pn, set) else {pn}
+        chk(f"proxy<->{be} reachable via {'|'.join(sorted(accepted))} only (got {sorted(shared)})",
+            len(shared) == 1 and shared <= accepted)
 
     if overlay:
         # In overlay context the peer-reachability check cannot be evaluated

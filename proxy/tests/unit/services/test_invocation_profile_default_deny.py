@@ -166,8 +166,14 @@ async def test_named_profile_with_bindings_denies_unbound_tool():
          patch.object(inv_mod, "_emit_audit_event", side_effect=_fake_emit), \
          patch.object(inv_mod, "_get_or_create_session", AsyncMock(return_value=None)), \
          patch.object(inv_mod, "_mcp_initialize", AsyncMock(return_value=None)), \
-         patch.object(inv_mod, "_lookup_profile_with_cache", AsyncMock(return_value=None)), \
-         patch.object(inv_mod, "_named_profile_has_any_binding", AsyncMock(return_value=True)) as mock_has_binding:
+         patch.object(
+             inv_mod, "_lookup_profile_with_cache",
+             # The resolver now owns named-profile default-deny (it was synthesized in
+             # invoke_tool until 2026-07-25, which meant discovery and invoke resolved
+             # it differently). This is what the real resolver returns for a configured
+             # profile with no row for this tool; invoke_tool's job is to forward it.
+             AsyncMock(return_value={"enabled": False, "allowed_functions": []}),
+         ) as mock_resolver:
         from app.services.policy import OPADenyError as _OPADenyError  # noqa: F401
         with pytest.raises(Exception):
             # opa_allow=False → policy.evaluate_policy denies; invoke_tool
@@ -175,7 +181,10 @@ async def test_named_profile_with_bindings_denies_unbound_tool():
             # about the OPA INPUT that was constructed before the deny.
             await _invoke(inv_mod, profile_uuid=p_uuid, request_id="req-named-deny-001")
 
-    mock_has_binding.assert_awaited_once_with(p_uuid)
+    mock_resolver.assert_awaited_once()
+    assert mock_resolver.await_args.kwargs.get("profile_uuid") == p_uuid, (
+        "invoke_tool must pass the bound profile_uuid down to the resolver"
+    )
     assert len(captured_opa_inputs) >= 1
     opa_input = captured_opa_inputs[0]
     assert opa_input.get("profile") == {"enabled": False, "allowed_functions": []}, (
@@ -206,11 +215,13 @@ async def test_named_profile_with_zero_bindings_still_allows():
          patch.object(inv_mod, "_emit_audit_event", side_effect=_fake_emit), \
          patch.object(inv_mod, "_get_or_create_session", AsyncMock(return_value=None)), \
          patch.object(inv_mod, "_mcp_initialize", AsyncMock(return_value=None)), \
-         patch.object(inv_mod, "_lookup_profile_with_cache", AsyncMock(return_value=None)), \
-         patch.object(inv_mod, "_named_profile_has_any_binding", AsyncMock(return_value=False)) as mock_has_binding:
+         patch.object(inv_mod, "_lookup_profile_with_cache", AsyncMock(return_value=None)) as mock_resolver:
         await _invoke(inv_mod, profile_uuid=p_uuid, request_id="req-named-allow-001")
 
-    mock_has_binding.assert_awaited_once_with(p_uuid)
+    mock_resolver.assert_awaited_once()
+    assert mock_resolver.await_args.kwargs.get("profile_uuid") == p_uuid, (
+        "invoke_tool must pass the bound profile_uuid down to the resolver"
+    )
     assert len(captured_opa_inputs) >= 1
     opa_input = captured_opa_inputs[0]
     assert opa_input.get("profile") == {}, (
@@ -240,11 +251,14 @@ async def test_legacy_path_does_not_call_named_profile_binding_check():
          patch.object(inv_mod, "_emit_audit_event", side_effect=_fake_emit), \
          patch.object(inv_mod, "_get_or_create_session", AsyncMock(return_value=None)), \
          patch.object(inv_mod, "_mcp_initialize", AsyncMock(return_value=None)), \
-         patch.object(inv_mod, "_lookup_profile_with_cache", AsyncMock(return_value=None)), \
-         patch.object(inv_mod, "_named_profile_has_any_binding", AsyncMock(return_value=True)) as mock_has_binding:
+         patch.object(inv_mod, "_lookup_profile_with_cache", AsyncMock(return_value=None)) as mock_resolver:
         await _invoke(inv_mod, profile_uuid=None, request_id="req-legacy-001")
 
-    mock_has_binding.assert_not_awaited()
+    # The legacy path must reach the resolver with profile_uuid=None, which is what
+    # tells it to skip the named source entirely (asserted at the resolver level in
+    # tests/unit/services/test_profile_deny_dominant.py).
+    mock_resolver.assert_awaited_once()
+    assert mock_resolver.await_args.kwargs.get("profile_uuid") is None
     assert len(captured_opa_inputs) >= 1
     opa_input = captured_opa_inputs[0]
     assert opa_input.get("profile") == {}, (
@@ -272,18 +286,19 @@ async def test_db_error_no_cache_binding_lookup_yields_503():
     async def _fake_emit(*args, **kwargs) -> str:
         return "fake-audit-id"
 
-    async def _fake_has_binding_raises(_p_uuid: str) -> bool:
+    async def _fake_resolver_raises(*_a, **_kw):
+        # The binding-count lookup lives inside the resolver now; its
+        # ProfileLookupError propagates out of _lookup_profile_with_cache.
         raise inv_mod.ProfileLookupError(
-            f"DB unreachable and no cached binding-count for profile {_p_uuid}"
+            f"DB unreachable and no cached binding-count for profile {p_uuid}"
         )
 
     with patch.dict(sys.modules, stubs), \
          patch.object(inv_mod, "_emit_audit_event", side_effect=_fake_emit), \
          patch.object(inv_mod, "_get_or_create_session", AsyncMock(return_value=None)), \
          patch.object(inv_mod, "_mcp_initialize", AsyncMock(return_value=None)), \
-         patch.object(inv_mod, "_lookup_profile_with_cache", AsyncMock(return_value=None)), \
          patch.object(
-             inv_mod, "_named_profile_has_any_binding", side_effect=_fake_has_binding_raises
+             inv_mod, "_lookup_profile_with_cache", side_effect=_fake_resolver_raises
          ), \
          pytest.raises(OPAUnavailableError):
         await _invoke(inv_mod, profile_uuid=p_uuid, request_id="req-named-503-001")

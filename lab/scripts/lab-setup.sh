@@ -157,6 +157,12 @@ fi
 # ── Step 4: Start infrastructure services ────────────────────────────────────
 log "Step 4: Starting infrastructure services"
 
+# Dex's mcp-dex-generic client's redirectURIs must match the CURRENT
+# PROXY_BASE_URL (a LAN/Tailscale IP that drifts across sessions) or its
+# external-OAuth enrollment flow 400s "Unregistered redirect_uri" — render
+# before `compose up` so Dex starts with the right config the first time.
+bash "${SCRIPT_DIR}/render_dex_config.sh" 2>&1 | tee -a "${LOG_FILE}"
+
 ${LAB_COMPOSE} up -d --build 2>&1 | tee -a "${LOG_FILE}"
 
 # Wait for core services

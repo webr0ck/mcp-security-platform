@@ -1,4 +1,4 @@
-"""Independent trust-envelope verifier (PRD-0001 M4 / RFC-0001 §6.3).
+"""Independent trust-envelope verifier (PRD-0001 M4 / SPEC-0001 §6.3).
 
 A process that did NOT produce the envelope verifies it (D4/D5/D6).
 Fail-closed: any failure → VerifierVerdict(accepted=False, integrity_rank=0).
@@ -6,8 +6,12 @@ Fail-closed: any failure → VerifierVerdict(accepted=False, integrity_rank=0).
 Verification steps (RFC §6.3):
   0. Presence check — no envelope → integrity_rank=0
   1. MAX_ENVELOPE_AGE check (first) — reject if signed_at > 10 min ago
-  2. Chain validation via PolicyBuilder (SPKI sub-CA anchor, no system store,
-     point-in-time at signed_at, automatic nameConstraints enforcement)
+  2. Chain validation — manual SPKI-pinned sub-CA anchor (NOT PolicyBuilder, whose
+     built-in verifiers require TLS EKUs the labeler OID can't satisfy): issuer-DN
+     match + leaf signature verify against the pinned sub-CA key + leaf validity at
+     signed_at. No system trust store consulted.
+  2b. Leaf extension policy — BasicConstraints ca=FALSE, KeyUsage digitalSignature,
+     and rejection of any unrecognized critical extension (RFC 5280 6.1.4/6.1.5)
   3. EKU check — require labeler OID; reject anyExtendedKeyUsage
   4. Signature verify — ECDSA(SHA-256), hardcoded (never dispatched from sig.alg)
   5. Content hash recomputation — JCS({content, structuredContent}); compare
@@ -30,6 +34,15 @@ logger = logging.getLogger(__name__)
 
 MCP_LABELER_OID = x509.ObjectIdentifier("1.3.6.1.4.1.99999.1.1")
 ANY_EKU_OID = x509.ObjectIdentifier("2.5.29.37.0")
+
+# RFC 5280 6.1.4/6.1.5: a cert carrying a CRITICAL extension the verifier does not
+# process MUST be rejected. This is the whole set we process on the leaf - anything
+# else marked critical is, by definition, a constraint we would be ignoring.
+RECOGNIZED_CRITICAL_OIDS = frozenset({
+    x509.oid.ExtensionOID.BASIC_CONSTRAINTS,
+    x509.oid.ExtensionOID.KEY_USAGE,
+    x509.oid.ExtensionOID.EXTENDED_KEY_USAGE,
+})
 TRUST_ENVELOPE_KEY = "io.mcp-security-platform/trust-envelope/v0.1"
 
 MAX_ENVELOPE_AGE_SECONDS: int = 600   # §6.3(4): 10 min
@@ -44,7 +57,7 @@ class VerifierVerdict:
 
 
 class TrustVerifier:
-    """RFC-0001 §6.3 conformant verifier.
+    """SPEC-0001 §6.3 conformant verifier.
 
     Pinned to a specific sub-CA cert (SPKI anchor, not DN, not system store).
     """
@@ -63,11 +76,18 @@ class TrustVerifier:
         self,
         result: dict,
         *,
-        tool_name: str,
-        server_id: str,
-        result_id: str,
+        tool_name: str | None = None,
+        server_id: str | None = None,
+        result_id: str | None = None,
     ) -> VerifierVerdict:
-        """Verify the trust envelope in result._meta. Fail-closed on any error."""
+        """Verify the trust envelope in result._meta. Fail-closed on any error.
+
+        Call-context (tool_name/server_id/result_id) is used to reconstruct the signed
+        input. A caller that already holds a field (its own request id, the tool it
+        called) SHOULD pass it — that is the anti-replay property. Any field left None
+        falls back to the envelope's unsigned ``call_context`` hint (A6); this is safe
+        because the signature covers the real values, so a forged hint fails verify.
+        """
         try:
             return self._verify(
                 result, tool_name=tool_name, server_id=server_id, result_id=result_id
@@ -84,15 +104,23 @@ class TrustVerifier:
         self,
         result: dict,
         *,
-        tool_name: str,
-        server_id: str,
-        result_id: str,
+        tool_name: str | None,
+        server_id: str | None,
+        result_id: str | None,
     ) -> VerifierVerdict:
         # ── Step 0: Envelope presence ─────────────────────────────────────
         meta = result.get("_meta") or {}
         envelope = meta.get(TRUST_ENVELOPE_KEY)
         if not envelope:
             return self._reject("no_envelope")
+
+        # A6: fall back to the unsigned call_context hint for any field the caller
+        # did not supply (a downstream consumer typically knows tool_name/result_id
+        # but not the upstream server_id). Transitively verified by the signature.
+        call_ctx = envelope.get("call_context") or {}
+        eff_tool_name = tool_name if tool_name is not None else call_ctx.get("tool_name", "")
+        eff_server_id = server_id if server_id is not None else call_ctx.get("server_id", "")
+        eff_result_id = result_id if result_id is not None else call_ctx.get("result_id", "")
 
         label = envelope.get("label") or {}
         binding = envelope.get("binding") or {}
@@ -137,9 +165,18 @@ class TrustVerifier:
         # We use manual chain validation instead of PolicyBuilder.build_client_verifier()
         # because the cryptography library's built-in verifiers enforce TLS-specific EKUs
         # (id-kp-clientAuth / id-kp-serverAuth) which our custom MCP labeler OID does not
-        # satisfy. The security properties are equivalent: we verify the leaf signature using
-        # the pinned sub-CA's public key (SPKI anchor), check issuer matching, and validate
-        # the leaf cert's validity window at signed_at. No system trust store is consulted.
+        # satisfy. No system trust store is consulted.
+        #
+        # This is NOT full RFC 5280 path validation, and an earlier version of this comment
+        # claimed it was. What we do: issuer-DN match, leaf signature verified with the
+        # pinned sub-CA's public key, leaf validity window at signed_at, then the leaf
+        # extension policy in step 2b (BasicConstraints, KeyUsage, unknown-critical) and
+        # the EKU check in step 3. What we still DO NOT do: revocation - there is no
+        # CRL/OCSP here, mitigated only by the 15-minute leaf lifetime.
+        # Path length and name constraints are genuinely moot rather than skipped: the path
+        # is exactly one hop. `intermediates` above is parsed for shape validation and then
+        # DELIBERATELY UNUSED - nothing but a leaf directly issued by the pinned sub-CA can
+        # ever verify, so an attacker-supplied intermediate has no route to being trusted.
         try:
             # 1. Leaf must be issued by the pinned sub-CA (issuer DN match + signature verify)
             if leaf_cert.issuer != self._sub_ca_cert.subject:
@@ -162,6 +199,33 @@ class TrustVerifier:
         except Exception:
             return self._reject("chain_validation_failed")
 
+        # ── Step 2b: leaf extension policy (RFC 5280 hygiene) ────────────
+        try:
+            basic_constraints = leaf_cert.extensions.get_extension_for_class(
+                x509.BasicConstraints
+            ).value
+        except x509.ExtensionNotFound:
+            return self._reject("missing_basic_constraints")
+        if basic_constraints.ca:
+            # A leaf that asserts ca=TRUE is a signing-capable cert masquerading as an
+            # end entity - it could mint siblings under a chain we would then accept.
+            return self._reject("leaf_is_ca")
+
+        try:
+            key_usage = leaf_cert.extensions.get_extension_for_class(x509.KeyUsage).value
+        except x509.ExtensionNotFound:
+            return self._reject("missing_key_usage")
+        if not key_usage.digital_signature:
+            return self._reject("key_usage_not_digital_signature")
+
+        unknown_critical = sorted(
+            ext.oid.dotted_string
+            for ext in leaf_cert.extensions
+            if ext.critical and ext.oid not in RECOGNIZED_CRITICAL_OIDS
+        )
+        if unknown_critical:
+            return self._reject(f"unknown_critical_extension:{unknown_critical[0]}")
+
         # ── Step 3: EKU check (parsed OID; reject anyExtendedKeyUsage) ───
         try:
             eku_ext = leaf_cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
@@ -173,6 +237,30 @@ class TrustVerifier:
             return self._reject("anyExtendedKeyUsage_rejected")
         if MCP_LABELER_OID not in eku_oids:
             return self._reject("missing_labeler_eku")
+
+        # ── Step 3b: Attribution binding ─────────────────────────────────
+        # `label.attribution` names the labeler that asserted this. It sits inside
+        # `label`, so it IS signed - but a valid signature only proves that SOME key
+        # chaining to the pinned sub-CA signed it. Without this comparison any sibling
+        # leaf (a rotated key, a second region, another tenant) can attribute its
+        # assertion to a DIFFERENT principal and verify clean, so "the named labeler
+        # asserted this" would be unproven. Bind the name to the cert presenting it.
+        attribution = label.get("attribution")
+        if not isinstance(attribution, list) or not attribution:
+            return self._reject("attribution_missing")
+        # Exactly one. Binding only attribution[0] would leave the rest unbound, and every
+        # extra entry sits INSIDE the signed label - so a sibling leaf could self-attribute
+        # at index 0 (passing the check below) and forge a second entry naming a different
+        # labeler, which then carries the signature's authority to anything that reads
+        # `attribution` as the list it is declared to be. Same lie, one index over.
+        if len(attribution) != 1:
+            return self._reject("attribution_multi")
+        signer = attribution[0] if isinstance(attribution[0], dict) else {}
+        leaf_fp = "sha256:" + leaf_cert.fingerprint(hashes.SHA256()).hex()
+        if signer.get("cert_fp") != leaf_fp:
+            return self._reject("attribution_mismatch")
+        if signer.get("principal") != leaf_cert.subject.rfc4514_string():
+            return self._reject("attribution_mismatch")
 
         # ── Step 4: Signature verify (ES256, hardcoded — never dispatched) ─
         try:
@@ -186,9 +274,9 @@ class TrustVerifier:
             content_hash=content_hash,
             nonce=nonce,
             signed_at=signed_at_str,
-            result_id=result_id,
-            tool_name=tool_name,
-            server_id=server_id,
+            result_id=eff_result_id,
+            tool_name=eff_tool_name,
+            server_id=eff_server_id,
         )
         try:
             leaf_cert.public_key().verify(sig_der, signed_input_bytes, ec.ECDSA(hashes.SHA256()))

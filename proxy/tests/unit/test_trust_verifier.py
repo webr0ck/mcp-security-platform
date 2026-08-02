@@ -1,4 +1,4 @@
-"""D4/D5/D6 + F-1..F-8 trust envelope verifier tests (PRD-0001 M4 / RFC-0001 §6.3, §17)."""
+"""D4/D5/D6 + F-1..F-8 trust envelope verifier tests (PRD-0001 M4 / SPEC-0001 §6.3, §17)."""
 from __future__ import annotations
 
 import base64
@@ -50,41 +50,56 @@ def _make_sub_ca(key=None):
     return key, cert
 
 
-def _make_leaf(sub_ca_key, sub_ca_cert, ttl_minutes=15, eku_oids=None, not_before=None):
+def _make_leaf(
+    sub_ca_key, sub_ca_cert, ttl_minutes=15, eku_oids=None, not_before=None,
+    ca=False, digital_signature=True, omit_basic_constraints=False,
+    omit_key_usage=False, extra_extensions=(),
+):
+    """Build a labeler leaf. The keyword flags exist so the leaf-extension-policy
+    tests can produce a cert that is valid in every respect *except* the one under
+    test - otherwise an earlier check would reject it and prove nothing."""
     if eku_oids is None:
         eku_oids = [MCP_LABELER_OID]
     key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "mcp-labeler.platform.internal")])
     now = datetime.now(UTC)
     nb = not_before if not_before is not None else now
-    cert = (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(subject).issuer_name(sub_ca_cert.subject)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(nb).not_valid_after(nb + timedelta(minutes=ttl_minutes))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(x509.KeyUsage(
-            digital_signature=True, key_cert_sign=False, crl_sign=False,
+    )
+    if not omit_basic_constraints:
+        builder = builder.add_extension(
+            x509.BasicConstraints(ca=ca, path_length=0 if ca else None), critical=True
+        )
+    if not omit_key_usage:
+        builder = builder.add_extension(x509.KeyUsage(
+            digital_signature=digital_signature, key_cert_sign=ca, crl_sign=False,
             content_commitment=False, key_encipherment=False,
             data_encipherment=False, key_agreement=False,
             encipher_only=False, decipher_only=False,
         ), critical=True)
-        .add_extension(x509.ExtendedKeyUsage(eku_oids), critical=False)
-        .sign(sub_ca_key, hashes.SHA256())
-    )
-    return key, cert
+    builder = builder.add_extension(x509.ExtendedKeyUsage(eku_oids), critical=False)
+    for ext, critical in extra_extensions:
+        builder = builder.add_extension(ext, critical=critical)
+    return key, builder.sign(sub_ca_key, hashes.SHA256())
 
 
-def _build_envelope(leaf_key, leaf_cert, sub_ca_cert, content, trust_tier=0, signed_at=None, tool_name="web_search", server_id="srv-1", result_id="rid-1", sensitivity_label="low"):
-    """Build a valid RFC-0001 §5 envelope."""
+def _build_envelope(leaf_key, leaf_cert, sub_ca_cert, content, trust_tier=0, signed_at=None, tool_name="web_search", server_id="srv-1", result_id="rid-1", sensitivity_label="low", attribution=None):
+    """Build a valid SPEC-0001 §5 envelope.
+
+    `attribution` overrides the labeler self-attribution so a test can sign with one leaf
+    while naming another (see TestAttributionBinding)."""
     from app.services.trust_labeler import _TRUST_TIER_LABELS
     safe_tier = trust_tier if 0 <= trust_tier <= 4 else 0
     label = {
         "source": _TRUST_TIER_LABELS[safe_tier],
         "integrity_rank": safe_tier,
         "sensitivity": sensitivity_label,
-        "attribution": [{"principal": leaf_cert.subject.rfc4514_string(), "cert_fp": "sha256:" + leaf_cert.fingerprint(hashes.SHA256()).hex()}],
+        "attribution": attribution if attribution is not None else [{"principal": leaf_cert.subject.rfc4514_string(), "cert_fp": "sha256:" + leaf_cert.fingerprint(hashes.SHA256()).hex()}],
     }
     canonical_payload = jcs_tool_result(content=content, structured_content=None)
     content_hash = "sha256:" + hashlib.sha256(canonical_payload).hexdigest()
@@ -163,6 +178,72 @@ class TestHappyPath:
         assert v.accepted is True
 
 
+# ── Attribution binding (the label's named labeler MUST be the presenting cert) ──
+
+class TestAttributionBinding:
+    def test_attribution_naming_a_different_leaf_rejected(self, pki, verifier):
+        """A SECOND leaf under the same pinned sub-CA signs, but attributes the assertion
+        to the FIRST leaf. Chain, EKU, freshness, signature and content hash all pass -
+        only the attribution binding catches it.
+
+        This is the realistic shape: a rotated key, a second region, another tenant, or
+        any leaf minted from the same sub-CA. Without this check the envelope proves only
+        'some key under the pinned anchor asserted this', while the label claims a
+        specific named labeler did."""
+        other_key, other_cert = _make_leaf(pki["sub_ca_key"], pki["sub_ca_cert"])
+        content = [{"type": "text", "text": "safe data"}]
+        impersonated = [{
+            "principal": pki["leaf_cert"].subject.rfc4514_string(),
+            "cert_fp": "sha256:" + pki["leaf_cert"].fingerprint(hashes.SHA256()).hex(),
+        }]
+        envelope = _build_envelope(other_key, other_cert, pki["sub_ca_cert"], content,
+                                   attribution=impersonated)
+        v = verifier.verify(_make_tool_result(content, envelope),
+                            tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is False
+        assert v.reason == "attribution_mismatch"
+
+    def test_absent_attribution_rejected(self, pki, verifier):
+        """No attribution at all: nothing to bind, so the 'named labeler' claim cannot be
+        made. Fail closed rather than accept an unattributed assertion."""
+        content = [{"type": "text", "text": "safe data"}]
+        envelope = _build_envelope(pki["leaf_key"], pki["leaf_cert"], pki["sub_ca_cert"],
+                                   content, attribution=[])
+        v = verifier.verify(_make_tool_result(content, envelope),
+                            tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is False
+        assert v.reason == "attribution_missing"
+
+    def test_honest_first_entry_with_forged_second_rejected(self, pki, verifier):
+        """The index-shift version of the same attack: attribution[0] honestly names the
+        signing leaf, so a check that only binds element 0 passes - and a forged element 1
+        names a different labeler from INSIDE the signed label, inheriting the signature's
+        authority for any consumer that reads the field as the list it is declared to be."""
+        content = [{"type": "text", "text": "safe data"}]
+        honest_then_forged = [
+            {
+                "principal": pki["leaf_cert"].subject.rfc4514_string(),
+                "cert_fp": "sha256:" + pki["leaf_cert"].fingerprint(hashes.SHA256()).hex(),
+            },
+            {"principal": "CN=mcp-labeler.platform.internal", "cert_fp": "sha256:deadbeef"},
+        ]
+        envelope = _build_envelope(pki["leaf_key"], pki["leaf_cert"], pki["sub_ca_cert"],
+                                   content, attribution=honest_then_forged)
+        v = verifier.verify(_make_tool_result(content, envelope),
+                            tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is False
+        assert v.reason == "attribution_multi"
+
+    def test_self_attributed_envelope_still_accepted(self, pki, verifier):
+        """Non-vacuity: the normal labeler-signs-and-names-itself path still passes."""
+        content = [{"type": "text", "text": "safe data"}]
+        envelope = _build_envelope(pki["leaf_key"], pki["leaf_cert"], pki["sub_ca_cert"],
+                                   content, trust_tier=2)
+        v = verifier.verify(_make_tool_result(content, envelope),
+                            tool_name="web_search", server_id="srv-1", result_id="rid-1")
+        assert v.accepted is True and v.integrity_rank == 2
+
+
 # ── D4: body-swap (content hash mismatch) ─────────────────────────────────
 
 class TestD4BodySwap:
@@ -176,6 +257,65 @@ class TestD4BodySwap:
         v = verifier.verify(result, tool_name="web_search", server_id="srv-1", result_id="rid-1")
         assert v.accepted is False
         assert v.integrity_rank == 0
+
+
+# ── Leaf extension policy (RFC 5280 6.1.4/6.1.5 hygiene) ─────────────────
+
+class TestLeafExtensionPolicy:
+    """Each leaf here is issued by the pinned sub-CA, in-window, with the labeler EKU
+    and a signature that verifies - so the only thing that can reject it is the
+    extension under test. Without that, a pass would be indistinguishable from the
+    chain check firing first."""
+
+    def _verdict(self, pki, **leaf_kwargs):
+        leaf_key, leaf_cert = _make_leaf(pki["sub_ca_key"], pki["sub_ca_cert"], **leaf_kwargs)
+        content = [{"type": "text", "text": "hello"}]
+        envelope = _build_envelope(leaf_key, leaf_cert, pki["sub_ca_cert"], content)
+        verifier = TrustVerifier(sub_ca_cert=pki["sub_ca_cert"])
+        return verifier.verify(
+            _make_tool_result(content, envelope),
+            tool_name="web_search", server_id="srv-1", result_id="rid-1",
+        )
+
+    def test_baseline_leaf_accepted(self, pki):
+        """Control: the same builder with no flags set is accepted - so a rejection
+        below is attributable to the flag, not to the helper."""
+        assert self._verdict(pki).accepted is True
+
+    def test_leaf_asserting_ca_true_rejected(self, pki):
+        v = self._verdict(pki, ca=True)
+        assert v.accepted is False and v.integrity_rank == 0
+        assert v.reason == "leaf_is_ca"
+
+    def test_leaf_without_basic_constraints_rejected(self, pki):
+        v = self._verdict(pki, omit_basic_constraints=True)
+        assert v.accepted is False
+        assert v.reason == "missing_basic_constraints"
+
+    def test_leaf_without_key_usage_rejected(self, pki):
+        v = self._verdict(pki, omit_key_usage=True)
+        assert v.accepted is False
+        assert v.reason == "missing_key_usage"
+
+    def test_leaf_without_digital_signature_rejected(self, pki):
+        v = self._verdict(pki, digital_signature=False)
+        assert v.accepted is False
+        assert v.reason == "key_usage_not_digital_signature"
+
+    def test_unknown_critical_extension_rejected(self, pki):
+        v = self._verdict(pki, extra_extensions=[
+            (x509.SubjectAlternativeName([x509.DNSName("labeler.platform.internal")]), True),
+        ])
+        assert v.accepted is False
+        assert v.reason.startswith("unknown_critical_extension:")
+
+    def test_same_extension_non_critical_accepted(self, pki):
+        """Non-critical is the whole distinction - RFC 5280 says an unprocessed
+        extension is only fatal when the issuer marked it critical."""
+        v = self._verdict(pki, extra_extensions=[
+            (x509.SubjectAlternativeName([x509.DNSName("labeler.platform.internal")]), False),
+        ])
+        assert v.accepted is True
 
 
 # ── D5: forged label (attacker signs with own cert) ───────────────────────

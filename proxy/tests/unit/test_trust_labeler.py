@@ -1,4 +1,4 @@
-"""Unit tests for TrustLabeler (PRD-0001 M3 / RFC-0001 §5)."""
+"""Unit tests for TrustLabeler (PRD-0001 M3 / SPEC-0001 §5)."""
 from __future__ import annotations
 
 import base64

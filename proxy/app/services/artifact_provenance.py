@@ -1,4 +1,4 @@
-"""RFC-0002 §7 — Artifact Provenance Envelope (APE).
+"""SPEC-0002 §7 — Artifact Provenance Envelope (APE).
 
 sign_artifact() produces a signed APE for any AI-generated artifact
 (llm-response, agent-document, ai-generated code, pipeline-report).

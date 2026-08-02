@@ -1,10 +1,10 @@
-"""B-coarse taint-floor decision core (PRD-0001 M2 / RFC-0001 §8.1).
+"""B-coarse taint-floor decision core (PRD-0001 M2 / SPEC-0001 §8.1).
 
 Pure, deterministic, services-free security logic. The Redis taint store
 (`taint_store.py`) and the `invocation.py` gate wire these together; keeping the
 decisions here makes them unit-testable without Postgres/Redis/OPA.
 
-Binary integrity model (RFC-0001 §4.1):
+Binary integrity model (SPEC-0001 §4.1):
     SEP-1913 trust_tier rank  -> binary integrity
         untrustedPublic = 0   -> 0 (untrusted)
         trustedPublic   = 1   -> 0 (untrusted)
@@ -81,3 +81,27 @@ def taint_floor_decision(*, tainted: bool, required_integrity: int) -> str:
     if tainted and required_integrity >= 1:
         return "deny"
     return "allow"
+
+
+# The two Phase-0 taint-floor actions (PRD-0010). "block" hard-denies (raises
+# TaintFloorDenyError); "notify" allows-with-disclaimer. Kept as a pair so the
+# invocation gate and its tests share one source of truth.
+TAINT_ACTION_BLOCK = "block"
+TAINT_ACTION_NOTIFY = "notify"
+
+
+def resolve_taint_action(decision: str, mode: str) -> str:
+    """Map a taint_floor_decision + configured mode to the effective action.
+
+    decision "allow"  -> "" (no action; the call proceeds normally, no notice).
+    decision "deny" + mode "enforce" -> "block" (raise TaintFloorDenyError, fail-closed).
+    decision "deny" + mode "notify"  -> "notify" (allow-with-disclaimer, Phase-0 default).
+
+    Only "enforce" enforces; ANY other mode string (incl. garbage) degrades to notify.
+    That is deliberate: this control is dark-launched, so an operator typo must not
+    silently start denying production traffic. The SECURITY fail-closed lives in the
+    decision (deny-on-unknown-taint); the MODE only chooses block-vs-notify once denied.
+    """
+    if decision != "deny":
+        return ""
+    return TAINT_ACTION_BLOCK if mode == "enforce" else TAINT_ACTION_NOTIFY

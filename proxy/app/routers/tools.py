@@ -17,22 +17,20 @@ Endpoints:
 """
 from __future__ import annotations
 
-import logging
 import uuid
-from datetime import UTC
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.services.auditor import LLMAuditRequiredError, run_audit
+from app.services.auditor import run_audit, LLMAuditRequiredError
+from app.services.ssrf import validate_server_url, SSRFError
+from app.services.server_onboarding import revalidate_upstream_ip_at_invoke, UpstreamRevalidationError
 from app.services.pinned_transport import PinnedIPTransport
-from app.services.server_onboarding import (
-    UpstreamRevalidationError,
-    revalidate_upstream_ip_at_invoke,
-)
-from app.services.ssrf import SSRFError, validate_server_url
+
+import logging
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +62,13 @@ async def register_tool(
     """
     import json
     import logging
-    from datetime import datetime
+    from datetime import datetime, timezone
     from uuid import uuid4
 
     from sqlalchemy import text
 
     from app.models.tool import ToolCreate
-    from app.services.auditor import LLMAuditRequiredError
-    from app.services.auditor import run_audit as _run_audit
+    from app.services.auditor import run_audit as _run_audit, LLMAuditRequiredError
     from app.services.sbom import generate_cyclonedx_sbom, publish_to_artifactory
 
     logger = logging.getLogger(__name__)
@@ -192,7 +189,7 @@ async def register_tool(
 
     sbom_id = str(uuid4())
     bom_serial = str(uuid4())
-    registered_at = datetime.now(UTC)
+    registered_at = datetime.now(timezone.utc)
 
     try:
         # Persist tool_registry
@@ -353,9 +350,9 @@ async def register_tool(
 @router.get("/")
 async def list_tools(
     request: Request,
-    status: str | None = Query(None, pattern="^(active|quarantined|deprecated|disabled)$"),
-    risk_level: str | None = Query(None, pattern="^(low|medium|high|critical)$"),
-    tag: list[str] | None = Query(None),
+    status: Optional[str] = Query(None, pattern="^(active|quarantined|deprecated|disabled)$"),
+    risk_level: Optional[str] = Query(None, pattern="^(low|medium|high|critical)$"),
+    tag: Optional[list[str]] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -364,8 +361,8 @@ async def list_tools(
     List registered tools. Response fields filtered by caller role.
     Required role: admin, auditor, readonly (readonly gets name/version only).
     """
+    import json
     import logging
-
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -454,8 +451,8 @@ async def get_tool(
     Per RBAC.md: readonly omits schema, upstream_url, source_commit, risk_reasons.
     Required role: admin, auditor, readonly, agent.
     """
+    import json
     import logging
-
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -550,7 +547,6 @@ async def update_tool(
     import json
     import logging
     from uuid import uuid4
-
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1012,7 +1008,6 @@ async def delete_tool(
     Historical audit references remain valid.
     """
     import logging
-
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1045,7 +1040,7 @@ async def delete_tool(
             {"id": str(tool_id)},
         )
         await db.commit()
-    except Exception:
+    except Exception as exc:
         raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Delete failed."})
 
     try:
@@ -1078,7 +1073,6 @@ async def get_tool_audit(
     Required role: admin, auditor.
     """
     import logging
-
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1138,7 +1132,6 @@ async def rerun_audit(
     """
     import logging
     from uuid import uuid4
-
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1176,7 +1169,7 @@ async def rerun_audit(
             {"job_id": job_id, "reference_id": str(tool_id), "created_by": client_id},
         )
         await db.commit()
-    except Exception:
+    except Exception as exc:
         raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Failed to queue job."})
 
     try:
@@ -1208,7 +1201,7 @@ async def rerun_audit(
 async def get_tool_sbom(
     tool_id: uuid.UUID,
     request: Request,
-    format: str | None = Query("cyclonedx", pattern="^(cyclonedx|spdx)$"),
+    format: Optional[str] = Query("cyclonedx", pattern="^(cyclonedx|spdx)$"),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """
@@ -1218,7 +1211,6 @@ async def get_tool_sbom(
     """
     import json
     import logging
-
     from sqlalchemy import text
 
     logger = logging.getLogger(__name__)
@@ -1291,9 +1283,7 @@ async def _generate_and_store_sbom(db: AsyncSession, tool_row) -> None:
     """
     import json
     from uuid import uuid4
-
     from sqlalchemy import text
-
     from app.services.sbom import generate_cyclonedx_sbom
 
     schema = tool_row.schema if isinstance(tool_row.schema, dict) else json.loads(tool_row.schema or "{}")
@@ -1454,17 +1444,15 @@ async def invoke_tool(
     INV-004: Returns 503 if OPA is unreachable (fail-closed).
     INV-005: Quarantined tools blocked before OPA evaluation.
     """
-    from app.services.entitlement import NotEntitledError
     from app.services.invocation import (
         ServerInMaintenanceError,
         TaintFloorDenyError,
         ToolDeprecatedError,
         ToolDisabledError,
         ToolQuarantinedError,
-    )
-    from app.services.invocation import (
         invoke_tool as _invoke,
     )
+    from app.services.entitlement import NotEntitledError
     from app.services.policy import OPADenyError, OPAUnavailableError
 
     client_roles: list[str] = getattr(request.state, "client_roles", [])
@@ -1621,8 +1609,16 @@ async def invoke_tool(
             # Task 4.3: named profile UUID — profile_uuid-scoped mcp_profiles lookup.
             profile_uuid=getattr(request.state, "profile_uuid", None),
         )
-        from app.services.trust_labeler import TRUST_ENVELOPE_KEY as _TEK
-        from app.services.trust_labeler import get_labeler as _get_labeler
+        # SCOPE (WI-3/WI-4): this REST invoke path is a SIGNER only — it labels the
+        # result with a fresh trust envelope and returns it. It intentionally does NOT
+        # run the observer/TRUST_ENVELOPE_ENFORCE verify step (that lives on the direct
+        # tools/call dispatch path in mcp_server.py). Verifying here would only re-check
+        # the gateway's OWN just-minted signature, which by construction always passes and
+        # catches nothing (a downstream MITM tampers AFTER this point). Content integrity
+        # for a result served over this path is the INDEPENDENT CONSUMER's job (the
+        # mcp-envelope-harness TrustGate), not the signer's. So "full reason coverage"
+        # (WI-3) is a property of the ENFORCE verify seam only; this path is out of its scope.
+        from app.services.trust_labeler import get_labeler as _get_labeler, TRUST_ENVELOPE_KEY as _TEK
         _tl = _get_labeler()
         if _tl is not None and isinstance(response.get("result"), dict):
             _resp_meta = response.get("meta", {})
@@ -1793,6 +1789,9 @@ async def invoke_tool(
             },
         )
     except OPADenyError as exc:
+        from app.services.policy import deny_remediation as _deny_remediation
+        _deny_reasons = exc.reasons if hasattr(exc, "reasons") else [str(exc)]
+        _deny_help = _deny_remediation(_deny_reasons)
         return JSONResponse(
             status_code=403,
             content={
@@ -1800,10 +1799,15 @@ async def invoke_tool(
                 "id": body.get("id"),
                 "error": {
                     "code": -32603,
-                    "message": "Tool invocation denied by policy.",
+                    "message": "Tool invocation denied by policy." + (
+                        f" {_deny_help}" if _deny_help else ""
+                    ),
                     "data": {
-                        "opa_reasons": exc.reasons if hasattr(exc, "reasons") else [str(exc)],
-                        "audit_id": "see X-Request-ID",
+                        "opa_reasons": _deny_reasons,
+                        # Was the literal string "see X-Request-ID", which is not an id
+                        # and cannot be pasted into a support ticket or grepped in Loki.
+                        "request_id": request_id,
+                        **({"remediation": _deny_help} if _deny_help else {}),
                     },
                 },
             },
@@ -1946,12 +1950,10 @@ async def _run_tool_discovery(
     """
     import json
     import logging
-
-    import httpx
     from sqlalchemy import text
+    import httpx
 
-    from app.services.auditor import LLMAuditRequiredError
-    from app.services.auditor import run_audit as _run_audit
+    from app.services.auditor import run_audit as _run_audit, LLMAuditRequiredError
     from app.services.sbom import generate_cyclonedx_sbom
 
     logger = logging.getLogger(__name__)

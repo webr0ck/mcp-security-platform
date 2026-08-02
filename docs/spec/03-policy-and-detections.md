@@ -212,7 +212,7 @@ The canonical list (currently 28 phrases, lowercase substring match) groups into
 
 ---
 
-## 4. Trust envelopes (RFC-0001)
+## 4. Trust envelopes (SPEC-0001)
 
 > **Status: passive today.** The labeler signs every result, but the
 > verifier/observer **only log** a verdict — they **never block**. Do not treat
@@ -467,10 +467,10 @@ Recorded per the engineering standard (a claim without backing code is a bug):
    applied to the **audit/log stream** (INV-002), **not** to tool response
    bodies. `response_filter.py` screens responses for **injection only**. The two
    are separate controls; this spec documents them separately (§6, SPEC-04).
-2. **RFC-0001 / PRD-0001 documents are not in the repo.** Trust-envelope and
-   taint-floor code cites `RFC-0001 §N` / `PRD-0001 MN` throughout, but no
-   `docs/rfc/RFC-0001*` file exists at HEAD; the citations are code-comment
-   anchors only. `transparency_log.py` cites **RFC-0002 §5.4** and is an explicit
+2. **SPEC-0001 / SPEC-0002 live in a separate repository.** Trust-envelope and
+   taint-floor code cites `SPEC-0001 §N` throughout; both specifications are
+   published at <https://github.com/webr0ck/security-specs> and the section numbers resolve there. `PRD-0001 MN`
+   citations remain code-comment anchors only — the PRDs are not published. `transparency_log.py` cites **SPEC-0002 §6.4** and is an explicit
    stub (see SPEC-04).
 
 ## 12. Configuration & operations (PRD-0006 R-3)

@@ -277,60 +277,15 @@ class TestAuthMiddlewareProfileUuid:
 
 # ---------------------------------------------------------------------------
 # _lookup_profile_with_cache — profile_uuid-scoped lookup
+#
+# Moved to tests/unit/services/test_profile_deny_dominant.py (2026-07-25).
+# The tests that lived here asserted f-string cache keys they built themselves
+# ("mcp_profile:uuid:abc-123:my-tool" == "mcp_profile:uuid:abc-123:my-tool"),
+# so they exercised no product code and could not fail. The replacements are
+# behavioural and must bypass the autouse _lookup_profile_with_cache stub in
+# tests/unit/conftest.py — which is why they live in a file that captures the
+# real function at import time.
 # ---------------------------------------------------------------------------
-
-class TestLookupProfileWithCacheProfileUuid:
-    """profile_uuid path uses uuid-scoped cache key and profile_uuid DB query."""
-
-    def test_uuid_cache_key_format(self) -> None:
-        """Verify the cache key format string for profile_uuid path."""
-        p_uuid = "abc-123"
-        tool_name = "my-tool"
-        # This mirrors the exact logic in _lookup_profile_with_cache
-        cache_key = f"mcp_profile:uuid:{p_uuid}:{tool_name}"
-        assert cache_key == "mcp_profile:uuid:abc-123:my-tool"
-
-    def test_legacy_cache_key_format(self) -> None:
-        """Verify the cache key format for the legacy (no profile_uuid) path."""
-        client_id = "user@corp"
-        tool_name = "my-tool"
-        cache_key = f"mcp_profile:{client_id}:{tool_name}"
-        assert cache_key == "mcp_profile:user@corp:my-tool"
-
-    def test_cache_key_uses_uuid_not_client_id_when_profile_uuid_set(self) -> None:
-        """Confirm that profile_uuid path key differs from legacy key."""
-        p_uuid = str(uuid.uuid4())
-        client_id = "user@corp"
-        tool_name = "tool-x"
-        uuid_key = f"mcp_profile:uuid:{p_uuid}:{tool_name}"
-        legacy_key = f"mcp_profile:{client_id}:{tool_name}"
-        assert uuid_key != legacy_key
-        assert "uuid" in uuid_key
-        assert "uuid" not in legacy_key
-
-    def test_profile_uuid_db_query_targets_different_column(self) -> None:
-        """The profile_uuid DB path queries profile_uuid column, not profile_id.
-
-        This test validates the SQL string embedded in invocation.py contains
-        the correct column name for the named-profile path by reading the source
-        file directly (avoids inspect issues when function is mocked by autouse).
-        """
-        import os
-        invocation_path = os.path.join(
-            os.path.dirname(__file__),
-            "..", "..", "app", "services", "invocation.py",
-        )
-        with open(invocation_path) as f:
-            source = f.read()
-        # The named-profile path must use profile_uuid= (not profile_id=) in its SQL
-        assert "profile_uuid=:uuid" in source, (
-            "Named-profile DB query must filter by profile_uuid column"
-        )
-        # The legacy path must still use profile_id=:pid
-        assert "profile_id=:pid" in source, (
-            "Legacy DB query must still use profile_id column"
-        )
-
 
 # ---------------------------------------------------------------------------
 # _registered_tools_for_client — profile_mcp_bindings filter
@@ -365,7 +320,7 @@ class TestRegisteredToolsProfileMcpBindings:
         mock_db.__aexit__ = AsyncMock(return_value=None)
 
         # Binding: tool-b is disabled for this profile; tool-a has no binding (default allow)
-        async def mock_lookup_binding(profile_uuid_arg: str, mcp_name: str):
+        async def mock_lookup_binding(client_id_arg: str, mcp_name: str, *, profile_uuid=None):
             if mcp_name == "tool-b":
                 return {"enabled": False, "allowed_functions": None}
             return None  # no binding = default allow
@@ -373,7 +328,7 @@ class TestRegisteredToolsProfileMcpBindings:
         with (
             patch("app.core.database.AsyncSessionLocal", MagicMock(return_value=mock_db)),
             patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=(grants_data, {}))),
-            patch("app.routers.mcp_server._lookup_profile_mcp_binding", side_effect=mock_lookup_binding),
+            patch("app.routers.mcp_server._resolve_profile", side_effect=mock_lookup_binding),
             patch("app.routers.mcp_server._TOOLS", []),
         ):
             from app.routers.mcp_server import _registered_tools_for_client
@@ -411,15 +366,14 @@ class TestRegisteredToolsProfileMcpBindings:
 
         binding_calls: list[str] = []
 
-        async def mock_lookup_binding(profile_uuid_arg: str, mcp_name: str):
-            binding_calls.append(mcp_name)
+        async def mock_lookup_binding(client_id_arg: str, mcp_name: str, *, profile_uuid=None):
+            binding_calls.append((mcp_name, profile_uuid))
             return None
 
         with (
             patch("app.core.database.AsyncSessionLocal", MagicMock(return_value=mock_db)),
             patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=(grants_data, {}))),
-            patch("app.routers.mcp_server._lookup_profile_mcp_binding", side_effect=mock_lookup_binding),
-            patch("app.routers.mcp_server._lookup_profile_row", new_callable=AsyncMock, return_value=None),
+            patch("app.routers.mcp_server._resolve_profile", side_effect=mock_lookup_binding),
             patch("app.routers.mcp_server._TOOLS", []),
         ):
             from app.routers.mcp_server import _registered_tools_for_client
@@ -431,9 +385,11 @@ class TestRegisteredToolsProfileMcpBindings:
                 profile_uuid=None,  # no named profile
             )
 
-        # profile_mcp_bindings lookup must NOT be called when profile_uuid is None
-        assert binding_calls == [], (
-            "_lookup_profile_mcp_binding should not be called when profile_uuid is None"
+        # The resolver is still called (it owns BOTH sources now), but it must be
+        # told there is no named profile so only the legacy source applies.
+        assert binding_calls, "profile resolver was never called — filter not wired"
+        assert all(pu is None for _, pu in binding_calls), (
+            f"resolver must receive profile_uuid=None when no profile is bound, got {binding_calls}"
         )
 
 
@@ -480,13 +436,63 @@ class TestNamedProfileCrud:
         assert data["profiles"][0]["name"] == "analyst"
 
     @pytest.mark.asyncio
-    async def test_list_profiles_forbidden_for_non_admin(self) -> None:
+    async def test_list_profiles_allowed_for_any_authenticated_caller(self) -> None:
+        """READING the catalog is deliberately open to any authenticated caller.
+
+        This asserted 403 for a non-admin, which the product no longer does — and the
+        test did not actually verify authorization at all: with the read allowed, it
+        fell through to a REAL database connection and failed on a connection error,
+        not on a missing 403. It has been failing on clean HEAD for that reason.
+
+        The open read is intentional (see list_named_profiles' docstring): a user needs
+        the catalog to pick a profile for their MCP client via ?profile=<name> at login.
+        What makes that safe is that every WRITE stays admin-only — pinned below.
+        """
+        from app.routers.profiles import list_named_profiles
+        with patch("app.routers.profiles._list_named_profiles",
+                   new_callable=AsyncMock, return_value=[]):
+            resp = await list_named_profiles(self._make_nonadmin_request())
+        assert resp.status_code == 200
+        assert json.loads(resp.body)["profiles"] == []
+
+    @pytest.mark.asyncio
+    async def test_list_profiles_requires_authentication(self) -> None:
         from fastapi import HTTPException
         from app.routers.profiles import list_named_profiles
         req = self._make_nonadmin_request()
-        with pytest.raises(HTTPException) as exc_info:
+        req.state.client_id = ""          # unauthenticated
+        with pytest.raises(HTTPException) as exc:
             await list_named_profiles(req)
-        assert exc_info.value.status_code == 403
+        assert exc.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_profile_WRITES_remain_admin_only(self) -> None:
+        """The guard that makes the open read above safe.
+
+        A non-admin who could create a profile, or rebind an existing one, could hand
+        themselves a profile that widens access. Reading the catalogue is harmless;
+        writing to it is not.
+        """
+        from fastapi import HTTPException
+        from app.routers.profiles import (
+            NamedProfileCreateBody,
+            NamedProfileMCPBindingBody,
+            create_named_profile,
+            upsert_named_profile_mcp,
+        )
+
+        req = self._make_nonadmin_request()
+
+        with pytest.raises(HTTPException) as exc:
+            await create_named_profile(
+                NamedProfileCreateBody(name="attacker-profile"), req)
+        assert exc.value.status_code == 403
+
+        with pytest.raises(HTTPException) as exc:
+            await upsert_named_profile_mcp(
+                "analyst", "echo-basic",
+                NamedProfileMCPBindingBody(enabled=True), req)
+        assert exc.value.status_code == 403
 
     @pytest.mark.asyncio
     async def test_create_profile_returns_201(self) -> None:

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-trust-verifier"
+version = "0.2.0"
+description = "Independent verifier for MCP signed trust envelopes (SPEC-0001 §6.3) - for out-of-tree consumers"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "cryptography>=44.0.0",
+    # Floors, not pins. Signer and verifier MUST canonicalize identically, so a jcs
+    # version skew between the two sides is an authenticity failure that surfaces as
+    # content_hash_mismatch - i.e. it looks exactly like an attack. Pin both sides
+    # together in any deployment that matters; a library cannot do it for you.
+    "jcs>=0.2.1",  # RFC 8785 canonicalization
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_trust_verifier"]

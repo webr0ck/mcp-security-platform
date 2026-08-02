@@ -1,6 +1,6 @@
 """GAP-1 regression: the audit event can carry session taint state.
 
-RFC-0001 §8.1 / PRD-0001 W2.4 require that a tainted-session ALLOW of a low-floor
+SPEC-0001 §8.1 / PRD-0001 W2.4 require that a tainted-session ALLOW of a low-floor
 sink is never silently unrecorded — so the audit record carries `tainted` on the
 ALLOW path, not only on the taint-floor DENY. This pins the schema contract:
 `tainted` round-trips through to_dict() and does NOT change the integrity hash

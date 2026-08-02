@@ -23,7 +23,14 @@ lab-setup-reset:
 
 ## lab-up          Bring up the full lab stack (build + seed)
 lab-up:
-	$(LAB_COMPOSE) up -d --build
+	# --profile trust-envelope: labeler-renewal inherits `profiles: [trust-envelope]`
+	# from docker-compose.yml, so a plain `up` NEVER starts it. Without it the
+	# trust-envelope leaf cert (LABELER_LEAF_TTL_MINUTES=15) is minted once at PKI
+	# init and never rotated — every chain validation fails ~15 min after boot, which
+	# is why AT2 was red. A fresh boot alone does not fix this; it just buys another
+	# 15-minute window that expires partway through the same acceptance run.
+	bash lab/scripts/render_dex_config.sh
+	$(LAB_COMPOSE) --profile trust-envelope up -d --build
 	sleep 10
 	$(MAKE) -f Makefile.lab lab-init
 

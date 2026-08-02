@@ -1,4 +1,4 @@
-"""RFC-0002 §7.4 — C2PA interoperability.
+"""SPEC-0002 §7.4 — C2PA interoperability.
 
 Builds C2PA assertion objects embedding APE provenance so that downstream
 content authenticity systems (C2PA validators) can verify AI provenance

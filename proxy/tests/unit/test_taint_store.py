@@ -1,4 +1,4 @@
-"""Unit tests for the fail-closed taint store (PRD-0001 M2 / RFC-0001 §8.1, INV-015).
+"""Unit tests for the fail-closed taint store (PRD-0001 M2 / SPEC-0001 §8.1, INV-015).
 
 The taint store is the OPPOSITE of the mcp_session cache: it fails CLOSED. A read
 error or an unavailable store means "treat the session as tainted" (deny high sinks),

@@ -33,6 +33,55 @@ class OPADenyError(Exception):
         super().__init__(f"OPA denied: {reasons}")
 
 
+# Remediation text per OPA deny reason.
+#
+# A deny that only names its rule ("mcp_disabled_for_profile") is a dead end: the caller
+# — very often an LLM agent — learns nothing about what to do next, so it retries the
+# same call or wanders to a neighbouring tool. The credential-enrollment deny path in
+# mcp_server.py already does this properly (it puts an actionable URL in the message
+# body because MCP clients render `message` but frequently ignore `data`); every other
+# deny reason was left as a bare rule name. This is that treatment, once, for all of
+# them — the three deny-mapping sites share it instead of each inventing wording.
+#
+# Keep entries actionable and specific: say who can fix it and how. An entry that just
+# restates the rule name in prose is worse than none.
+_DENY_REMEDIATION: dict[str, str] = {
+    "mcp_disabled_for_profile": (
+        "This tool is disabled in your profile. Call get_my_profile to see what is "
+        "disabled, then enable_mcp_server to re-enable it. If you are using a named "
+        "profile (X-MCP-Profile / ?profile=), that profile also restricts you and only "
+        "an administrator can change it."
+    ),
+    "function_not_allowed_for_profile": (
+        "This specific function is not in your profile's allowed-function list for this "
+        "tool. Call get_my_profile to see the allowed functions, then enable_function to "
+        "add one back."
+    ),
+    "anomaly_threshold_exceeded": (
+        "Your recent call pattern crossed the anomaly cutoff for this client. Wait for "
+        "the window to roll off, or ask an administrator to review the threshold."
+    ),
+    "not_entitled_to_server": (
+        "You are not entitled to the MCP server backing this tool. Request access from "
+        "the server's owner; being able to see a tool never implies permission to call it."
+    ),
+}
+
+
+def deny_remediation(reasons: list[str]) -> str | None:
+    """Return actionable next-step text for the first deny reason we recognise.
+
+    None when nothing is known — callers must not invent generic filler, which trains
+    agents to ignore the field.
+    """
+    for reason in reasons or []:
+        # Reasons may arrive decorated (e.g. "taint_floor:required_integrity=3").
+        hit = _DENY_REMEDIATION.get(reason) or _DENY_REMEDIATION.get(reason.split(":", 1)[0])
+        if hit:
+            return hit
+    return None
+
+
 class OPAUnavailableError(Exception):
     """OPA sidecar is unreachable. Per INV-004, deny all."""
 

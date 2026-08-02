@@ -28,6 +28,13 @@ def _make_request(client_id: str = "test-client", roles: list | None = None) -> 
     req = MagicMock()
     req.state.client_id = client_id
     req.state.client_roles = roles or ["editor"]
+    # MUST be set explicitly. On a bare MagicMock, `req.state.is_service_account`
+    # auto-creates a child Mock, which is TRUTHY — so the P1-2 guard in
+    # _handle_enable_mcp_server / _handle_disable_mcp_server correctly treats the
+    # caller as a service account and refuses to mutate the profile. That is the
+    # guard being properly fail-closed; these fixtures represent a HUMAN caller, so
+    # they have to say so.
+    req.state.is_service_account = False
     return req
 
 

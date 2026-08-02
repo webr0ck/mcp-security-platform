@@ -223,7 +223,7 @@ didn't follow the client.
 methods **MUST NOT** reset the taint floor. Reference: `services/invocation.py` ~L428
 (`is_tainted_for_principal(client_id)` with the inline note "keyed on logical identity, not
 auth-method (LOGIC-005)"), taint write at ~L1033–L1042, `services/taint_store.py`. The taint floor
-itself is the RFC-0001 §8.1 trust-tier mechanism; keying is the security-critical detail.
+itself is the SPEC-0001 §8.1 trust-tier mechanism; keying is the security-critical detail.
 
 ---
 

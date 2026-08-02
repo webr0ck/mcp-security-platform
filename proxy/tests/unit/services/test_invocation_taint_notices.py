@@ -361,6 +361,10 @@ async def test_taint_notify_only_call_site_emits_empty_deny_reasons_and_notice()
     mock_taint_floor.effective_injection_mode = MagicMock(return_value="none")  # type: ignore[attr-defined]
     mock_taint_floor.effective_required_integrity = MagicMock(return_value=1)  # type: ignore[attr-defined]
     mock_taint_floor.taint_floor_decision = MagicMock(return_value="deny")  # type: ignore[attr-defined]
+    # PRD-0010: invocation.py resolves the action via resolve_taint_action(decision, mode).
+    # Notify mode → "notify". TAINT_ACTION_BLOCK is imported alongside for the enforce branch.
+    mock_taint_floor.resolve_taint_action = MagicMock(return_value="notify")  # type: ignore[attr-defined]
+    mock_taint_floor.TAINT_ACTION_BLOCK = "block"  # type: ignore[attr-defined]
     # Downstream write-before-forward step (unrelated to Fix 7) also imports
     # this from the same module — stub it so the call doesn't ImportError.
     mock_taint_floor.result_taints_session = MagicMock(return_value=False)  # type: ignore[attr-defined]
@@ -492,3 +496,83 @@ def test_no_other_allow_outcome_call_site_uses_nonempty_deny_reasons():
                 f"non-empty literal deny_reasons={literal} — advisory text belongs "
                 f"in `notices`, not `deny_reasons` (Fix 7)."
             )
+
+
+# ===========================================================================
+# WI-1: ENFORCE mode — the taint floor HARD-DENIES (comparable to notify above)
+# ===========================================================================
+
+@pytest.mark.unit
+async def test_taint_enforce_mode_denies_and_audits_deny():
+    """
+    PRD-0010 ENFORCE: with TAINT_FLOOR_MODE=enforce, the SAME tainted high sink that
+    notify-mode allows-with-disclaimer is instead HARD-DENIED — invoke_tool raises
+    TaintFloorDenyError (routers map to 403 / JSON-RPC error) AND emits an outcome="deny"
+    audit with a taint_floor deny_reason. This is the enforce half of the notify/enforce
+    comparison the article cites.
+    """
+    mock_taint_floor = ModuleType("app.services.taint_floor")
+    mock_taint_floor.effective_injection_mode = MagicMock(return_value="none")  # type: ignore[attr-defined]
+    mock_taint_floor.effective_required_integrity = MagicMock(return_value=1)  # type: ignore[attr-defined]
+    mock_taint_floor.taint_floor_decision = MagicMock(return_value="deny")  # type: ignore[attr-defined]
+    # ENFORCE: resolve_taint_action returns the block sentinel.
+    mock_taint_floor.resolve_taint_action = MagicMock(return_value="block")  # type: ignore[attr-defined]
+    mock_taint_floor.TAINT_ACTION_BLOCK = "block"  # type: ignore[attr-defined]
+    mock_taint_floor.result_taints_session = MagicMock(return_value=False)  # type: ignore[attr-defined]
+
+    mock_taint_store = ModuleType("app.services.taint_store")
+    mock_taint_store.is_tainted_for_principal = AsyncMock(return_value=True)  # type: ignore[attr-defined]
+    mock_taint_store.mark_tainted_for_principal = AsyncMock(return_value=None)  # type: ignore[attr-defined]
+
+    extra_stubs = {
+        "app.services.taint_floor": mock_taint_floor,
+        "app.services.taint_store": mock_taint_store,
+    }
+    stubs = _make_stubs()
+    stubs.update(extra_stubs)
+    inv_mod = _fresh_invocation_module(extra_stubs)
+    inv_mod._SKIP_AUDIT_DB_WRITE = True
+
+    captured_emit_calls: list[dict] = []
+
+    async def _fake_emit(*args, **kwargs) -> str:
+        captured_emit_calls.append(kwargs)
+        return "fake-audit-id"
+
+    from app.core.config import settings as _real_settings
+
+    tool_record = {
+        "tool_id": "tool-taint-1", "name": "risky-tool", "status": "active",
+        "upstream_url": "http://mcp-server:8080/mcp", "service_name": None,
+        "injection_mode": "none", "inject_header": None, "inject_prefix": None,
+        "version": "1.0", "server_id": None, "risk_level": "high", "required_integrity": 1,
+    }
+    json_rpc_request = {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "do_thing", "arguments": {}},
+    }
+
+    with patch.dict(sys.modules, stubs), \
+         patch.object(_real_settings, "TAINT_FLOOR_ENABLED", True), \
+         patch.object(_real_settings, "TAINT_FLOOR_MODE", "enforce"), \
+         patch.object(inv_mod, "_emit_audit_event", side_effect=_fake_emit), \
+         patch.object(inv_mod, "_get_or_create_session", AsyncMock(return_value=None)), \
+         patch.object(inv_mod, "_mcp_initialize", AsyncMock(return_value=None)), \
+         patch.object(inv_mod, "_lookup_server_trust", AsyncMock(return_value=(1, "none"))), \
+         patch.object(inv_mod, "_lookup_profile_with_cache", AsyncMock(return_value=None)), \
+         patch("app.services.ssrf.validate_server_url", MagicMock(return_value=None)):
+        with pytest.raises(inv_mod.TaintFloorDenyError) as excinfo:
+            await inv_mod.invoke_tool(
+                tool_record=tool_record,
+                json_rpc_request=json_rpc_request,
+                client_id="tainted-client",
+                client_roles=["agent"],
+                is_testing=False,
+                request_id="req-taint-enforce-001",
+            )
+
+    assert excinfo.value.required_integrity == 1
+    deny_calls = [c for c in captured_emit_calls if c.get("outcome") == "deny"]
+    assert len(deny_calls) == 1, f"expected one deny audit, got: {captured_emit_calls}"
+    assert any("taint_floor" in r for r in deny_calls[0]["deny_reasons"])
+    assert deny_calls[0]["notices"] == []

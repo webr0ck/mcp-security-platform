@@ -129,13 +129,22 @@ class Settings(BaseSettings):
     # registration blocks.  See docs/ARCHITECTURE.md §5.4.
     REQUIRE_LLM_AUDIT: bool = False
 
-    # PRD-0001 M2 — B-coarse taint floor (RFC-0001 §8.1). When True, a session
+    # PRD-0001 M2 — B-coarse taint floor (SPEC-0001 §8.1). When True, a session
     # tainted by an untrusted (server trust_tier-derived) result is denied any
     # high-sensitivity / credential-injecting sink, enforced in invocation.py and
     # audited (INV-001). Default False so the control is dark until the V038
     # migration + server_registry.trust_tier JOIN on the tool-fetch query are in
     # place and the D1/D2 integration tests pass. Fail-closed when enabled.
     TAINT_FLOOR_ENABLED: bool = False
+
+    # PRD-0010 Phase 0: taint-floor action when TAINT_FLOOR_ENABLED and a tainted
+    # session hits a high-integrity sink.
+    #   "notify"  — allow the call, attach a disclaimer notice (Phase-0 default, never blocks)
+    #   "enforce" — DENY the call (raise TaintFloorDenyError → router 403/JSON-RPC error),
+    #               audited (INV-001). Fail-closed, SPEC-0001 §8.1 hard-deny.
+    # Only consulted when TAINT_FLOOR_ENABLED is True. An unrecognised value is treated
+    # as "notify" (fail-safe-for-availability at this dark-launch stage; see resolve_taint_action).
+    TAINT_FLOOR_MODE: str = "notify"
 
     # =========================================================================
     # Wazuh SIEM integration (AI attack detection)
@@ -147,10 +156,10 @@ class Settings(BaseSettings):
     WAZUH_SYSLOG_HOST: str = ""          # e.g. "lab-wazuh-manager" — empty = disabled
     WAZUH_SYSLOG_PORT: int = 514         # UDP syslog port on Wazuh manager
 
-    # Trust envelope labeler (PRD-0001 M3 / RFC-0001)
+    # Trust envelope labeler (PRD-0001 M3 / SPEC-0001)
     TRUST_ENVELOPE_ENABLED: bool = False
     # Layer B: MIME-style in-band advisory wrapper for non-conformant LLM consumers.
-    # Advisory only — never the security boundary (RFC-0001 §3, P2).
+    # Advisory only — never the security boundary (SPEC-0001 §3, P2).
     LAYER_B_ENABLED: bool = False
     LABELER_CERT_PATH: str = "/labeler/leaf.crt"
     LABELER_KEY_PATH: str = "/labeler/leaf.key"
@@ -179,6 +188,14 @@ class Settings(BaseSettings):
     SCAN_MAX_AGE_HOURS: int = 168
     SCAN_FRESHNESS_ENFORCED: bool = True
     RESCAN_INTERVAL_HOURS: int = 24
+
+    # R6.1: continuous attestation for self-hosted servers. The rescan loop re-scans
+    # the SOURCE REPO; this re-reads the LIVE tool surface of the running backend and
+    # demotes the server to re-review if a registered-active tool no longer matches.
+    # Without it, a self-hosted server is trusted forever on one point-in-time check —
+    # submit a clean repo, get approved, then serve something else at the same URL.
+    # On by default: it only ever moves a server toward review, never away from it.
+    SELF_HOSTED_ATTESTATION_ENABLED: bool = True
 
     # CR-08: POST /api/v1/servers (self-service direct registration) skips the
     # submission-scan/review funnel entirely — a server_owner-role caller goes
@@ -672,6 +689,26 @@ class Settings(BaseSettings):
             raise ValueError(
                 "Staging startup blocked: SESSION_COOKIE_SECURE must be True in "
                 "staging. Set SESSION_COOKIE_SECURE=true in your environment."
+            )
+
+        # R4.6: VAULT_TOKEN, OAUTH_STATE_SECRET, and DEX_CLIENT_SECRET ship with
+        # non-empty dev-placeholder defaults ("change-me-in-production",
+        # "mcp-proxy-secret") so the lab and local dev can boot without extra
+        # config. _reject_placeholders_in_production already refuses to boot
+        # production on these values; staging must mirror that (same rationale
+        # as the OIDC_AUDIENCE/SESSION_COOKIE_SECURE checks above) rather than
+        # silently authenticating to Vault, signing OAuth state, or trusting
+        # Dex with a well-known secret in a pre-production environment.
+        staging_sensitive_fields = ("VAULT_TOKEN", "OAUTH_STATE_SECRET", "DEX_CLIENT_SECRET")
+        bad = [
+            name for name in staging_sensitive_fields
+            if str(getattr(self, name, "")).strip() in _KNOWN_PLACEHOLDER_VALUES
+        ]
+        if bad:
+            raise ValueError(
+                "Staging startup blocked: the following secrets are unset "
+                "or set to a known placeholder value: "
+                + ", ".join(bad)
             )
 
         return self

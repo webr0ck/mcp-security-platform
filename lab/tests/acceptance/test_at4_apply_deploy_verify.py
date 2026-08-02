@@ -85,9 +85,21 @@ def clean_mcp_upstream_b3():
 
 
 def _create_draft(token: str, name: str, repo_url: str) -> str:
+    # self_host=False is REQUIRED for what this module tests. It exercises the
+    # PLATFORM-MANAGED build/deploy loop (/apply -> build_requested -> deploy ->
+    # verify), and that path only exists for platform-deployed submissions.
+    #
+    # The draft was created with the default self_host=True, which since PRD-0012 C2
+    # makes approval run the self-hosted pipeline INLINE and land 'active' — so the
+    # test's own setup contradicted the flow it goes on to assert, and its
+    # 'approved_pending_url' expectation became unreachable. The assertion was never
+    # wrong; the setup was. Platform-deployed submissions still park at
+    # 'approved_pending_url' by design (submission.py::approve_submission docstring),
+    # because the platform has not built or deployed anything yet.
     r = httpx.post(f"{BASE_URL}/api/v1/submissions", headers=_auth_headers(token),
                    json={"name": name, "github_repo_url": repo_url,
-                         "description": f"{name} acceptance test fixture"},
+                         "description": f"{name} acceptance test fixture",
+                         "self_host": False},
                    verify=False, timeout=60)
     assert r.status_code == 201, f"draft create failed: {r.status_code} {r.text}"
     return r.json()["server_id"]
@@ -261,11 +273,42 @@ def test_apply_deploy_verify_full_loop(alice_token, carol_token, clean_mcp_upstr
     # app.services.ssrf/server_onboarding docstrings) -- provide-url computes
     # this via validate_upstream_url_ssrf; replicate it here by reading the
     # same UPSTREAM_PRIVATE_CIDR_ALLOWLIST env var the running proxy uses.
-    _cidr = ""
+    # R2.2: UPSTREAM_PRIVATE_CIDR_ALLOWLIST is a COMMA-SEPARATED list
+    # ("10.89.0.0/16,100.64.0.0/10" in .env.lab), but
+    # server_registry.upstream_allowlist_entry stores a SINGLE matched CIDR —
+    # services/server_onboarding.py::validate_upstream_url_ssrf returns "the
+    # matched allowlist CIDR string", and services/ssrf.py::validate_server_url
+    # (the function discover_tools actually calls) does
+    # `ipaddress.ip_network(allowed_cidr, strict=False)` on the stored value,
+    # which raises ValueError -> SSRFError -> 400 on a comma-joined string.
+    # Storing the raw multi-CIDR env value here (rather than resolving the
+    # fixture's real IP and picking the ONE entry that contains it, the way
+    # provide_running_url's real code path does) is exactly what made
+    # discover_tools fail at this final step with SSRF_VALIDATION_FAILED.
+    # Confirmed against a working comparison row: test_at3_onboarding.py's
+    # clean-mcp fixture lands upstream_allowlist_entry='10.89.0.0/16' (single
+    # entry), never the joined string.
+    import ipaddress
+    import socket
+
+    _cidr_list = []
     for _line in (__import__("pathlib").Path(__file__).resolve().parents[3] / ".env.lab").read_text().splitlines():
         if _line.startswith("UPSTREAM_PRIVATE_CIDR_ALLOWLIST="):
-            _cidr = _line.split("=", 1)[1]
-    assert _cidr, "UPSTREAM_PRIVATE_CIDR_ALLOWLIST not found in .env.lab"
+            _cidr_list = [c.strip() for c in _line.split("=", 1)[1].split(",") if c.strip()]
+    assert _cidr_list, "UPSTREAM_PRIVATE_CIDR_ALLOWLIST not found in .env.lab"
+
+    _fixture_host = clean_mcp_upstream_b3.split("://", 1)[1].split(":", 1)[0].split("/", 1)[0]
+    # Resolve via the proxy container's own DNS (lab-net), not the test
+    # runner's host DNS -- container hostnames only resolve inside lab-net.
+    _resolve_code = f"import socket; print(socket.gethostbyname('{_fixture_host}'))"
+    _resolved = _proxy_exec_python(_resolve_code, timeout=30)
+    assert _resolved.returncode == 0, f"could not resolve {_fixture_host!r} from mcp-proxy: {_resolved.stderr}"
+    _fixture_ip = ipaddress.ip_address(_resolved.stdout.strip())
+
+    _cidr = next((c for c in _cidr_list if _fixture_ip in ipaddress.ip_network(c, strict=False)), None)
+    assert _cidr, (
+        f"fixture IP {_fixture_ip} matched none of UPSTREAM_PRIVATE_CIDR_ALLOWLIST's entries {_cidr_list}"
+    )
     db_query(f"UPDATE server_registry SET status='approved', "
              f"upstream_url='{clean_mcp_upstream_b3}', upstream_allowlist_entry='{_cidr}' "
              f"WHERE server_id='{server_id}'")

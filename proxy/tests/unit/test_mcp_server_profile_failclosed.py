@@ -2,19 +2,19 @@
 Unit tests — N2 fix: Profile lookup fail-closed in mcp_server.py (INV-015).
 
 Covers the two router-level helpers added/rewritten for N2:
-  _lookup_profile_row        (cache key: profile_row:{profile_id}:{mcp_name})
-  _lookup_profile_mcp_binding (cache key: profile_binding:{profile_uuid}:{mcp_name})
+  _lookup_profile_source     (cache key: mcp_profile:v2:id:{client_id}:{tool})
+    (the named source uses mcp_profile:v2:uuid:{profile_uuid}:{tool})
 
 And the tools/list dispatch path that must return JSON-RPC error + HTTP 503 when
 ProfileLookupError propagates out of _registered_tools_for_client.
 
 Test matrix
 -----------
-  Test 1: _lookup_profile_row — DB raises, Redis raises ConnectionError
+  Test 1: _lookup_profile_source — DB raises, Redis raises ConnectionError
           → ProfileLookupError raised (NOT a passthrough / None return)
-  Test 2: _lookup_profile_row — DB raises, Redis returns None (cache miss)
+  Test 2: _lookup_profile_source — DB raises, Redis returns None (cache miss)
           → ProfileLookupError raised
-  Test 3: _lookup_profile_row — DB raises, Redis returns a cached JSON value
+  Test 3: _lookup_profile_source — DB raises, Redis returns a cached JSON value
           → cached value returned (no exception, no 503)
   Test 4: tools/list handler — _registered_tools_for_client raises ProfileLookupError
           → _dispatch raises _ProfileLookupUnavailable → mcp_post returns HTTP 503
@@ -49,11 +49,11 @@ def _make_db_exc() -> Exception:
 async def test_lookup_profile_row_db_raises_redis_raises():
     """
     INV-015: when the DB raises AND Redis raises a RedisError (e.g. ECONNREFUSED),
-    _lookup_profile_row must raise ProfileLookupError.
+    _lookup_profile_source must raise ProfileLookupError.
 
     A Redis exception is NOT a cache miss — it must never fall through.
     """
-    from app.routers.mcp_server import _lookup_profile_row
+    from app.services.invocation import _lookup_profile_source
     from app.services.invocation import ProfileLookupError
 
     # DB raises
@@ -71,7 +71,14 @@ async def test_lookup_profile_row_db_raises_redis_raises():
     with patch("app.core.database.AsyncSessionLocal", return_value=mock_session), \
          patch("app.core.redis_client.redis_pool", mock_redis_pool):
         with pytest.raises(ProfileLookupError):
-            await _lookup_profile_row("user-123", "some-mcp-tool")
+            await _lookup_profile_source(
+                table="mcp_profiles",
+                key_column="profile_id",
+                key_value="user-123",
+                tool_name="some-mcp-tool",
+                cache_key="mcp_profile:v2:id:user-123:some-mcp-tool",
+                log_ctx={},
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -82,9 +89,9 @@ async def test_lookup_profile_row_db_raises_redis_raises():
 async def test_lookup_profile_row_db_raises_redis_miss():
     """
     INV-015: when the DB raises AND Redis returns None (genuine cache miss),
-    _lookup_profile_row must raise ProfileLookupError.
+    _lookup_profile_source must raise ProfileLookupError.
     """
-    from app.routers.mcp_server import _lookup_profile_row
+    from app.services.invocation import _lookup_profile_source
     from app.services.invocation import ProfileLookupError
 
     # DB raises
@@ -102,7 +109,14 @@ async def test_lookup_profile_row_db_raises_redis_miss():
     with patch("app.core.database.AsyncSessionLocal", return_value=mock_session), \
          patch("app.core.redis_client.redis_pool", mock_redis_pool):
         with pytest.raises(ProfileLookupError):
-            await _lookup_profile_row("user-123", "some-mcp-tool")
+            await _lookup_profile_source(
+                table="mcp_profiles",
+                key_column="profile_id",
+                key_value="user-123",
+                tool_name="some-mcp-tool",
+                cache_key="mcp_profile:v2:id:user-123:some-mcp-tool",
+                log_ctx={},
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -113,11 +127,11 @@ async def test_lookup_profile_row_db_raises_redis_miss():
 async def test_lookup_profile_row_db_raises_redis_hit():
     """
     INV-015: when the DB raises but Redis has a cached profile row,
-    _lookup_profile_row must return the cached value without raising.
+    _lookup_profile_source must return the cached value without raising.
 
     This is the last-known-state path — availability via cache on transient DB blip.
     """
-    from app.routers.mcp_server import _lookup_profile_row
+    from app.services.invocation import _lookup_profile_source
 
     cached_row = {"enabled": True}
 
@@ -135,7 +149,14 @@ async def test_lookup_profile_row_db_raises_redis_hit():
 
     with patch("app.core.database.AsyncSessionLocal", return_value=mock_session), \
          patch("app.core.redis_client.redis_pool", mock_redis_pool):
-        result = await _lookup_profile_row("user-123", "some-mcp-tool")
+        result = await _lookup_profile_source(
+                table="mcp_profiles",
+                key_column="profile_id",
+                key_value="user-123",
+                tool_name="some-mcp-tool",
+                cache_key="mcp_profile:v2:id:user-123:some-mcp-tool",
+                log_ctx={},
+            )
 
     assert result == cached_row, (
         f"Expected cached row {cached_row!r}, got {result!r}"

@@ -66,7 +66,14 @@ _CROSS_PROFILE_WRITE_ROLES = frozenset({"platform_admin"}) | _PROFILE_SERVICE_RO
 # Deny-by-default: only listed roles may enable/disable their own MCP servers.
 # The old negative check ("block if viewer") was bypassed by empty-roles tokens
 # (PRIVESC-001 fix). A positive allowlist is the correct pattern.
-_SELF_SERVICE_ALLOWED_ROLES = frozenset({"admin", "platform_admin", "analyst", "editor", "profile_service"})
+# `agent` added 2026-07-25: the canonical /{principal}/... routes already allow ANY
+# role to manage its OWN profile (_assert_may_write returns early on
+# caller_id == principal), and the portal already permits agent via
+# _require_portal_write. Excluding agent here made only the /me/ shorthand behave
+# differently from the two surfaces that already worked — an inconsistency, not a
+# control. Service accounts remain barred on every path by
+# _assert_not_service_account (P1-2). `viewer` stays out: read-only by design.
+_SELF_SERVICE_ALLOWED_ROLES = frozenset({"admin", "platform_admin", "analyst", "editor", "profile_service", "agent"})
 
 # Cache sentinel — must match the value in invocation.py
 _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
@@ -188,6 +195,38 @@ async def _assert_mcp_exists(mcp_name: str) -> None:
             raise HTTPException(status_code=404, detail=f"MCP '{mcp_name}' not found in registry")
 
 
+# Tools required to INSPECT and UNDO a profile restriction. Disabling these in your
+# own profile is a self-lockout: you can no longer see what you disabled, nor re-enable
+# it, and there is deliberately no role bypass on the profile gate — an admin who does
+# it to themselves is locked out exactly like anyone else.
+#
+# Observed in the lab: a self-service sweep wrote 37 disable rows in 1.4s, including
+# these three. The principal could then call neither get_profile nor enable_mcp.
+#
+# This is the firewall-rule-that-locks-out-the-management-interface problem. Recovery
+# stayed *technically* possible only by accident — the platform meta-tools
+# get_my_profile / enable_mcp_server bypass the profile gate because they are served by
+# the role-only _visible_tools path, and they merely happen to be named differently.
+# Accidental recovery is not recovery; this makes it structural.
+_RECOVERY_MCPS = frozenset({"get_profile", "enable_mcp", "enable_function"})
+
+
+def would_self_lockout(
+    principal: str, mcp_name: str, enabled: bool, changed_by: str
+) -> bool:
+    """True when this write would disable a caller's own means of undoing it.
+
+    Scoped to self-directed writes (changed_by == principal). An admin restricting
+    ANOTHER principal's self-service is legitimate policy and stays allowed — that
+    principal is not locked out, because the admin can still reverse it.
+    """
+    return (
+        not enabled
+        and mcp_name in _RECOVERY_MCPS
+        and changed_by == principal
+    )
+
+
 async def _upsert_profile_row(
     principal: str,
     mcp_name: str,
@@ -195,7 +234,30 @@ async def _upsert_profile_row(
     allowed_functions: list | None,
     changed_by: str,
 ) -> None:
-    """Insert or update an mcp_profiles row."""
+    """Insert or update an mcp_profiles row.
+
+    Refuses a self-lockout (see would_self_lockout). Enforced HERE rather than in the
+    endpoints because 11 call sites across profiles.py and mcp_server.py route through
+    this function — guarding each caller would leave the next one unprotected.
+    """
+    if would_self_lockout(principal, mcp_name, enabled, changed_by):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "PROFILE_SELF_LOCKOUT_BLOCKED",
+                "message": (
+                    f"Refusing to disable '{mcp_name}' in your own profile: it is one of "
+                    f"the tools you would need to undo this. Disabling it would leave you "
+                    f"unable to inspect or restore your own access."
+                ),
+                "protected_tools": sorted(_RECOVERY_MCPS),
+                "remediation": (
+                    "To restrict your own access, disable the specific tools you want to "
+                    "stop using and leave the recovery tools enabled. An administrator can "
+                    "restrict these on your behalf if that is genuinely intended."
+                ),
+            },
+        )
     af_json = json.dumps(allowed_functions) if allowed_functions is not None else None
     async with AsyncSessionLocal() as db:
         await db.execute(
@@ -267,7 +329,7 @@ async def _invalidate_profile_cache(
     Write the updated profile value into the Redis cache used by
     _lookup_profile_with_cache (invocation.py Task 1.10).
 
-    Cache key: mcp_profile:{principal}:{mcp_name}
+    Cache key: mcp_profile:v2:id:{principal}:{mcp_name}
 
     If new_value is None → write the sentinel (no profile row = default allow).
 
@@ -279,7 +341,7 @@ async def _invalidate_profile_cache(
     try:
         from app.core.redis_client import redis_pool
         redis = redis_pool.client
-        cache_key = f"mcp_profile:{principal}:{mcp_name}"
+        cache_key = f"mcp_profile:v2:id:{principal}:{mcp_name}"
         value = json.dumps(new_value) if new_value is not None else _SENTINEL_NO_ROW
         await redis.setex(cache_key, _PROFILE_CACHE_TTL_SECONDS, value)
         logger.debug(
@@ -998,13 +1060,25 @@ async def _get_profile_mcp_bindings(profile_uuid: str) -> list[dict]:
 
 
 async def _invalidate_profile_mcp_binding_cache(profile_uuid: str, mcp_name: str, new_value: dict | None) -> None:
-    """Invalidate Redis cache for a named-profile MCP binding (Task 4.3)."""
+    """Invalidate Redis cache for a named-profile MCP binding (Task 4.3).
+
+    Invalidates BOTH tiers the invoke path reads:
+      - the per-(profile, tool) row      -> mcp_profile:v2:uuid:{uuid}:{tool}
+      - the "is this profile configured?" -> mcp_profile:v2:uuid:{uuid}:__has_bindings__
+
+    The __has_bindings__ sentinel was never invalidated by any writer before
+    2026-07-25. Because it gates named-profile default-deny, a stale `false` there
+    keeps a freshly-configured profile in "unconfigured -> allow everything" mode for
+    the full TTL — a fail-open window on the exact mechanism that enforces the profile.
+    """
     try:
         from app.core.redis_client import redis_pool
         redis = redis_pool.client
-        cache_key = f"mcp_profile:uuid:{profile_uuid}:{mcp_name}"
+        cache_key = f"mcp_profile:v2:uuid:{profile_uuid}:{mcp_name}"
         value = json.dumps(new_value) if new_value is not None else _SENTINEL_NO_ROW
         await redis.setex(cache_key, _PROFILE_CACHE_TTL_SECONDS, value)
+        # Drop the binding-count sentinel so the next lookup re-derives it from the DB.
+        await redis.delete(f"mcp_profile:v2:uuid:{profile_uuid}:__has_bindings__")
         logger.debug(
             "Named profile MCP binding cache updated",
             extra={"profile_uuid": profile_uuid, "mcp_name": mcp_name},

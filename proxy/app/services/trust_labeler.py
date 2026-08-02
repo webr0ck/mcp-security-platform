@@ -1,4 +1,4 @@
-"""Trust envelope labeler (PRD-0001 M3 / RFC-0001 §5).
+"""Trust envelope labeler (PRD-0001 M3 / SPEC-0001 §5).
 
 Signing failure returns None — never raises (W3.5). Enforcement (taint floor)
 is independent of signing.
@@ -136,6 +136,16 @@ class TrustLabeler:
                 "content_hash": content_hash,
                 "nonce": nonce,
                 "signed_at": signed_at,
+            },
+            # A6: unsigned call-context hints. A downstream consumer that reaches the
+            # gateway does NOT independently know the upstream server_id, which is signed
+            # but not otherwise carried — without this it cannot reconstruct the signed
+            # input. Safe because verified transitively: the signature covers these exact
+            # values, so a tampered hint just fails signature verification.
+            "call_context": {
+                "server_id": server_id,
+                "result_id": result_id,
+                "tool_name": tool_name,
             },
             "sig": {
                 "alg": "ES256",

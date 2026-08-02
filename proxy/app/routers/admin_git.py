@@ -83,7 +83,7 @@ async def put_provider(provider: str, body: ProviderUpdate, request: Request) ->
         try:
             git_providers.validate_host(body.host, body.allow_private)
         except git_providers.GitHostError as exc:
-            raise HTTPException(status_code=400, detail=f"host validation failed: {exc}")
+            raise HTTPException(status_code=400, detail=f"host validation failed: {exc}") from exc
 
     pool = await _db()
     await pool.execute(
@@ -113,8 +113,12 @@ async def put_token(provider: str, body: TokenUpdate, request: Request) -> dict:
     try:
         await platform_secrets.set_secret(f"git-{provider}", body.token, actor)
     except Exception as exc:
-        logger.warning("git token store failed for %s: %s", provider, exc)
-        raise HTTPException(status_code=503, detail="Could not store token (KMS/Vault unavailable)")
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.exception("git token store failed for %s (request_id=%s)", provider, request_id)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not store token (KMS/Vault unavailable) request_id={request_id}",
+        ) from exc
     await emit_admin_config_event(actor, "set_git_token", provider, {"token_len": len(body.token)})
     return {"ok": True}
 

@@ -22,16 +22,17 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 
-from app.core.telemetry import telemetry
 from app.credential_broker.broker import CredentialBroker
 from app.credential_broker.registry import Registry
+from app.core.telemetry import telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -62,96 +63,102 @@ class _NullSpan:
         pass
 
 
-async def _lookup_profile_with_cache(
-    client_id: str,
+def merge_profile_deny_dominant(legacy: dict | None, named: dict | None) -> dict | None:
+    """
+    Merge a legacy per-identity profile with a named-profile binding, deny-dominant.
+
+    A named profile is a *narrowing* mechanism — a curated subset of what the caller
+    is already allowed. It must never widen access. Before this function existed the
+    two systems were an if/else (named REPLACED legacy), which let any caller shed
+    their own per-identity restrictions simply by binding a profile. See the
+    "profile-binding escalation" case in the deny-dominant tests.
+
+    Rules:
+      - enabled: logical AND. Either side saying False wins.
+      - allowed_functions: intersection when BOTH restrict; the restricting side when
+        only one does; unrestricted only when neither restricts.
+      - a DISJOINT intersection means nothing is permitted -> enabled=False. Returning
+        an empty list here would read as "unrestricted" to authz.rego (which triggers
+        only on count(...) > 0) and would be a fail-open.
+
+    None means "no row" = no restriction from that side.
+    """
+    if legacy is None:
+        return named
+    if named is None:
+        return legacy
+
+    enabled = bool(legacy.get("enabled", True)) and bool(named.get("enabled", True))
+    fns_legacy = list(legacy.get("allowed_functions") or [])
+    fns_named = list(named.get("allowed_functions") or [])
+
+    if fns_legacy and fns_named:
+        merged_fns = [f for f in fns_legacy if f in fns_named]  # order-stable intersection
+        if not merged_fns:
+            # Disjoint allowlists: no function satisfies both sides.
+            return {"enabled": False, "allowed_functions": []}
+    else:
+        merged_fns = fns_legacy or fns_named
+
+    return {"enabled": enabled, "allowed_functions": merged_fns or None}
+
+
+async def _lookup_profile_source(
+    *,
+    table: str,
+    key_column: str,
+    key_value: str,
     tool_name: str,
-    profile_uuid: str | None = None,
+    cache_key: str,
+    log_ctx: dict,
 ) -> dict | None:
     """
-    Look up an mcp_profiles row with Redis caching.
+    Single-source profile row lookup with the Redis last-known-state cache.
 
-    Task 4.3 update: when ``profile_uuid`` is set, queries by
-    ``(profile_uuid, tool_name)`` — the named-profile path.
-    Falls back to legacy ``(client_id, tool_name)`` lookup when
-    ``profile_uuid`` is None (backward compatible).
-
-    Task 1.10 (SELF-F2): fail-closed semantics — mirrors the role caching
-    pattern in middleware/auth.py but with stricter failure posture:
-
-      DB success:            use profile + update Redis cache (TTL 300s)
-      DB error + cache hit:  use cached profile (last-known-state)
+    Task 1.10 (SELF-F2): fail-closed semantics —
+      DB success:            use row + update Redis cache (TTL 300s)
+      DB error + cache hit:  use cached row (last-known-state)
       DB error + cache miss: raise ProfileLookupError → caller 503s
 
-    Returns:
-      dict with {enabled: bool, allowed_functions: list[str]} if a row exists,
-      or None if no profile row exists (no restriction, default allow).
-
-    Raises:
-      ProfileLookupError: if DB is unreachable and no cached profile available.
+    `table` and `key_column` are chosen from a fixed internal set by the two
+    callers below — never from request data — so the f-string interpolation
+    here cannot carry untrusted input into SQL.
     """
     import json as _json
-
     from app.core.redis_client import redis_pool
 
-    # Cache key disambiguates named-profile path from legacy path.
-    if profile_uuid:
-        cache_key = f"mcp_profile:uuid:{profile_uuid}:{tool_name}"
-    else:
-        cache_key = f"mcp_profile:{client_id}:{tool_name}"
     _SENTINEL_NO_ROW = "__NO_PROFILE_ROW__"
 
-    # -----------------------------------------------------------------------
-    # Tier 1: Redis cache
-    # -----------------------------------------------------------------------
+    # ── Tier 1: Redis cache ────────────────────────────────────────────────
     cached_raw: str | None = None
-    redis_available = False
     try:
         redis = redis_pool.client
         cached_raw = await redis.get(cache_key)
-        redis_available = True
     except Exception as _redis_exc:
-        logger.warning(
-            "Profile cache Redis read failed",
-            extra={"client_id": client_id, "tool_name": tool_name, "error": str(_redis_exc)},
-        )
+        logger.warning("Profile cache Redis read failed", extra={**log_ctx, "error": str(_redis_exc)})
 
     if cached_raw is not None:
         if cached_raw == _SENTINEL_NO_ROW:
-            return None  # cached "no profile row" — default allow
+            return None  # cached "no profile row" — no restriction from this source
         try:
             return _json.loads(cached_raw)
         except Exception:
             pass  # malformed cache entry — fall through to DB
 
-    # -----------------------------------------------------------------------
-    # Tier 2: PostgreSQL mcp_profiles
-    # -----------------------------------------------------------------------
+    # ── Tier 2: PostgreSQL ─────────────────────────────────────────────────
     profile_data: dict | None = None
     db_succeeded = False
     try:
-        from sqlalchemy import text
-
         from app.core.database import AsyncSessionLocal
+        from sqlalchemy import text
         async with AsyncSessionLocal() as _db:
-            if profile_uuid:
-                # Task 4.3: named-profile path — query by profile_uuid FK
-                row = await _db.execute(
-                    text(
-                        "SELECT enabled, allowed_functions "
-                        "FROM mcp_profiles "
-                        "WHERE profile_uuid=:uuid AND mcp_name=:mname LIMIT 1"
-                    ),
-                    {"uuid": profile_uuid, "mname": tool_name},
-                )
-            else:
-                # Legacy path — query by profile_id (client identity)
-                row = await _db.execute(
-                    text(
-                        "SELECT enabled, allowed_functions "
-                        "FROM mcp_profiles WHERE profile_id=:pid AND mcp_name=:mname LIMIT 1"
-                    ),
-                    {"pid": client_id, "mname": tool_name},
-                )
+            row = await _db.execute(
+                text(
+                    f"SELECT enabled, allowed_functions FROM {table} "  # noqa: S608 — fixed internal values
+                    f"WHERE {key_column}=:kv AND mcp_name=:mname LIMIT 1"
+                ),
+                {"kv": key_value, "mname": tool_name},
+            )
             prow = row.mappings().first()
             if prow:
                 profile_data = {
@@ -160,31 +167,85 @@ async def _lookup_profile_with_cache(
                 }
         db_succeeded = True
     except Exception as _db_exc:
-        logger.error(
-            "mcp_profiles DB lookup failed",
-            extra={"client_id": client_id, "tool_name": tool_name, "error": str(_db_exc)},
-        )
+        logger.error("profile DB lookup failed", extra={**log_ctx, "error": str(_db_exc)})
 
     if db_succeeded:
-        # Update Redis cache with the DB result (best-effort)
         try:
             redis = redis_pool.client
             value = _json.dumps(profile_data) if profile_data is not None else _SENTINEL_NO_ROW
             await redis.setex(cache_key, _PROFILE_CACHE_TTL_SECONDS, value)
         except Exception as _cache_exc:
-            logger.warning(
-                "Failed to write profile to Redis cache",
-                extra={"client_id": client_id, "tool_name": tool_name, "error": str(_cache_exc)},
-            )
+            logger.warning("Failed to write profile to Redis cache", extra={**log_ctx, "error": str(_cache_exc)})
         return profile_data
 
-    # -----------------------------------------------------------------------
-    # DB failed. We have no cached value (cache hit was handled above).
-    # Fail-closed: raise ProfileLookupError → caller converts to 503.
-    # -----------------------------------------------------------------------
-    raise ProfileLookupError(
-        f"DB unreachable and no cached profile for {client_id}/{tool_name}"
+    raise ProfileLookupError(f"DB unreachable and no cached profile for {key_value}/{tool_name}")
+
+
+async def _lookup_profile_with_cache(
+    client_id: str,
+    tool_name: str,
+    profile_uuid: str | None = None,
+) -> dict | None:
+    """
+    Resolve the effective profile restriction for (client_id, tool_name, profile_uuid).
+
+    This is the SINGLE place that decides which identity key and which table a profile
+    decision is read from, and how the two systems combine. Discovery and invoke must
+    both route through it — parallel-implementing the rules is what produced the
+    hidden-but-callable and profile-binding-escalation defects.
+
+    Sources:
+      legacy  — mcp_profiles.profile_id       = client_id   (bare identity, e.g. 'alice@corp')
+      named   — profile_mcp_bindings.profile_id = profile_uuid
+
+    The named source reads ``profile_mcp_bindings`` — the table its only writer
+    (routers/profiles.py::_upsert_profile_mcp_binding) actually writes. It previously
+    read ``mcp_profiles WHERE profile_uuid=``, which no writer ever populates, so every
+    named restriction resolved to "no row" -> allow while discovery correctly hid the
+    tool: hidden in the UI, callable over the wire.
+
+    Combination is deny-dominant (see merge_profile_deny_dominant): a named profile
+    narrows, never widens.
+
+    Returns:
+      dict with {enabled: bool, allowed_functions: list[str] | None}, or None when
+      neither source restricts (default allow).
+
+    Raises:
+      ProfileLookupError: if DB is unreachable and no cached value is available.
+    """
+    # Cache keys are namespaced v2: the pre-merge entries have different semantics
+    # (they were single-source) and must not be served after this change.
+    legacy = await _lookup_profile_source(
+        table="mcp_profiles",
+        key_column="profile_id",
+        key_value=client_id,
+        tool_name=tool_name,
+        cache_key=f"mcp_profile:v2:id:{client_id}:{tool_name}",
+        log_ctx={"client_id": client_id, "tool_name": tool_name, "source": "legacy"},
     )
+
+    if not profile_uuid:
+        return legacy
+
+    named = await _lookup_profile_source(
+        table="profile_mcp_bindings",
+        key_column="profile_id",
+        key_value=profile_uuid,
+        tool_name=tool_name,
+        cache_key=f"mcp_profile:v2:uuid:{profile_uuid}:{tool_name}",
+        log_ctx={"profile_uuid": profile_uuid, "tool_name": tool_name, "source": "named"},
+    )
+
+    # Named-profile default-deny: a configured profile (>=1 binding anywhere) that has
+    # no row for THIS tool has not granted it. An unconfigured profile (zero bindings)
+    # stays default-allow so a freshly created profile isn't bricked before an admin
+    # adds the first binding. Resolved HERE so discovery and invoke cannot disagree
+    # about it — it used to live in invoke_tool() only.
+    if named is None and await _named_profile_has_any_binding(profile_uuid):
+        named = {"enabled": False, "allowed_functions": []}
+
+    return merge_profile_deny_dominant(legacy, named)
 
 
 async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
@@ -224,10 +285,9 @@ async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
         available.
     """
     import json as _json
-
     from app.core.redis_client import redis_pool
 
-    cache_key = f"mcp_profile:uuid:{profile_uuid}:__has_bindings__"
+    cache_key = f"mcp_profile:v2:uuid:{profile_uuid}:__has_bindings__"
 
     # -----------------------------------------------------------------------
     # Tier 1: Redis cache
@@ -249,17 +309,23 @@ async def _named_profile_has_any_binding(profile_uuid: str) -> bool:
             pass  # malformed cache entry — fall through to DB
 
     # -----------------------------------------------------------------------
-    # Tier 2: PostgreSQL mcp_profiles — count rows for this profile_uuid
+    # Tier 2: PostgreSQL profile_mcp_bindings — count rows for this profile.
+    #
+    # This counted `mcp_profiles WHERE profile_uuid=` until 2026-07-25. No writer
+    # ever populates mcp_profiles.profile_uuid (_upsert_profile_row does not set the
+    # column), so the count was ALWAYS 0 -> every named profile looked "unconfigured"
+    # -> default-allow. Combined with the named lookup reading the same wrong table,
+    # that made every named-profile restriction advisory-only: hidden from tools/list
+    # but fully callable. Counting the table the writer actually writes is the fix.
     # -----------------------------------------------------------------------
     has_binding: bool | None = None
     db_succeeded = False
     try:
-        from sqlalchemy import text
-
         from app.core.database import AsyncSessionLocal
+        from sqlalchemy import text
         async with AsyncSessionLocal() as _db:
             row = await _db.execute(
-                text("SELECT COUNT(*) AS cnt FROM mcp_profiles WHERE profile_uuid=:uuid"),
+                text("SELECT COUNT(*) AS cnt FROM profile_mcp_bindings WHERE profile_id=:uuid"),
                 {"uuid": profile_uuid},
             )
             prow = row.mappings().first()
@@ -334,7 +400,6 @@ async def _record_connection_result(
         return  # unlinked tool — nothing to flag
     try:
         from sqlalchemy import text
-
         from app.core.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
@@ -377,6 +442,634 @@ async def _record_connection_result(
             await db.commit()
     except Exception as exc:
         logger.warning("connection_result_recording_failed: %s", exc)
+
+
+@dataclass
+class InvocationContext:
+    """State threaded through invoke_tool's gates.
+
+    WHY THIS EXISTS: invoke_tool had 50 top-level locals, 24 of which were assigned
+    before the OPA step and still read after it. That entanglement is what made the
+    function un-splittable — extracting a gate meant either a 24-argument signature or
+    returning tuples, both worse than the 1,100-line function. One object crossing the
+    boundary makes each gate a `(ctx) -> None` that raises to deny.
+
+    Two field groups, and the distinction is load-bearing:
+
+    INPUTS — set once when the context is built, never reassigned by a gate. Treat as
+    read-only. (Not `frozen=True` because the OUTPUT fields below must be writable;
+    splitting into two dataclasses would double the plumbing for no real gain.)
+
+    GATE OUTPUTS — each is written by exactly ONE gate and read later by OPA input
+    assembly, the audit event, or dispatch. If two gates ever write the same field,
+    that is a bug: it means an ordering dependency nobody declared.
+
+    The ordering of the gates is a security invariant, pinned by
+    tests/unit/services/test_invoke_tool_gate_order.py. Read that before reordering
+    anything here.
+    """
+
+    # ── INPUTS (read-only after construction) ───────────────────────────────
+    tool_record: dict[str, Any]
+    json_rpc_request: dict[str, Any]
+    client_id: str
+    client_roles: list[str]
+    is_testing: bool
+    request_id: str
+    inbound_auth: str | None = None
+    principal_id: str | None = None
+    principal_type: str | None = None
+    user_kc_token: str | None = None
+    source_ip: str | None = None
+    session_jti: str | None = None
+    profile_uuid: str | None = None
+    principal_issuer: str | None = None
+    principal_display_sub: str | None = None
+
+    # Derived from tool_record / json_rpc_request at construction — still inputs.
+    tool_id: Any = None
+    tool_name: str = ""
+    tool_status: str = ""
+    tool_risk_level: str = "low"
+    tool_server_id: str = ""
+    upstream_url: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
+    function_name: str = ""
+
+    # ── GATE OUTPUTS (each written by exactly one gate) ─────────────────────
+    tainted: bool | None = None                 # _gate_taint_floor
+    taint_notice: str | None = None             # _gate_taint_floor
+    taint_server_trust_tier: int | None = None  # _gate_taint_floor
+    anomaly_score: float = 0.0                  # _stage_anomaly
+    recent_calls: list[dict] = field(default_factory=list)   # _stage_recent_calls
+    profile_data: dict = field(default_factory=dict)         # _stage_profile
+    owned_server_ids: list[str] = field(default_factory=list)  # _stage_owned_servers
+    owner_max_risk_level: str = "medium"        # _stage_owned_servers
+
+    @classmethod
+    def build(cls, **kw: Any) -> "InvocationContext":
+        """Construct from invoke_tool's arguments, deriving the tool_record fields."""
+        rec = kw["tool_record"]
+        jrpc = kw["json_rpc_request"]
+        self = cls(**kw)
+        self.tool_id = rec["tool_id"]
+        self.tool_name = rec["name"]
+        self.tool_status = rec["status"]
+        self.tool_risk_level = rec.get("risk_level", "low")
+        self.tool_server_id = str(rec["server_id"]) if rec.get("server_id") else ""
+        self.upstream_url = rec["upstream_url"]
+        self.params = jrpc.get("params", {}).get("arguments", {})
+        # Task 1.9 (SELF-F2): the JSON-RPC function identifier, NOT a tool argument.
+        # Reading it from params.arguments made it always "" on the direct tools/call
+        # path, silently bypassing allowed_functions.
+        self.function_name = (jrpc.get("params", {}) or {}).get("name", "") or ""
+        return self
+
+
+async def _gate_tool_status(ctx: "InvocationContext") -> None:
+    """Step 1 (INV-005). Cheapest gate, MUST stay first: a disabled/quarantined/
+    deprecated tool must never reach policy, the credential broker, or the network.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_status = ctx.tool_status
+    # Step 1: INV-005 — Block unavailable/quarantined tools before OPA evaluation
+    # -------------------------------------------------------------------------
+    if tool_status == "disabled":
+        raise ToolDisabledError(tool_id, tool_name)
+
+    if tool_status == "quarantined":
+        raise ToolQuarantinedError(tool_id, tool_name)
+
+    if tool_status == "deprecated":
+        raise ToolDeprecatedError(tool_id, tool_name)
+
+    # -------------------------------------------------------------------------
+
+async def _gate_maintenance(ctx: "InvocationContext") -> None:
+    """Step 1.1. Debug/maintenance mode: hard deny for everyone except the server's
+    owner and its maintainers. No role bypass — an admin is NOT exempt, by explicit
+    product requirement. Fails closed if the lookup itself errors.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_server_id = ctx.tool_server_id
+    # Step 1.1: Debug/maintenance mode — hard deny for everyone except the
+    # server's owner and its (max 2) maintainers. No role-based bypass: an
+    # admin is not exempt, by explicit product requirement. Fail closed if
+    # the lookup itself errors (a DB hiccup must not silently grant access
+    # to a server someone deliberately locked down).
+    # -------------------------------------------------------------------------
+    if tool_server_id:
+        from app.core.database import AsyncSessionLocal as _MaintDBSession
+        from sqlalchemy import text as _maint_sql
+
+        try:
+            async with _MaintDBSession() as _mconn:
+                _mrow = (await _mconn.execute(
+                    _maint_sql(
+                        "SELECT debug_mode, owner_sub, maintainers FROM server_registry "
+                        "WHERE server_id = :sid AND deleted_at IS NULL"
+                    ),
+                    {"sid": tool_server_id},
+                )).fetchone()
+        except Exception as exc:
+            logger.error(
+                "Debug-mode lookup failed for server_id=%s — failing closed",
+                tool_server_id, extra={"error": str(exc)},
+            )
+            raise ServerInMaintenanceError(tool_id, tool_name, tool_server_id) from exc
+
+        if _mrow and _mrow.debug_mode:
+            allowed = {_mrow.owner_sub, *(_mrow.maintainers or [])}
+            if client_id not in allowed:
+                raise ServerInMaintenanceError(tool_id, tool_name, tool_server_id)
+
+    # -------------------------------------------------------------------------
+
+async def _gate_scan_freshness(ctx: "InvocationContext") -> None:
+    """Step 1.2. Supply-chain scan freshness (Stage 3).
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    client_roles = ctx.client_roles
+    is_testing = ctx.is_testing
+    principal_id = ctx.principal_id
+    principal_type = ctx.principal_type
+    request_id = ctx.request_id
+    session_jti = ctx.session_jti
+    source_ip = ctx.source_ip
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_record = ctx.tool_record
+    tool_server_id = ctx.tool_server_id
+    # Step 1.2: Supply-chain scan freshness gate (Stage 3).
+    # If the tool is linked to a server and SCAN_FRESHNESS_ENFORCED=True,
+    # deny calls to servers whose last_rescanned_at is older than
+    # SCAN_MAX_AGE_HOURS or NULL (never rescanned).
+    # When SCAN_FRESHNESS_ENFORCED=False (default), only a warning is emitted.
+    # -------------------------------------------------------------------------
+    if tool_server_id:
+        from app.core.config import settings as _scan_settings
+        from app.core.database import AsyncSessionLocal
+        from datetime import timedelta
+        from sqlalchemy import text as _sql_text
+
+        try:
+            async with AsyncSessionLocal() as _conn:
+                _row = await _conn.execute(
+                    _sql_text(
+                        "SELECT last_rescanned_at FROM server_registry "
+                        "WHERE server_id = :sid AND deleted_at IS NULL"
+                    ),
+                    {"sid": tool_server_id},
+                )
+                _scan_row = _row.fetchone()
+            _last = _scan_row[0] if _scan_row else None
+            _age_limit = datetime.now(timezone.utc) - timedelta(hours=_scan_settings.SCAN_MAX_AGE_HOURS)
+            _stale = _last is None or _last < _age_limit
+            if _stale:
+                if _scan_settings.SCAN_FRESHNESS_ENFORCED:
+                    await _emit_audit_event(
+                        tool_id=str(tool_id) if tool_id is not None else None,
+                        tool_name=tool_name,
+                        tool_version=tool_record.get("version"),
+                        client_id=client_id,
+                        outcome="deny",
+                        deny_reasons=["scan_freshness_stale"],
+                        request_id=request_id,
+                        latency_ms=0,
+                        anomaly_score=0.0,
+                        opa_decision_id="",
+                        is_testing=is_testing,
+                        source_ip=source_ip,
+                        principal_type=principal_type,
+            principal_id=principal_id,
+                        roles=client_roles,
+                        session_jti=session_jti,
+                    )
+                    raise ScanFreshnessError(tool_id, tool_name, _last)
+                else:
+                    logger.warning(
+                        "Scan freshness stale for server %s (last=%s) — warn-only "
+                        "(SCAN_FRESHNESS_ENFORCED=False)",
+                        tool_server_id, _last,
+                    )
+        except ScanFreshnessError:
+            raise
+        except Exception as _sf_exc:
+            # CR-11: a lookup failure must not silently skip the gate — fail closed
+            # to match "Fail closed on scan lookup errors" when enforcement is on.
+            # Warn-only mode (default) still just logs, since nothing is enforced.
+            logger.warning("Scan freshness check failed for %s: %s", tool_server_id, _sf_exc)
+            if _scan_settings.SCAN_FRESHNESS_ENFORCED:
+                await _emit_audit_event(
+                    tool_id=str(tool_id) if tool_id is not None else None,
+                    tool_name=tool_name,
+                    tool_version=tool_record.get("version"),
+                    client_id=client_id,
+                    outcome="deny",
+                    deny_reasons=["scan_freshness_lookup_failed"],
+                    request_id=request_id,
+                    latency_ms=0,
+                    anomaly_score=0.0,
+                    opa_decision_id="",
+                    is_testing=is_testing,
+                    source_ip=source_ip,
+                    principal_type=principal_type,
+            principal_id=principal_id,
+                    roles=client_roles,
+                    session_jti=session_jti,
+                )
+                raise ScanFreshnessError(tool_id, tool_name, None) from _sf_exc
+
+    # -------------------------------------------------------------------------
+
+async def _gate_entitlement(ctx: "InvocationContext") -> None:
+    """Step 1.5. discovery==invoke: a server-linked tool requires entitlement to that
+    server. No role exception, admin included.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    client_roles = ctx.client_roles
+    is_testing = ctx.is_testing
+    principal_id = ctx.principal_id
+    principal_type = ctx.principal_type
+    request_id = ctx.request_id
+    session_jti = ctx.session_jti
+    source_ip = ctx.source_ip
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_record = ctx.tool_record
+    # Step 1.5: 6.2 — discovery==invoke. If the tool is linked to a server,
+    # the caller must be entitled to that server (same resolver the catalog
+    # uses for discovery). No role exception: admin/platform_admin are gated
+    # identically. Unlinked tools (server_id is NULL) are unaffected here.
+    # App-layer, pre-OPA, fail-closed — like the INV-005 quarantine gate above.
+    # INV-001: emit a synchronous deny audit here so the gate is recorded
+    # uniformly on every path (REST + both /mcp) before the exception propagates.
+    # -------------------------------------------------------------------------
+    from app.services.entitlement import NotEntitledError, enforce_tool_entitlement
+    try:
+        await enforce_tool_entitlement(tool_record, principal_id, principal_type)
+    except NotEntitledError as ent_exc:
+        await _emit_audit_event(
+            tool_id=str(tool_id) if tool_id is not None else None,
+            tool_name=tool_name,
+            tool_version=tool_record.get("version"),
+            client_id=client_id,
+            outcome="deny",
+            deny_reasons=[f"not_entitled:{ent_exc.reason}"],
+            request_id=request_id,
+            latency_ms=0,
+            anomaly_score=0.0,
+            opa_decision_id="",
+            is_testing=is_testing,
+            source_ip=source_ip,
+            principal_type=principal_type,
+            principal_id=principal_id,
+            roles=client_roles,
+            session_jti=session_jti,
+        )
+        raise
+
+    # -------------------------------------------------------------------------
+
+async def _gate_taint_floor(ctx: "InvocationContext") -> None:
+    """Step 1.6. B-coarse taint floor. Mode-selected: notify attaches a disclaimer,
+    enforce denies. Writes the taint outputs the audit event and response meta read.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    client_roles = ctx.client_roles
+    is_testing = ctx.is_testing
+    principal_id = ctx.principal_id
+    principal_type = ctx.principal_type
+    request_id = ctx.request_id
+    session_jti = ctx.session_jti
+    source_ip = ctx.source_ip
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_record = ctx.tool_record
+    tool_server_id = ctx.tool_server_id
+
+    # Step 1.6: B-coarse taint floor (SPEC-0001 §8.1, PRD-0001 M2).
+    # Order: INV-005 quarantine -> taint-floor -> INV-004 OPA. A session tainted
+    # by a prior untrusted result cannot invoke a high-sensitivity or credential-
+    # injecting sink. Fail-closed (INV-015); the deny is audited (INV-001) before
+    # the exception propagates, like the entitlement gate above. Dark unless the
+    # TAINT_FLOOR_ENABLED flag is set.
+    # -------------------------------------------------------------------------
+    from app.core.config import settings as _tf_settings
+    _taint_server_trust_tier: int | None = None  # stashed for write-before-forward below
+    _tainted: bool | None = None  # GAP-1: session taint state, recorded on the ALLOW audit too
+    # PRD-0010 Phase 0: taint-floor action is mode-selected via TAINT_FLOOR_MODE.
+    #   "notify"  (default) — allow the call, attach a disclaimer notice; never blocks.
+    #   "enforce"           — hard-DENY via TaintFloorDenyError (routers map to 403 /
+    #                         JSON-RPC error), audited as a deny. SPEC-0001 §8.1.
+    # See docs/prd/PRD-0010-taint-floor-mode-delegation.md for the mode/delegation roadmap.
+    _taint_notice: str | None = None
+    if _tf_settings.TAINT_FLOOR_ENABLED:
+        from app.services.taint_floor import (
+            TAINT_ACTION_BLOCK,
+            effective_injection_mode,
+            effective_required_integrity,
+            resolve_taint_action,
+            taint_floor_decision,
+        )
+        from app.services.taint_store import is_tainted_for_principal
+
+        _taint_server_trust_tier, _server_default_injection = await _lookup_server_trust(
+            tool_server_id
+        )
+        _raw_required = tool_record.get("required_integrity")
+        _tool_required = 1 if _raw_required is None else int(_raw_required)
+        _eff_injection = effective_injection_mode(
+            tool_record.get("injection_mode"),
+            _server_default_injection,
+        )
+        _required = effective_required_integrity(_tool_required, _eff_injection)
+        _tainted = await is_tainted_for_principal(client_id)  # keyed on logical identity, not auth-method (LOGIC-005)
+        _decision = taint_floor_decision(tainted=_tainted, required_integrity=_required)
+        _action = resolve_taint_action(_decision, _tf_settings.TAINT_FLOOR_MODE)
+        if _action == TAINT_ACTION_BLOCK:
+            # ENFORCE mode: hard deny (SPEC-0001 §8.1). Audit the deny (INV-001) BEFORE
+            # raising, mirroring the entitlement gate above, then let the router map
+            # TaintFloorDenyError to a 403 / JSON-RPC error. Fail-closed (INV-015).
+            await _emit_audit_event(
+                tool_id=str(tool_id) if tool_id is not None else None,
+                tool_name=tool_name,
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="deny",
+                deny_reasons=[f"taint_floor:required_integrity={_required}"],
+                notices=[],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=0.0,
+                opa_decision_id="",
+                is_testing=is_testing,
+                source_ip=source_ip,
+                principal_type=principal_type,
+                principal_id=principal_id,
+                roles=client_roles,
+                session_jti=session_jti,
+                tainted=_tainted,
+            )
+            raise TaintFloorDenyError(
+                tool_id=str(tool_id) if tool_id is not None else "",
+                tool_name=tool_name,
+                required_integrity=_required,
+            )
+        elif _action:  # "notify"
+            # NOTIFY mode (Phase-0 default): allow the call through and surface a
+            # disclaimer in the response meta. Still audited (outcome="allow") so the
+            # taint event isn't silently lost.
+            _taint_notice = (
+                f"This result may include data derived from an untrusted or "
+                f"not-yet-reviewed source (required_integrity={_required}); the "
+                f"platform's taint-floor block is currently in notify-only mode."
+            )
+            await _emit_audit_event(
+                tool_id=str(tool_id) if tool_id is not None else None,
+                tool_name=tool_name,
+                tool_version=tool_record.get("version"),
+                client_id=client_id,
+                outcome="allow",
+                # Fix 7 (docs/spec/11-server-lifecycle-and-hardening-batch.md
+                # §7): this is an ALLOW — deny_reasons must stay empty so the
+                # event isn't misread as a deny. The taint notice is advisory
+                # only and belongs in `notices`.
+                deny_reasons=[],
+                notices=[f"taint_floor_notice:required_integrity={_required}"],
+                request_id=request_id,
+                latency_ms=0,
+                anomaly_score=0.0,
+                opa_decision_id="",
+                is_testing=is_testing,
+                source_ip=source_ip,
+                principal_type=principal_type,
+                principal_id=principal_id,
+                roles=client_roles,
+                session_jti=session_jti,
+                tainted=_tainted,
+            )
+
+    # -------------------------------------------------------------------------
+    ctx.tainted = _tainted
+    ctx.taint_notice = _taint_notice
+    ctx.taint_server_trust_tier = _taint_server_trust_tier
+
+async def _stage_anomaly(ctx: "InvocationContext") -> None:
+    """Step 2. Anomaly detection — advisory score fed into the OPA input.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    is_testing = ctx.is_testing
+    json_rpc_request = ctx.json_rpc_request
+    tool_name = ctx.tool_name
+
+    # Step 2: Anomaly detection
+    # -------------------------------------------------------------------------
+    # Testing bypass: skip anomaly for admin is_testing requests so test suites
+    # don't accumulate window state.
+    from app.services.anomaly import detect as detect_anomaly
+
+    anomaly_score = 0.0
+    if not is_testing:
+        try:
+            anomaly_result = await detect_anomaly(
+                client_id=client_id, tool_name=tool_name, method=json_rpc_request.get("method")
+            )
+            anomaly_score = anomaly_result.anomaly_score
+        except Exception as exc:
+            # Anomaly detection is non-blocking — a failure here should not
+            # block invocation, but must be logged for investigation.
+            logger.warning(
+                "Anomaly detection failed — defaulting score to 0.0",
+                extra={"client_id": client_id, "tool_name": tool_name, "error": str(exc)},
+            )
+
+    # -------------------------------------------------------------------------
+    ctx.anomaly_score = anomaly_score
+
+async def _stage_recent_calls(ctx: "InvocationContext") -> None:
+    """Step 2.3. Recent-call window for OPA's structural anomaly rules.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    # OPAUnavailableError was imported in invoke_tool's preamble, so extracting this
+    # gate put it out of scope — a fail-closed path would have raised NameError
+    # instead of the 503-mapped error. Caught by the *_yields_503 tests. Same class
+    # as the _tf_settings leak: extraction must account for IMPORT bindings, not
+    # just assignments.
+    from app.services.policy import OPAUnavailableError
+    client_id = ctx.client_id
+    is_testing = ctx.is_testing
+    tool_name = ctx.tool_name
+
+    # Step 2.3: Fetch recent_calls for OPA anomaly structural evaluation.
+    # -------------------------------------------------------------------------
+    # Task 1.7 (DET-F3): The anomaly.rego structural rules (credential_then_exec,
+    # web_search→bulk_read, etc.) are evaluated WITHIN the single authz OPA query
+    # rather than as a separate HTTP round-trip. We populate input.recent_calls
+    # from the Redis window (already updated by detect_anomaly above) so that
+    # authz.rego can import structural_deny_reasons from data.mcp.anomaly.
+    #
+    # FAIL-CLOSED (INV-004 parity): if we cannot read the window (Redis failure),
+    # we raise OPAUnavailableError → 503. Sending an empty list would silently
+    # bypass structural deny rules (same class as INV-004 allow-through on OPA
+    # unreachable). The difference from Step 2's anomaly score: the Python scorer
+    # is advisory; the structural Rego rules are mandatory policy gates.
+    recent_calls: list[dict] = []
+    if not is_testing:
+        try:
+            recent_calls = await _get_recent_calls_for_opa(client_id)
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch recent_calls for OPA anomaly evaluation — "
+                "failing closed per INV-004 parity (anomaly path)",
+                extra={"client_id": client_id, "tool_name": tool_name, "error": str(exc)},
+            )
+            raise OPAUnavailableError(
+                f"Anomaly recent_calls fetch failed: {exc}"
+            ) from exc
+
+    # -------------------------------------------------------------------------
+    ctx.recent_calls = recent_calls
+
+async def _stage_profile(ctx: "InvocationContext") -> None:
+    """Step 2.5. Profile resolution (both systems, deny-dominant) -> OPA input.profile.
+    Fail-closed: a lookup failure raises rather than defaulting to allow.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    # OPAUnavailableError was imported in invoke_tool's preamble, so extracting this
+    # gate put it out of scope — a fail-closed path would have raised NameError
+    # instead of the 503-mapped error. Caught by the *_yields_503 tests. Same class
+    # as the _tf_settings leak: extraction must account for IMPORT bindings, not
+    # just assignments.
+    from app.services.policy import OPAUnavailableError
+    client_id = ctx.client_id
+    function_name = ctx.function_name
+    json_rpc_request = ctx.json_rpc_request
+    params = ctx.params
+    profile_uuid = ctx.profile_uuid
+    tool_name = ctx.tool_name
+
+    # Step 2.5: Profile lookup — check mcp_profiles for per-identity permission
+    # -------------------------------------------------------------------------
+    # If a profile row exists for (client_id, tool_name), inject it into OPA input.
+    # OPA then applies mcp_disabled_for_profile / function_not_allowed_for_profile rules.
+    # Absence of a row = platform default = no restriction.
+    #
+    # Task 1.9 (SELF-F2): derive tool_function_name from json_rpc_request.params.name
+    # (the JSON-RPC function identifier), NOT from the tool body arguments.
+    #
+    # On the direct tools/call path (mcp_server.py _route_to_registry), the request
+    # is built as: params = {name: <function_name>, arguments: {...}}.
+    # Previously function_name = params.arguments.get("tool_name", "") which is
+    # always "" for direct calls — silently bypassing allowed_functions restrictions.
+    #
+    # The correct source is json_rpc_request["params"]["name"]:
+    #   - For tools/call: this is the function being invoked (e.g. "write_file")
+    #   - For other methods: falls back to "" (no function restriction)
+    _jrpc_params = json_rpc_request.get("params", {})
+    function_name: str = _jrpc_params.get("name", "") or ""
+
+    # Task 1.10 (SELF-F2): fail-closed profile lookup with Redis last-known-state cache.
+    # Task 4.3: when profile_uuid is set, look up by (profile_uuid, tool_name) — named-profile path.
+    # DB success → profile used + cache updated
+    # DB error + cache hit → cached profile used
+    # DB error + cache miss → ProfileLookupError raised → OPAUnavailableError → 503
+    profile_data: dict = {}
+    try:
+        _profile_result = await _lookup_profile_with_cache(
+            client_id, tool_name, profile_uuid=profile_uuid
+        )
+        if _profile_result is not None:
+            profile_data = _profile_result
+        # NOTE: named-profile default-deny (Fix 1,
+        # docs/spec/11-server-lifecycle-and-hardening-batch.md §1) used to be
+        # synthesized here. It now lives inside _lookup_profile_with_cache so that
+        # discovery and invoke resolve it identically — keeping it here as well
+        # would double-apply it on one path only.
+    except ProfileLookupError as _profile_exc:
+        logger.error(
+            "Profile lookup fail-closed: DB unreachable and no cached profile — "
+            "returning 503 per Task 1.10 (SELF-F2) fail-closed mandate",
+            extra={"client_id": client_id, "tool_name": tool_name, "error": str(_profile_exc)},
+        )
+        raise OPAUnavailableError(
+            f"Profile lookup failed (DB unreachable, no cache): {_profile_exc}"
+        ) from _profile_exc
+
+    # -------------------------------------------------------------------------
+    ctx.profile_data = profile_data
+
+async def _stage_owned_servers(ctx: "InvocationContext") -> None:
+    """Step 2.7. Owned server ids for the server_owner/manager OPA rules.
+
+    Body moved VERBATIM from invoke_tool (Phase 2). Locals are unpacked from ctx
+    at the top and results written back at the bottom, so the logic is unchanged.
+    Gate ORDER is a security invariant — see
+    tests/unit/services/test_invoke_tool_gate_order.py before reordering.
+    """
+    client_id = ctx.client_id
+    client_roles = ctx.client_roles
+
+    # Step 2.7: Resolve owned server IDs for server_owner/manager OPA rules.
+    # Only fetched when the caller holds one of those roles (fast-path for
+    # all other roles). Fails open (empty list) so a transient DB/Redis error
+    # does not block callers that have explicit grants.
+    # -------------------------------------------------------------------------
+    # Phase 3 (V025) will add owner_max_risk_level as a DB column on
+    # server_registry. Until then, default to "medium" as documented in
+    # docs/RBAC.md §server_owner.  # TODO: read from server_registry after V025.
+    _OWNER_MAX_RISK_LEVEL_DEFAULT = "medium"
+    owned_server_ids: list[str] = []
+    owner_max_risk_level: str = _OWNER_MAX_RISK_LEVEL_DEFAULT
+
+    if any(r in {"server_owner", "manager"} for r in client_roles):
+        from app.services.entitlement import get_owned_server_ids
+        owned_server_ids = await get_owned_server_ids(client_id)
+
+    # -------------------------------------------------------------------------
+    ctx.owned_server_ids = owned_server_ids
+    ctx.owner_max_risk_level = owner_max_risk_level
 
 
 async def invoke_tool(
@@ -444,367 +1137,77 @@ async def invoke_tool(
         OPADenyError: If OPA denies the invocation.
         OPAUnavailableError: If OPA is unreachable (returns 503).
     """
+    from app.services.anomaly import evaluate_anomaly
     from app.services.policy import OPADenyError, OPAUnavailableError, evaluate_policy
 
-    tool_id = tool_record["tool_id"]
-    tool_name = tool_record["name"]
-    tool_status = tool_record["status"]
-    tool_risk_level = tool_record.get("risk_level", "low")
-    tool_server_id: str = str(tool_record["server_id"]) if tool_record.get("server_id") else ""
-    upstream_url = tool_record["upstream_url"]
-    params = json_rpc_request.get("params", {}).get("arguments", {})
+    # Phase 1: one context object replaces the 24 locals that used to cross the
+    # pre-dispatch/dispatch boundary. Gates take ctx and raise to deny.
+    ctx = InvocationContext.build(
+        tool_record=tool_record,
+        json_rpc_request=json_rpc_request,
+        client_id=client_id,
+        client_roles=client_roles,
+        is_testing=is_testing,
+        request_id=request_id,
+        inbound_auth=inbound_auth,
+        principal_id=principal_id,
+        principal_type=principal_type,
+        user_kc_token=user_kc_token,
+        source_ip=source_ip,
+        session_jti=session_jti,
+        profile_uuid=profile_uuid,
+        principal_issuer=principal_issuer,
+        principal_display_sub=principal_display_sub,
+    )
+
+    # The dispatch half below still reads these by bare name; bind them from ctx so
+    # that ~590 lines stay byte-identical in this phase.
+    tool_id = ctx.tool_id
+    tool_name = ctx.tool_name
+    tool_status = ctx.tool_status
+    tool_risk_level = ctx.tool_risk_level
+    tool_server_id = ctx.tool_server_id
+    upstream_url = ctx.upstream_url
+    params = ctx.params
+    function_name = ctx.function_name
 
     # -------------------------------------------------------------------------
-    # Step 1: INV-005 — Block unavailable/quarantined tools before OPA evaluation
-    # -------------------------------------------------------------------------
-    if tool_status == "disabled":
-        raise ToolDisabledError(tool_id, tool_name)
+    # ---------------------------------------------------------------------
+    # PRE-DISPATCH GATES (Steps 1 -> 2.7), extracted in Phase 2.
+    # THE ORDER OF THESE CALLS IS A SECURITY INVARIANT. Each edge is pinned by
+    # tests/unit/services/test_invoke_tool_gate_order.py — read it before you
+    # insert, reorder or remove a line here. Status must precede everything;
+    # nothing here may fetch a credential or touch the network.
+    # ---------------------------------------------------------------------
+    await _gate_tool_status(ctx)
+    await _gate_maintenance(ctx)
+    await _gate_scan_freshness(ctx)
+    await _gate_entitlement(ctx)
+    await _gate_taint_floor(ctx)
+    await _stage_anomaly(ctx)
+    await _stage_recent_calls(ctx)
+    await _stage_profile(ctx)
+    await _stage_owned_servers(ctx)
 
-    if tool_status == "quarantined":
-        raise ToolQuarantinedError(tool_id, tool_name)
-
-    if tool_status == "deprecated":
-        raise ToolDeprecatedError(tool_id, tool_name)
-
-    # -------------------------------------------------------------------------
-    # Step 1.1: Debug/maintenance mode — hard deny for everyone except the
-    # server's owner and its (max 2) maintainers. No role-based bypass: an
-    # admin is not exempt, by explicit product requirement. Fail closed if
-    # the lookup itself errors (a DB hiccup must not silently grant access
-    # to a server someone deliberately locked down).
-    # -------------------------------------------------------------------------
-    if tool_server_id:
-        from sqlalchemy import text as _maint_sql
-
-        from app.core.database import AsyncSessionLocal as _MaintDBSession
-
-        try:
-            async with _MaintDBSession() as _mconn:
-                _mrow = (await _mconn.execute(
-                    _maint_sql(
-                        "SELECT debug_mode, owner_sub, maintainers FROM server_registry "
-                        "WHERE server_id = :sid AND deleted_at IS NULL"
-                    ),
-                    {"sid": tool_server_id},
-                )).fetchone()
-        except Exception as exc:
-            logger.error(
-                "Debug-mode lookup failed for server_id=%s — failing closed",
-                tool_server_id, extra={"error": str(exc)},
-            )
-            raise ServerInMaintenanceError(tool_id, tool_name, tool_server_id) from exc
-
-        if _mrow and _mrow.debug_mode:
-            allowed = {_mrow.owner_sub, *(_mrow.maintainers or [])}
-            if client_id not in allowed:
-                raise ServerInMaintenanceError(tool_id, tool_name, tool_server_id)
-
-    # -------------------------------------------------------------------------
-    # Step 1.2: Supply-chain scan freshness gate (Stage 3).
-    # If the tool is linked to a server and SCAN_FRESHNESS_ENFORCED=True,
-    # deny calls to servers whose last_rescanned_at is older than
-    # SCAN_MAX_AGE_HOURS or NULL (never rescanned).
-    # When SCAN_FRESHNESS_ENFORCED=False (default), only a warning is emitted.
-    # -------------------------------------------------------------------------
-    if tool_server_id:
-        from datetime import timedelta
-
-        from sqlalchemy import text as _sql_text
-
-        from app.core.config import settings as _scan_settings
-        from app.core.database import AsyncSessionLocal
-
-        try:
-            async with AsyncSessionLocal() as _conn:
-                _row = await _conn.execute(
-                    _sql_text(
-                        "SELECT last_rescanned_at FROM server_registry "
-                        "WHERE server_id = :sid AND deleted_at IS NULL"
-                    ),
-                    {"sid": tool_server_id},
-                )
-                _scan_row = _row.fetchone()
-            _last = _scan_row[0] if _scan_row else None
-            _age_limit = datetime.now(UTC) - timedelta(hours=_scan_settings.SCAN_MAX_AGE_HOURS)
-            _stale = _last is None or _last < _age_limit
-            if _stale:
-                if _scan_settings.SCAN_FRESHNESS_ENFORCED:
-                    await _emit_audit_event(
-                        tool_id=str(tool_id) if tool_id is not None else None,
-                        tool_name=tool_name,
-                        tool_version=tool_record.get("version"),
-                        client_id=client_id,
-                        outcome="deny",
-                        deny_reasons=["scan_freshness_stale"],
-                        request_id=request_id,
-                        latency_ms=0,
-                        anomaly_score=0.0,
-                        opa_decision_id="",
-                        is_testing=is_testing,
-                        source_ip=source_ip,
-                        principal_type=principal_type,
-            principal_id=principal_id,
-                        roles=client_roles,
-                        session_jti=session_jti,
-                    )
-                    raise ScanFreshnessError(tool_id, tool_name, _last)
-                logger.warning(
-                    "Scan freshness stale for server %s (last=%s) — warn-only "
-                    "(SCAN_FRESHNESS_ENFORCED=False)",
-                    tool_server_id, _last,
-                )
-        except ScanFreshnessError:
-            raise
-        except Exception as _sf_exc:
-            # CR-11: a lookup failure must not silently skip the gate — fail closed
-            # to match "Fail closed on scan lookup errors" when enforcement is on.
-            # Warn-only mode (default) still just logs, since nothing is enforced.
-            logger.warning("Scan freshness check failed for %s: %s", tool_server_id, _sf_exc)
-            if _scan_settings.SCAN_FRESHNESS_ENFORCED:
-                await _emit_audit_event(
-                    tool_id=str(tool_id) if tool_id is not None else None,
-                    tool_name=tool_name,
-                    tool_version=tool_record.get("version"),
-                    client_id=client_id,
-                    outcome="deny",
-                    deny_reasons=["scan_freshness_lookup_failed"],
-                    request_id=request_id,
-                    latency_ms=0,
-                    anomaly_score=0.0,
-                    opa_decision_id="",
-                    is_testing=is_testing,
-                    source_ip=source_ip,
-                    principal_type=principal_type,
-            principal_id=principal_id,
-                    roles=client_roles,
-                    session_jti=session_jti,
-                )
-                raise ScanFreshnessError(tool_id, tool_name, None) from _sf_exc
-
-    # -------------------------------------------------------------------------
-    # Step 1.5: 6.2 — discovery==invoke. If the tool is linked to a server,
-    # the caller must be entitled to that server (same resolver the catalog
-    # uses for discovery). No role exception: admin/platform_admin are gated
-    # identically. Unlinked tools (server_id is NULL) are unaffected here.
-    # App-layer, pre-OPA, fail-closed — like the INV-005 quarantine gate above.
-    # INV-001: emit a synchronous deny audit here so the gate is recorded
-    # uniformly on every path (REST + both /mcp) before the exception propagates.
-    # -------------------------------------------------------------------------
-    from app.services.entitlement import NotEntitledError, enforce_tool_entitlement
-    try:
-        await enforce_tool_entitlement(tool_record, principal_id, principal_type)
-    except NotEntitledError as ent_exc:
-        await _emit_audit_event(
-            tool_id=str(tool_id) if tool_id is not None else None,
-            tool_name=tool_name,
-            tool_version=tool_record.get("version"),
-            client_id=client_id,
-            outcome="deny",
-            deny_reasons=[f"not_entitled:{ent_exc.reason}"],
-            request_id=request_id,
-            latency_ms=0,
-            anomaly_score=0.0,
-            opa_decision_id="",
-            is_testing=is_testing,
-            source_ip=source_ip,
-            principal_type=principal_type,
-            principal_id=principal_id,
-            roles=client_roles,
-            session_jti=session_jti,
-        )
-        raise
-
-    # -------------------------------------------------------------------------
-    # Step 1.6: B-coarse taint floor (RFC-0001 §8.1, PRD-0001 M2).
-    # Order: INV-005 quarantine -> taint-floor -> INV-004 OPA. A session tainted
-    # by a prior untrusted result cannot invoke a high-sensitivity or credential-
-    # injecting sink. Fail-closed (INV-015); the deny is audited (INV-001) before
-    # the exception propagates, like the entitlement gate above. Dark unless the
-    # TAINT_FLOOR_ENABLED flag is set.
-    # -------------------------------------------------------------------------
+    # Unpack the gate outputs the dispatch half below still reads by bare name,
+    # so the remaining ~590 lines stay byte-identical in this phase.
+    #
+    # _tf_settings was previously bound by an `import ... as` INSIDE the taint step and
+    # then read again far below in the response-meta code. Extracting the gate moved
+    # that binding out of scope — caught immediately by the Phase 0 allow-path tests
+    # (NameError), which is exactly why those two tests exist. Import bindings cross
+    # boundaries just like assignments do; an assignment-only audit misses them.
     from app.core.config import settings as _tf_settings
-    _taint_server_trust_tier: int | None = None  # stashed for write-before-forward below
-    _tainted: bool | None = None  # GAP-1: session taint state, recorded on the ALLOW audit too
-    # Phase 0 (2026-07-18, PRD-0010): taint floor is NOTIFY-ONLY for now, never blocks.
-    # See docs/prd/PRD-0010-taint-floor-mode-delegation.md for the full mode/delegation roadmap.
-    _taint_notice: str | None = None
-    if _tf_settings.TAINT_FLOOR_ENABLED:
-        from app.services.taint_floor import (
-            effective_injection_mode,
-            effective_required_integrity,
-            taint_floor_decision,
-        )
-        from app.services.taint_store import is_tainted_for_principal
 
-        _taint_server_trust_tier, _server_default_injection = await _lookup_server_trust(
-            tool_server_id
-        )
-        _raw_required = tool_record.get("required_integrity")
-        _tool_required = 1 if _raw_required is None else int(_raw_required)
-        _eff_injection = effective_injection_mode(
-            tool_record.get("injection_mode"),
-            _server_default_injection,
-        )
-        _required = effective_required_integrity(_tool_required, _eff_injection)
-        _tainted = await is_tainted_for_principal(client_id)  # keyed on logical identity, not auth-method (LOGIC-005)
-        if taint_floor_decision(tainted=_tainted, required_integrity=_required) == "deny":
-            # Phase 0 (PRD-0010): NOTIFY-ONLY. Previously raised TaintFloorDenyError here
-            # (hard deny) — now allow the call through and surface a disclaimer in the
-            # response meta instead. Still audited (outcome="allow") so the
-            # taint event isn't silently lost. TaintFloorDenyError / the deny path are kept
-            # intact in code for Phase 1 (per-profile/tenant mode switching) to re-enable.
-            _taint_notice = (
-                f"This result may include data derived from an untrusted or "
-                f"not-yet-reviewed source (required_integrity={_required}); the "
-                f"platform's taint-floor block is currently in notify-only mode."
-            )
-            await _emit_audit_event(
-                tool_id=str(tool_id) if tool_id is not None else None,
-                tool_name=tool_name,
-                tool_version=tool_record.get("version"),
-                client_id=client_id,
-                outcome="allow",
-                # Fix 7 (docs/spec/11-server-lifecycle-and-hardening-batch.md
-                # §7): this is an ALLOW — deny_reasons must stay empty so the
-                # event isn't misread as a deny. The taint notice is advisory
-                # only and belongs in `notices`.
-                deny_reasons=[],
-                notices=[f"taint_floor_notice:required_integrity={_required}"],
-                request_id=request_id,
-                latency_ms=0,
-                anomaly_score=0.0,
-                opa_decision_id="",
-                is_testing=is_testing,
-                source_ip=source_ip,
-                principal_type=principal_type,
-            principal_id=principal_id,
-                roles=client_roles,
-                session_jti=session_jti,
-                tainted=_tainted,
-            )
+    _tainted = ctx.tainted
+    _taint_notice = ctx.taint_notice
+    _taint_server_trust_tier = ctx.taint_server_trust_tier
+    anomaly_score = ctx.anomaly_score
+    recent_calls = ctx.recent_calls
+    profile_data = ctx.profile_data
+    owned_server_ids = ctx.owned_server_ids
+    owner_max_risk_level = ctx.owner_max_risk_level
 
-    # -------------------------------------------------------------------------
-    # Step 2: Anomaly detection
-    # -------------------------------------------------------------------------
-    # Testing bypass: skip anomaly for admin is_testing requests so test suites
-    # don't accumulate window state.
-    from app.services.anomaly import detect as detect_anomaly
-
-    anomaly_score = 0.0
-    if not is_testing:
-        try:
-            anomaly_result = await detect_anomaly(
-                client_id=client_id, tool_name=tool_name, method=json_rpc_request.get("method")
-            )
-            anomaly_score = anomaly_result.anomaly_score
-        except Exception as exc:
-            # Anomaly detection is non-blocking — a failure here should not
-            # block invocation, but must be logged for investigation.
-            logger.warning(
-                "Anomaly detection failed — defaulting score to 0.0",
-                extra={"client_id": client_id, "tool_name": tool_name, "error": str(exc)},
-            )
-
-    # -------------------------------------------------------------------------
-    # Step 2.3: Fetch recent_calls for OPA anomaly structural evaluation.
-    # -------------------------------------------------------------------------
-    # Task 1.7 (DET-F3): The anomaly.rego structural rules (credential_then_exec,
-    # web_search→bulk_read, etc.) are evaluated WITHIN the single authz OPA query
-    # rather than as a separate HTTP round-trip. We populate input.recent_calls
-    # from the Redis window (already updated by detect_anomaly above) so that
-    # authz.rego can import structural_deny_reasons from data.mcp.anomaly.
-    #
-    # FAIL-CLOSED (INV-004 parity): if we cannot read the window (Redis failure),
-    # we raise OPAUnavailableError → 503. Sending an empty list would silently
-    # bypass structural deny rules (same class as INV-004 allow-through on OPA
-    # unreachable). The difference from Step 2's anomaly score: the Python scorer
-    # is advisory; the structural Rego rules are mandatory policy gates.
-    recent_calls: list[dict] = []
-    if not is_testing:
-        try:
-            recent_calls = await _get_recent_calls_for_opa(client_id)
-        except Exception as exc:
-            logger.error(
-                "Failed to fetch recent_calls for OPA anomaly evaluation — "
-                "failing closed per INV-004 parity (anomaly path)",
-                extra={"client_id": client_id, "tool_name": tool_name, "error": str(exc)},
-            )
-            raise OPAUnavailableError(
-                f"Anomaly recent_calls fetch failed: {exc}"
-            ) from exc
-
-    # -------------------------------------------------------------------------
-    # Step 2.5: Profile lookup — check mcp_profiles for per-identity permission
-    # -------------------------------------------------------------------------
-    # If a profile row exists for (client_id, tool_name), inject it into OPA input.
-    # OPA then applies mcp_disabled_for_profile / function_not_allowed_for_profile rules.
-    # Absence of a row = platform default = no restriction.
-    #
-    # Task 1.9 (SELF-F2): derive tool_function_name from json_rpc_request.params.name
-    # (the JSON-RPC function identifier), NOT from the tool body arguments.
-    #
-    # On the direct tools/call path (mcp_server.py _route_to_registry), the request
-    # is built as: params = {name: <function_name>, arguments: {...}}.
-    # Previously function_name = params.arguments.get("tool_name", "") which is
-    # always "" for direct calls — silently bypassing allowed_functions restrictions.
-    #
-    # The correct source is json_rpc_request["params"]["name"]:
-    #   - For tools/call: this is the function being invoked (e.g. "write_file")
-    #   - For other methods: falls back to "" (no function restriction)
-    _jrpc_params = json_rpc_request.get("params", {})
-    function_name: str = _jrpc_params.get("name", "") or ""
-
-    # Task 1.10 (SELF-F2): fail-closed profile lookup with Redis last-known-state cache.
-    # Task 4.3: when profile_uuid is set, look up by (profile_uuid, tool_name) — named-profile path.
-    # DB success → profile used + cache updated
-    # DB error + cache hit → cached profile used
-    # DB error + cache miss → ProfileLookupError raised → OPAUnavailableError → 503
-    profile_data: dict = {}
-    try:
-        _profile_result = await _lookup_profile_with_cache(
-            client_id, tool_name, profile_uuid=profile_uuid
-        )
-        if _profile_result is not None:
-            profile_data = _profile_result
-        # Fix 1 (docs/spec/11-server-lifecycle-and-hardening-batch.md §1):
-        # named-profile default-deny. No explicit binding row exists for
-        # THIS tool under the named profile. If the profile has been
-        # configured at all (>=1 binding row anywhere), an unbound tool
-        # is "not granted" — synthesize a disabled profile so OPA denies
-        # with mcp_disabled_for_profile. An unconfigured profile (zero
-        # binding rows) keeps default-allow so it isn't bricked before
-        # an admin has added the first binding. Legacy per-identity path
-        # (profile_uuid is None) is unaffected — still default-allow.
-        elif profile_uuid and await _named_profile_has_any_binding(profile_uuid):
-            profile_data = {"enabled": False, "allowed_functions": []}
-    except ProfileLookupError as _profile_exc:
-        logger.error(
-            "Profile lookup fail-closed: DB unreachable and no cached profile — "
-            "returning 503 per Task 1.10 (SELF-F2) fail-closed mandate",
-            extra={"client_id": client_id, "tool_name": tool_name, "error": str(_profile_exc)},
-        )
-        raise OPAUnavailableError(
-            f"Profile lookup failed (DB unreachable, no cache): {_profile_exc}"
-        ) from _profile_exc
-
-    # -------------------------------------------------------------------------
-    # Step 2.7: Resolve owned server IDs for server_owner/manager OPA rules.
-    # Only fetched when the caller holds one of those roles (fast-path for
-    # all other roles). Fails open (empty list) so a transient DB/Redis error
-    # does not block callers that have explicit grants.
-    # -------------------------------------------------------------------------
-    # Phase 3 (V025) will add owner_max_risk_level as a DB column on
-    # server_registry. Until then, default to "medium" as documented in
-    # docs/RBAC.md §server_owner.  # TODO: read from server_registry after V025.
-    _OWNER_MAX_RISK_LEVEL_DEFAULT = "medium"
-    owned_server_ids: list[str] = []
-    owner_max_risk_level: str = _OWNER_MAX_RISK_LEVEL_DEFAULT
-
-    if any(r in {"server_owner", "manager"} for r in client_roles):
-        from app.services.entitlement import get_owned_server_ids
-        owned_server_ids = await get_owned_server_ids(client_id)
-
-    # -------------------------------------------------------------------------
     # Step 3: OPA policy evaluation (INV-003, INV-004)
     # -------------------------------------------------------------------------
     try:
@@ -894,9 +1297,8 @@ async def invoke_tool(
         # upstream_allowlist_entry was not pre-fetched in tool_record (e.g. SELECT *
         # from tool_registry does not carry server_registry columns). Fetch it once.
         try:
-            from sqlalchemy import text as _text
-
             from app.core.database import AsyncSessionLocal as _ASL
+            from sqlalchemy import text as _text
             async with _ASL() as _db:
                 _sr = await _db.execute(
                     _text(
@@ -950,8 +1352,7 @@ async def invoke_tool(
     # enforcement, or the credentials-in-URL check.
     # -------------------------------------------------------------------------
     from app.core.config import settings
-    from app.services.ssrf import SSRFError
-    from app.services.ssrf import validate_server_url as _validate_server_url
+    from app.services.ssrf import SSRFError, validate_server_url as _validate_server_url
 
     try:
         _validate_server_url(
@@ -972,8 +1373,8 @@ async def invoke_tool(
     # tools. CredentialInjectionError is re-raised after emitting a deny audit.
     # -------------------------------------------------------------------------
     from app.credential_broker.dispatcher import (
-        CredentialEnrollmentRequiredError,
         CredentialInjectionError,
+        CredentialEnrollmentRequiredError,
         CrossTypePrincipalFallbackDenied,
     )
 
@@ -1123,7 +1524,7 @@ async def invoke_tool(
     # -------------------------------------------------------------------------
     # (credential injection was moved to Step 3c-pre, before DNS-rebind)
 
-    start_ts = datetime.now(UTC)
+    start_ts = datetime.now(timezone.utc)
     upstream_response: dict[str, Any] = {}
     upstream_error: Exception | None = None
     upstream_challenge: dict[str, Any] | None = None
@@ -1285,7 +1686,7 @@ async def invoke_tool(
             if credential is not None:
                 credential.zero()
 
-        end_ts = datetime.now(UTC)
+        end_ts = datetime.now(timezone.utc)
         latency_ms = int((end_ts - start_ts).total_seconds() * 1000)
 
         # -------------------------------------------------------------------------
@@ -1410,7 +1811,7 @@ async def invoke_tool(
         }
 
     # -------------------------------------------------------------------------
-    # Write-before-forward (RFC-0001 §8.1, PRD-0001 M2). A real result came back
+    # Write-before-forward (SPEC-0001 §8.1, PRD-0001 M2). A real result came back
     # from the upstream server. If that server is untrusted (binary integrity 0;
     # fail-closed when trust_tier is unknown), taint the principal's session BEFORE
     # the result is forwarded — and BEFORE the response-injection screen below, so a
@@ -1430,9 +1831,9 @@ async def invoke_tool(
     # processes them as content, so they must be screened here before return.
     # -------------------------------------------------------------------------
     from app.services.response_filter import (
+        screen_response,
         BLOCK_ON_MATCH,
         INJECTION_DETECTED_RESPONSE,
-        screen_response,
     )
 
     screened_text = json.dumps(upstream_response.get("result", upstream_response))
@@ -1491,9 +1892,8 @@ async def _lookup_server_trust(server_id: str) -> tuple[int | None, str | None]:
     """
     if not server_id:
         return (None, None)
-    from sqlalchemy import text
-
     from app.core.database import AsyncSessionLocal
+    from sqlalchemy import text
 
     try:
         async with AsyncSessionLocal() as _db:
@@ -1651,11 +2051,9 @@ def _compute_hmac_signature(sha256_hash: str, event: Any) -> str | None:
     may omit the key; the checker falls back to plain hash verification).
     """
     try:
-        import hashlib as _hashlib
         import hmac as _hmac
-
+        import hashlib as _hashlib
         from mcp_audit_logger.hasher import canonical_audit_json as _canonical_audit_json
-
         from app.core.config import settings as _settings
 
         # Use settings (not os.environ) so secrets injected via Vault agent,
@@ -1728,7 +2126,7 @@ async def _emit_audit_event(
             is reserved for reasons a request was actually denied.
     """
     try:
-        from mcp_audit_logger import AuditEvent, AuditEventType, AuditOutcome
+        from mcp_audit_logger import AuditEvent, AuditEventType, AuditOutcome, MCPAuditLogger
 
         outcome_map = {
             "allow": AuditOutcome.ALLOW,
@@ -1784,7 +2182,6 @@ async def _emit_audit_event(
         # a nullable UUID FK, so NULL is valid; cast is applied only for non-None.
         try:
             from sqlalchemy import text as _text
-
             from app.core.database import engine as _db_engine
             async with _db_engine.begin() as conn:
                 await conn.execute(
@@ -2030,7 +2427,7 @@ class ServerInMaintenanceError(Exception):
 class TaintFloorDenyError(Exception):
     """Raised when the B-coarse taint floor denies a sink in a tainted session.
 
-    RFC-0001 §8.1 / PRD-0001 M2. App-layer deny, pre-OPA, fail-closed — the deny
+    SPEC-0001 §8.1 / PRD-0001 M2. App-layer deny, pre-OPA, fail-closed — the deny
     is audited (INV-001) before this propagates. Routers map it to a deny response.
     """
 

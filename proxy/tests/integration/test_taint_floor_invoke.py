@@ -1,4 +1,4 @@
-"""Integration: B-coarse taint floor through invoke_tool (PRD-0001 M2 / RFC-0001 §8.1).
+"""Integration: B-coarse taint floor through invoke_tool (PRD-0001 M2 / SPEC-0001 §8.1).
 
 Runs against real Postgres + Redis (inside the proxy container):
   pytest tests/integration/test_taint_floor_invoke.py -m integration

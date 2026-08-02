@@ -9,7 +9,7 @@ See docs/API.md Section 2.1 for full specification.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter
@@ -62,18 +62,34 @@ async def liveness() -> JSONResponse:
     }
 
     critical_ok = db_ok and redis_ok and opa_ok
-    overall = "ok" if critical_ok else ("degraded" if any([db_ok, redis_ok, opa_ok]) else "error")
 
+    # Startup subsystems. lifespan() starts eight background services, each wrapped in
+    # `except Exception: logger.warning(...)` so a failure degrades rather than
+    # crash-loops. That is deliberate — but until now the failure existed ONLY in
+    # stdout, so /health answered "ok" while (for example) OPA grant reconciliation
+    # had silently stopped. Reporting them does not change whether the process starts.
+    from app.core import startup_state
+    subsystems = startup_state.snapshot()
+    degraded = startup_state.degraded_required()
+
+    overall = "ok" if critical_ok else ("degraded" if any([db_ok, redis_ok, opa_ok]) else "error")
+    if overall == "ok" and degraded:
+        overall = "degraded"
+
+    # Status code stays keyed on the LIVE critical dependencies only. A degraded
+    # background subsystem must be visible, but it must not start failing k8s liveness
+    # probes and restart-loop a proxy that is still correctly serving and denying.
     status_code = 200 if critical_ok else 503
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "status": overall,
-            "version": settings.PLATFORM_VERSION,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "services": services,
-        },
-    )
+    body = {
+        "status": overall,
+        "version": settings.PLATFORM_VERSION,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "services": services,
+        "subsystems": subsystems,
+    }
+    if degraded:
+        body["degraded_subsystems"] = degraded
+    return JSONResponse(status_code=status_code, content=body)
 
 
 @router.get("/health/ready", include_in_schema=True)

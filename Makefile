@@ -3,7 +3,7 @@
         db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle test-signed-bundle \
         assign-role compliance-run sbom-verify onboard-server \
         security-check health smoke-test ship-check demo \
-        dep-audit dep-audit-report dep-audit-images ui-dev ui-build \
+        dep-audit dep-audit-report dep-audit-images ui-acceptance \
         lab-init lab-init-force labup lab-up lab-down lab-down-volumes \
         lab-migrate-per-tool-dry lab-migrate-per-tool-activate lab-migrate-per-tool lab-migrate-validate \
         sdk-base \
@@ -75,8 +75,7 @@ help:
 	@echo "  make dep-audit         Scan deps for CVEs (auto-runs before up/build)"
 	@echo "  make dep-audit-report  Full dep audit with JSON report"
 	@echo "  make dep-audit-images  Full audit including pulled container images"
-	@echo "  make ui-dev            Run the UI dev server (dep-audit runs first)"
-	@echo "  make ui-build          Build the UI for production (dep-audit runs first)"
+	@echo "  make ui-acceptance     Run the portal acceptance suite (needs a live lab)"
 	@echo "                         (trufflehog scan + rego lint + OPA deny-default)"
 	@echo ""
 	@echo "Infrastructure:"
@@ -384,11 +383,11 @@ dep-audit-report:
 dep-audit-images:
 	@bash scripts/dep-audit.sh --json
 
-ui-dev: dep-audit
-	cd ui && npm ci && npm run dev
-
-ui-build: dep-audit
-	cd ui && npm ci && npm run build
+# ui-dev / ui-build removed 2026-07-25 along with ui/src — the React SPA was never
+# deployed (no compose service, no nginx location, no CI job). The live UI is the
+# server-rendered portal in proxy/app/routers/portal.py.
+ui-acceptance:
+	cd ui && npm ci && npm run acceptance
 
 # ─── Security invariant checks (CI gate — make security-check) ────────────────
 # Implements machine-verifiable checks from SECURITY_NONNEGATABLES.md.

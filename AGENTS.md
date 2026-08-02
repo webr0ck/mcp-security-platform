@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`proxy/app/` contains the Python 3.12 FastAPI enforcement service; its unit, integration, security, and performance tests live under `proxy/tests/`. OPA/Rego authorization rules are in `policies/rego/`, while `gateway/` holds Nginx and ModSecurity configuration. Use `lab/` and `podman-compose.lab.yml` for the self-contained Podman environment. Supporting components live in `observability/`, `scanner_worker/`, `build_worker/`, and `mcp-servers/`; deployment material is under `deployments/`, `infra/`, and `helm/`. The React/Vite frontend is in `ui/`, with Playwright tests in `ui/e2e/`. Operational helpers belong in `scripts/`.
+`proxy/app/` contains the Python 3.12 FastAPI enforcement service; its unit, integration, security, and performance tests live under `proxy/tests/`. OPA/Rego authorization rules are in `policies/rego/`, while `gateway/` holds Nginx and ModSecurity configuration. Use `lab/` and `podman-compose.lab.yml` for the self-contained Podman environment. Supporting components live in `observability/`, `scanner_worker/`, `build_worker/`, and `mcp-servers/`; deployment material is under `deployments/`, `infra/`, and `helm/`. The live UI is the server-rendered portal in `proxy/app/routers/portal.py` (HTML + htmx); `ui/` holds only its Playwright acceptance suite (`ui/e2e/portal-acceptance.spec.ts`). A React/Vite SPA in `ui/src` was deleted 2026-07-25 — it was never deployed (no compose service, no nginx location, no CI job) and had become a parallel implementation of screens the portal already served. Operational helpers belong in `scripts/`.
 
 ## Build, Test, and Development Commands
 

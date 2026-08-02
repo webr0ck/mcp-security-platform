@@ -505,7 +505,7 @@ class TestCacheInvalidation:
         # Verify setex was called with the right key and TTL
         mock_redis.setex.assert_awaited_once()
         call_args = mock_redis.setex.call_args[0]
-        assert call_args[0] == "mcp_profile:alice:file_tool"
+        assert call_args[0] == "mcp_profile:v2:id:alice:file_tool"
         assert call_args[1] == _PROFILE_CACHE_TTL_SECONDS
         stored_value = json.loads(call_args[2])
         assert stored_value["enabled"] is False

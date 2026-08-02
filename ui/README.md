@@ -1,58 +1,32 @@
-# MCP Security Platform — UI
+# ui/ — portal acceptance suite
 
-> **STATUS (2026-06): DEMO / NOT WIRED.** This standalone React SPA is **not mounted by any
-> deployment tier** and currently renders **mock data** (dashboard, server registry, portal,
-> install wizard); several buttons are stubs. The UI actually served by the proxy is the
-> server-rendered **htmx portal** (`proxy/app/routers/portal.py`, `admin_credentials.py`).
-> Treat this SPA as a design prototype — wiring it to the live API (`src/services/api.ts` →
-> backend routes) is roadmap. See the repo README "Admin credentials UI" row.
+This directory holds the **Playwright acceptance suite** for the platform's live UI.
 
-Standalone React + TypeScript + Vite frontend. **Zero external UI library dependency** — every component is hand-rolled with CSS custom properties, making it trivial to retheme or port to any stack.
+The live UI is the **server-rendered portal** at `proxy/app/routers/portal.py`
+(HTML + htmx), served at `/portal`.
 
-## Structure
+## There is no React app here any more
 
-```
-ui/
-├── src/
-│   ├── design/
-│   │   ├── tokens.css      ← Edit this to retheme the entire UI
-│   │   └── global.css      ← Base resets + shared patterns
-│   ├── types/index.ts      ← All shared TypeScript types
-│   ├── services/api.ts     ← API client — one place to swap backends
-│   └── components/
-│       ├── common/         ← Badge, Button, Card (reusable primitives)
-│       ├── layout/         ← AppShell, Sidebar
-│       ├── Dashboard/      ← SecurityDashboard (audit stream + detections)
-│       ├── AdminPanel/     ← OIDC config + server registry + credentials
-│       ├── Portal/         ← Tool catalog + role-based access
-│       └── Wizard/         ← 4-step installation wizard
-```
+A React/Vite SPA lived in `ui/src` until 2026-07-25. It was deleted because it was
+**never deployed**:
 
-## Quick start
+- no service in `docker-compose.yml`, `podman-compose.lab.yml` or any `compose.*.yml`
+- no `location` block in `gateway/nginx/conf.d/mcp-proxy.conf`
+- no CI job built it (`.github/workflows/ci.yml` builds only the proxy and
+  compliance-checker images)
 
-```bash
-cd ui
-npm install
-npm run dev        # → http://localhost:3100
-npm run build      # → dist/
-```
+It had grown into a parallel implementation of screens the portal already served —
+servers, submissions, limits, wizard — so every UI decision was being made twice and
+shipped zero-to-once. Its own e2e suite (`e2e/portal.spec.ts`) tested that dead app
+against mocks and is gone with it.
 
-The dev server proxies `/api/*` to `https://localhost` (the engine tier). Configure via `VITE_API_URL` env var.
+If you want a SPA, start from the portal's actual API surface and wire it into compose
+and nginx in the same change — otherwise it will drift out of existence again.
 
-## Customising
+## Running the suite
 
-**Retheme:** edit `src/design/tokens.css` — all colours, fonts, spacing, and border radii are CSS custom properties. No JavaScript changes needed.
+    make -f Makefile.lab lab-up          # the suite needs a live lab
+    cd ui && npm ci && npm run acceptance
 
-**Swap backend:** `src/services/api.ts` is the only file that knows about the API. All components use mock data while the API is unavailable; wire up real calls by replacing the `MOCK_*` constants with `api.*` function calls.
-
-**Add a view:** add an entry to `NAV_ITEMS` in `Sidebar.tsx`, add a `case` in `App.tsx`, and create your component folder.
-
-## API assumptions
-
-The UI talks to the MCP Security Platform proxy (`https://localhost`) via:
-- `GET /health` — service health
-- `GET /api/v1/audit` — audit events
-- `GET/POST /api/v1/admin/servers` — server registry
-- `GET/PUT /api/v1/auth/oidc/config` — OIDC configuration
-
-All endpoints require a valid session (Bearer token or API key). In dev, set `VITE_API_URL=https://localhost` and ensure the engine tier is running.
+or `make ui-acceptance` from the repo root. Config: `playwright.portal.config.ts`
+(targets the portal over TLS; override the host with `PORTAL_BASE_URL`).

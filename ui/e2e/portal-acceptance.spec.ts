@@ -13,6 +13,7 @@
  */
 
 import { test, expect, Page, Browser, BrowserContext } from '@playwright/test'
+import AxeBuilder from '@axe-core/playwright'
 
 const CREDS = {
   alice: ['alice', 'CudvCD5L3WzmmktMEVmWvRkLqFlI'],
@@ -122,7 +123,14 @@ test.describe('AC-02 Admin navigation (alice)', () => {
     // Nav was regrouped into 5 top-level sections (2026-07-07); see
     // proxy/app/routers/portal.py's _ADMIN_GROUPS for the canonical list.
     for (const group of ['Security', 'Servers', 'Access', 'Settings']) {
-      await expect(page.getByRole('button', { name: group, exact: true })).toBeVisible()
+      // Anchored regex, NOT exact: the Servers button renders an awaiting-review
+      // count badge inside itself (portal.py `adm-nav-badge`), so its accessible name
+      // becomes "Servers1" whenever a submission is pending. `exact: true` passed only
+      // because AC-06's /submit step never actually succeeded and the count was always
+      // zero — fixing that test broke this one.
+      await expect(
+        page.getByRole('button', { name: new RegExp(`^${group}\\s*\\d*$`) })
+      ).toBeVisible()
     }
     await ctx.close()
   })
@@ -318,7 +326,12 @@ test.describe('AC-05 Design-assist API', () => {
 
 // ── AC-06: Submission lifecycle ───────────────────────────────────────────────
 
-test.describe('AC-06 Submission lifecycle', () => {
+// .serial: these six steps are one chain sharing `serverId`. Declared explicitly so a
+// retry re-runs the chain FROM THE START. Previously a retry re-initialised the
+// module-level serverId to '', so `test.skip(!serverId)` skipped the retry — a failed
+// step then reported as "flaky" instead of "failed", and the /submit step silently
+// never passed at all while the suite showed green.
+test.describe.serial('AC-06 Submission lifecycle', () => {
   const serverName = `at-${SUFFIX}`
   let serverId = ''
 
@@ -339,7 +352,15 @@ test.describe('AC-06 Submission lifecycle', () => {
     test.skip(!aliceStorage || !serverId, 'pre-conditions not met')
     const ctx = await authedCtx(browser, 'alice')
     const resp = await ctx.request.patch(`/api/v1/submissions/${serverId}`, {
-      data: { injection_mode: 'kc_token_exchange', data_categories: ['pii'], has_write_ops: false },
+      data: {
+        injection_mode: 'kc_token_exchange',
+        data_categories: ['pii'],
+        has_write_ops: false,
+        // Required before /submit will accept a self-hosted draft (drafts default to
+        // is_self_hosted=true). Without it /submit returns 422 INCOMPLETE_SUBMISSION —
+        // which is CORRECT product behaviour that this suite was not satisfying.
+        requested_upstream_url: 'http://lab-mcp-echo:9000/mcp',
+      },
     })
     expect(resp.ok()).toBeTruthy()
     expect((await resp.json()).updated).toBe(true)
@@ -371,8 +392,12 @@ test.describe('AC-06 Submission lifecycle', () => {
     test.skip(!aliceStorage || !serverId, 'pre-conditions not met')
     const ctx = await authedCtx(browser, 'alice')
     const resp = await ctx.request.post(`/api/v1/submissions/${serverId}/submit`)
-    expect(resp.ok()).toBeTruthy()
-    expect((await resp.json()).submission_status).toBe('awaiting_review')
+    // Report WHAT the server said on failure. Bare `expect(resp.ok())` yields
+    // "expected true, received false", which says nothing about why and makes an
+    // intermittent failure undiagnosable after the fact.
+    const rawBody = await resp.text()
+    expect(resp.ok(), `POST /submit -> HTTP ${resp.status()}: ${rawBody}`).toBeTruthy()
+    expect(JSON.parse(rawBody).submission_status).toBe('awaiting_review')
     await ctx.close()
   })
 
@@ -467,5 +492,216 @@ test.describe('AC-08 GitHub URL validation', () => {
     })
     expect(resp.status()).toBe(201)
     await ctx.close()
+  })
+})
+
+// ── AC-09: portal access pill reflects the REAL profile decision ──────────────
+//
+// Added 2026-07-25. The portal read `mcp_profiles` directly and knew nothing about
+// named profiles, so it was a fourth un-synced re-implementation of the profile
+// decision and could render a green "Access enabled" pill for a server that denies
+// at invoke. It now resolves through the same function as tools/list and tools/call.
+//
+// There was no e2e coverage asserting card CONTENT at all — only that the fragment
+// loaded — which is why the drift went unnoticed.
+//
+// Targets the fragment directly rather than the rendered page: alice gets the ADMIN
+// shell (which does not embed the access grid), and `agent` — the role that DOES see
+// the agent portal — is excluded from _SELF_SERVICE_ALLOWED_ROLES and cannot toggle
+// its own profile at all.
+test.describe.serial('AC-09 Portal access pill matches invoke decision', () => {
+  const TARGET = 'echo-basic'
+  const FRAGMENT = '/portal/fragments/my-access'
+
+  // lab-echo's full tool set. A card is "enabled" if ANY of its tools is callable,
+  // so a meaningful test must disable them all — and that is also the semantic worth
+  // pinning: a server whose every tool is denied is genuinely unusable.
+  const SERVER_TOOLS = ['ping', 'slow_tool', 'echo-sa', 'echo-basic']
+
+  test('portal pill follows the profile decision, not a stale source', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+
+    for (const t of SERVER_TOOLS) {
+      const r = await ctx.request.post(`/api/v1/profiles/me/mcps/${t}/enable`)
+      expect(r.ok(), `enable ${t} -> ${r.status()}: ${await r.text()}`).toBeTruthy()
+    }
+    const enabledHtml = await (await ctx.request.get(FRAGMENT)).text()
+    expect(enabledHtml).toContain('Access enabled')
+
+    // Disabling ONE tool must NOT flip the card — the server is still usable.
+    await ctx.request.post(`/api/v1/profiles/me/mcps/echo-basic/disable`)
+    const partialHtml = await (await ctx.request.get(FRAGMENT)).text()
+    expect(partialHtml).toContain('Access enabled')
+
+    // Disabling ALL of them must flip it. The portal keyed this lookup on the SERVER
+    // name against a TOOL-keyed table, so it silently defaulted to enabled and the
+    // pill was decorative — it never showed "Access disabled" for any profile state.
+    for (const t of SERVER_TOOLS) {
+      const r = await ctx.request.post(`/api/v1/profiles/me/mcps/${t}/disable`)
+      expect(r.ok(), `disable ${t} -> ${r.status()}: ${await r.text()}`).toBeTruthy()
+    }
+    const disabledHtml = await (await ctx.request.get(FRAGMENT)).text()
+    expect(disabledHtml).toContain('Access disabled')
+
+    // Restore: leave no state behind (the F5 lesson).
+    for (const t of SERVER_TOOLS) {
+      await ctx.request.post(`/api/v1/profiles/me/mcps/${t}/enable`)
+    }
+    await ctx.close()
+  })
+
+  test('recovery tools cannot be self-disabled (self-lockout guard)', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+    const resp = await ctx.request.post('/api/v1/profiles/me/mcps/enable_mcp/disable')
+    const body = await resp.text()
+    expect(resp.status(), body).toBe(400)
+    expect(body).toContain('PROFILE_SELF_LOCKOUT_BLOCKED')
+    await ctx.close()
+  })
+
+  test('the deleted unfiltered catalog fragment is gone', async ({ browser }) => {
+    // GET /portal/fragments/catalog dumped every tool_registry row to any
+    // agent/auditor with no entitlement, grant or profile filtering.
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+    expect((await ctx.request.get('/portal/fragments/catalog')).status()).toBe(404)
+    await ctx.close()
+  })
+})
+
+// ── AC-10: Accessibility (axe-core) — R1.3 ────────────────────────────────────
+// Runs axe against the loaded /portal admin shell (alice) and agent shell
+// (bob) and fails on any 'critical' or 'serious' impact violation. 'moderate'/
+// 'minor' are reported but not gating — this is a floor, not full WCAG
+// conformance.
+
+test.describe('AC-10 Accessibility (axe-core)', () => {
+  async function axeScanPortal(browser: Browser, who: 'alice' | 'bob') {
+    const storage = who === 'alice' ? aliceStorage : bobStorage
+    const ctx = await browser.newContext({ ignoreHTTPSErrors: true, storageState: storage })
+    const page = await ctx.newPage()
+    await page.goto('/portal')
+    await page.waitForLoadState('networkidle')
+    const results = await new AxeBuilder({ page }).analyze()
+    await ctx.close()
+    return results
+  }
+
+  test('alice admin portal has no critical/serious violations', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const results = await axeScanPortal(browser, 'alice')
+    const gating = results.violations.filter(v => v.impact === 'critical' || v.impact === 'serious')
+    if (gating.length) {
+      console.log('AC-10 alice violations:', JSON.stringify(gating.map(v => ({
+        id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.length,
+      })), null, 2))
+    }
+    expect(gating, `violations: ${gating.map(v => `${v.id}(${v.impact})`).join(', ')}`).toEqual([])
+  })
+
+  test('bob agent portal has no critical/serious violations', async ({ browser }) => {
+    test.skip(!bobStorage, 'bob session not available')
+    const results = await axeScanPortal(browser, 'bob')
+    const gating = results.violations.filter(v => v.impact === 'critical' || v.impact === 'serious')
+    if (gating.length) {
+      console.log('AC-10 bob violations:', JSON.stringify(gating.map(v => ({
+        id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.length,
+      })), null, 2))
+    }
+    expect(gating, `violations: ${gating.map(v => `${v.id}(${v.impact})`).join(', ')}`).toEqual([])
+  })
+})
+
+/*
+ * AC-11 — every data-act in rendered markup resolves to a registered handler.
+ *
+ * R1.4 replaced 80 inline onclick= attributes with data-act delegation. The failure
+ * mode of that change is silent: a renamed or unregistered handler leaves a button
+ * that looks completely normal and does nothing when clicked. Nothing else in this
+ * suite would catch it — the old inline handlers had the same weakness, which is
+ * why several were only ever verified by hand.
+ *
+ * This walks the admin tabs, collects every [data-act] the server actually renders,
+ * and asserts each one is callable.
+ */
+test.describe('AC-11 Delegated actions are all wired', () => {
+  test('every rendered data-act resolves to a registered function', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+    const page = await ctx.newPage()
+
+    // A CSP violation surfaces only as a console error — the page still renders, the
+    // button just silently does nothing. Exactly the failure mode this suite exists
+    // to catch, so collect them rather than trusting the page to look right.
+    const cspErrors: string[] = []
+    page.on('console', m => {
+      const t = m.text()
+      if (/Content Security Policy|Refused to (execute|apply|load|connect)/i.test(t)) cspErrors.push(t)
+    })
+
+    const seen = new Set<string>()
+    const collect = async () => {
+      for (const a of await page.$$eval('[data-act]', els => els.map(e => e.getAttribute('data-act')))) {
+        if (a) seen.add(a)
+      }
+    }
+
+    await page.goto('/portal')
+    await page.waitForLoadState('networkidle')
+    await collect()
+
+    // Walk the admin tabs so fragment-rendered actions are covered too, not just
+    // the ones present on the initial shell.
+    for (const tab of ['servers', 'tools', 'credentials', 'grants', 'policy', 'audit', 'profile']) {
+      const btn = page.locator(`[data-act="loadAdminTab"][data-a0="${tab}"]`).first()
+      if (await btn.count()) {
+        await btn.click().catch(() => {})
+        await page.waitForTimeout(400)
+        await collect()
+      }
+    }
+
+    expect(seen.size, 'no data-act attributes found at all — the probe is not exercising the portal').toBeGreaterThan(10)
+
+    console.log('AC-11 data-act names rendered:', seen.size,
+      '| allowlist:', await page.evaluate(() => (window as any).PORTAL_ACTIONS.size),
+      '| handlers defined at script-end:', await page.evaluate(() => (window as any).__PORTAL_ACTIONS_DEFINED_AT_LOAD__))
+
+    const unresolved = await page.evaluate((names: string[]) => {
+      const reg = (window as any).PORTAL_ACTIONS
+      // Must be BOTH allowlisted and actually defined — checking only one of the two
+      // is how the first version of this passed against a completely dead dispatcher.
+      return names.filter(n => !(reg && reg.has(n)) || typeof (window as any)[n] !== 'function')
+    }, [...seen])
+
+    await ctx.close()
+    expect(unresolved, `data-act names with no handler: ${unresolved.join(', ')}`).toEqual([])
+    expect(cspErrors, `CSP violations: ${cspErrors.join(' | ')}`).toEqual([])
+  })
+})
+
+test.describe('AC-12 Portal Content-Security-Policy', () => {
+  test('portal HTML carries a nonce CSP with no unsafe-inline script-src', async ({ browser }) => {
+    test.skip(!aliceStorage, 'alice session not available')
+    const ctx = await authedCtx(browser, 'alice')
+    const page = await ctx.newPage()
+    const resp = await page.goto('/portal')
+    const csp = resp?.headers()['content-security-policy'] || ''
+    await ctx.close()
+
+    expect(csp, 'portal HTML served with no Content-Security-Policy at all').not.toEqual('')
+    expect(csp).toContain("script-src 'self' 'nonce-")
+    // A policy carrying BOTH a nonce and 'unsafe-inline' silently drops the nonce in
+    // every browser that supports one — it would look protected and not be.
+    expect(csp, 'script-src must not carry unsafe-inline alongside a nonce')
+      .not.toMatch(/script-src[^;]*'unsafe-inline'/)
+    // style-src still carries 'unsafe-inline' for portal.js's 58 CSSOM writes (R1.7),
+    // NOT for markup: R1.5 removed all 593 inline style= attributes. Asserted as a
+    // known state so that when R1.7 lands, this line is what forces the policy update.
+    expect(csp).toContain("style-src 'self' 'unsafe-inline'")
+    expect(csp).toContain("object-src 'none'")
+    expect(csp).toContain("base-uri 'none'")
   })
 })

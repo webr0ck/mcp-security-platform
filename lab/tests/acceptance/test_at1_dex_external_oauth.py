@@ -57,10 +57,21 @@ import re
 import httpx
 import pytest
 
-from conftest import BASE_URL, call_upstream_tool, db_query
+from conftest import BASE_URL, _env_lab, call_upstream_tool, db_query
 
 DEX_ISSUER_BASE = "http://localhost:5556/dex"
 DEX_SERVICE_NAME = "dex-external"
+
+# R2 (2026-07-25): the redirect_uri Dex hands back is built server-side from
+# PROXY_BASE_URL (app.core.public_url::derive_public_base_url always prefers
+# it over the request's own Host header), NOT from whatever address this test
+# happened to connect through (BASE_URL, typically the 127.0.0.1 loopback
+# route to the gateway). On this lab PROXY_BASE_URL is the host's current
+# LAN/Tailscale IP, which can legitimately differ from BASE_URL — comparing
+# against BASE_URL here made this assertion fail as soon as
+# lab/scripts/render_dex_config.sh (added the same session) fixed Dex to
+# actually accept that redirect_uri instead of 400ing earlier in the flow.
+_PROXY_BASE_URL = _env_lab("PROXY_BASE_URL", BASE_URL).rstrip("/")
 
 
 def _dex_password() -> str:
@@ -122,7 +133,7 @@ def _drive_dex_enrollment(alice_token: str) -> None:
             f"Dex login POST: {login_post.status_code} {login_post.text[:300]}"
         )
         callback_url = login_post.headers["location"]
-        assert callback_url.startswith(f"{BASE_URL}/auth/callback/{DEX_SERVICE_NAME}"), (
+        assert callback_url.startswith(f"{_PROXY_BASE_URL}/auth/callback/{DEX_SERVICE_NAME}"), (
             f"expected Dex to redirect back to our callback, got: {callback_url}"
         )
         assert "code=" in callback_url and "state=" in callback_url
