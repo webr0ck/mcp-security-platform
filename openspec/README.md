@@ -79,25 +79,31 @@ These are procurement decisions, not code:
 
 ## Build order
 
-Each layer is a chokepoint the next depends on. Building out of order produces a system that
-cannot be retrofitted cheaply.
+This order optimises for defensible stopping points: stop after any item and the deployment is
+safer than before you started. It is not the runtime order, in which identity resolves first.
 
-1. `identity-authentication` - resolve who is calling before anything trusts a request.
-2. `network-isolation` - establish the topology now; retrofitting it means re-plumbing
-   every service.
-3. `policy-enforcement` - one deny-by-default chokepoint on every mediated operation, in both
-   directions.
-4. `authorization-entitlement` - who may see and call what.
-5. `audit-observability` - must record before the effect from the first invocation, not added
-   later.
-6. `credential-broker` - the largest single lift, and the one that removes agent-held
-   credentials. Start with stored credentials; add token exchange where the identity provider
-   supports it.
-7. `server-vetting` + `server-onboarding` - the supply-chain gate and its human workflow.
+1. `network-isolation` - the only item that reduces risk with nothing else built, and the only
+   one whose retrofit means re-plumbing every service. Do it before there are thirty of them.
+2. `identity-authentication` + `audit-observability` - who called, and a record of it. Audit
+   belongs here rather than later because it must record before the effect from the first
+   invocation; a platform that adds it in phase five has no account of phases one to four.
+3. `policy-enforcement`, structural half - one chokepoint every path funnels through, built
+   before there is anything interesting to put in it. Build the checks first and the second
+   code path is already there.
+4. `authorization-entitlement` - who may see and call what. Cheap, and closes the gap where
+   listing discloses what invoking would deny.
+5. `credential-broker` - the largest single lift, and the one that removes agent-held
+   credentials. Start with stored credentials; add token exchange where the authorization
+   server supports it.
+6. `policy-enforcement`, remainder - per-call argument policy, integrity levels and the taint
+   floor, once the chokepoint is proven.
+7. `server-onboarding` + `server-vetting` - the states first, then the analysis that feeds the
+   approval. Late because they gate onboarding: build them before there is anything to onboard
+   and they gate nothing but your own progress.
 
-Items 1-5 are structural. 6 and 7 can be staged, but a platform without 6 has not yet
-delivered its central property: the agent never holds a credential that opens more than one
-door.
+Items 1-3 cannot be retrofitted cheaply. 5 can be staged, but a platform without it has not
+yet delivered the central property: the agent never holds a credential that opens more than
+one door.
 
 ## Capabilities
 
