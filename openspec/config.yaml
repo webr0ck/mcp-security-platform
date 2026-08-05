@@ -1,0 +1,16 @@
+schema: spec-driven
+
+context: |
+  Project: MCP Security Platform - a runtime security gateway that mediates every
+  Model Context Protocol tool call from an AI agent to a backend MCP server through
+  identity, authorization, policy, credential brokering and audit. Thesis: mediate,
+  don't classify - a fully hostile backend server must gain nothing.
+  Tech stack (reference implementation, not normative): Python 3.12 proxy, OPA/Rego
+  policy engine, PostgreSQL, Redis, Vault/OpenBao, Podman/Docker Compose, Keycloak.
+  Any equivalent stack satisfies these specs; requirements name properties, not vendors.
+  Deployment: backends on internal networks with no host-published ports; only the
+  edge publishes. Agents reach backends exclusively through the proxy.
+  Users: AI coding agents (Claude Code, Codex) acting on behalf of authenticated humans,
+  plus platform admins and security reviewers operating the approval workflow.
+  Identity: one client-facing authorization server is the only issuer agents ever see.
+  Upstream IdPs and backend credentials are never advertised to agents.
