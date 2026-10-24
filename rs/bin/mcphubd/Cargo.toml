@@ -1,0 +1,44 @@
+[package]
+name = "mcphubd"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mcphubd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcphubd"
+path = "src/main.rs"
+
+[dependencies]
+mcphub-types = { workspace = true }
+mcphub-gateway = { workspace = true }
+mcphub-identity = { workspace = true }
+mcphub-policy = { workspace = true }
+mcphub-creds = { workspace = true }
+mcphub-store = { workspace = true }
+mcphub-ui = { workspace = true, default-features = false }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+reqwest = { workspace = true }
+url = "2"
+uuid = { workspace = true }
+time = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+base64 = "0.22"
+jsonwebtoken = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+rand = "0.8"

@@ -1,0 +1,37 @@
+## Managed by Ansible role `postgres` — do not edit by hand.
+## systemctl status {{ postgres_container_name }}.service
+[Unit]
+Description=mcphub postgres
+After=network-online.target {{ mcphub_data_network }}-network.service
+Requires={{ mcphub_data_network }}-network.service
+Wants=network-online.target
+
+[Container]
+Image={{ postgres_image }}
+ContainerName={{ postgres_container_name }}
+Network={{ mcphub_data_network }}.network
+Volume={{ postgres_volume_name }}.volume:/var/lib/postgresql/data
+Secret=mcphub-postgres-password,type=env,target=POSTGRES_PASSWORD
+Environment=POSTGRES_DB={{ postgres_db }}
+Environment=POSTGRES_USER={{ postgres_user }}
+# No PublishPort= — postgres is reachable ONLY over mcphub_data_network,
+# never from the host or any other network (network isolation requirement).
+User=999:999
+ReadOnly=true
+Tmpfs=/tmp
+Tmpfs=/var/run/postgresql
+NoNewPrivileges=true
+DropCapability=ALL
+Memory={{ postgres_memory_limit }}
+PidsLimit=256
+HealthCmd=pg_isready -U {{ postgres_user }} -d {{ postgres_db }}
+HealthInterval=10s
+HealthRetries=5
+HealthStartPeriod=20s
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

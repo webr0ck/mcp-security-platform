@@ -1,0 +1,88 @@
+---
+# Three-phase health check per the component brief:
+#  1. pre-deploy: is the new image digest pullable (see deploy.yml, which
+#     calls this role's pull-check BEFORE swapping the running unit — not
+#     duplicated here since it needs the *candidate* digest, not the live
+#     one; see playbooks/deploy.yml "pre-deploy pull check").
+#  2. post-deploy: process up, port answering, /health/ready green.
+#  3. smoke test: the full auth->policy->invoke->audit chain.
+
+## mcphubd publishes NO host port, not even on 127.0.0.1 (D1 — a loopback
+## bind is reachable by any local process/colocated container and bypasses
+## the gateway entirely). So "direct to mcphubd, bypassing the gateway"
+## health checks must run FROM the container network mcphubd is actually on,
+## not from the Ansible-controlled host's network namespace. mcphubd's own
+## image is distroless with no shell/curl (see mcphubd.container.j2), so we
+## can't `podman exec` into it either — instead run a throwaway curl
+## container attached to the same network, which also proves the network is
+## reachable at all (an unreachable network here is itself a real signal,
+## not something to paper over).
+- name: Post-deploy readiness check (direct to mcphubd over its container network, bypassing the gateway — isolates mcphubd health from gateway health)
+  ansible.builtin.command:
+    cmd: >-
+      podman run --rm --network {{ mcphub_gateway_network }}
+      {{ mcphub_probe_image }}
+      curl -sf -o /dev/null -w '%{http_code}'
+      http://{{ mcphubd_container_name }}:{{ mcphubd_listen_port }}{{ mcphubd_health_path }}
+  register: mcphubd_ready
+  until: mcphubd_ready.rc == 0 and mcphubd_ready.stdout == "200"
+  retries: "{{ (mcphub_health_timeout_s | int / 2) | int }}"
+  delay: 2
+  changed_when: false
+
+- name: Post-deploy readiness check (through the gateway — proves the whole edge is wired, not just mcphubd)
+  ansible.builtin.uri:
+    url: "{{ health_check_gateway_url }}/health/ready"
+    validate_certs: false
+    status_code: 200
+    timeout: 10
+  register: gateway_ready
+  until: gateway_ready.status == 200
+  retries: "{{ (mcphub_health_timeout_s | int / 2) | int }}"
+  delay: 2
+
+- name: Read the smoke-test service account's client secret from Vault
+  ansible.builtin.set_fact:
+    _smoke_test_client_secret: >-
+      {{ lookup('community.hashi_vault.hashi_vault',
+                 (vault_mcphubd_creds_path ~ '/smoke-test'), field='client_secret',
+                 url=vault_addr, auth_method='approle',
+                 role_id=vault_role_id, secret_id=vault_secret_id) }}
+  no_log: true
+
+- name: Copy the smoke test script
+  ansible.builtin.copy:
+    src: smoke_test.sh
+    dest: /usr/local/bin/mcphub-smoke-test.sh
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Run the full-chain smoke test (auth -> policy -> invoke -> audit)
+  ansible.builtin.command:
+    cmd: "/usr/local/bin/mcphub-smoke-test.sh {{ mcphub_env }} {{ health_check_gateway_url }}"
+  environment:
+    SMOKE_CLIENT_ID: "{{ mcphub_smoke_test_client_id | default('mcphub-smoke-test') }}"
+    SMOKE_CLIENT_SECRET: "{{ _smoke_test_client_secret }}"
+    SMOKE_TOKEN_ENDPOINT: "{{ mcphub_smoke_test_token_endpoint }}"
+  register: smoke_result
+  changed_when: false
+  failed_when: smoke_result.rc != 0
+  # D10: no_log MUST be unconditional. `-vv` is the ordinary "why did this
+  # fail" reflex, not a deliberate opt-in to leaking secrets — a verbosity
+  # flag is not an authorization control, and this previously made
+  # SMOKE_CLIENT_SECRET print to stdout and into any CI/AWX log at -vv+.
+  # If the smoke test fails and more detail is needed, add
+  # non-secret diagnostic output to smoke_test.sh itself instead.
+  no_log: true
+
+- name: Show smoke test output
+  # With the task above now unconditionally no_log (D10), smoke_result's
+  # fields are censored ("VALUE SPECIFIED IN NO LOG PARAMETER") regardless
+  # of verbosity — that's intentional; smoke_test.sh's own stdout may
+  # legitimately include the token endpoint response envelope. Operators
+  # needing real failure detail should run the script by hand
+  # (/usr/local/bin/mcphub-smoke-test.sh) with SMOKE_CLIENT_SECRET sourced
+  # from Vault directly, not via -vv on this play.
+  ansible.builtin.debug:
+    msg: "{{ smoke_result.stdout_lines }}"

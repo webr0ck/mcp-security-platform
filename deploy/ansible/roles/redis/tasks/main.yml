@@ -1,0 +1,113 @@
+---
+- name: Read redis password from Vault
+  ansible.builtin.set_fact:
+    _redis_password: >-
+      {{ lookup('community.hashi_vault.hashi_vault',
+                 (vault_mcphubd_creds_path ~ '/redis'),
+                 field='password',
+                 url=vault_addr,
+                 auth_method='approle',
+                 role_id=vault_role_id,
+                 secret_id=vault_secret_id) }}
+  no_log: true
+
+- name: Ensure the secret-hash marker directory exists
+  ansible.builtin.file:
+    path: "{{ mcphub_secret_hash_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# D9 fix: `force: true` unconditionally reports changed=true on every run.
+# Hash-gate it, and use the same hash comparison to know whether redis needs
+# a restart to actually pick up a rotated password — redis-server only reads
+# /run/secrets/redis_password once, at the entrypoint wrapper's `cat` (see
+# redis.container.j2); recreating the secret file alone does not make the
+# already-running redis-server re-read it.
+- name: Compute content hash of the redis password
+  ansible.builtin.set_fact:
+    _redis_password_hash: "{{ _redis_password | hash('sha256') }}"
+  no_log: true
+
+- name: Determine whether the redis password changed since the last run
+  ansible.builtin.set_fact:
+    _redis_password_changed: >-
+      {{ (lookup('file', mcphub_secret_hash_dir ~ '/mcphub-redis-password', errors='ignore')
+          | default('', true)) != _redis_password_hash }}
+  no_log: true
+
+- name: Create podman secret for redis password (recreated only when its content actually changed)
+  containers.podman.podman_secret:
+    name: mcphub-redis-password
+    data: "{{ _redis_password }}"
+    state: present
+    force: "{{ _redis_password_changed }}"
+  no_log: true
+
+- name: Persist the updated password hash marker
+  ansible.builtin.copy:
+    content: "{{ _redis_password_hash }}"
+    dest: "{{ mcphub_secret_hash_dir }}/mcphub-redis-password"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Render redis quadlet volume unit
+  ansible.builtin.template:
+    src: redis.volume.j2
+    dest: "{{ quadlet_unit_dir }}/{{ redis_volume_name }}.volume"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+
+- name: Render redis quadlet container unit
+  ansible.builtin.template:
+    src: redis.container.j2
+    dest: "{{ quadlet_unit_dir }}/{{ redis_container_name }}.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+  register: redis_unit_rendered
+
+- name: Flush handlers so the quadlet-generated service unit exists before we start it
+  ansible.builtin.meta: flush_handlers
+
+- name: Start/enable redis service
+  ansible.builtin.systemd:
+    name: "{{ redis_container_name }}.service"
+    state: started
+    enabled: true
+  register: redis_service_state
+
+# D9: the unit only names the secret, so a content-only rotation never
+# changes it; redis-server reads the secret file once, at startup, via the
+# entrypoint wrapper — hence the explicit rotation check below too.
+- name: Restart redis if the unit changed or the password was rotated under an unchanged secret name
+  ansible.builtin.systemd:
+    name: "{{ redis_container_name }}.service"
+    state: restarted
+  when: >-
+    (redis_unit_rendered.changed and not redis_service_state.changed)
+    or (_redis_password_changed | default(false))
+
+- name: Wait for redis to accept connections
+  # The password is NOT passed via -a here — containers share the host
+  # kernel, so any argv passed to `podman exec` is visible in `ps`/`/proc`
+  # on the HOST for the life of the process (no_log only redacts Ansible's
+  # own output, not the process table — D8). REDISCLI_AUTH is read by
+  # redis-cli from its environment instead, which does not appear in argv.
+  containers.podman.podman_container_exec:
+    name: "{{ redis_container_name }}"
+    command: "redis-cli --no-auth-warning ping"
+    env:
+      REDISCLI_AUTH: "{{ _redis_password }}"
+  register: redis_ping
+  until: redis_ping.rc == 0 and 'PONG' in redis_ping.stdout
+  retries: 15
+  delay: 2
+  changed_when: false
+  no_log: true

@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  author: mcp-security-platform devops
+  role_name: mcp_backends
+  description: Deploys backend MCP servers on an isolated internal network with no published ports, and verifies it
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+dependencies:
+  - role: common

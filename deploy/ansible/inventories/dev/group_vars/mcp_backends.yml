@@ -1,0 +1,10 @@
+---
+mcp_backend_servers:
+  - name: echo
+    image: "ghcr.io/example-org/mcp-echo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    auth_mode: shared_passthrough
+    memory_limit: 128m
+  - name: notes
+    image: "ghcr.io/example-org/mcp-notes@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    auth_mode: shared_exchange
+    memory_limit: 192m

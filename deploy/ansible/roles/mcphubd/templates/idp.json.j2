@@ -1,0 +1,31 @@
+{#
+  Managed by Ansible role `mcphubd` — do not edit by hand.
+  Renders EXACTLY `Vec<IdpConfig>` as consumed by
+  rs/crates/mcphub-identity/src/config.rs::FileIdpConfigLoader::from_json —
+  a bare JSON array, no wrapper key, field names matching the Rust struct
+  verbatim (checked against source, not guessed). `vault_secret_name` from
+  the source idp.<vendor>.yml is deploy-only metadata and is deliberately
+  NOT included below — it exists only to key the Vault path/podman-secret
+  name for this entry's client_secret (see tasks/main.yml), which IdpConfig
+  itself has no field for (confirmed: the struct doesn't carry a secret at
+  all — client_secret delivery is a separate, still-unconfirmed mechanism,
+  see mcphubd role README's "open question" section).
+#}
+[
+{% for idp in mcphubd_idp_entries %}
+  {
+    "issuer": {{ idp.issuer | to_json }},
+    "discovery_url": {{ idp.discovery_url | default(none) | to_json }},
+    "issuer_aliases": {{ idp.issuer_aliases | default([]) | to_json }},
+    "audiences": {{ idp.audiences | default([]) | to_json }},
+    "allowed_algs": {{ idp.allowed_algs | default([]) | to_json }},
+    "clock_skew_seconds": {{ idp.clock_skew_seconds | default(60) | to_json }},
+    "auth_mode": {{ idp.auth_mode | to_json }},
+    "dedicated_port": {{ idp.dedicated_port | default(none) | to_json }},
+    "supports_token_exchange": {{ idp.supports_token_exchange | default(false) | to_json }},
+    "client_id": {{ idp.client_id | default(none) | to_json }},
+    "redirect_uri_allowlist": {{ idp.redirect_uri_allowlist | default([]) | to_json }},
+    "role_mapping": {{ idp.role_mapping | to_json }}
+  }{% if not loop.last %},{% endif %}
+{% endfor %}
+]

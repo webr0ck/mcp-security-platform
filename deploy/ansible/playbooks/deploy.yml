@@ -1,0 +1,109 @@
+---
+# Health-gated deploy: render the new digest, verify it, and automatically
+# roll back to the last known-good digest if health checks or the smoke
+# test fail. Usage:
+#   ansible-playbook playbooks/deploy.yml -e mcphubd_image_digest=sha256:... [-e confirm_prod=true]
+- name: Health-gated mcphubd deploy with automatic rollback on failure
+  hosts: mcp_gateway
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Refuse to deploy to prod without explicit confirmation
+      ansible.builtin.fail:
+        msg: "Prod deploys require -e confirm_prod=true (mcphub_deploy_requires_confirm is set in inventories/prod/group_vars/all.yml)"
+      when:
+        - mcphub_deploy_requires_confirm | default(false)
+        - not (confirm_prod | default(false) | bool)
+
+    - name: Require an explicit, well-formed candidate digest (never deploy 'whatever group_vars already says' by accident)
+      # A sha256 digest is EXACTLY 64 lowercase hex chars after the prefix —
+      # startswith('sha256:') alone (the previous guard) passes malformed
+      # digests of any length, including the 60/61-char placeholders that
+      # were committed in every inventory (D12). podman itself rejects a
+      # malformed digest at pull, but that means the failure surfaces deep
+      # inside the pre-deploy pull-check task with a confusing podman error
+      # instead of here, with a clear message, before anything else runs.
+      ansible.builtin.fail:
+        msg: >-
+          Pass -e mcphubd_image_digest=sha256:<64 lowercase hex chars> —
+          deploy.yml never infers a digest implicitly, and never accepts a
+          malformed one.
+      when: mcphubd_image_digest is not defined or not (mcphubd_image_digest is match('^sha256:[0-9a-f]{64}$'))
+
+    - name: Pre-deploy check — candidate digest must be pullable
+      containers.podman.podman_image:
+        name: "{{ mcphubd_image_repo }}@{{ mcphubd_image_digest }}"
+        pull: true
+        state: present
+      register: pull_check
+
+    - name: Record the currently-live digest as the rollback point
+      ansible.builtin.include_role:
+        name: rollback
+        tasks_from: record
+
+  tasks:
+    - name: Attempt the deploy, roll back automatically on any failure
+      block:
+        - name: Render and start mcphubd at the candidate digest
+          ansible.builtin.include_role:
+            name: mcphubd
+
+        - name: Post-deploy health check + full-chain smoke test
+          ansible.builtin.include_role:
+            name: health_check
+
+        - name: Deploy succeeded
+          ansible.builtin.debug:
+            msg: "mcphubd on {{ inventory_hostname }} is healthy at {{ mcphubd_image_digest }}"
+
+      rescue:
+        - name: Deploy or health check FAILED — rolling back automatically
+          ansible.builtin.debug:
+            msg: >-
+              Deploy of {{ mcphubd_image_digest }} to {{ inventory_hostname }}
+              failed health/smoke checks. Restoring the last known-good
+              digest now.
+
+        # D4: restore.yml can itself fail — a Vault-independence fix removes
+        # ONE cause (see roles/mcphubd/tasks/redeploy_digest_only.yml), but
+        # a migration-boundary refusal or a rolled-back version that is
+        # ALSO unhealthy are both real, intentional failure paths through
+        # restore.yml, not bugs to swallow. A `rescue:` inside a `rescue:`
+        # doesn't nest in Ansible — a bare failure here would previously
+        # abort before the explicit "did not ship" message below ever ran,
+        # leaving whoever's watching with only restore.yml's raw error and
+        # no statement of overall deploy outcome. block/rescue/always here
+        # guarantees that final statement always fires, with the right
+        # message for whichever case actually happened.
+        - name: Restore the last known-good digest, and always report the true outcome afterward
+          block:
+            - name: Restore the last known-good digest
+              ansible.builtin.include_role:
+                name: rollback
+                tasks_from: restore
+
+            - name: Fail the play (rollback succeeded, but the ORIGINAL deploy is still a failure — CI must not report green)
+              ansible.builtin.fail:
+                msg: >-
+                  Deploy of {{ mcphubd_image_digest }} failed and was
+                  automatically rolled back. The platform is healthy again
+                  on the previous digest, but this deploy did not ship.
+          rescue:
+            # Rollback itself failed here — the platform may be in a WORSE
+            # state than before this deploy started and needs immediate
+            # operator attention, not just a "deploy did not ship" note.
+            - name: Fail the play (rollback itself failed, not just the original deploy)
+              ansible.builtin.fail:
+                msg: >-
+                  Deploy of {{ mcphubd_image_digest }} failed health/smoke
+                  checks AND the automatic rollback to the previous digest
+                  also failed (see the task output above for why — e.g. a
+                  refused migration-boundary crossing, or the rollback
+                  target itself failing health). The platform is NOT
+                  confirmed healthy on any digest right now. This requires
+                  immediate manual investigation
+                  (playbooks/rollback.yml against an earlier generation, or
+                  a direct fix) — do not assume the previous state is
+                  intact.

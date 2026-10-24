@@ -1,0 +1,88 @@
+---
+# Dev overrides of role defaults (deploy/ansible/roles/*/defaults/main.yml).
+# Only environment-specific values live here — see the precedence chain in
+# each role's README: defaults -> group_vars/all -> group_vars/<env> ->
+# host_vars -> -e extra_vars.
+
+mcphub_env: dev
+
+# ── Image digests (deploy by digest only — never a tag) ─────────────────────
+# Populated by CI after `podman build -f rs/Containerfile` + push; this file
+# is the single source of truth the deploy/rollback playbooks read from and
+# write back to (rollback.yml restores the PREVIOUS value captured here).
+mcphubd_image_repo: "ghcr.io/example-org/mcphubd"
+mcphubd_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"  # noqa: yaml[line-length] -- placeholder until first CI build
+
+postgres_image: "docker.io/library/postgres:16-alpine@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+redis_image: "docker.io/library/redis:7-alpine@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+vault_image: "docker.io/hashicorp/vault:1.17@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+gateway_image: "docker.io/owasp/modsecurity-crs:nginx-alpine@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+loki_image: "docker.io/grafana/loki:3.0.0@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+grafana_image: "docker.io/grafana/grafana-oss:11.0.0@sha256:6666666666666666666666666666666666666666666666666666666666666666"
+# Used by health_check (mcphubd readiness probe, since mcphubd is distroless
+# and publishes no host port — D1) as a throwaway `podman run --network ...`
+# helper. (mcp_backends' D3 isolation probe execs directly inside each
+# backend container instead — it doesn't need this image.)
+mcphub_probe_image: "docker.io/curlimages/curl:8.10.1@sha256:7777777777777777777777777777777777777777777777777777777777777777"
+
+# ── Networking ────────────────────────────────────────────────────────────
+mcphub_gateway_network: mcp-gateway-net       # gateway <-> mcphubd only, has host-published ports
+mcphub_backend_network: mcp-backend-internal  # mcphubd <-> backend MCP servers, internal:true, NO published ports
+mcphub_data_network: mcp-data-internal        # mcphubd <-> postgres/redis/vault, internal:true
+mcphub_observability_network: mcp-observability-internal  # mcphubd/backends -> loki/grafana/alertmanager, internal:true
+
+mcphubd_listen_port: 8000
+gateway_https_port: 8443
+gateway_mtls_port: 8445
+
+# ── Cross-role identity vars (moved here from role defaults/main.yml) ──────
+# `roles/postgres`/`roles/redis` own these conceptually, but role defaults
+# are NOT visible outside a role that is actually included in the current
+# playbook run when included dynamically (`include_role`) — only Ansible's
+# classic static `roles:` list (as in site.yml) preloads every listed
+# role's defaults into a shared namespace. Confirmed empirically: a
+# minimal two-role reproduction shows a dynamically-included role sees
+# `***UNDEFINED***` for another role's `defaults/main.yml` var, while a
+# statically-listed one resolves it. `playbooks/deploy.yml` and
+# `playbooks/rollback.yml` both `include_role: name: mcphubd` WITHOUT ever
+# including `postgres`/`redis` — mcphubd's DSN-building tasks reference
+# these vars directly, with no `| default(...)` fallback (unlike the two
+# already-defensive lines in mcphubd.container.j2's [Unit] section) — so
+# without this promotion, every real `deploy.yml`/`rollback.yml` run would
+# hard-fail on "postgres_container_name is undefined" the first time either
+# runs standalone (i.e. every time after the very first `site.yml` bring-up
+# in the same ansible-playbook process). Single source of truth now lives
+# HERE; the role defaults files no longer define these.
+quadlet_unit_dir: /etc/containers/systemd  # also needed outside roles/common — same cross-role-visibility issue
+postgres_container_name: mcp-postgres
+postgres_port: 5432
+postgres_db: mcphub
+postgres_user: mcphub                         # superuser/migration-owner role
+postgres_app_user: mcphub_app                 # mcphubd's runtime, non-owner, non-superuser role
+redis_container_name: mcp-redis
+vault_container_name: mcp-vault
+
+dedicated_port_range_start: 9000
+dedicated_port_range_end: 9100
+
+# ── Vault (secret source of truth — see vault-secrets role) ─────────────────
+vault_addr: "https://vault-dev.internal:8200"
+vault_kv_mount: "secret"
+vault_mcphubd_creds_path: "mcphub/dev/mcphubd"
+vault_kek_path: "mcphub/dev/broker-kek"       # credential-broker KEK — Vault ONLY, never a plaintext env var
+vault_audit_hmac_path: "mcphub/dev/audit-hmac-key"  # audit-chain HMAC key — same never-plaintext-on-disk treatment as the KEK
+vault_idp_secrets_path: "mcphub/dev/idp"
+vault_role_id: "{{ lookup('env', 'VAULT_ROLE_ID') }}"      # AppRole auth, never committed
+vault_secret_id: "{{ lookup('env', 'VAULT_SECRET_ID') }}"  # set by the operator/CI runner at deploy time, not stored anywhere
+
+# ── Rollback bookkeeping ─────────────────────────────────────────────────
+mcphub_rollback_state_dir: /var/lib/mcphub/rollback
+mcphub_rollback_history: 5
+
+# ── Health/smoke ───────────────────────────────────────────────────────────
+mcphub_health_timeout_s: 30
+mcphub_smoke_test_user: "loadtest-smoke@dev.internal"
+mcphub_smoke_test_token_endpoint: "https://keycloak-dev.internal/realms/mcp/protocol/openid-connect/token"
+
+# ── IDP (install-time path; see deploy/idp-examples/) ───────────────────────
+mcphub_idp_config_file: "{{ inventory_dir }}/../../idp-examples/idp.keycloak.yml"

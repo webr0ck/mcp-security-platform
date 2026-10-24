@@ -1,0 +1,13 @@
+---
+# Operator-invoked rollback (deploy.yml also calls this automatically on a
+# failed health/smoke gate — this playbook is for "prod is misbehaving,
+# roll back NOW" independent of any in-flight deploy).
+- name: Roll mcphubd back to the last known-good image digest
+  hosts: mcp_gateway
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Restore the last known-good digest
+      ansible.builtin.include_role:
+        name: rollback
+        tasks_from: restore

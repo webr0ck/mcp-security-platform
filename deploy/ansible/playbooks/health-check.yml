@@ -1,0 +1,9 @@
+---
+- name: Run post-deploy health checks (readiness only, no smoke traffic side effects beyond the fixture tools)
+  hosts: mcp_gateway
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Run the health_check role
+      ansible.builtin.include_role:
+        name: health_check

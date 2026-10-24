@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Server registry{% endblock %}
+{% block content %}
+<h1>Server registry</h1>
+<p class="lede">Every registered MCP server, its owner, and auth mode with assigned port when applicable.</p>
+
+{% if servers.is_empty() %}
+<div class="empty-state"><p>No servers registered yet.</p></div>
+{% else %}
+<table>
+  <caption>All registered servers</caption>
+  <thead>
+    <tr>
+      <th scope="col">Name</th>
+      <th scope="col">Owner</th>
+      <th scope="col">Auth mode</th>
+      <th scope="col">Port</th>
+      <th scope="col">Onboarding</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in servers %}
+    <tr>
+      <td data-label="Name">{{ s.name }}</td>
+      <td data-label="Owner">{{ s.owner_sub }}</td>
+      <td data-label="Auth mode"><code>{{ s.auth_mode.kind }}</code></td>
+      <td data-label="Port">{% if let Some(p) = s.auth_mode.port %}<code>{{ p }}</code>{% else %}<span class="hint">shared</span>{% endif %}</td>
+      <td data-label="Onboarding">{{ s.onboarding.label() }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

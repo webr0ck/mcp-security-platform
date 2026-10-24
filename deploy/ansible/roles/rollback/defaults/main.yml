@@ -1,0 +1,2 @@
+---
+mcphub_rollback_history_file: "{{ mcphub_rollback_state_dir }}/history.json"

@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  author: mcp-security-platform devops
+  role_name: observability
+  description: Loki + Grafana (audit/log aggregation, SIEM integration seam, dashboards)
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+dependencies:
+  - role: common

@@ -1,0 +1,35 @@
+## Managed by Ansible role `gateway` — do not edit by hand.
+[Unit]
+Description=mcphub gateway (nginx + ModSecurity/OWASP-CRS mTLS edge)
+After=network-online.target {{ mcphub_gateway_network }}-network.service {{ mcphubd_container_name }}.service
+Requires={{ mcphub_gateway_network }}-network.service
+Wants={{ mcphubd_container_name }}.service
+
+[Container]
+Image={{ gateway_image }}
+ContainerName={{ gateway_container_name }}
+Network={{ mcphub_gateway_network }}.network
+Volume={{ gateway_conf_dir }}/nginx.conf:/etc/nginx/nginx.conf:ro,Z
+Volume={{ gateway_conf_dir }}/conf.d:/etc/nginx/conf.d:ro,Z
+Volume={{ gateway_tls_dir }}:/etc/mcphub/gateway-tls:ro,Z
+PublishPort=0.0.0.0:{{ gateway_https_port }}:{{ gateway_https_port }}
+PublishPort=0.0.0.0:{{ gateway_mtls_port }}:{{ gateway_mtls_port }}
+{% for entry in gateway_dedicated_ports %}
+PublishPort=0.0.0.0:{{ entry.port }}:{{ entry.port }}
+{% endfor %}
+User={{ gateway_container_uid }}:{{ gateway_container_gid }}
+NoNewPrivileges=true
+DropCapability=ALL
+AddCapability=NET_BIND_SERVICE
+Memory=256m
+PidsLimit=128
+HealthCmd=nginx -t
+HealthInterval=30s
+HealthRetries=3
+
+[Service]
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

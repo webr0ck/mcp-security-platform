@@ -1,0 +1,26 @@
+---
+# Install-time IDP configuration path (the OTHER path is runtime, via
+# `POST /api/v1/admin/idps` — see deploy/scripts/configure_idp_runtime.py).
+# Usage:
+#   ansible-playbook playbooks/configure-idp.yml -e @../idp-examples/idp.keycloak.yml
+# or point mcphub_idp_config_file at a file written by deploy/configure-idp.sh.
+- name: Apply install-time IDP configuration and restart mcphubd to pick it up
+  hosts: mcp_gateway
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Require an explicit idp config file
+      ansible.builtin.fail:
+        msg: >-
+          Pass -e mcphub_idp_config_file=/path/to/idp.yml (see
+          deploy/idp-examples/ for the schema and worked examples, or run
+          deploy/configure-idp.sh to generate one interactively).
+      when: mcphub_idp_config_file is not defined
+
+    - name: Re-render mcphubd config + secrets + quadlet with the new IDP set, and restart
+      ansible.builtin.include_role:
+        name: mcphubd
+
+    - name: Verify the platform is healthy with the new IDP config before declaring success
+      ansible.builtin.include_role:
+        name: health_check

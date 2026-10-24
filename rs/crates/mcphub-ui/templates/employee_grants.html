@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}My access{% endblock %}
+{% block content %}
+<h1>My access</h1>
+
+<h2>Active grants</h2>
+{% if grants.is_empty() %}
+<div class="empty-state"><p>You have no active grants.</p></div>
+{% else %}
+<table>
+  <caption>Servers and tools you can currently invoke</caption>
+  <thead>
+    <tr><th scope="col">Server</th><th scope="col">Tool</th><th scope="col">Granted by</th><th scope="col">Granted at</th></tr>
+  </thead>
+  <tbody>
+    {% for g in grants %}
+    <tr>
+      <td data-label="Server">{{ g.server_name }}</td>
+      <td data-label="Tool">{% if let Some(t) = g.tool_name %}<code>{{ t }}</code>{% else %}<span class="hint">all tools</span>{% endif %}</td>
+      <td data-label="Granted by">{{ g.granted_by }}</td>
+      <td data-label="Granted at">{{ g.granted_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>My access requests</h2>
+{% if requests.is_empty() %}
+<div class="empty-state"><p>You haven't requested any access.</p></div>
+{% else %}
+<table>
+  <caption>Pending and past requests</caption>
+  <thead>
+    <tr><th scope="col">Server</th><th scope="col">Tool</th><th scope="col">Justification</th><th scope="col">Status</th></tr>
+  </thead>
+  <tbody>
+    {% for r in requests %}
+    <tr>
+      <td data-label="Server">{{ r.server_name }}</td>
+      <td data-label="Tool"><code>{{ r.tool_name }}</code></td>
+      <td data-label="Justification">{{ r.justification }}</td>
+      <td data-label="Status"><span class="badge badge--pending" data-glyph="&#9679; ">{{ r.status }}</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,40 @@
+---
+# Self-hosted Keycloak, matching lab/keycloak's realm-mcp.json. Shape is
+# rs/crates/mcphub-identity/src/config.rs::IdpConfig, verbatim — see
+# SCHEMA.md for how each field maps to source. client_secret lives in Vault
+# at {{ vault_idp_secrets_path }}/mcp-keycloak (key: client_secret):
+#   vault kv put secret/mcphub/<env>/idp/mcp-keycloak client_secret=...
+idps:
+  - vault_secret_name: mcp-keycloak   # deploy-only key (NOT part of IdpConfig) — selects the Vault path/podman-secret name for this entry's client_secret; stripped before mcphubd ever sees this file
+    issuer: "https://keycloak.internal/realms/mcp"
+    discovery_url: null   # discovery lives at the default {issuer}/.well-known/openid-configuration
+    issuer_aliases: []
+    audiences: ["mcphub-proxy"]
+    allowed_algs: ["RS256"]
+    clock_skew_seconds: 60
+    auth_mode: SharedExchange
+    dedicated_port: null
+    supports_token_exchange: true   # realm import enables --features=token-exchange
+    client_id: "mcp-proxy"
+    redirect_uri_allowlist:
+      - "https://gateway.internal:8443/oauth/callback"
+    role_mapping:
+      rules:
+        # Keycloak default: realm_access.roles
+        - extract:
+            kind: nested_array
+            path: ["realm_access", "roles"]
+          role_values:
+            mcphub-super-admin: SuperAdmin
+            mcphub-server-owner: ServerOwner
+            mcphub-security-analyst: SecurityAnalyst
+            mcphub-employee: Employee
+        # Optional: a custom protocol mapper adding a top-level `roles` claim
+        - extract:
+            kind: top_level_array
+            claim: roles
+          role_values:
+            mcphub-super-admin: SuperAdmin
+            mcphub-server-owner: ServerOwner
+            mcphub-security-analyst: SecurityAnalyst
+            mcphub-employee: Employee

@@ -1,0 +1,13 @@
+---
+# Data-driven: one entry per backend MCP server. Override per-environment in
+# inventories/<env>/group_vars/mcp_backends.yml. Empty by default so a
+# fresh env with no backends registered yet is a valid, idempotent no-op.
+mcp_backend_servers: []
+
+# Example shape (see inventories/dev/group_vars/mcp_backends.yml):
+# mcp_backend_servers:
+#   - name: echo
+#     image: "ghcr.io/example-org/mcp-echo:latest@sha256:aaaa...."
+#     auth_mode: shared_passthrough
+#     port: 8000
+#     memory_limit: 128m

@@ -480,6 +480,53 @@ async def _registered_tools_for_client(
         logger.error("DB error fetching tool catalogue: %s", exc)
         return []
 
+    # F-CX-001: discovery must not advertise tools the invoke path's
+    # server-state gates (services/invocation.py _gate_maintenance_mode /
+    # _gate_scan_freshness) would then deny — those are pure server-state
+    # checks (no session/request context needed), so they CAN be mirrored
+    # here, batched once per server_id rather than per tool. The taint-floor
+    # and OPA gates are session/request-scoped (source IP, session taint,
+    # full policy input) and have no meaning at discovery time — they stay
+    # invoke-only, same as before.
+    server_ids = {row["server_id"] for row in rows if row["server_id"] is not None}
+    server_gate_state: dict = {}
+    if server_ids:
+        from datetime import datetime, timedelta, timezone
+
+        from app.core.config import settings as _mcp_scan_settings
+
+        try:
+            async with AsyncSessionLocal() as session:
+                gate_rows = await session.execute(
+                    text(
+                        "SELECT server_id, debug_mode, owner_sub, maintainers, last_rescanned_at "
+                        "FROM server_registry WHERE server_id = ANY(:sids) AND deleted_at IS NULL"
+                    ),
+                    {"sids": list(server_ids)},
+                )
+                server_gate_state = {str(r["server_id"]): r for r in gate_rows.mappings().fetchall()}
+        except Exception as exc:
+            logger.error("DB error fetching server gate state for discovery: %s", exc)
+            return []
+
+    def _server_gates_pass(server_id) -> bool:
+        gate_row = server_gate_state.get(str(server_id))
+        if gate_row is None:
+            # Fail-closed: same posture as the maintenance-mode lookup failure
+            # on the invoke path — an unknown/unreachable server state hides
+            # the tool rather than showing it.
+            return False
+        if gate_row["debug_mode"]:
+            allowed = {gate_row["owner_sub"], *(gate_row["maintainers"] or [])}
+            if client_id not in allowed:
+                return False
+        if _mcp_scan_settings.SCAN_FRESHNESS_ENFORCED:
+            last = gate_row["last_rescanned_at"]
+            age_limit = datetime.now(timezone.utc) - timedelta(hours=_mcp_scan_settings.SCAN_MAX_AGE_HOURS)
+            if last is None or last < age_limit:
+                return False
+        return True
+
     platform_names = {t["name"] for t in _TOOLS}
     tools = []
     for row in rows:
@@ -487,6 +534,9 @@ async def _registered_tools_for_client(
             continue
 
         server_id = row["server_id"]
+
+        if server_id is not None and not _server_gates_pass(server_id):
+            continue
 
         if server_id is None:
             # ── NULL-server_id: grants-only visibility (OPA-only invoke path) ──

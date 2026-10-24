@@ -1,0 +1,132 @@
+---
+# Allocates a port from listeners.dedicated_range for an IDP configured with
+# auth_mode: DedicatedPort (its own IDP, no token exchange available — see
+# rs/ARCHITECTURA.md "Multi-IDP architecture").
+#
+# CORRECTED (was per-server, now per-IDP): `dedicated_port` is a field on
+# `IdpConfig` itself (rs/crates/mcphub-identity/src/config.rs), not on any
+# backend server row — confirmed against the real struct, which has no
+# server-scoped fields at all. One dedicated_port IDP = one listener, shared
+# by every backend server that uses it.
+#
+# Usage:
+#   ansible-playbook playbooks/provision-dedicated-port.yml -e idp_name=mcp-entra
+# `idp_name` matches an entry's `vault_secret_name` in mcphub_idp_config_file
+# (deploy-only identifier — see deploy/idp-examples/SCHEMA.md).
+- name: Provision a dedicated_port listener for an IDP
+  hosts: mcp_gateway
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Require idp_name
+      ansible.builtin.fail:
+        msg: "Pass -e idp_name=<vault_secret_name from idp.yml>"
+      when: idp_name is not defined
+
+    - name: Load the install-time idp.yml file
+      ansible.builtin.include_vars:
+        file: "{{ mcphub_idp_config_file }}"
+        name: _idp_file
+
+    - name: Find the named IDP entry
+      ansible.builtin.set_fact:
+        _target_idp: "{{ _idp_file.idps | selectattr('vault_secret_name', 'equalto', idp_name) | list }}"
+
+    - name: Fail if the IDP isn't in the config file
+      ansible.builtin.fail:
+        msg: "No idp entry with vault_secret_name={{ idp_name }} in {{ mcphub_idp_config_file }}"
+      when: _target_idp | length == 0
+
+    - name: Fail if the IDP isn't configured for dedicated_port
+      ansible.builtin.fail:
+        msg: >-
+          {{ idp_name }}'s auth_mode is {{ _target_idp[0].auth_mode }}, not
+          DedicatedPort — only DedicatedPort IDPs get a listener allocated.
+      when: _target_idp[0].auth_mode != 'DedicatedPort'
+
+    - name: No-op if this IDP already has a dedicated_port
+      ansible.builtin.debug:
+        msg: "{{ idp_name }} already has dedicated_port {{ _target_idp[0].dedicated_port }} — nothing to do."
+      when: _target_idp[0].dedicated_port is not none
+
+    - name: Allocate and apply a new dedicated_port
+      when: _target_idp[0].dedicated_port is none
+      block:
+        - name: Load the current gateway dedicated-port registry
+          ansible.builtin.set_fact:
+            _registry_path: "{{ gateway_dedicated_ports_registry | default('/etc/mcphub/dedicated-ports.json') }}"
+
+        - name: Load registry contents (empty if first allocation on this host)
+          ansible.builtin.set_fact:
+            _registry: "{{ (lookup('file', _registry_path, errors='ignore') | default('[]', true)) | from_json }}"
+
+        # D11: a set_fact overwritten inside a `loop`+`when` keeps whatever
+        # the LAST matching iteration wrote — the HIGHEST free port, not the
+        # lowest as the previous task's name claimed. Computing the full
+        # ascending free-port list once, here, avoids that entirely.
+        - name: Compute the free ports in the configured range, ascending
+          ansible.builtin.set_fact:
+            _free_ports: >-
+              {{ range(dedicated_port_range_start | int, dedicated_port_range_end | int) | list
+                 | reject('in', (_registry | map(attribute='port') | map('int') | list)) | list }}
+
+        - name: Fail if the range is exhausted
+          # Checked BEFORE assigning _new_port (not via `_new_port is not
+          # defined` afterwards, D11): this playbook can run more than once
+          # in the same ansible-playbook invocation (e.g. looped over
+          # multiple idp_names via -e / an including playbook), and a fact
+          # set on a previous iteration is never un-set by Ansible — a stale
+          # `_new_port` from idp #1 would make idp #2's exhaustion guard
+          # silently pass even when idp #2's range really is exhausted.
+          # Testing the freshly-computed list's length has no such staleness
+          # window.
+          ansible.builtin.fail:
+            msg: "No free port in [{{ dedicated_port_range_start }}, {{ dedicated_port_range_end }}) — extend dedicated_port_range_end."
+          when: _free_ports | length == 0
+
+        - name: Select the lowest free port
+          ansible.builtin.set_fact:
+            _new_port: "{{ _free_ports | first }}"
+
+        - name: Rewrite the idp.yml file with dedicated_port set for this entry
+          ansible.builtin.set_fact:
+            _updated_idps: >-
+              {{ (_idp_file.idps | rejectattr('vault_secret_name', 'equalto', idp_name) | list)
+                 + [_target_idp[0] | combine({'dedicated_port': (_new_port | int)})] }}
+
+        - name: Persist the updated idp.yml (LOCAL file, not the remote host — this is the source of truth checked into deploy tooling)
+          delegate_to: localhost
+          become: false
+          ansible.builtin.copy:
+            content: "{{ {'idps': _updated_idps} | to_nice_yaml }}"
+            dest: "{{ mcphub_idp_config_file }}"
+            mode: "0644"
+
+        - name: Update the gateway's dedicated-port registry
+          ansible.builtin.set_fact:
+            _registry: "{{ _registry + [{'idp_name': idp_name, 'port': (_new_port | int)}] }}"
+
+        - name: Persist the registry
+          ansible.builtin.copy:
+            content: "{{ _registry | to_nice_json }}"
+            dest: "{{ _registry_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Re-render the gateway (opens/routes the new port)
+          ansible.builtin.include_role:
+            name: gateway
+
+        - name: Re-apply mcphubd config (idp.json now reflects the allocated port)
+          ansible.builtin.include_role:
+            name: mcphubd
+
+        - name: Report the new allocation
+          ansible.builtin.debug:
+            msg: >-
+              Allocated dedicated port {{ _new_port }} to IDP {{ idp_name }},
+              updated {{ mcphub_idp_config_file }}, and re-rendered
+              gateway + mcphubd. The runtime-API equivalent
+              (PATCH the IdpConfig's dedicated_port via the admin API) is
+              blocked on that API existing — see API_CONTRACT.md.

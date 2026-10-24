@@ -1,0 +1,17 @@
+## Managed by Ansible role `common` — do not edit by hand.
+## Podman quadlet network unit. `systemctl daemon-reload` picks this up and
+## generates a `{{ net_name }}-network.service` that creates the network;
+## anything with `Network={{ net_name }}.network` in its .container unit
+## gets a dependency on it automatically.
+[Unit]
+Description=MCP platform network: {{ net_name }} ({{ net_purpose }})
+
+[Network]
+NetworkName={{ net_name }}
+Driver=bridge
+Internal={{ net_internal | lower }}
+{% if net_subnet is defined %}
+Subnet={{ net_subnet }}
+{% endif %}
+Label=managed-by=ansible
+Label=mcphub-purpose={{ net_purpose }}

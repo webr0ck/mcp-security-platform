@@ -1,0 +1,11 @@
+---
+# This role has no default entrypoint — it is always invoked with an
+# explicit tasks_from (record.yml or restore.yml) from playbooks/deploy.yml
+# or playbooks/rollback.yml. Guard against an accidental bare
+# `include_role: name=rollback` silently doing nothing useful.
+- name: Fail — this role requires an explicit tasks_from
+  ansible.builtin.fail:
+    msg: >-
+      roles/rollback has no default task list. Use
+      `include_role: {name: rollback, tasks_from: record}` (before a deploy)
+      or `tasks_from: restore` (to actually roll back).

@@ -1,0 +1,41 @@
+---
+# Thin wrapper for CI: run ONLY the full-chain smoke test (auth -> policy ->
+# invoke -> audit) against an already-deployed environment, skipping the
+# readiness wait loop in health-check.yml (assumes the caller already knows
+# the platform is up — e.g. right after `make lab-up` in CI).
+- name: Run the full-chain smoke test against a live environment
+  hosts: mcp_gateway
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Read the smoke-test service account's client secret from Vault
+      ansible.builtin.set_fact:
+        _smoke_test_client_secret: >-
+          {{ lookup('community.hashi_vault.hashi_vault',
+                     (vault_mcphubd_creds_path ~ '/smoke-test'), field='client_secret',
+                     url=vault_addr, auth_method='approle',
+                     role_id=vault_role_id, secret_id=vault_secret_id) }}
+      no_log: true
+
+    - name: Copy the smoke test script
+      ansible.builtin.copy:
+        src: "{{ role_path | default(playbook_dir ~ '/../roles/health_check') }}/files/smoke_test.sh"
+        dest: /usr/local/bin/mcphub-smoke-test.sh
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Run the full-chain smoke test
+      ansible.builtin.command:
+        cmd: "/usr/local/bin/mcphub-smoke-test.sh {{ mcphub_env }} {{ health_check_gateway_url | default('https://127.0.0.1:' ~ gateway_https_port) }}"
+      environment:
+        SMOKE_CLIENT_ID: "{{ mcphub_smoke_test_client_id | default('mcphub-smoke-test') }}"
+        SMOKE_CLIENT_SECRET: "{{ _smoke_test_client_secret }}"
+        SMOKE_TOKEN_ENDPOINT: "{{ mcphub_smoke_test_token_endpoint }}"
+      register: smoke_result
+      changed_when: false
+      failed_when: smoke_result.rc != 0
+
+    - name: Show smoke test output
+      ansible.builtin.debug:
+        msg: "{{ smoke_result.stdout_lines }}"

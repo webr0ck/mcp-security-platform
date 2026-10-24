@@ -1,0 +1,70 @@
+---
+- name: Ensure observability config directory exists
+  ansible.builtin.file:
+    path: "{{ observability_conf_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Read grafana admin password from Vault
+  ansible.builtin.set_fact:
+    _grafana_password: >-
+      {{ lookup('community.hashi_vault.hashi_vault',
+                 (vault_mcphubd_creds_path ~ '/grafana'), field=grafana_admin_vault_key,
+                 url=vault_addr, auth_method='approle',
+                 role_id=vault_role_id, secret_id=vault_secret_id) }}
+  no_log: true
+
+- name: Create podman secret for grafana admin password
+  containers.podman.podman_secret:
+    name: mcphub-grafana-admin-password
+    data: "{{ _grafana_password }}"
+    state: present
+    force: true
+  no_log: true
+
+- name: Render loki config
+  ansible.builtin.template:
+    src: loki-config.yml.j2
+    dest: "{{ observability_conf_dir }}/loki-config.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+
+- name: Render loki quadlet units (volume + container)
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ quadlet_unit_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: loki.volume.j2, dest: "{{ loki_volume_name }}.volume" }
+    - { src: loki.container.j2, dest: "{{ loki_container_name }}.container" }
+  notify: Reload systemd units
+
+- name: Render grafana quadlet units (volume + container)
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ quadlet_unit_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: grafana.volume.j2, dest: "{{ grafana_volume_name }}.volume" }
+    - { src: grafana.container.j2, dest: "{{ grafana_container_name }}.container" }
+  notify: Reload systemd units
+
+- name: Flush handlers so quadlet-generated service units exist
+  ansible.builtin.meta: flush_handlers
+
+- name: Start/enable loki and grafana services
+  ansible.builtin.systemd:
+    name: "{{ item }}.service"
+    state: started
+    enabled: true
+  loop:
+    - "{{ loki_container_name }}"
+    - "{{ grafana_container_name }}"

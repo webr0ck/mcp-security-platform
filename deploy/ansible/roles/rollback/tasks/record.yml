@@ -1,0 +1,74 @@
+---
+# Called by deploy.yml BEFORE the new digest is rendered — captures whatever
+# digest is CURRENTLY live (read from the running quadlet unit, not from
+# group_vars, so it reflects reality even if group_vars already changed) as
+# the rollback target if the new deploy fails health/smoke checks.
+
+- name: Read the currently-rendered mcphubd quadlet unit (if any — first deploy has none)
+  ansible.builtin.slurp:
+    src: "{{ quadlet_unit_dir }}/{{ mcphubd_container_name }}.container"
+  register: current_unit_raw
+  failed_when: false
+
+- name: Extract the currently-live image digest
+  ansible.builtin.set_fact:
+    _current_live_digest: >-
+      {{ (current_unit_raw.content | b64decode | regex_search('Image=.*@(sha256:[a-f0-9]+)', '\1'))[0]
+         if (current_unit_raw.content is defined) else omit }}
+  when: current_unit_raw.content is defined
+
+- name: Ensure rollback state directory exists
+  ansible.builtin.file:
+    path: "{{ mcphub_rollback_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+# D4: mcphubd auto-migrates the schema at startup and this platform has NO
+# migration-rollback mechanism (sqlx migrations here are forward-only — no
+# .down.sql path, and none is being invented by this deploy-layer fix). A
+# rollback history entry that records only the image digest is not enough:
+# rolling back to an OLD binary after the schema has since migrated FORWARD
+# past what that binary expects produces an old-binary-new-schema
+# combination that can fail its own health check — arguably worse than the
+# failure being recovered from. Recording the schema version fingerprint
+# alongside the digest lets restore.yml detect and REFUSE exactly that case
+# (see roles/rollback/tasks/restore.yml) instead of silently attempting it.
+# Table absent on a brand-new DB is not an error — treated as version 0 below.
+- name: Read the latest applied sqlx migration version
+  containers.podman.podman_container_exec:
+    name: "{{ postgres_container_name }}"
+    command: >-
+      psql -U {{ postgres_user }} -d {{ postgres_db }} -tAc
+      "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success = true"
+  register: _pg_schema_version_raw
+  changed_when: false
+  failed_when: false
+
+- name: Resolve the schema version fingerprint to record
+  ansible.builtin.set_fact:
+    _current_schema_version: >-
+      {{ (_pg_schema_version_raw.stdout | default('0') | trim | int)
+         if (_pg_schema_version_raw.rc | default(1)) == 0 else 0 }}
+
+- name: Load existing rollback history (empty list if this is the first deploy)
+  ansible.builtin.set_fact:
+    _rollback_history: "{{ (lookup('file', mcphub_rollback_history_file, errors='ignore') | default('[]', true)) | from_json }}"
+
+- name: Append the current live digest + schema version as a rollback point (skip if nothing was live yet, or unchanged from the last recorded point)
+  ansible.builtin.set_fact:
+    _rollback_history: >-
+      {{ ([{'digest': _current_live_digest, 'recorded_at': ansible_date_time.iso8601, 'schema_version': _current_schema_version}] + _rollback_history)
+         [:mcphub_rollback_history | int] }}
+  when:
+    - _current_live_digest is defined
+    - _rollback_history | length == 0 or _rollback_history[0].digest != _current_live_digest
+
+- name: Persist rollback history
+  ansible.builtin.copy:
+    content: "{{ _rollback_history | to_nice_json }}"
+    dest: "{{ mcphub_rollback_history_file }}"
+    owner: root
+    group: root
+    mode: "0640"

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Quarantine{% endblock %}
+{% block content %}
+<h1>Quarantine</h1>
+<p class="lede">Tools currently held in quarantine cannot be invoked by anyone, regardless of grants, until released here.</p>
+
+{% if entries.is_empty() %}
+<div class="empty-state"><p>Nothing is quarantined right now.</p></div>
+{% else %}
+<table>
+  <caption>Quarantined tools</caption>
+  <thead>
+    <tr>
+      <th scope="col">Server / tool</th>
+      <th scope="col">Reason</th>
+      <th scope="col">Since</th>
+      <th scope="col">Action</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for q in entries %}
+    <tr>
+      <td data-label="Server / tool">{{ q.server_name }} / <code>{{ q.tool_name }}</code></td>
+      <td data-label="Reason">{{ q.reason }}</td>
+      <td data-label="Since">{{ q.quarantined_at }}</td>
+      <td data-label="Action">
+        <form method="post" action="/security/quarantine/release" class="inline-form"
+              data-confirm="Release {{ q.tool_name }} on {{ q.server_name }} from quarantine? It becomes invokable immediately for anyone with a grant.">
+          <input type="hidden" name="csrf_token" value="{{ chrome.csrf_token }}">
+          <input type="hidden" name="server_id" value="{{ q.server_id }}">
+          <input type="hidden" name="tool_name" value="{{ q.tool_name }}">
+          <button type="submit" class="btn btn--danger">Release</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

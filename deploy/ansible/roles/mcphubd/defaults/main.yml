@@ -1,0 +1,21 @@
+---
+mcphubd_container_name: mcp-mcphubd
+# mcphubd_config_path / mcphubd.toml deliberately removed (was dead — see
+# tasks/main.yml's note; bin/mcphubd/src/config.rs is 100%
+# environment-variable driven and never reads a config file).
+mcphubd_idp_config_path: /etc/mcphub/idp.json   # bare JSON array matching Vec<IdpConfig> — see FileIdpConfigLoader::from_json
+mcphubd_memory_limit: 512m   # ARCHITECTURE.md budget: steady-state RSS < 512MB
+mcphubd_cpu_limit: "8.0"     # budget is measured "on 8 cores"
+mcphubd_health_path: /health/ready
+mcphubd_log_level: info
+# Content-hash markers used to make podman_secret idempotent AND to detect
+# secret rotation under an unchanged secret NAME (the unit file only
+# references secrets by name, so a rotated value alone never changes it —
+# see D9 in the deploy review). Hashes only, never plaintext.
+mcphub_secret_hash_dir: /var/lib/mcphub/secret-hashes
+# Vault "shell" podman-secret driver (D2) — used for the credential-broker
+# KEK's Vault-token and the audit HMAC key. See tasks/main.yml for why
+# neither ever becomes a `file`-driver podman secret.
+mcphub_vault_secret_driver_dir: /usr/local/lib/mcphub/vault-secret-driver
+mcphub_vault_secret_index: /etc/mcphub/vault-secret-driver/index.json
+mcphub_vault_approle_env: /etc/mcphub/vault-approle.env

@@ -1,0 +1,10 @@
+---
+# postgres_container_name / postgres_port / postgres_db / postgres_user /
+# postgres_app_user moved to inventories/<env>/group_vars/all.yml — they
+# are needed by roles/mcphubd too, and role defaults aren't visible across
+# a dynamic `include_role` (see that file for the full rationale). Only
+# this role's own private concerns stay here.
+postgres_volume_name: mcp-postgres-data
+postgres_vault_secret_key: password    # key under vault_mcphubd_creds_path/postgres and .../mcphub_app
+postgres_memory_limit: 1024m
+postgres_cpu_limit: "1.0"

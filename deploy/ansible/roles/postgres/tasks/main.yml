@@ -1,0 +1,207 @@
+---
+- name: Read postgres password from Vault (never written to disk here)
+  ansible.builtin.set_fact:
+    _postgres_password: >-
+      {{ lookup('community.hashi_vault.hashi_vault',
+                 (vault_mcphubd_creds_path ~ '/postgres'),
+                 field=postgres_vault_secret_key,
+                 url=vault_addr,
+                 auth_method='approle',
+                 role_id=vault_role_id,
+                 secret_id=vault_secret_id) }}
+  no_log: true   # the secret value must never hit Ansible output/logs
+
+- name: Ensure the secret-hash marker directory exists
+  ansible.builtin.file:
+    path: "{{ mcphub_secret_hash_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# D9 fix: `force: true` unconditionally reports changed=true on every run
+# (breaking site.yml's "changed=0 on a clean second run" claim) AND doesn't,
+# by itself, guarantee the running postgres process ever picks up a rotated
+# password — see the restart task below, which is the actual propagation
+# path. Hash-gate `force` so recreation (and the changed/restart signal it
+# should drive) only happens when the password content actually changed.
+- name: Compute content hash of the postgres password
+  ansible.builtin.set_fact:
+    _postgres_password_hash: "{{ _postgres_password | hash('sha256') }}"
+  no_log: true
+
+- name: Determine whether the postgres password changed since the last run
+  ansible.builtin.set_fact:
+    _postgres_password_changed: >-
+      {{ (lookup('file', mcphub_secret_hash_dir ~ '/mcphub-postgres-password', errors='ignore')
+          | default('', true)) != _postgres_password_hash }}
+  no_log: true
+
+- name: Create podman secret for postgres password from the Vault-sourced value (recreated only when its content actually changed)
+  containers.podman.podman_secret:
+    name: mcphub-postgres-password
+    data: "{{ _postgres_password }}"
+    state: present
+    force: "{{ _postgres_password_changed }}"
+  no_log: true
+
+- name: Persist the updated password hash marker
+  ansible.builtin.copy:
+    content: "{{ _postgres_password_hash }}"
+    dest: "{{ mcphub_secret_hash_dir }}/mcphub-postgres-password"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Render postgres quadlet volume unit
+  ansible.builtin.template:
+    src: postgres.volume.j2
+    dest: "{{ quadlet_unit_dir }}/{{ postgres_volume_name }}.volume"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+
+- name: Render postgres quadlet container unit
+  ansible.builtin.template:
+    src: postgres.container.j2
+    dest: "{{ quadlet_unit_dir }}/{{ postgres_container_name }}.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+
+- name: Flush handlers so the quadlet-generated service unit exists before we start it
+  ansible.builtin.meta: flush_handlers
+
+- name: Start/enable postgres service (quadlet-generated unit name = <container-name>.service)
+  ansible.builtin.systemd:
+    name: "{{ postgres_container_name }}.service"
+    state: started
+    enabled: true
+
+- name: Wait for postgres to accept connections (pg_isready inside the container)
+  containers.podman.podman_container_exec:
+    name: "{{ postgres_container_name }}"
+    command: "pg_isready -U {{ postgres_user }} -d {{ postgres_db }}"
+  register: pg_ready
+  until: pg_ready.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+
+# D9's rotation-propagation gap, closed for real: the official postgres
+# image only consults POSTGRES_PASSWORD during first-ever initdb — updating
+# the podman secret (or even restarting the container) does NOT change the
+# live role's password on an already-initialized data volume. Without this
+# step, a rotated Vault password updates the secret file but the DATABASE
+# itself silently keeps the old one, and mcphubd's rotated DSN (built from
+# the same Vault value) starts failing to authenticate. PGNEWPASS is passed
+# as an environment variable, not interpolated into the SQL/argv, for the
+# same reason redis-cli moved off `-a` (D8) — argv is host-visible via
+# `ps`/`/proc`, environment is not.
+- name: Actually rotate the live postgres role's password when the Vault-sourced value changed (container restart alone does not do this)
+  containers.podman.podman_container_exec:
+    name: "{{ postgres_container_name }}"
+    command: >-
+      psql -v ON_ERROR_STOP=1 -U {{ postgres_user }} -d {{ postgres_db }}
+      -c "\getenv _newpw PGNEWPASS"
+      -c "ALTER ROLE {{ postgres_user }} WITH PASSWORD :'_newpw'"
+    env:
+      PGNEWPASS: "{{ _postgres_password }}"
+  when: _postgres_password_changed
+  no_log: true
+
+# ── mcphub_app: the non-owner, non-superuser role mcphubd connects as at ────
+# runtime (new requirement from fix-store's assert_non_privileged_connection,
+# see mcphub-store/src/security.rs). `{{ postgres_user }}` above (the
+# container's POSTGRES_USER) is a Postgres SUPERUSER and — once migrations
+# run — the OWNER of every table including audit_events; either property
+# lets it TRUNCATE/DROP/DISABLE TRIGGER regardless of any GRANT/REVOKE,
+# which makes the append-only guarantee on audit_events decorative if
+# mcphubd ever connects as it. Migration 0004_ops.up.sql already creates
+# `mcphub_app` (NOLOGIN, with the exact least-privilege GRANT set —
+# fix-store proved TRUNCATE/DISABLE TRIGGER/DROP/UPDATE all independently
+# fail for it) but explicitly defers giving it a real LOGIN + password to
+# "deployment tooling" — that's this task.
+#
+# Created HERE, before mcphubd ever runs its first migration, not inside
+# the migration itself: migration 0004's own role-creation is
+# `IF NOT EXISTS ... CREATE ROLE mcphub_app NOLOGIN`, so pre-creating it
+# with LOGIN here makes that a no-op (the migration's GRANTs still apply to
+# whichever role already exists under that name) — this avoids a
+# chicken-and-egg ordering problem where mcphub_app doesn't exist until
+# mcphubd migrates, but mcphubd can't safely connect to migrate except as
+# the owner in the first place.
+- name: Read mcphub_app's application password from Vault (never written to disk here)
+  ansible.builtin.set_fact:
+    _mcphub_app_password: >-
+      {{ lookup('community.hashi_vault.hashi_vault',
+                 (vault_mcphubd_creds_path ~ '/mcphub_app'),
+                 field=postgres_vault_secret_key,
+                 url=vault_addr,
+                 auth_method='approle',
+                 role_id=vault_role_id,
+                 secret_id=vault_secret_id) }}
+  no_log: true
+
+- name: Compute content hash of mcphub_app's password
+  ansible.builtin.set_fact:
+    _mcphub_app_password_hash: "{{ _mcphub_app_password | hash('sha256') }}"
+  no_log: true
+
+- name: Determine whether mcphub_app's password changed since the last run
+  ansible.builtin.set_fact:
+    _mcphub_app_password_changed: >-
+      {{ (lookup('file', mcphub_secret_hash_dir ~ '/mcphub-app-password', errors='ignore')
+          | default('', true)) != _mcphub_app_password_hash }}
+  no_log: true
+
+- name: Persist the updated mcphub_app password hash marker
+  ansible.builtin.copy:
+    content: "{{ _mcphub_app_password_hash }}"
+    dest: "{{ mcphub_secret_hash_dir }}/mcphub-app-password"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+# Idempotent either way — never CREATE OR REPLACE, never touches the role
+# again after its first NOLOGIN->LOGIN transition.
+- name: Create mcphub_app with LOGIN if absent, or rotate its password if changed
+  containers.podman.podman_container_exec:
+    name: "{{ postgres_container_name }}"
+    command: >-
+      psql -v ON_ERROR_STOP=1 -U {{ postgres_user }} -d {{ postgres_db }}
+      -c "\getenv _newpw PGNEWPASS"
+      -c "DO $do$ BEGIN
+            IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ postgres_app_user }}') THEN
+              ALTER ROLE {{ postgres_app_user }} WITH LOGIN PASSWORD :'_newpw';
+            ELSE
+              CREATE ROLE {{ postgres_app_user }} WITH LOGIN PASSWORD :'_newpw';
+            END IF;
+          END $do$;"
+    env:
+      PGNEWPASS: "{{ _mcphub_app_password }}"
+  when: _mcphub_app_password_changed
+  no_log: true
+
+# Fail-closed sanity check, cheap enough to run every play: mcphub_app must
+# exist, have LOGIN, and be neither a superuser nor own audit_events, or
+# fix-store's own assertion (once wired into mcphubd's startup) would refuse
+# to serve traffic anyway — better to catch a misconfigured role here, with
+# a clear Ansible message, than as an opaque mcphubd startup crash loop.
+- name: Verify mcphub_app is a real LOGIN role, not a superuser, and does not own audit_events
+  containers.podman.podman_container_exec:
+    name: "{{ postgres_container_name }}"
+    command: >-
+      psql -v ON_ERROR_STOP=1 -U {{ postgres_user }} -d {{ postgres_db }} -tAc
+      "SELECT rolcanlogin AND NOT rolsuper AND NOT EXISTS (
+         SELECT 1 FROM pg_class WHERE relname = 'audit_events' AND relowner = pg_roles.oid
+       ) FROM pg_roles WHERE rolname = '{{ postgres_app_user }}'"
+  register: _mcphub_app_privilege_check
+  changed_when: false
+  failed_when: >-
+    _mcphub_app_privilege_check.rc != 0
+    or _mcphub_app_privilege_check.stdout | trim != 't'

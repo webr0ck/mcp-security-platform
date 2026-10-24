@@ -1,0 +1,387 @@
+---
+- name: Load install-time IDP config file (BOTH-paths requirement — see rs/ARCHITECTURE.md)
+  ansible.builtin.include_vars:
+    file: "{{ mcphub_idp_config_file }}"
+    name: mcphubd_idp_file
+
+- name: Expose IDP entries to the mcphubd config template
+  ansible.builtin.set_fact:
+    mcphubd_idp_entries: "{{ mcphubd_idp_file.idps }}"
+
+- name: Read the migration/owner postgres password, mcphub_app's runtime password, and the redis password from Vault
+  # Each looked up independently here, exactly like `roles/postgres` does
+  # for its own copies — NOT passed as a fact between roles. This role runs
+  # standalone from `playbooks/deploy.yml`/`rollback.yml` (which never run
+  # `roles/postgres`), so anything mcphubd needs must come from Vault
+  # directly, every time; a cross-role `set_fact` would be undefined outside
+  # a full `site.yml` run and break every real deploy.
+  ansible.builtin.set_fact:
+    _pg_password: >-
+      {{ lookup('community.hashi_vault.hashi_vault',
+                 (vault_mcphubd_creds_path ~ '/postgres'), field='password',
+                 url=vault_addr, auth_method='approle',
+                 role_id=vault_role_id, secret_id=vault_secret_id) }}
+    _mcphub_app_password: >-
+      {{ lookup('community.hashi_vault.hashi_vault',
+                 (vault_mcphubd_creds_path ~ '/mcphub_app'), field='password',
+                 url=vault_addr, auth_method='approle',
+                 role_id=vault_role_id, secret_id=vault_secret_id) }}
+    _redis_password: >-
+      {{ lookup('community.hashi_vault.hashi_vault',
+                 (vault_mcphubd_creds_path ~ '/redis'), field='password',
+                 url=vault_addr, auth_method='approle',
+                 role_id=vault_role_id, secret_id=vault_secret_id) }}
+  no_log: true
+
+# Two DSNs, two roles, two purposes — DO NOT collapse these back into one:
+#   _mcphubd_migration_dsn -- {{ postgres_user }} (superuser/owner). Used
+#     ONLY for running migrations. Rendered to MCPHUBD_MIGRATION_DATABASE_URL.
+#   _mcphubd_app_dsn -- {{ postgres_app_user }} (mcphub_app, non-owner,
+#     non-superuser — see roles/postgres for how its password is
+#     provisioned). This is the RUNTIME connection mcphubd serves traffic
+#     on, rendered to DATABASE_URL. Connecting the runtime pool as the
+#     owner/superuser is exactly the gap fix-store's
+#     assert_non_privileged_connection exists to catch (see mcphubd role
+#     README "DATABASE_URL / migration split" section for the current
+#     wiring status on the mcphubd binary side).
+- name: Assemble the DSN/URL strings once (reused below for hashing and for the actual podman secrets)
+  ansible.builtin.set_fact:
+    _mcphubd_migration_dsn: "postgres://{{ postgres_user }}:{{ _pg_password }}@{{ postgres_container_name }}:{{ postgres_port }}/{{ postgres_db }}"
+    _mcphubd_app_dsn: "postgres://{{ postgres_app_user }}:{{ _mcphub_app_password }}@{{ postgres_container_name }}:{{ postgres_port }}/{{ postgres_db }}"
+    _redis_url: "redis://:{{ _redis_password }}@{{ redis_container_name }}:6379/0"
+  no_log: true
+  # NOTE: the credential-broker KEK and the audit HMAC key are deliberately
+  # NOT read into Ansible facts here — see the "vault shell-driver secrets"
+  # block below. Unlike the DSNs/redis-URL/IDP-client-secret podman secrets
+  # (still `file`-driver: real plaintext-on-disk in secretsdata.json,
+  # base64-encoded not encrypted, disclosed to any offline-disk-image/
+  # backup reader), those two secrets are explicitly kept off this host's
+  # disk entirely, not even transiently in Ansible's own process memory or
+  # fact cache beyond this file.
+
+# ── D9 fix (idempotence + rotation propagation) ─────────────────────────────
+# `force: true` unconditionally (the previous behaviour) makes EVERY run
+# report changed=true for every secret, which breaks site.yml's documented
+# "changed=0 on a clean second run" claim by inspection. Worse: the unit
+# file references each podman secret BY NAME, so recreating a secret with
+# new content does not change the rendered unit — `mcphubd_unit_rendered`
+# stays unchanged, the restart trigger at the bottom of this file never
+# fires, and mcphubd keeps running with the OLD secret in its environment
+# (loaded once at container start) until some UNRELATED restart happens.
+#
+# Fix: hash each secret's plaintext content, compare against a marker file
+# recorded on the previous run, and only force-recreate + restart when the
+# content actually changed — real idempotence AND real rotation propagation,
+# from the same mechanism.
+- name: Ensure the secret-hash marker directory exists (root-only — hashes are not secret, but keep them alongside other rollback/state bookkeeping)
+  ansible.builtin.file:
+    path: "{{ mcphub_secret_hash_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# The KEK and audit HMAC key are handled separately below (shell driver) —
+# never hashed here because they are never read into Ansible at all (never
+# plaintext, not even hashed-of-plaintext, which the hash marker files ARE
+# for the other secrets — not sensitive itself, but a needless trace of a
+# value this design goes out of its way to keep off this host entirely).
+- name: Compute content hashes for the mcphubd-managed file-driver secrets
+  ansible.builtin.set_fact:
+    _mcphubd_secret_hashes:
+      mcphub-mcphubd-database-url: "{{ _mcphubd_app_dsn | hash('sha256') }}"
+      mcphub-mcphubd-migration-database-url: "{{ _mcphubd_migration_dsn | hash('sha256') }}"
+      mcphub-mcphubd-redis-url: "{{ _redis_url | hash('sha256') }}"
+  no_log: true
+
+# Absent marker = first run = treat as changed.
+- name: Determine which of the fixed secrets actually changed since the last run
+  ansible.builtin.set_fact:
+    _mcphubd_secret_changed: >-
+      {{ _mcphubd_secret_changed | default({})
+         | combine({item.key: ((lookup('file', mcphub_secret_hash_dir ~ '/' ~ item.key, errors='ignore')
+                                 | default('', true)) != item.value)}) }}
+  loop: "{{ _mcphubd_secret_hashes | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+- name: Create podman secret — mcphub_app runtime DSN (DATABASE_URL; recreated only when its content actually changed)
+  containers.podman.podman_secret:
+    name: mcphub-mcphubd-database-url
+    data: "{{ _mcphubd_app_dsn }}"
+    state: present
+    force: "{{ _mcphubd_secret_changed['mcphub-mcphubd-database-url'] }}"
+  no_log: true
+
+- name: Create podman secret — migration/owner DSN (MCPHUBD_MIGRATION_DATABASE_URL; recreated only when its content actually changed)
+  containers.podman.podman_secret:
+    name: mcphub-mcphubd-migration-database-url
+    data: "{{ _mcphubd_migration_dsn }}"
+    state: present
+    force: "{{ _mcphubd_secret_changed['mcphub-mcphubd-migration-database-url'] }}"
+  no_log: true
+
+- name: Create podman secret — full redis URL (recreated only when its content actually changed)
+  containers.podman.podman_secret:
+    name: mcphub-mcphubd-redis-url
+    data: "{{ _redis_url }}"
+    state: present
+    force: "{{ _mcphubd_secret_changed['mcphub-mcphubd-redis-url'] }}"
+  no_log: true
+
+## ── Credential-broker KEK + audit HMAC key: podman "shell" secret driver ───
+## Neither becomes a podman `file`-driver secret at all — that driver
+## persists the value base64-encoded (not encrypted) to secretsdata.json,
+## which is exactly the plaintext-on-disk exposure this platform's standing
+## KEK-persistence decision already rejected for a `.env` KEK (see agent
+## memory: kek-persistence-decision). Instead: `shell`-driver podman
+## secrets whose `store` script discards the value it's given and whose
+## `lookup` script fetches the CURRENT value live from Vault every time
+## podman needs to materialize it into a container.
+##
+## The KEK specifically doesn't even flow through this driver as a "value"
+## — see lookup.sh's "approle_token" pointer type. mcphubd's own
+## VaultKekSource (rs/crates/mcphub-creds) authenticates to Vault ITSELF
+## using MCPHUB_VAULT_TOKEN and fetches the KEK live, on its own schedule.
+## This driver's job for the KEK is only to mint that TOKEN fresh at every
+## container start (never a long-lived token sitting on disk) — the KEK
+## itself never passes through Ansible OR this driver.
+##
+## The audit HMAC key has no such mcphubd-side live-fetch path (yet) —
+## config.rs reads it as a plain required env var — so it goes through the
+## "kv" pointer type: fetched live from Vault by lookup.sh and handed to
+## podman as MCPHUB_AUDIT_HMAC_KEY, still never touching disk.
+- name: Install the vault-secret-driver shell scripts
+  ansible.builtin.copy:
+    src: "vault-secret-driver/{{ item }}"
+    dest: "{{ mcphub_vault_secret_driver_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - lookup.sh
+    - store.sh
+    - delete.sh
+    - list.sh
+
+- name: Ensure the vault-secret-driver index directory exists (root-only — holds only non-secret pointers)
+  ansible.builtin.file:
+    path: "{{ mcphub_vault_secret_index | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Ensure the vault-secret-driver index file exists (empty JSON object if first run)
+  ansible.builtin.copy:
+    content: "{}"
+    dest: "{{ mcphub_vault_secret_index }}"
+    owner: root
+    group: root
+    mode: "0600"
+    force: false   # never overwrite existing pointer entries — only the merge task below updates content
+
+- name: Read the current vault-secret-driver index
+  ansible.builtin.slurp:
+    src: "{{ mcphub_vault_secret_index }}"
+  register: _vault_secret_index_raw
+
+- name: Merge in the vault-token and audit-HMAC-key pointers (non-secret — never the values themselves)
+  ansible.builtin.copy:
+    content: >-
+      {{ ((_vault_secret_index_raw.content | b64decode | from_json)
+          | combine({
+              'mcphub-mcphubd-vault-token': {'type': 'approle_token'},
+              'mcphub-mcphubd-audit-hmac-key': {'type': 'kv', 'vault_path': vault_audit_hmac_path, 'vault_field': 'key'}
+            }))
+         | to_nice_json }}
+    dest: "{{ mcphub_vault_secret_index }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+# The AppRole role_id/secret_id are still on disk here, root-only 0600 —
+# a real residual exposure, but a strictly narrower one than the KEK or the
+# audit HMAC key: this AppRole is scoped to read only the paths it needs
+# (least privilege, enforced by the Vault policy the role_id/secret_id are
+# bound to), is independently revocable/rotatable in Vault without touching
+# either secret, and is the SAME role_id/secret_id Ansible itself already
+# authenticates with (env vars, "never committed" — see inventory
+# group_vars) — this task gives the host's own lookup.sh the same
+# credential, not a new exposure category. A stolen disk image still yields
+# this AppRole credential, but not the KEK or the audit HMAC key
+# themselves — those can only be fetched live from a reachable,
+# sealed-checked Vault, which is the actual finding this design closes.
+- name: Write the AppRole bootstrap file lookup.sh authenticates with
+  ansible.builtin.copy:
+    content: |
+      VAULT_ADDR={{ vault_addr }}
+      VAULT_ROLE_ID={{ vault_role_id }}
+      VAULT_SECRET_ID={{ vault_secret_id }}
+    dest: "{{ mcphub_vault_approle_env }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+# store.sh discards this placeholder (see store.sh) — the real value is
+# fetched live by lookup.sh (a fresh AppRole login, for this one) at
+# container-start time.
+- name: Create the Vault-token podman secret via the shell driver (MCPHUB_VAULT_TOKEN)
+  containers.podman.podman_secret:
+    name: mcphub-mcphubd-vault-token
+    data: "managed-by-vault-shell-driver"   # never used as the actual secret value — see store.sh
+    state: present
+    driver: shell
+    driver_opts:
+      lookup: "{{ mcphub_vault_secret_driver_dir }}/lookup.sh"
+      store: "{{ mcphub_vault_secret_driver_dir }}/store.sh"
+      delete: "{{ mcphub_vault_secret_driver_dir }}/delete.sh"
+      list: "{{ mcphub_vault_secret_driver_dir }}/list.sh"
+
+# store.sh discards this placeholder — the real value is fetched live by
+# lookup.sh (a Vault KV read) at container-start time.
+- name: Create the audit-HMAC-key podman secret via the shell driver (MCPHUB_AUDIT_HMAC_KEY)
+  containers.podman.podman_secret:
+    name: mcphub-mcphubd-audit-hmac-key
+    data: "managed-by-vault-shell-driver"   # never used as the actual secret value — see store.sh
+    state: present
+    driver: shell
+    driver_opts:
+      lookup: "{{ mcphub_vault_secret_driver_dir }}/lookup.sh"
+      store: "{{ mcphub_vault_secret_driver_dir }}/store.sh"
+      delete: "{{ mcphub_vault_secret_driver_dir }}/delete.sh"
+      list: "{{ mcphub_vault_secret_driver_dir }}/list.sh"
+
+- name: Persist updated hash markers for the file-driver secrets (so the NEXT run can tell what changed)
+  ansible.builtin.copy:
+    content: "{{ item.value }}"
+    dest: "{{ mcphub_secret_hash_dir }}/{{ item.key }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ _mcphubd_secret_hashes | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+- name: Read each configured IDP's client secret from Vault
+  ansible.builtin.set_fact:
+    _mcphubd_idp_secrets: >-
+      {{ _mcphubd_idp_secrets | default({})
+         | combine({item.vault_secret_name:
+             lookup('community.hashi_vault.hashi_vault',
+                     (vault_idp_secrets_path ~ '/' ~ item.vault_secret_name), field='client_secret',
+                     url=vault_addr, auth_method='approle',
+                     role_id=vault_role_id, secret_id=vault_secret_id)}) }}
+  loop: "{{ mcphubd_idp_entries }}"
+  loop_control:
+    label: "{{ item.vault_secret_name }}"
+  no_log: true
+
+- name: Determine which per-IDP client secrets actually changed since the last run
+  ansible.builtin.set_fact:
+    _mcphubd_idp_secret_changed: >-
+      {{ _mcphubd_idp_secret_changed | default({})
+         | combine({item.key: ((lookup('file', mcphub_secret_hash_dir ~ '/mcphub-idp-' ~ item.key ~ '-client-secret', errors='ignore')
+                                 | default('', true)) != (item.value | hash('sha256')))}) }}
+  loop: "{{ _mcphubd_idp_secrets | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+- name: Create a podman secret per IDP client secret (recreated only when its content actually changed)
+  # Keyed by `vault_secret_name` — a deploy-only field on each idp.yml entry,
+  # NOT part of IdpConfig (the real struct has no `name`/identifier field at
+  # all, confirmed against rs/crates/mcphub-identity/src/config.rs). This is
+  # how we key the Vault path / podman secret name without inventing a field
+  # that doesn't exist on the wire type.
+  containers.podman.podman_secret:
+    name: "mcphub-idp-{{ item.key }}-client-secret"
+    data: "{{ item.value }}"
+    state: present
+    force: "{{ _mcphubd_idp_secret_changed[item.key] }}"
+  loop: "{{ _mcphubd_idp_secrets | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+- name: Persist updated hash markers for per-IDP client secrets
+  ansible.builtin.copy:
+    content: "{{ item.value | hash('sha256') }}"
+    dest: "{{ mcphub_secret_hash_dir }}/mcphub-idp-{{ item.key }}-client-secret"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ _mcphubd_idp_secrets | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+# The unit file only names secrets, so this is the ONLY signal that a
+# restart is needed for content that changed under an unchanged name.
+- name: Note whether any mcphubd-managed secret was rotated this run
+  ansible.builtin.set_fact:
+    _mcphubd_secrets_rotated: >-
+      {{ ((_mcphubd_secret_changed.values() | list) + (_mcphubd_idp_secret_changed.values() | list))
+         | select('equalto', true) | list | length > 0 }}
+
+# mcphubd.toml / MCPHUBD_CONFIG are NOT rendered/set here — confirmed
+# against the real bin/mcphubd/src/config.rs that startup config is 100%
+# environment-variable driven (DATABASE_URL, REDIS_URL,
+# MCPHUB_IDP_CONFIG_FILE, MCPHUB_VAULT_*, MCPHUB_AUDIT_HMAC_KEY, ...); no
+# code path in config.rs ever reads a TOML file or an MCPHUBD_CONFIG env
+# var. Rendering and mounting a config file nothing reads was dead wiring
+# that looked load-bearing — removed rather than left as misleading
+# evidence of a mechanism that doesn't exist.
+- name: Render idp.json (bare JSON array matching Vec<IdpConfig> exactly — see FileIdpConfigLoader::from_json)
+  ansible.builtin.template:
+    src: idp.json.j2
+    dest: "{{ mcphubd_idp_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+
+- name: Render mcphubd quadlet container unit (digest-pinned image)
+  ansible.builtin.template:
+    src: mcphubd.container.j2
+    dest: "{{ quadlet_unit_dir }}/{{ mcphubd_container_name }}.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+  register: mcphubd_unit_rendered
+
+- name: Flush handlers so the quadlet-generated service unit exists/reflects the new digest
+  ansible.builtin.meta: flush_handlers
+
+- name: Start/enable mcphubd service
+  ansible.builtin.systemd:
+    name: "{{ mcphubd_container_name }}.service"
+    state: started
+    enabled: true
+  register: mcphubd_service_state
+
+# D9: a secret rotation alone never changes the unit file, so without the
+# second condition below this would never trigger a restart for one.
+- name: Restart mcphubd if the unit changed (digest bump) or any managed secret's content was rotated under an unchanged name
+  ansible.builtin.systemd:
+    name: "{{ mcphubd_container_name }}.service"
+    state: restarted
+  when: >-
+    (mcphubd_unit_rendered.changed and not mcphubd_service_state.changed)
+    or (_mcphubd_secrets_rotated | default(false))
+
+# NOTE on KEK / audit-HMAC-key / Vault-token rotation specifically: unlike
+# the file-driver secrets above, Ansible never reads these values (that's
+# the point of the shell driver), so it has no content to hash and cannot
+# detect "the value changed in Vault" the way it detects DSN/redis-URL/
+# IDP-secret rotation. An operator rotating the KEK or the audit HMAC key
+# in Vault must explicitly trigger a restart to pick it up — see
+# playbooks/rotate-kek.yml (KEK) and playbooks/rotate-audit-hmac-key.yml
+# (audit HMAC key — note its rotation invalidates verification of every
+# PRIOR audit row; that playbook says so explicitly, this is not something
+# to run casually). Both are deliberately minimal, auditable actions that
+# touch nothing else.

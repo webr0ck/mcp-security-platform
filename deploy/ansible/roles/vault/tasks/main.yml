@@ -1,0 +1,188 @@
+---
+# Vault is the ONE component that cannot bootstrap its own secret purely
+# from Vault (chicken-and-egg): initial unseal keys + root token must exist
+# somewhere the first time. We minimize the blast radius: shamir key
+# material is written ONCE, to a root-only 0600 file outside the podman
+# volume, and every task after init is idempotent and never re-reads or
+# re-prints that file's contents into Ansible output (no_log throughout).
+# Prod is expected to set vault_seal_type to a cloud KMS seal, which skips
+# this file entirely (see vault.hcl.j2) — shamir is the dev/staging default
+# because it needs no cloud credentials to stand up a lab.
+
+- name: Ensure vault-init state directory exists (0700, root-only)
+  ansible.builtin.file:
+    path: "{{ vault_init_state_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Ensure vault TLS material directory exists
+  ansible.builtin.file:
+    path: /etc/mcphub/vault-tls
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Generate vault TLS private key (idempotent — only created if absent)
+  community.crypto.openssl_privatekey:
+    path: /etc/mcphub/vault-tls/vault.key
+    type: RSA
+    size: 4096
+    owner: root
+    group: "{{ vault_container_gid }}"
+    mode: "0640"
+
+# The vault quadlet runs `User={{ vault_container_uid }}:{{ vault_container_gid }}`
+# and bind-mounts vault-tls read-only with no userns remapping — a
+# root:root 0640 key is unreadable to that gid and vault's HTTPS listener
+# fails at startup (proven the same way as the gateway's D7 case: `podman
+# run --user 100:1000 ...` against a root:root 0640 key cannot open it).
+# Re-assert group ownership every run so a host_vars-supplied real key is
+# covered too, not just the self-signed path above.
+- name: Ensure vault TLS key is group-owned by the vault container's gid
+  ansible.builtin.file:
+    path: /etc/mcphub/vault-tls/vault.key
+    owner: root
+    group: "{{ vault_container_gid }}"
+    mode: "0640"
+
+- name: Generate a self-signed vault TLS cert (dev/staging convenience — prod should supply a real CA-issued cert via host_vars override of this task's `when`)
+  community.crypto.x509_certificate:
+    path: /etc/mcphub/vault-tls/vault.crt
+    privatekey_path: /etc/mcphub/vault-tls/vault.key
+    provider: selfsigned
+    mode: "0644"
+
+- name: Render vault.hcl
+  ansible.builtin.template:
+    src: vault.hcl.j2
+    dest: /etc/mcphub/vault.hcl
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+
+- name: Render vault quadlet volume unit
+  ansible.builtin.template:
+    src: vault.volume.j2
+    dest: "{{ quadlet_unit_dir }}/{{ vault_volume_name }}.volume"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+
+- name: Render vault quadlet container unit
+  ansible.builtin.template:
+    src: vault.container.j2
+    dest: "{{ quadlet_unit_dir }}/{{ vault_container_name }}.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+
+- name: Flush handlers so the quadlet-generated service unit exists before we start it
+  ansible.builtin.meta: flush_handlers
+
+- name: Start/enable vault service
+  ansible.builtin.systemd:
+    name: "{{ vault_container_name }}.service"
+    state: started
+    enabled: true
+
+- name: Wait for the vault API to answer (sealed or not — just reachable)
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ vault_port }}/v1/sys/health"
+    validate_certs: false
+    status_code: [200, 429, 472, 473, 501, 503]
+  register: vault_health
+  until: vault_health.status is defined
+  retries: 15
+  delay: 2
+
+- name: Check whether vault is already initialized
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ vault_port }}/v1/sys/init"
+    validate_certs: false
+    return_content: true
+  register: vault_init_check
+
+- name: One-time initialization (shamir only — KMS auto-unseal handles this itself)
+  when:
+    - vault_seal_type == 'shamir'
+    - not (vault_init_check.json.initialized | default(false))
+  block:
+    - name: Initialize vault, capture unseal keys + root token
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:{{ vault_port }}/v1/sys/init"
+        method: PUT
+        validate_certs: false
+        body_format: json
+        body:
+          secret_shares: "{{ vault_shamir_shares }}"
+          secret_threshold: "{{ vault_shamir_threshold }}"
+        status_code: 200
+      register: vault_init_result
+      no_log: true
+
+    - name: Persist unseal keys + root token to the root-only break-glass file
+      ansible.builtin.copy:
+        content: "{{ vault_init_result.json | to_nice_json }}"
+        dest: "{{ vault_init_state_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: OPERATOR ACTION REQUIRED
+      ansible.builtin.debug:
+        msg: >-
+          Vault was just initialized on {{ inventory_hostname }}.
+          Unseal keys + root token were written to
+          {{ vault_init_state_path }} (root-only, 0600). Move this file to
+          your break-glass secret store and delete it from the host TODAY —
+          it is the one secret this platform cannot source from Vault
+          itself. Every other secret (postgres/redis passwords, the
+          credential-broker KEK, IDP client secrets) is read FROM Vault by
+          AppRole, never stored on disk like this.
+
+- name: Read break-glass unseal keys (only exists post-init; absent file = KMS auto-unseal, this whole block is skipped)
+  ansible.builtin.slurp:
+    src: "{{ vault_init_state_path }}"
+  register: vault_init_state_raw
+  no_log: true
+  when: vault_seal_type == 'shamir'
+  failed_when: false
+
+- name: Unseal vault if sealed (shamir path)
+  when:
+    - vault_seal_type == 'shamir'
+    - vault_init_state_raw is defined
+    - vault_init_state_raw.content is defined
+  block:
+    - name: Parse break-glass state
+      ansible.builtin.set_fact:
+        _vault_unseal_keys: "{{ (vault_init_state_raw.content | b64decode | from_json).keys }}"
+      no_log: true
+
+    - name: Check seal status
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:{{ vault_port }}/v1/sys/seal-status"
+        validate_certs: false
+        return_content: true
+      register: vault_seal_status
+
+    - name: Submit unseal keys (idempotent — vault ignores extra submits once unsealed)
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:{{ vault_port }}/v1/sys/unseal"
+        method: PUT
+        validate_certs: false
+        body_format: json
+        body:
+          key: "{{ item }}"
+        status_code: 200
+      loop: "{{ _vault_unseal_keys[: vault_shamir_threshold | int] }}"
+      when: vault_seal_status.json.sealed | default(true)
+      no_log: true
+      changed_when: false   # unseal is a runtime state transition, not config drift

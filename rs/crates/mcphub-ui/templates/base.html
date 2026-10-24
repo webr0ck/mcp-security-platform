@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}MCP Hub{% endblock %} · MCP Hub</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="app-header">
+    <div class="app-header__brand">MCP Hub</div>
+    <nav aria-label="Primary" class="app-nav">
+      <ul>
+        {% for item in chrome.nav %}
+        <li><a href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>{{ item.label }}</a></li>
+        {% endfor %}
+      </ul>
+    </nav>
+    <div class="app-header__user">
+      <span class="badge badge--role">{{ chrome.user_role }}</span>
+      <span class="app-header__email">{{ chrome.user_email }}</span>
+      <form method="post" action="/logout" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ chrome.csrf_token }}">
+        <button type="submit" class="btn btn--ghost">Sign out</button>
+      </form>
+    </div>
+  </header>
+  {% if let Some(msg) = chrome.flash %}
+  <div class="flash" role="status">{{ msg }}</div>
+  {% endif %}
+  <main id="main">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="app-footer">
+    <p>MCP Hub &mdash; server-rendered, no build step.</p>
+  </footer>
+  <script nonce="{{ chrome.csp_nonce }}" src="/static/app.js"></script>
+</body>
+</html>

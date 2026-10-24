@@ -1,0 +1,55 @@
+---
+- name: Render backend MCP server quadlet units
+  ansible.builtin.template:
+    src: backend.container.j2
+    dest: "{{ quadlet_unit_dir }}/mcp-backend-{{ item.name }}.container"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ mcp_backend_servers }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    server: "{{ item }}"
+  notify: Reload systemd units
+
+- name: Flush handlers so quadlet-generated service units exist
+  ansible.builtin.meta: flush_handlers
+
+- name: Start/enable each backend MCP server
+  ansible.builtin.systemd:
+    name: "mcp-backend-{{ item.name }}.service"
+    state: started
+    enabled: true
+  loop: "{{ mcp_backend_servers }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Copy the runtime isolation verifier
+  ansible.builtin.copy:
+    src: verify_isolation.py
+    dest: /usr/local/bin/mcp-verify-isolation.py
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Verify backend network isolation (F-001 runtime port) — FAILS THE PLAY on violation
+  # The inventory (mcp_backend_servers) is the OUTER loop the verifier
+  # audits against — passed explicitly as argv so a container that has
+  # escaped the network (e.g. --network host) is still inspected by name,
+  # not silently excluded by a `podman ps --filter network=...` query that
+  # can only ever return containers already on the property being checked.
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['python3', '/usr/local/bin/mcp-verify-isolation.py',
+         mcphub_backend_network, mcphubd_container_name | default('mcp-mcphubd')]
+        + (mcp_backend_servers | map(attribute='name') | map('regex_replace', '^(.*)$', 'mcp-backend-\1') | list)
+      }}
+  register: isolation_check
+  changed_when: false
+  failed_when: isolation_check.rc != 0
+
+- name: Report isolation verification result
+  ansible.builtin.debug:
+    msg: "{{ isolation_check.stdout_lines }}"

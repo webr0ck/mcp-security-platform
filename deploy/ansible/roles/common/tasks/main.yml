@@ -1,0 +1,107 @@
+---
+# common: base OS packages, the mcphub system account, quadlet directory
+# scaffolding, and kernel/sysctl tuning the performance budget assumes.
+# Idempotent by construction: package/user/file/sysctl modules are all
+# state-diffing, no shell/command steps here.
+
+- name: Detect OS family (guards Debian/RHEL-specific tasks below)
+  ansible.builtin.set_fact:
+    mcphub_os_is_debian: "{{ ansible_facts['os_family'] == 'Debian' }}"
+    mcphub_os_is_rhel: "{{ ansible_facts['os_family'] == 'RedHat' }}"
+
+- name: Install podman and base tooling (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: "{{ podman_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: mcphub_os_is_debian
+  register: apt_result
+  changed_when: apt_result.changed
+
+- name: Install podman and base tooling (RHEL/Fedora family)
+  ansible.builtin.dnf:
+    name: "{{ podman_packages }}"
+    state: present
+  when: mcphub_os_is_rhel
+
+- name: Create mcphub system group
+  ansible.builtin.group:
+    name: "{{ mcphub_system_group }}"
+    gid: "{{ mcphub_system_gid }}"
+    system: true
+    state: present
+
+- name: Create mcphub system user (no login shell, no home write access)
+  ansible.builtin.user:
+    name: "{{ mcphub_system_user }}"
+    uid: "{{ mcphub_system_uid }}"
+    group: "{{ mcphub_system_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    state: present
+
+- name: Create mcphub runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ mcphub_system_user }}"
+    group: "{{ mcphub_system_group }}"
+    mode: "0750"
+  loop: "{{ mcphub_dirs }}"
+
+- name: Ensure the podman quadlet unit directory exists
+  ansible.builtin.file:
+    path: "{{ quadlet_unit_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Enable lingering podman auto-update timer (digest-pinned images only, see mcphubd role — this just keeps the timer unit itself current)
+  ansible.builtin.systemd:
+    name: podman-auto-update.timer
+    enabled: false          # deliberately OFF — digest-pinned deploys are
+    state: stopped           # driven by deploy.yml, not by silent background
+    daemon_reload: true       # image churn; enabling this would violate the
+  # "deploy by digest, explicit rollback" model in rs/ARCHITECTURE.md.
+
+- name: Render podman quadlet network units (gateway / backend / data)
+  ansible.builtin.template:
+    src: network.network.j2
+    dest: "{{ quadlet_unit_dir }}/{{ item.net_name }}.network"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - net_name: "{{ mcphub_gateway_network }}"
+      net_purpose: "gateway-to-mcphubd ingress"
+      net_internal: false        # needs WAN egress for OIDC discovery/OCSP
+    - net_name: "{{ mcphub_backend_network }}"
+      net_purpose: "mcphubd-to-backend-mcp-servers"
+      net_internal: true         # HARD REQUIREMENT: no route to the outside,
+                                  # no published ports — see mcp_backends role
+    - net_name: "{{ mcphub_data_network }}"
+      net_purpose: "mcphubd-to-postgres-redis-vault"
+      net_internal: true
+    - net_name: "{{ mcphub_observability_network }}"
+      net_purpose: "mcphubd-and-backends-to-loki-grafana-alertmanager"
+      net_internal: true
+  loop_control:
+    label: "{{ item.net_name }}"
+  notify: Reload systemd units
+
+- name: Apply sysctl tuning for the gateway's connection/throughput budget
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    - { name: "net.core.somaxconn", value: "65535" }
+    - { name: "net.ipv4.ip_local_port_range", value: "1024 65535" }
+    - { name: "net.ipv4.tcp_tw_reuse", value: "1" }
+    - { name: "fs.file-max", value: "2097152" }
+  when: mcphub_apply_sysctl_tuning | default(true)

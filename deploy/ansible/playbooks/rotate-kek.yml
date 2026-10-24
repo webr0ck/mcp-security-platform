@@ -1,0 +1,46 @@
+---
+# Explicit, minimal-blast-radius KEK rotation. The credential-broker KEK is
+# managed via podman's "shell" secret driver (see roles/mcphubd/tasks —
+# D2 in the deploy review) specifically so it is fetched LIVE from Vault at
+# every mcphubd (re)start rather than persisted plaintext-on-disk. That also
+# means Ansible has no way to detect "the KEK changed in Vault" the way it
+# detects other secret rotations (it never reads the value at all) — an
+# operator who rotates the KEK in Vault must run this playbook to make
+# mcphubd pick it up.
+#
+# Deliberately touches NOTHING else: no config re-render, no other secret
+# rotation, no digest change — a KEK rotation should be a single, minimal,
+# auditable action, not bundled with unrelated deploy risk.
+#
+# Usage:
+#   ansible-playbook playbooks/rotate-kek.yml [-e confirm_prod=true]
+- name: Restart mcphubd to pick up a rotated credential-broker KEK from Vault
+  hosts: mcp_gateway
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Refuse on prod without explicit confirmation (same guard as deploy.yml)
+      ansible.builtin.fail:
+        msg: "Prod KEK rotation requires -e confirm_prod=true"
+      when:
+        - mcphub_deploy_requires_confirm | default(false)
+        - not (confirm_prod | default(false) | bool)
+
+    - name: Warn — mcphubd cannot decrypt anything sealed under the OLD KEK after this restart
+      ansible.builtin.debug:
+        msg: >-
+          Restarting {{ mcphubd_container_name }} on {{ inventory_hostname }}
+          now. It will fetch the CURRENT value at {{ vault_kek_path }} from
+          Vault at startup (via lookup.sh — see roles/mcphubd). Make sure
+          the Vault rotation has fully landed before proceeding; there is no
+          overlap window where both old- and new-KEK-sealed credentials
+          decrypt successfully.
+
+    - name: Restart mcphubd
+      ansible.builtin.systemd:
+        name: "{{ mcphubd_container_name }}.service"
+        state: restarted
+
+    - name: Verify the platform is healthy after the restart
+      ansible.builtin.include_role:
+        name: health_check

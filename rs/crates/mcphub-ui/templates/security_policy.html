@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Policy decisions{% endblock %}
+{% block content %}
+<h1>Policy decisions</h1>
+<p class="lede">Every denied call, with the machine-readable reason code the OPA policy or gate produced.</p>
+
+{% if denied.is_empty() %}
+<div class="empty-state"><p>No denials recorded.</p></div>
+{% else %}
+<table>
+  <caption>Denied calls</caption>
+  <thead>
+    <tr>
+      <th scope="col">Time</th>
+      <th scope="col">Principal</th>
+      <th scope="col">Server / tool</th>
+      <th scope="col">Reason code</th>
+      <th scope="col">Detail</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in denied %}
+    <tr>
+      <td data-label="Time">{{ e.at }}</td>
+      <td data-label="Principal">{{ e.principal_sub }}</td>
+      <td data-label="Server / tool">{{ e.server_name }} / <code>{{ e.tool_name }}</code></td>
+      <td data-label="Reason code">
+        {% if let Some(r) = e.deny_reason %}
+        <span class="badge badge--deny" data-glyph="&#9679; "><code>{{ r.code }}</code></span>
+        {% endif %}
+      </td>
+      <td data-label="Detail">{% if let Some(r) = e.deny_reason %}{{ r.detail }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

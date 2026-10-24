@@ -146,18 +146,26 @@ def _require_submission_reviewer(request: Request) -> None:
 _HTMX_TAG = '<script src="/static/htmx.min.js"></script>'
 _FAVICON_LINK = '<link rel="icon" type="image/png" href="/static/owl-icon.png">'
 
-_FONTS_LINK = (
-    # Non-blocking async font load: media="print" + onload swap prevents blocking
-    # the window load event when fonts.googleapis.com is unreachable (lab network).
-    '<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800'
-    '&family=JetBrains+Mono:wght@400;500;600&display=swap"'
-    # data-media-swap replaces an inline onload= handler: inline event handlers are
-    # blocked by the portal CSP and cannot be nonce'd. portal.js does the swap.
-    ' rel="stylesheet" media="print" data-media-swap>'
-)
-
-
 _CSS = """
+/* Self-hosted (see middleware/csp.py — this replaced the Google Fonts
+ * <link>, which was a third-party request the CSP had to carve a hole for).
+ * Kept in sync with the same block in static/portal.css (see module
+ * docstring above for why this page keeps its CSS inline). */
+@font-face {
+  font-family: 'Hanken Grotesk';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('/static/fonts/hanken-grotesk.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('/static/fonts/jetbrains-mono.woff2') format('woff2');
+}
+
   :root {
     --bg:      #0a0c11;
     --surface: #12161e;
@@ -1154,7 +1162,6 @@ async def _build_admin_shell(cid: str, roles: list, initial_tab: str = "servers"
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MCP Security Platform · Admin</title>
   {_FAVICON_LINK}
-  {_FONTS_LINK}
   {_HTMX_TAG}
   <link rel="stylesheet" href="/static/portal.css">
   <script src="/static/portal.js" defer></script>
@@ -1233,7 +1240,6 @@ def _build_agent_shell(cid: str, roles: list) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MCP Security Platform · Portal</title>
   {_FAVICON_LINK}
-  {_FONTS_LINK}
   {_HTMX_TAG}
   <link rel="stylesheet" href="/static/portal.css">
   <script src="/static/portal.js" defer></script>
@@ -2628,7 +2634,13 @@ async def fragment_admin_servers(request: Request):
             verify_note = ""
             if isinstance(_vr, dict):
                 if _vr.get("invocation_probe_ok"):
-                    verify_note = ' <span  class="u93">&#x2713; last verification passed</span>'
+                    # F-CX-004: this only proves the upstream answered a bare
+                    # JSON-RPC `initialize` directly (see deploy_verifier.py
+                    # _probe_initialize) — it does NOT prove any principal can
+                    # actually invoke a tool through the proxy pipeline (OPA,
+                    # entitlement, credential injection are never exercised).
+                    # Wording must not claim more than that.
+                    verify_note = ' <span  class="u93">&#x2713; upstream reachable at last verification</span>'
                 elif _vr.get("healthcheck") is False:
                     verify_note = ' <span  class="u94">&#x2717; last verification failed — see logs</span>'
 
@@ -5072,7 +5084,6 @@ async def submit_wizard_page(request: Request):
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Submit MCP Server · MCP Security Platform</title>
   {_FAVICON_LINK}
-  {_FONTS_LINK}
   {_HTMX_TAG}
   <script src="/static/portal.js" defer></script>
   <style>

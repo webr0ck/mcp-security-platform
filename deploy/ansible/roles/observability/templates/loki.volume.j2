@@ -1,0 +1,7 @@
+## Managed by Ansible role `observability` — do not edit by hand.
+[Unit]
+Description=mcphub loki data volume
+
+[Volume]
+VolumeName={{ loki_volume_name }}
+Label=managed-by=ansible

@@ -1,0 +1,115 @@
+## Managed by Ansible role `gateway` — do not edit by hand.
+## Shared/OAuth port: everything except the mTLS tools API and any
+## dedicated_port-mode backend below.
+server {
+    listen 0.0.0.0:{{ gateway_https_port }} ssl;
+    http2 on;
+    server_name _;
+
+    ssl_certificate     {{ gateway_tls_dir }}/tls.crt;
+    ssl_certificate_key {{ gateway_tls_dir }}/tls.key;
+
+    # Low-volume, abuse-sensitive endpoints (dynamic client/IDP registration,
+    # admin) get the tighter per-IP `api` zone ahead of the high-throughput
+    # catch-all below — this is what the `api` zone (declared in nginx.conf)
+    # actually protects; previously it was declared and never referenced.
+    location /oauth/register {
+        proxy_pass http://{{ mcphubd_container_name }}:{{ mcphubd_listen_port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Client-Cert-CN "";
+        limit_req zone=api burst=20 nodelay;
+    }
+
+    location /api/v1/admin/ {
+        proxy_pass http://{{ mcphubd_container_name }}:{{ mcphubd_listen_port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Client-Cert-CN "";
+        limit_req zone=api burst=20 nodelay;
+    }
+
+    location / {
+        proxy_pass http://{{ mcphubd_container_name }}:{{ mcphubd_listen_port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-Id $http_x_request_id;
+        proxy_set_header X-Forwarded-Proto https;
+        # DEFAULT-DENY on trust headers: this port has no client-cert
+        # verification at all, so nothing it forwards may be trusted as an
+        # asserted identity. Scrub every inbound X-Client-Cert-* header
+        # unconditionally — this location covers the entire URI space
+        # (including /api/v1/tools/), so it must never let a caller-supplied
+        # value reach mcphubd under a name mcphubd treats as trusted.
+        proxy_set_header X-Client-Cert-CN "";
+        limit_req zone=shared_port burst=200 nodelay;
+    }
+}
+
+## Optional mTLS-required tools API port (client cert optional-verify; only
+## /api/v1/tools/ trusts the resulting CN — see nginx.conf's
+## $client_cert_cn_safe map, ported unmodified from the Python-era gateway).
+## An empty/unreadable client CA bundle is a HARD FAILURE at render time
+## (see roles/gateway/tasks/main.yml) rather than a silent "mTLS disabled"
+## — a bundle that fails to verify anything here must not quietly downgrade
+## this port to the same trust level as the shared port above.
+server {
+    listen 0.0.0.0:{{ gateway_mtls_port }} ssl;
+    server_name _;
+
+    ssl_certificate     {{ gateway_tls_dir }}/tls.crt;
+    ssl_certificate_key {{ gateway_tls_dir }}/tls.key;
+    ssl_client_certificate {{ gateway_tls_dir }}/client-ca.crt;
+    ssl_verify_client optional;
+
+    # Default-deny for every location on this port: scrub first, then the
+    # one location entitled to assert the header re-sets it explicitly below.
+    proxy_set_header X-Client-Cert-CN "";
+
+    location /api/v1/tools/ {
+        proxy_pass http://{{ mcphubd_container_name }}:{{ mcphubd_listen_port }};
+        # Only trustworthy when $ssl_client_verify actually succeeded — with
+        # ssl_verify_client optional, $ssl_client_s_dn_cn is still populated
+        # from ANY presented cert (even one that fails verification), so it
+        # must not be forwarded unless nginx verified it against client-ca.crt.
+        set $trusted_cn "";
+        if ($ssl_client_verify = SUCCESS) {
+            set $trusted_cn $ssl_client_s_dn_cn;
+        }
+        proxy_set_header X-Client-Cert-CN $trusted_cn;
+        limit_req zone=agent burst=100 nodelay;
+    }
+
+    location / {
+        # Every other path on this port: no location is entitled to assert
+        # the header, so re-scrub explicitly (defense in depth — do not rely
+        # solely on the server-level default above).
+        proxy_pass http://{{ mcphubd_container_name }}:{{ mcphubd_listen_port }};
+        proxy_set_header X-Client-Cert-CN "";
+        limit_req zone=shared_port burst=10 nodelay;
+    }
+}
+
+{% for entry in gateway_dedicated_ports %}
+## dedicated_port listener for IDP "{{ entry.idp_name }}" (that IDP's own
+## PKCE flow runs directly against this port; the shared port above is
+## unaffected — isolation valve, see ARCHITECTURE.md). This is a property of
+## the IDP CONFIG ITSELF (IdpConfig.dedicated_port), not of any one backend
+## server — every backend server that uses this IDP shares this listener.
+server {
+    listen 0.0.0.0:{{ entry.port }} ssl;
+    server_name _;
+
+    ssl_certificate     {{ gateway_tls_dir }}/tls.crt;
+    ssl_certificate_key {{ gateway_tls_dir }}/tls.key;
+
+    location / {
+        proxy_pass http://{{ mcphubd_container_name }}:{{ mcphubd_listen_port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Dedicated-Port-Idp {{ entry.idp_name }};
+        # No client-cert verification on this port either — scrub, same
+        # default-deny rule as the shared port.
+        proxy_set_header X-Client-Cert-CN "";
+        limit_req zone=shared_port burst=10 nodelay;
+    }
+}
+{% endfor %}

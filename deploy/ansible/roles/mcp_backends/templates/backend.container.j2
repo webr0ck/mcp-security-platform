@@ -1,0 +1,30 @@
+## Managed by Ansible role `mcp_backends` — do not edit by hand.
+## Backend MCP server "{{ server.name }}". NETWORK ISOLATION IS A HARD
+## REQUIREMENT: this unit has exactly one Network= line
+## ({{ mcphub_backend_network }}, internal:true) and NO PublishPort= line,
+## ever. See roles/mcp_backends/tasks/verify_isolation.yml, which fails the
+## play if either of those is violated.
+[Unit]
+Description=mcp backend server: {{ server.name }}
+After=network-online.target {{ mcphub_backend_network }}-network.service
+Requires={{ mcphub_backend_network }}-network.service
+
+[Container]
+Image={{ server.image }}
+ContainerName=mcp-backend-{{ server.name }}
+Network={{ mcphub_backend_network }}.network
+Environment=MCP_SERVER_NAME={{ server.name }}
+User=1001:1001
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,size=32m
+NoNewPrivileges=true
+DropCapability=ALL
+Memory={{ server.memory_limit | default('256m') }}
+PidsLimit=64
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

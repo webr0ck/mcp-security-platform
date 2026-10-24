@@ -1,0 +1,8 @@
+---
+# redis_container_name moved to inventories/<env>/group_vars/all.yml —
+# needed by roles/mcphubd too; see that file's comment for why role
+# defaults alone aren't visible across a dynamic `include_role`.
+redis_volume_name: mcp-redis-data
+redis_memory_limit: 512m
+redis_maxmemory: 400mb
+redis_maxmemory_policy: allkeys-lru

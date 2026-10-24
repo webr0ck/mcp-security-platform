@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  author: mcp-security-platform devops
+  role_name: redis
+  description: Podman-quadlet redis for mcphubd rate-limiting/cache/audit-stream, credential from Vault
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+dependencies:
+  - role: common

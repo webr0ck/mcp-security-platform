@@ -1,0 +1,125 @@
+---
+- name: Ensure gateway conf/TLS directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ gateway_conf_dir }}"
+    - "{{ gateway_conf_dir }}/conf.d"
+    - "{{ gateway_tls_dir }}"
+
+- name: Generate gateway TLS private key (idempotent — prod should override this with a real CA-issued cert via host_vars)
+  community.crypto.openssl_privatekey:
+    path: "{{ gateway_tls_dir }}/tls.key"
+    type: RSA
+    size: 4096
+    owner: root
+    group: "{{ gateway_container_gid }}"
+    mode: "0640"
+  when: gateway_tls_managed | default(true)
+
+# The nginx quadlet unit runs `User={{ gateway_container_uid }}:{{ gateway_container_gid }}`
+# (see gateway.container.j2) and bind-mounts gateway_tls_dir read-only with no
+# userns remapping — the uid/gid inside the container is the SAME uid/gid as
+# on the host. A key written 0640 root:root is unreadable to that uid and
+# nginx fails at listener startup (proven: `podman run --user 101:101 ...`
+# against a root:root 0640 key exits nonzero on `nginx -t`). Group-own the
+# key by the container's gid explicitly so 0640 is actually readable.
+- name: Ensure gateway TLS key is group-owned by the nginx container's gid (covers host_vars-supplied real keys too, not just the self-signed path above)
+  ansible.builtin.file:
+    path: "{{ gateway_tls_dir }}/tls.key"
+    owner: root
+    group: "{{ gateway_container_gid }}"
+    mode: "0640"
+
+- name: Generate self-signed gateway TLS cert
+  community.crypto.x509_certificate:
+    path: "{{ gateway_tls_dir }}/tls.crt"
+    privatekey_path: "{{ gateway_tls_dir }}/tls.key"
+    provider: selfsigned
+    mode: "0644"
+  when: gateway_tls_managed | default(true)
+
+# nginx conf.d references client-ca.crt unconditionally; an EMPTY file makes
+# ssl_verify_client optional silently never match ANY client cert — i.e. the
+# mTLS port degrades to "no identity is ever trusted" with no operator
+# signal (D5/D1: the /api/v1/tools/ location then forwards an always-empty
+# $trusted_cn, which happens to be safe, but only by accident of this
+# specific config — a future location added to that port would inherit a
+# silently-disabled mTLS boundary). Fail loudly instead of guessing: prod
+# and staging MUST supply gateway_client_ca_pem; only dev may run without a
+# real client CA, and only via an explicit opt-out.
+- name: Refuse to render an empty client CA bundle outside dev (mTLS must not silently no-op)
+  ansible.builtin.fail:
+    msg: >-
+      gateway_client_ca_pem is not set for {{ mcphub_env }} — the mTLS port
+      ({{ gateway_mtls_port }}) would verify against an empty CA bundle,
+      which means ssl_verify_client can never succeed and every caller is
+      treated as unauthenticated. Set gateway_client_ca_pem in host_vars
+      (from Vault/your PKI), or set gateway_allow_empty_client_ca=true to
+      explicitly accept an mTLS-disabled dev port.
+  when:
+    - mcphub_env != 'dev'
+    - not (gateway_allow_empty_client_ca | default(false))
+    - (gateway_client_ca_pem | default('')) | length == 0
+
+- name: Ensure client-ca.crt exists
+  ansible.builtin.copy:
+    content: "{{ gateway_client_ca_pem | default('') }}"
+    dest: "{{ gateway_tls_dir }}/client-ca.crt"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Load the dedicated-port registry (empty list if not provisioned yet)
+  ansible.builtin.set_fact:
+    gateway_dedicated_ports: "{{ (lookup('file', gateway_dedicated_ports_registry, errors='ignore') | default('[]', true)) | from_json }}"
+
+- name: Render nginx.conf
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ gateway_conf_dir }}/nginx.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload gateway
+
+- name: Render mcp-proxy.conf (shared port + mTLS tools port + any dedicated_port listeners)
+  ansible.builtin.template:
+    src: mcp-proxy.conf.j2
+    dest: "{{ gateway_conf_dir }}/conf.d/mcp-proxy.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload gateway
+
+- name: Render gateway quadlet container unit (PublishPort list follows the dedicated-port registry)
+  ansible.builtin.template:
+    src: gateway.container.j2
+    dest: "{{ quadlet_unit_dir }}/{{ gateway_container_name }}.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+  register: gateway_unit_rendered
+
+- name: Flush handlers (systemd reload + nginx -s reload, in dependency order)
+  ansible.builtin.meta: flush_handlers
+
+- name: Start/enable gateway service
+  ansible.builtin.systemd:
+    name: "{{ gateway_container_name }}.service"
+    state: started
+    enabled: true
+  register: gateway_service_state
+
+- name: Restart gateway if PublishPort set changed (adding a dedicated port requires a container recreate, reload alone won't rebind)
+  ansible.builtin.systemd:
+    name: "{{ gateway_container_name }}.service"
+    state: restarted
+  when:
+    - gateway_unit_rendered.changed
+    - not gateway_service_state.changed

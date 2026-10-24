@@ -9,6 +9,7 @@ See docs/API.md for complete endpoint specifications.
 """
 import asyncio
 import logging
+import mimetypes
 import os
 from contextlib import asynccontextmanager
 
@@ -393,6 +394,10 @@ app.include_router(oauth_provider_profiles.router)  # OAuth provider profile cat
 app.include_router(lab_links.router)          # Lab convenience: / → portal, /netbox /grafana /keycloak
 
 # Static assets — served at /static/* (no auth required; public JS/CSS only)
+# .woff2 is unregistered in this image's system mime.types (StaticFiles falls
+# back to text/plain via mimetypes.guess_type), so register it explicitly —
+# needed for the self-hosted portal fonts under static/fonts/.
+mimetypes.add_type("font/woff2", ".woff2")
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(_static_dir):
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")

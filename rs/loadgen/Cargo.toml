@@ -1,0 +1,36 @@
+[package]
+name = "loadgen"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Open-loop 3000-agent MCP load harness with HDR histograms and coordinated-omission correction"
+
+# Deliberately its own workspace (empty [workspace] table below) so it builds
+# and is verifiable independently of the sibling mcphubd crates, which may
+# not compile yet while other components of the Rust rewrite are in flight.
+# See rs/ARCHITECTURE.md — component 6 owns this directory.
+[workspace]
+
+[[bin]]
+name = "loadgen"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "process"] }
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+hdrhistogram = "7"
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+anyhow = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }

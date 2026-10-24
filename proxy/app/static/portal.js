@@ -1482,12 +1482,3 @@ registerPortalActions([
   'showEl', 'hideEl', 'toggleEl', 'htmxGet', 'toggleDisplay', 'copyText', 'copyElementText',
   'adminSetMaintainers', 'adminEditEndpoint', 'adminSetPublic', 'savePrompt', 'resetPrompt',
 ]);
-
-// Async webfont swap — replaces onload="this.media='all'" on the Google Fonts <link>,
-// which the portal CSP blocks (inline handlers cannot carry a nonce). Checks .sheet
-// first because this file is deferred and the stylesheet may already have loaded, in
-// which case the load event has been and gone.
-document.querySelectorAll('link[data-media-swap]').forEach(function(l) {
-  if (l.sheet) { l.media = 'all'; }
-  else { l.addEventListener('load', function() { l.media = 'all'; }); }
-});

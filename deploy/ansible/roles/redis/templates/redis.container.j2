@@ -1,0 +1,44 @@
+## Managed by Ansible role `redis` — do not edit by hand.
+[Unit]
+Description=mcphub redis
+After=network-online.target {{ mcphub_data_network }}-network.service
+Requires={{ mcphub_data_network }}-network.service
+Wants=network-online.target
+
+[Container]
+Image={{ redis_image }}
+ContainerName={{ redis_container_name }}
+Network={{ mcphub_data_network }}.network
+Volume={{ redis_volume_name }}.volume:/data
+Secret=mcphub-redis-password,type=mount,target=/run/secrets/redis_password
+# redis-server has no --requirepass-file flag, so the password is read from
+# the mounted secret at container start via a one-line shell wrapper (the
+# alpine redis image ships /bin/sh); the plaintext value never appears in
+# `ps`, the unit file, or Environment= — only inside this already-mounted
+# tmpfs-backed secret file.
+Entrypoint=/bin/sh
+Exec=-c 'exec redis-server --appendonly yes --maxmemory {{ redis_maxmemory }} --maxmemory-policy {{ redis_maxmemory_policy }} --requirepass "$(cat /run/secrets/redis_password)"'
+# No PublishPort= — redis is internal-network-only, same isolation rule as postgres.
+User=999:999
+ReadOnly=true
+Tmpfs=/tmp
+NoNewPrivileges=true
+DropCapability=ALL
+Memory={{ redis_memory_limit }}
+PidsLimit=128
+# REDISCLI_AUTH (env), not -a (argv): containers share the host kernel, so
+# any -a value would sit in `ps`/`/proc` on the HOST for the life of the
+# process — 8,640 exposures/day at this HealthInterval (D8). The env var
+# itself is only visible via /proc/<pid>/environ, which is root-only /
+# same-uid, not world-readable like argv in `ps aux`.
+HealthCmd=/bin/sh -c "REDISCLI_AUTH=\"$(cat /run/secrets/redis_password)\" redis-cli --no-auth-warning ping | grep -q PONG"
+HealthInterval=10s
+HealthRetries=5
+HealthStartPeriod=15s
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

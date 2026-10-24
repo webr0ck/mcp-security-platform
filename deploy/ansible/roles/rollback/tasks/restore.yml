@@ -1,0 +1,123 @@
+---
+# Called either by rollback.yml (operator-invoked) or automatically from
+# deploy.yml's `rescue:` block when a health-gated deploy fails. Restores
+# the most recent PREVIOUS digest (history[0] — record.yml never pushes the
+# digest that's about to be deployed, only what was live before it).
+#
+# D4 fixes in this file:
+#   1. Vault independence — uses mcphubd's redeploy_digest_only.yml (no
+#      Vault lookups) instead of the full mcphubd role, so rollback works
+#      even when Vault is sealed/unreachable (a leading cause of the very
+#      deploy failure this recovers from). See that file for the one
+#      documented residual Vault dependency (the KEK, self-healing via
+#      systemd Restart=on-failure).
+#   2. Migration-boundary refusal — this platform has no migration
+#      rollback; an old binary against a schema that has since migrated
+#      forward is refused rather than attempted.
+#   3. History is popped BEFORE the post-rollback health re-check, not
+#      after — previously, a health-check failure on the rolled-back
+#      version aborted the task list before the pop/persist steps ran, so a
+#      second rollback attempt would retry the exact same (apparently bad)
+#      rollback point forever. Popping first means a retry always advances
+#      to the next-older generation.
+
+- name: Load rollback history
+  ansible.builtin.set_fact:
+    _rollback_history: "{{ lookup('file', mcphub_rollback_history_file) | from_json }}"
+
+- name: Fail loudly if there is nothing to roll back to
+  ansible.builtin.fail:
+    msg: >-
+      No rollback history at {{ mcphub_rollback_history_file }} — this is
+      either the first-ever deploy (nothing to roll back to) or the state
+      file was lost. Rollback requires a prior successful deploy on this
+      host.
+  when: _rollback_history | length == 0
+
+- name: Select the rollback target digest
+  ansible.builtin.set_fact:
+    mcphubd_image_digest: "{{ _rollback_history[0].digest }}"
+    _rollback_target_recorded_at: "{{ _rollback_history[0].recorded_at }}"
+    # Older history entries recorded before this fix has no schema_version
+    # key — default to a value that never trips the boundary check below
+    # rather than crashing on a KeyError, but SAY so, since it means the
+    # boundary check is unverified for that entry.
+    _rollback_target_schema_version: "{{ _rollback_history[0].schema_version | default(omit) }}"
+
+- name: Read the CURRENTLY LIVE schema version (may have migrated forward since the rollback point was recorded)
+  containers.podman.podman_container_exec:
+    name: "{{ postgres_container_name }}"
+    command: >-
+      psql -U {{ postgres_user }} -d {{ postgres_db }} -tAc
+      "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success = true"
+  register: _pg_current_schema_version_raw
+  changed_when: false
+  failed_when: false
+
+- name: Resolve the current schema version
+  ansible.builtin.set_fact:
+    _current_schema_version: >-
+      {{ (_pg_current_schema_version_raw.stdout | default('0') | trim | int)
+         if (_pg_current_schema_version_raw.rc | default(1)) == 0 else 0 }}
+
+- name: Warn (not fail) when the rollback point predates this fix and has no recorded schema version
+  ansible.builtin.debug:
+    msg: >-
+      Rollback target (recorded {{ _rollback_target_recorded_at }}) has no
+      recorded schema_version — it was written before migration-boundary
+      tracking existed. Proceeding, but this rollback's schema
+      compatibility is UNVERIFIED; check manually before trusting it.
+  when: _rollback_target_schema_version is not defined
+
+# THE POLICY (D4, explicit per the review): migrations in this platform are
+# forward-only — mcphubd auto-migrates at startup and there is no
+# .down.sql / auto-downgrade path, and this deploy-layer fix does not
+# invent one. An old binary started against a schema newer than what it
+# expects is exactly the "rolled-back service fails its own health check,
+# system ends up worse than the failed deploy left it" scenario from the
+# review — refuse it outright rather than attempt and hope.
+- name: Refuse a rollback that crosses a migration boundary
+  ansible.builtin.fail:
+    msg: >-
+      Refusing to roll back {{ mcphubd_container_name }} to
+      {{ mcphubd_image_repo }}@{{ mcphubd_image_digest }}: the schema has
+      migrated forward from version {{ _rollback_target_schema_version }}
+      (recorded at that rollback point) to {{ _current_schema_version }}
+      (current). Migrations on this platform are forward-only — there is no
+      supported way to run that older binary against the current schema.
+      This requires manual intervention (a database restore to a matching
+      schema snapshot, or a forward-fix deploy instead of a rollback).
+  when:
+    - _rollback_target_schema_version is defined
+    - _current_schema_version | int > (_rollback_target_schema_version | int)
+
+- name: Announce the rollback target
+  ansible.builtin.debug:
+    msg: >-
+      Rolling {{ mcphubd_container_name }} back to
+      {{ mcphubd_image_repo }}@{{ mcphubd_image_digest }}
+      (last known-good, recorded {{ _rollback_target_recorded_at }})
+
+# Vault-INDEPENDENT (D4) — see redeploy_digest_only.yml for why this does
+# not reuse the full mcphubd role.
+- name: Re-render and restart mcphubd at the rollback digest
+  ansible.builtin.include_role:
+    name: mcphubd
+    tasks_from: redeploy_digest_only
+
+# Done BEFORE the health re-check below — see file header.
+- name: Pop the used rollback point so a second consecutive rollback advances instead of looping
+  ansible.builtin.set_fact:
+    _rollback_history: "{{ _rollback_history[1:] }}"
+
+- name: Persist the updated rollback history
+  ansible.builtin.copy:
+    content: "{{ _rollback_history | to_nice_json }}"
+    dest: "{{ mcphub_rollback_history_file }}"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Re-run health checks against the rolled-back version
+  ansible.builtin.include_role:
+    name: health_check

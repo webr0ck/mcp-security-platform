@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Anomalies{% endblock %}
+{% block content %}
+<h1>Anomalies</h1>
+<p class="lede">Behavioral outliers flagged by the anomaly cutoff. Read-only here — act via quarantine or grant revocation.</p>
+
+{% if anomalies.is_empty() %}
+<div class="empty-state"><p>No anomalies flagged.</p></div>
+{% else %}
+<table>
+  <caption>Flagged anomalies</caption>
+  <thead>
+    <tr>
+      <th scope="col">Time</th>
+      <th scope="col">Principal</th>
+      <th scope="col">Kind</th>
+      <th scope="col">Severity</th>
+      <th scope="col">Summary</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in anomalies %}
+    <tr>
+      <td data-label="Time">{{ a.at }}</td>
+      <td data-label="Principal">{{ a.principal_sub }}</td>
+      <td data-label="Kind"><code>{{ a.kind }}</code></td>
+      <td data-label="Severity">
+        {% if a.severity == "high" %}
+        <span class="badge badge--deny" data-glyph="&#9679; ">High</span>
+        {% else if a.severity == "medium" %}
+        <span class="badge badge--pending" data-glyph="&#9679; ">Medium</span>
+        {% else %}
+        <span class="badge badge--neutral" data-glyph="&#9679; ">Low</span>
+        {% endif %}
+      </td>
+      <td data-label="Summary">{{ a.summary }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

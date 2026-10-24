@@ -1,0 +1,35 @@
+[package]
+name = "mcphub-creds"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcphub-types = { workspace = true }
+mcphub-gateway = { workspace = true }
+aws-lc-rs = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+# Zeroizes derived KEK / master-secret key material on drop. Small,
+# single-purpose, not worth a workspace-level entry.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+hex = "0.4"
+base64 = "0.22"
+
+[dev-dependencies]
+# `seal` example only (ops utility). MUST stay a dev-dependency:
+# mcphub-creds is a lower layer than mcphub-store, and a regular
+# dep here would invert that and drag Postgres into every build.
+mcphub-store = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+uuid = { workspace = true }
+# doctests compile as external users of this crate, so they see dev-deps only,
+# not the regular dependency above.
+base64 = "0.22"

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Roles & grants{% endblock %}
+{% block content %}
+<h1>Roles &amp; grants</h1>
+<p class="lede">Every standing grant, platform-wide. This UI is convenience only — OPA is the enforcement authority for every call.</p>
+
+{% if grants.is_empty() %}
+<div class="empty-state"><p>No grants exist yet.</p></div>
+{% else %}
+<table>
+  <caption>All grants</caption>
+  <thead>
+    <tr>
+      <th scope="col">Principal</th>
+      <th scope="col">Server</th>
+      <th scope="col">Tool</th>
+      <th scope="col">Granted by</th>
+      <th scope="col">Granted at</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for g in grants %}
+    <tr>
+      <td data-label="Principal">{{ g.principal_sub }}</td>
+      <td data-label="Server">{{ g.server_name }}</td>
+      <td data-label="Tool">{% if let Some(t) = g.tool_name %}<code>{{ t }}</code>{% else %}<span class="hint">all tools</span>{% endif %}</td>
+      <td data-label="Granted by">{{ g.granted_by }}</td>
+      <td data-label="Granted at">{{ g.granted_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

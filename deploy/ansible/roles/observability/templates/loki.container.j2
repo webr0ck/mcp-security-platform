@@ -1,0 +1,29 @@
+## Managed by Ansible role `observability` — do not edit by hand.
+[Unit]
+Description=mcphub loki (audit/log aggregation — SIEM integration seam)
+After=network-online.target {{ mcphub_observability_network }}-network.service
+Requires={{ mcphub_observability_network }}-network.service
+
+[Container]
+Image={{ loki_image }}
+ContainerName={{ loki_container_name }}
+Network={{ mcphub_observability_network }}.network
+Volume={{ loki_volume_name }}.volume:/loki
+Volume={{ observability_conf_dir }}/loki-config.yml:/etc/loki/local-config.yaml:ro,Z
+Exec=-config.file=/etc/loki/local-config.yaml
+# No PublishPort= — Grafana (same network) is the only consumer; nothing
+# outside mcphub_observability_network can reach Loki directly.
+User=10001:10001
+ReadOnly=true
+Tmpfs=/tmp
+NoNewPrivileges=true
+DropCapability=ALL
+Memory=512m
+PidsLimit=128
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

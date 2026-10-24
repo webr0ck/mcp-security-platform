@@ -1,0 +1,39 @@
+---
+# Microsoft Entra ID. Entra does not support RFC 8693 token exchange to
+# arbitrary downstream audiences, so this defaults to DedicatedPort (its own
+# listener, own PKCE flow — see playbooks/provision-dedicated-port.yml,
+# which allocates `dedicated_port` on THIS idp entry, not on any one backend
+# server). client_secret lives in Vault at {{ vault_idp_secrets_path }}/mcp-entra.
+#
+# issuer_aliases + discovery_url exist specifically for Entra's v1/v2
+# dual-issuer quirk: tokens assert the v1 tenant issuer
+# (https://sts.windows.net/<tenant>/) but OIDC discovery is published at the
+# v2.0 path. Both must resolve to this same config (config.rs::matches_issuer
+# checks issuer_aliases too).
+idps:
+  - vault_secret_name: mcp-entra   # deploy-only key (NOT part of IdpConfig) — selects the Vault path/podman-secret name for this entry's client_secret; stripped before mcphubd ever sees this file
+    issuer: "https://sts.windows.net/<TENANT_ID>/"
+    discovery_url: "https://login.microsoftonline.com/<TENANT_ID>/v2.0/.well-known/openid-configuration"
+    issuer_aliases:
+      - "https://login.microsoftonline.com/<TENANT_ID>/v2.0"
+    audiences: ["<ENTRA_APPLICATION_CLIENT_ID>"]
+    allowed_algs: ["RS256"]
+    clock_skew_seconds: 60
+    auth_mode: DedicatedPort
+    dedicated_port: null   # allocated by playbooks/provision-dedicated-port.yml -e idp_name=mcp-entra
+    supports_token_exchange: false
+    client_id: "<ENTRA_APPLICATION_CLIENT_ID>"
+    redirect_uri_allowlist:
+      - "https://gateway.internal:9000/oauth/callback"   # dedicated_port listener's own callback, not the shared port's
+    role_mapping:
+      rules:
+        # Entra app roles land directly in a top-level `roles` claim when
+        # the app registration defines them and a user/group is assigned.
+        - extract:
+            kind: top_level_array
+            claim: roles
+          role_values:
+            mcphub-super-admin: SuperAdmin
+            mcphub-server-owner: ServerOwner
+            mcphub-security-analyst: SecurityAnalyst
+            mcphub-employee: Employee

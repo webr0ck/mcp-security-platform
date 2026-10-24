@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Help{% endblock %}
+{% block content %}
+<h1>Help</h1>
+<p class="hint">How to add MCP servers, manage your own access with the self-service MCP, and use profiles. Links go straight to the relevant screen — you'll only see the ones your role allows.</p>
+
+<nav aria-label="On this page">
+  <ul>
+    <li><a href="#connect">Connecting your MCP client</a></li>
+    <li><a href="#profiles">Managing your own access (profiles)</a></li>
+    <li><a href="#selfservice">The self-service MCP</a></li>
+    <li><a href="#add-server">Adding an MCP server</a></li>
+    <li><a href="#denied">When a call is denied</a></li>
+  </ul>
+</nav>
+
+<h2 id="connect">Connecting your MCP client</h2>
+
+<p>Point your client at this gateway's <code>/mcp</code> endpoint. It will discover how to sign you in automatically and open a browser for OAuth — you don't paste a token, and there is no static API key to leak.</p>
+
+<p><strong>Server URL:</strong> <code>{{ chrome.mcp_url }}</code></p>
+
+<h3>Claude Code</h3>
+<pre><code>claude mcp add --transport http mcphub {{ chrome.mcp_url }}</code></pre>
+<p>Or in <code>.mcp.json</code>:</p>
+<pre><code>{
+  "mcpServers": {
+    "mcphub": { "type": "http", "url": "{{ chrome.mcp_url }}" }
+  }
+}</code></pre>
+<p class="hint">The transport must be <code>http</code>. <code>sse</code> and <code>streamable-http</code> will not connect.</p>
+
+<h3>Claude Desktop</h3>
+<p>Settings → Connectors → Add custom connector, then enter <code>{{ chrome.mcp_url }}</code>. A browser window opens for sign-in the first time.</p>
+
+<h3>Codex</h3>
+<pre><code>codex mcp add mcphub --transport http {{ chrome.mcp_url }}
+codex mcp login mcphub</code></pre>
+
+<h3>ChatGPT app</h3>
+<p>Settings → Connectors → Add, then enter <code>{{ chrome.mcp_url }}</code> and complete the sign-in prompt.</p>
+
+<h3>Checking it worked</h3>
+<p>Ask your client to list its tools. You should see everything in <a href="/catalog">Catalog</a> that you've been granted — no more, no less. If a tool you expect is missing, check <a href="/me/grants">My access</a>, then your profile with <code>get_profile</code>.</p>
+
+<h3>If it won't connect</h3>
+<ul>
+  <li><strong>The browser never opens</strong> — the client is almost certainly using the wrong transport. It must be <code>http</code>.</li>
+  <li><strong>Sign-in succeeds but no tools appear</strong> — you're connected and authenticated; you just have no grants yet. Request access from <a href="/catalog">Catalog</a>.</li>
+  <li><strong>TLS or certificate errors</strong> — your machine doesn't trust the gateway's certificate. That's a trust-store problem on your side, not a sign-in problem.</li>
+  <li><strong>Some servers use their own port.</strong> If an admin told you a server has a dedicated port, use that URL instead — it signs you in against that server's own identity provider.</li>
+</ul>
+
+<h2 id="profiles">Managing your own access</h2>
+
+<p>Two separate things decide whether you can call a tool, and <strong>both</strong> must allow it:</p>
+
+<table>
+  <caption>Grants vs profiles</caption>
+  <thead>
+    <tr><th scope="col">Layer</th><th scope="col">Who changes it</th><th scope="col">What it does</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td data-label="Layer"><strong>Grants</strong></td>
+      <td data-label="Who changes it">An admin</td>
+      <td data-label="What it does">What you are permitted to call at all. See <a href="/me/grants">My access</a>.</td>
+    </tr>
+    <tr>
+      <td data-label="Layer"><strong>Your profile</strong></td>
+      <td data-label="Who changes it">You</td>
+      <td data-label="What it does">Your own narrowing on top. You can switch an MCP server off, or limit which of its functions you expose.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>A profile can only ever take access away, never add it.</strong> Disabling something in your profile hides it; enabling it again only restores access you were already granted. If a tool isn't in <a href="/me/grants">My access</a>, no profile change will make it callable — <a href="/catalog">request access</a> instead.</p>
+
+<p>Turning an MCP off removes its tools from <em>both</em> your tool list and from being callable. There is no state where a tool is hidden but still works, or visible but blocked by your profile.</p>
+
+<h2 id="selfservice">The self-service MCP</h2>
+
+<p>You change your profile by calling tools, not through this portal — the same way your agent calls anything else. The server is called <code>self-service</code> and it goes through exactly the same security checks as every other MCP server.</p>
+
+<table>
+  <caption>Self-service tools</caption>
+  <thead>
+    <tr><th scope="col">Tool</th><th scope="col">What it does</th></tr>
+  </thead>
+  <tbody>
+    <tr><td data-label="Tool"><code>list_available_mcps</code></td><td data-label="What it does">Which MCP servers you can use</td></tr>
+    <tr><td data-label="Tool"><code>get_profile</code></td><td data-label="What it does">Your current profile</td></tr>
+    <tr><td data-label="Tool"><code>enable_mcp</code></td><td data-label="What it does">Turn an MCP server back on for yourself</td></tr>
+    <tr><td data-label="Tool"><code>disable_mcp</code></td><td data-label="What it does">Turn an MCP server off for yourself</td></tr>
+    <tr><td data-label="Tool"><code>list_functions</code></td><td data-label="What it does">Which functions of an MCP are enabled</td></tr>
+    <tr><td data-label="Tool"><code>enable_function</code></td><td data-label="What it does">Allow one function</td></tr>
+    <tr><td data-label="Tool"><code>disable_function</code></td><td data-label="What it does">Restrict to an explicit allowlist without that function</td></tr>
+  </tbody>
+</table>
+
+<h3>Turning an MCP off</h3>
+<pre><code>{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+ "params": {"name": "disable_mcp", "arguments": {"mcp_name": "demo-echo"}}}</code></pre>
+<p>Its tools disappear from your tool list immediately. <code>enable_mcp</code> brings them back.</p>
+
+<h3>Restricting individual functions</h3>
+<pre><code>{"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+ "params": {"name": "disable_function",
+            "arguments": {"mcp_name": "demo-echo", "function_name": "delete_thing"}}}</code></pre>
+<p class="hint">Note: an MCP starts <em>unrestricted</em> (every granted function allowed). The first <code>disable_function</code> switches it to an explicit allowlist — so it narrows to nothing rather than to "everything except that one". Use <code>enable_function</code> to add back the ones you want, and <code>list_functions</code> to check where you stand.</p>
+
+<h3>You cannot lock yourself out</h3>
+<p>Disabling <code>self-service</code> in your own profile is refused, as is removing your own recovery functions from it. Otherwise you'd have no way to undo the change:</p>
+<pre><code>{"error": "self_lockout_blocked",
+ "detail": "refusing to disable \"self-service\" in your own profile: it holds their own recovery tools"}</code></pre>
+<p>An admin can still disable it for someone else — the guard protects you from yourself, not from administration.</p>
+
+<h2 id="add-server">Adding an MCP server</h2>
+
+<p>A server must be registered, approved, and granted before anyone can call it. Nothing is reachable by default.</p>
+
+<ol>
+  <li><strong>Register it</strong> — an admin adds it to the <a href="/admin/servers">server registry</a> with its upstream URL and owner.</li>
+  <li><strong>Approve it</strong> — a server stays <code>pending</code> until approved. Pending servers are invisible and uncallable.</li>
+  <li><strong>Register its tools</strong> — each tool is registered with a name, version and risk level. A tool with no risk assessment is refused at call time, not silently allowed.</li>
+  <li><strong>Grant access</strong> — an admin grants principals the specific tools they may call, via <a href="/admin/grants">Roles &amp; grants</a>. Owners can see their own servers under <a href="/owner/servers">My servers</a>.</li>
+</ol>
+
+<h3>Things that will block a new server</h3>
+<ul>
+  <li><strong>A localhost or private-range upstream is refused</strong> unless the server row explicitly opts in with an allowed CIDR. This stops a server being pointed at internal services it shouldn't reach.</li>
+  <li><strong>Every callable tool needs a credential enrolled</strong>, even a placeholder. A missing credential is a denial, not "this tool needs none".</li>
+  <li><strong>Backends must not be reachable except through the gateway.</strong> A server that can be called directly bypasses every check on this page.</li>
+</ul>
+
+<h3>Choosing an auth mode</h3>
+<p>Set per server when it's registered — see <a href="/admin/idps">Identity providers</a>.</p>
+<table>
+  <caption>Auth modes</caption>
+  <thead>
+    <tr><th scope="col">Mode</th><th scope="col">Use when</th></tr>
+  </thead>
+  <tbody>
+    <tr><td data-label="Mode"><code>shared_passthrough</code></td><td data-label="Use when">The backend accepts your platform identity token as-is</td></tr>
+    <tr><td data-label="Mode"><code>shared_exchange</code></td><td data-label="Use when">The backend needs its own IDP, and your IDP supports token exchange</td></tr>
+    <tr><td data-label="Mode"><code>dedicated_port</code></td><td data-label="Use when">The backend needs its own IDP and there's no token exchange. That IDP gets its own port, so one awkward provider doesn't disrupt sign-in for everything else.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="denied">When a call is denied</h2>
+
+<p>Denials return a short reason. The common ones:</p>
+
+<table>
+  <caption>Deny reasons</caption>
+  <thead>
+    <tr><th scope="col">Reason</th><th scope="col">What to do</th></tr>
+  </thead>
+  <tbody>
+    <tr><td data-label="Reason"><code>unauthenticated</code></td><td data-label="What to do">Missing, expired or invalid token. Sign in again.</td></tr>
+    <tr><td data-label="Reason"><code>entitlement_missing</code></td><td data-label="What to do">Not granted, <em>or</em> disabled in your own profile. Check <a href="/me/grants">My access</a> first, then <code>get_profile</code>.</td></tr>
+    <tr><td data-label="Reason"><code>no_grant</code></td><td data-label="What to do">Your role doesn't meet the tool's requirement. Ask an admin.</td></tr>
+    <tr><td data-label="Reason"><code>quarantined</code></td><td data-label="What to do">The security team has quarantined it. See <a href="/security/quarantine">Quarantine</a>.</td></tr>
+    <tr><td data-label="Reason"><code>rate_limited</code></td><td data-label="What to do">Too many calls. Slow down and retry.</td></tr>
+    <tr><td data-label="Reason"><code>taint_floor</code></td><td data-label="What to do">The tool isn't trusted enough to call. It likely needs a risk assessment.</td></tr>
+    <tr><td data-label="Reason"><code>policy_denied</code></td><td data-label="What to do">A policy rule refused it. The specific rule is recorded in the audit log — see <a href="/security/policy">Policy decisions</a>.</td></tr>
+    <tr><td data-label="Reason"><code>dependency_unavailable</code></td><td data-label="What to do">A required service is unreachable. The platform denies rather than guessing — this is not something you can work around.</td></tr>
+  </tbody>
+</table>
+
+<p class="hint">Every call, allowed or denied, is written to the audit log with its reason. The security team can look up any request by its id under <a href="/security/audit">Audit</a>.</p>
+{% endblock %}

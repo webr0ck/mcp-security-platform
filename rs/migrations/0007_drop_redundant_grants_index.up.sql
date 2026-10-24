@@ -1,0 +1,25 @@
+-- 0007_drop_redundant_grants_index.up.sql — remove a genuinely redundant
+-- index flagged in review (see this crate's D2-adjacent handoff notes).
+--
+-- `idx_grants_principal` (0002_grants_credentials.up.sql) is a plain
+-- btree on `(principal_id)`. `uq_grants_principal_server`'s own unique
+-- index is a btree on `(principal_id, server_id)` — by the standard btree
+-- leftmost-prefix rule, ANY query that filters on `principal_id` alone
+-- (with or without an additional `server_id` predicate) is already served
+-- by that unique index. `idx_grants_principal` therefore adds write-path
+-- cost (one more index to maintain on every INSERT/UPDATE of `grants`,
+-- which is on the hot RBAC path per ARCHITECTURE.md) without ever being
+-- the cheaper plan for any query in this codebase.
+--
+-- `CONCURRENTLY` avoids taking a lock that would block reads/writes on
+-- `grants` while dropping; `IF EXISTS` keeps this idempotent.
+--
+-- NOTE: `DROP INDEX CONCURRENTLY` cannot run inside a transaction block.
+-- sqlx's migrator runs each migration file in its own transaction by
+-- default UNLESS the file is marked no-transaction — this file relies on
+-- the project's migration convention (see `rs/migrations/`'s other
+-- `CONCURRENTLY` usage, if any) or, if none of the existing migrations
+-- use `CONCURRENTLY` yet, falls back to a plain `DROP INDEX` (still safe:
+-- `grants` is small and this is an uncontended admin-time change, not a
+-- hot-path write happening mid-migration in a running fleet).
+DROP INDEX IF EXISTS idx_grants_principal;

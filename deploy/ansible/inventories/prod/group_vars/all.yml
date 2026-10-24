@@ -1,0 +1,91 @@
+---
+# Prod overrides of role defaults (deploy/ansible/roles/*/defaults/main.yml).
+# Only environment-specific values live here — see the precedence chain in
+# each role's README: defaults -> group_vars/all -> group_vars/<env> ->
+# host_vars -> -e extra_vars.
+# (This file was copied from dev/group_vars/all.yml and was mistitled "Dev
+# overrides" — D12 audit. Digests below are still CI-populated placeholders,
+# same as dev/staging; the git-history point stands regardless of title.)
+
+mcphub_env: prod
+
+# ── Image digests (deploy by digest only — never a tag) ─────────────────────
+# Populated by CI after `podman build -f rs/Containerfile` + push; this file
+# is the single source of truth the deploy/rollback playbooks read from and
+# write back to (rollback.yml restores the PREVIOUS value captured here).
+mcphubd_image_repo: "ghcr.io/example-org/mcphubd"
+mcphubd_image_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"  # noqa: yaml[line-length] -- placeholder until first CI build
+
+postgres_image: "docker.io/library/postgres:16-alpine@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+redis_image: "docker.io/library/redis:7-alpine@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+vault_image: "docker.io/hashicorp/vault:1.17@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+gateway_image: "docker.io/owasp/modsecurity-crs:nginx-alpine@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+loki_image: "docker.io/grafana/loki:3.0.0@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+grafana_image: "docker.io/grafana/grafana-oss:11.0.0@sha256:6666666666666666666666666666666666666666666666666666666666666666"
+# Used by health_check (mcphubd readiness probe, since mcphubd is distroless
+# and publishes no host port — D1) as a throwaway `podman run --network ...`
+# helper. (mcp_backends' D3 isolation probe execs directly inside each
+# backend container instead — it doesn't need this image.)
+mcphub_probe_image: "docker.io/curlimages/curl:8.10.1@sha256:7777777777777777777777777777777777777777777777777777777777777777"
+
+# ── Networking ────────────────────────────────────────────────────────────
+mcphub_gateway_network: mcp-gateway-net       # gateway <-> mcphubd only, has host-published ports
+mcphub_backend_network: mcp-backend-internal  # mcphubd <-> backend MCP servers, internal:true, NO published ports
+mcphub_data_network: mcp-data-internal        # mcphubd <-> postgres/redis/vault, internal:true
+mcphub_observability_network: mcp-observability-internal  # mcphubd/backends -> loki/grafana/alertmanager, internal:true
+
+mcphubd_listen_port: 8000
+gateway_https_port: 8443
+gateway_mtls_port: 8445
+
+# ── Cross-role identity vars (see dev/group_vars/all.yml for the full
+# rationale — role defaults are not visible across a dynamic
+# `include_role`, which breaks deploy.yml/rollback.yml without this) ───────
+quadlet_unit_dir: /etc/containers/systemd  # also needed outside roles/common — same cross-role-visibility issue
+postgres_container_name: mcp-postgres
+postgres_port: 5432
+postgres_db: mcphub
+postgres_user: mcphub
+postgres_app_user: mcphub_app
+redis_container_name: mcp-redis
+vault_container_name: mcp-vault
+
+dedicated_port_range_start: 9000
+dedicated_port_range_end: 9100
+
+# ── Vault (secret source of truth — see vault-secrets role) ─────────────────
+vault_addr: "https://vault-prod.internal:8200"
+vault_kv_mount: "secret"
+vault_mcphubd_creds_path: "mcphub/prod/mcphubd"
+vault_kek_path: "mcphub/prod/broker-kek"       # credential-broker KEK — Vault ONLY, never a plaintext env var
+vault_audit_hmac_path: "mcphub/prod/audit-hmac-key"  # audit-chain HMAC key — same never-plaintext-on-disk treatment as the KEK
+vault_idp_secrets_path: "mcphub/prod/idp"
+vault_role_id: "{{ lookup('env', 'VAULT_ROLE_ID') }}"      # AppRole auth, never committed
+vault_secret_id: "{{ lookup('env', 'VAULT_SECRET_ID') }}"  # set by the operator/CI runner at deploy time, not stored anywhere
+
+# ── Rollback bookkeeping ─────────────────────────────────────────────────
+mcphub_rollback_state_dir: /var/lib/mcphub/rollback
+mcphub_rollback_history: 10          # prod keeps more generations than dev's default of 5
+
+# ── Health/smoke ───────────────────────────────────────────────────────────
+mcphub_health_timeout_s: 60           # prod health checks are allowed longer to settle behind an LB
+mcphub_smoke_test_user: "loadtest-smoke@prod.internal"
+mcphub_smoke_test_token_endpoint: "https://login.microsoftonline.com/<TENANT_ID>/oauth2/v2.0/token"
+mcphub_smoke_test_strict: true        # smoke-test.yml treats ANY non-2xx/timeout as a hard failure
+
+# ── IDP (install-time path; see deploy/idp-examples/) ───────────────────────
+mcphub_idp_config_file: "{{ inventory_dir }}/../../idp-examples/idp.entra.yml"
+
+# ── Prod-only hardening ──────────────────────────────────────────────────
+mcphub_deploy_requires_confirm: true  # deploy.yml refuses unless -e confirm_prod=true is also passed
+
+# NOT SET HERE (D12 audit gap, flagged not silently fixed): roles/vault's
+# tasks/README say "Prod is expected to set vault_seal_type to a cloud KMS
+# seal" (awskms/azurekeyvault/gcpckms), but this file — the actual prod
+# inventory — never overrides it, so prod inherits the role default
+# (`shamir`) same as dev/staging: prod would go through the shamir
+# init/break-glass-unseal-key-file path on a real deploy. Setting a real KMS
+# seal requires real cloud KMS credentials/config this task has no basis to
+# invent; uncomment and fill in when prod's KMS is provisioned:
+# vault_seal_type: azurekeyvault
+# vault_kms_config: { ... }  # see vault.hcl.j2 for what the seal stanza needs

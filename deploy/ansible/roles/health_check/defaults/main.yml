@@ -1,0 +1,8 @@
+---
+mcphub_smoke_test_strict: false
+health_check_gateway_url: "https://127.0.0.1:{{ gateway_https_port }}"
+# mcphub_probe_image (digest-pinned curl image used both here and by
+# roles/mcp_backends' isolation probe) is defined in
+# inventories/<env>/group_vars/all.yml, same as every other _image var
+# (postgres_image, redis_image, ...) — deliberately NOT defaulted here, so a
+# missing pin fails loudly instead of silently falling back to a tag.

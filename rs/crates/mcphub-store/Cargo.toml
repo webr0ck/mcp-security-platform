@@ -1,0 +1,29 @@
+[package]
+name = "mcphub-store"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcphub-types = { workspace = true }
+sqlx = { workspace = true, features = ["json", "migrate", "macros"] }
+redis = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+async-trait = { workspace = true }
+aws-lc-rs = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[features]
+# Exposes `testing` (the throwaway-migrated-database helper) to other
+# crates' test builds, not just this crate's own. Never enabled in a
+# non-dev build.
+testing = []

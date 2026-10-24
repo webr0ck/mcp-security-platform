@@ -1,0 +1,25 @@
+## Managed by Ansible role `vault` — do not edit by hand.
+storage "file" {
+  path = "/vault/data"
+}
+
+listener "tcp" {
+  address       = "0.0.0.0:{{ vault_port }}"
+  tls_disable   = false
+  tls_cert_file = "/vault/tls/vault.crt"
+  tls_key_file  = "/vault/tls/vault.key"
+}
+
+{% if vault_seal_type != 'shamir' %}
+seal "{{ vault_seal_type }}" {
+  # Cloud KMS key reference — supplied via the matching env vars in the
+  # quadlet unit (AZURE_*/AWS_*/GOOGLE_* per HashiCorp's seal docs), never
+  # inlined here. Auto-unseal means no Shamir key ceremony and no
+  # break-glass unseal-key file, which is why prod defaults to this.
+}
+{% endif %}
+
+api_addr     = "https://{{ inventory_hostname }}:{{ vault_port }}"
+cluster_addr = "https://{{ inventory_hostname }}:{{ vault_cluster_port }}"
+ui           = true
+disable_mlock = true

@@ -9,6 +9,25 @@
  * mount) and linked once per full-page shell — fragments swapped in via
  * htmx must NOT re-include it.
  */
+
+/* Self-hosted (no third-party request — see middleware/csp.py for why this
+ * replaced the Google Fonts <link>). Both are variable fonts: one woff2
+ * file covers the whole weight axis used here. */
+@font-face {
+  font-family: 'Hanken Grotesk';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('/static/fonts/hanken-grotesk.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('/static/fonts/jetbrains-mono.woff2') format('woff2');
+}
+
   :root {
     --bg:      #0a0c11;
     --surface: #12161e;

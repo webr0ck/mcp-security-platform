@@ -1,0 +1,31 @@
+## Managed by Ansible role `vault` — do not edit by hand.
+[Unit]
+Description=mcphub vault (secret source of truth — postgres/redis/idp/broker-KEK)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image={{ vault_image }}
+ContainerName={{ vault_container_name }}
+Network={{ mcphub_data_network }}.network
+PublishPort=127.0.0.1:{{ vault_port }}:{{ vault_port }}
+Volume={{ vault_volume_name }}.volume:/vault/data
+Volume=/etc/mcphub/vault-tls:/vault/tls:ro,Z
+Volume=/etc/mcphub/vault.hcl:/vault/config/vault.hcl:ro,Z
+Environment=VAULT_ADDR=https://127.0.0.1:{{ vault_port }}
+Exec=vault server -config=/vault/config/vault.hcl
+User=100:1000
+CapabilityAdd=IPC_LOCK
+NoNewPrivileges=true
+Memory=512m
+HealthCmd=/bin/sh -c "VAULT_ADDR=https://127.0.0.1:{{ vault_port }} VAULT_SKIP_VERIFY=true vault status -format=json | grep -q '\"sealed\":false'"
+HealthInterval=15s
+HealthRetries=6
+HealthStartPeriod=20s
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

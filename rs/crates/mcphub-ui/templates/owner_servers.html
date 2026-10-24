@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}My servers{% endblock %}
+{% block content %}
+<h1>My servers</h1>
+<p class="lede">Servers you own. Select one to manage its tool registry, auth mode, and onboarding status.</p>
+
+{% if servers.is_empty() %}
+<div class="empty-state"><p>You don't own any registered servers yet.</p></div>
+{% else %}
+<table>
+  <caption>Your MCP servers</caption>
+  <thead>
+    <tr>
+      <th scope="col">Name</th>
+      <th scope="col">Health</th>
+      <th scope="col">Onboarding</th>
+      <th scope="col">Auth mode</th>
+      <th scope="col">Enabled</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in servers %}
+    <tr>
+      <td data-label="Name"><a href="/owner/servers/{{ s.id }}">{{ s.name }}</a></td>
+      <td data-label="Health">
+        {% match s.health %}
+        {% when ServerHealth::Healthy %}
+        <span class="badge badge--allow" data-glyph="&#9679; ">Healthy</span>
+        {% when ServerHealth::Degraded %}
+        <span class="badge badge--pending" data-glyph="&#9679; ">Degraded</span>
+        {% when ServerHealth::Unreachable %}
+        <span class="badge badge--deny" data-glyph="&#9679; ">Unreachable</span>
+        {% endmatch %}
+      </td>
+      <td data-label="Onboarding">{{ s.onboarding.label() }}</td>
+      <td data-label="Auth mode"><code>{{ s.auth_mode.kind }}</code>{% if let Some(p) = s.auth_mode.port %} (port {{ p }}){% endif %}</td>
+      <td data-label="Enabled">{% if s.enabled %}Yes{% else %}No{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

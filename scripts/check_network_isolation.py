@@ -158,27 +158,58 @@ def _stub_env_for_file(compose_file: str) -> dict[str, str]:
     return stubs
 
 
-def _raw_yaml_fallback(compose_file: str) -> Optional[dict]:
+def _merge_compose_layer(base, override):
     """
-    Parse the compose file directly with PyYAML when compose-binary resolution
-    fails for reasons unrelated to network topology (e.g. external-network
-    references that require a running daemon, or services with no image/build
-    that strict docker-compose rejects).
+    Merge one compose YAML layer over another, approximating compose-spec
+    override semantics closely enough for network-membership checks: dicts
+    merge key-by-key recursively, lists concatenate (deduped, order-preserved),
+    anything else is replaced by the override's value.
+    """
+    if isinstance(base, dict) and isinstance(override, dict):
+        merged = dict(base)
+        for key, value in override.items():
+            merged[key] = _merge_compose_layer(base.get(key), value) if key in base else value
+        return merged
+    if isinstance(base, list) and isinstance(override, list):
+        merged = list(base)
+        for item in override:
+            if item not in merged:
+                merged.append(item)
+        return merged
+    return override
+
+
+def _raw_yaml_fallback(compose_files: list[str]) -> Optional[dict]:
+    """
+    Parse the compose file(s) directly with PyYAML when compose-binary
+    resolution fails for reasons unrelated to network topology (e.g.
+    external-network references that require a running daemon, services with
+    no image/build that strict docker-compose rejects, or fail-fast port vars
+    that can't take a "gate-stub" placeholder).
 
     Variable interpolation is NOT performed — network-membership checks only
     depend on the static `networks:` keys in each service definition, which are
-    plain strings and do not require interpolation.
+    plain strings and do not require interpolation. For multiple files, layers
+    are merged in argument order (later overrides earlier), same as compose -f.
     """
-    try:
-        text = Path(compose_file).read_text(errors="replace")
-        parsed = yaml.safe_load(text)
-        if isinstance(parsed, dict) and "services" in parsed:
-            print(f"INFO  [{compose_file}] using raw-YAML fallback "
-                  "(compose-binary resolution failed; variable interpolation "
-                  "not needed for network-membership checks)")
-            return parsed
-    except yaml.YAMLError as exc:
-        print(f"FAIL: raw-YAML parse of {compose_file} failed: {exc}")
+    merged: Optional[dict] = None
+    for compose_file in compose_files:
+        try:
+            text = Path(compose_file).read_text(errors="replace")
+            parsed = yaml.safe_load(text)
+        except OSError:
+            return None
+        except yaml.YAMLError as exc:
+            print(f"FAIL: raw-YAML parse of {compose_file} failed: {exc}")
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        merged = parsed if merged is None else _merge_compose_layer(merged, parsed)
+    if isinstance(merged, dict) and "services" in merged:
+        print(f"INFO  {compose_files} using raw-YAML fallback "
+              "(compose-binary resolution failed; variable interpolation "
+              "not needed for network-membership checks)")
+        return merged
     return None
 
 
@@ -237,11 +268,10 @@ def _resolve_compose(compose_files: list[str]) -> Optional[dict]:
         print(f"INFO  `{' '.join(cmd)}` resolution failed, trying next driver:\n"
               f"      {stderr.splitlines()[0] if stderr else '(no stderr)'}")
 
-    # All binary drivers failed — attempt raw-YAML fallback for single-file calls
-    if len(compose_files) == 1:
-        result = _raw_yaml_fallback(compose_files[0])
-        if result is not None:
-            return result
+    # All binary drivers failed — attempt raw-YAML fallback
+    result = _raw_yaml_fallback(compose_files)
+    if result is not None:
+        return result
 
     print(f"FAIL: all compose drivers failed to resolve {compose_files}.\n"
           f"      Last error: {last_error}")

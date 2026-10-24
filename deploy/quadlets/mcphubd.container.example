@@ -1,0 +1,47 @@
+## Managed by Ansible role `mcphubd` — do not edit by hand.
+## Image is deploy-by-digest ONLY (mcphubd_image_repo@mcphubd_image_digest,
+## never a tag) — deploy.yml/rollback.yml are the only things that change
+## this file's Image= line.
+[Unit]
+Description=mcphubd — MCP security gateway (Rust)
+After=network-online.target {{ mcphub_data_network }}-network.service {{ mcphub_backend_network }}-network.service {{ mcphub_gateway_network }}-network.service {{ postgres_container_name | default('mcp-postgres') }}.service {{ redis_container_name | default('mcp-redis') }}.service {{ vault_container_name | default('mcp-vault') }}.service
+Requires={{ mcphub_data_network }}-network.service {{ mcphub_backend_network }}-network.service {{ mcphub_gateway_network }}-network.service
+Wants={{ postgres_container_name | default('mcp-postgres') }}.service {{ redis_container_name | default('mcp-redis') }}.service {{ vault_container_name | default('mcp-vault') }}.service
+
+[Container]
+Image={{ mcphubd_image_repo }}@{{ mcphubd_image_digest }}
+ContainerName={{ mcphubd_container_name }}
+Network={{ mcphub_data_network }}.network
+Network={{ mcphub_backend_network }}.network
+Network={{ mcphub_gateway_network }}.network
+Volume=/etc/mcphub/mcphubd.toml:/etc/mcphub/mcphubd.toml:ro,Z
+Secret=mcphub-mcphubd-database-url,type=env,target=MCPHUBD_DATABASE_URL
+Secret=mcphub-mcphubd-redis-url,type=env,target=MCPHUBD_REDIS_URL
+Secret=mcphub-mcphubd-broker-kek,type=env,target=MCPHUBD_BROKER_KEK
+{% for idp in mcphubd_idp_entries %}
+Secret=mcphub-idp-{{ idp.name }}-client-secret,type=env,target=MCPHUBD_IDP_{{ idp.name | upper }}_CLIENT_SECRET
+{% endfor %}
+Environment=MCPHUBD_CONFIG=/etc/mcphub/mcphubd.toml
+Environment=RUST_LOG={{ mcphubd_log_level }}
+# NOT published to the host directly — only the gateway (nginx, same-host,
+# on mcphub_gateway_network) reaches this port. No 0.0.0.0 host bind here.
+PublishPort=127.0.0.1:{{ mcphubd_listen_port }}:{{ mcphubd_listen_port }}
+User=65532:65532
+ReadOnly=true
+Tmpfs=/tmp
+NoNewPrivileges=true
+DropCapability=ALL
+Memory={{ mcphubd_memory_limit }}
+Cpus={{ mcphubd_cpu_limit }}
+PidsLimit=256
+# No HealthCmd: the final image is distroless with no shell/curl (see
+# rs/Containerfile) — health is verified from outside the container, over
+# the network, by the health_check role and deploy.yml's post-deploy gate.
+
+[Service]
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

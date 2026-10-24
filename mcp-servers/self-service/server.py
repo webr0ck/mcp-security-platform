@@ -107,6 +107,23 @@ class _IdentityMiddleware(BaseHTTPMiddleware):
             _ctx_user_token.reset(tok_user)
 
 
+# The self-service server's own registry name (lab/seeder/sql/servers.sql).
+# A non-admin caller may never disable this MCP (or its recovery functions)
+# for themselves — doing so would strand them with no tool left to re-enable
+# it, since only an admin can restore another principal's profile.
+_SELF_SERVICE_MCP_NAME = "self-service"
+_RECOVERY_FUNCTIONS = frozenset({"get_profile", "enable_mcp", "enable_function"})
+
+
+def _is_self_lockout(mcp_name: str, caller_role: str, profile_id: str, caller_sub: str,
+                      function_name: str | None = None) -> bool:
+    if caller_role in ("admin", "platform_admin"):
+        return False
+    if profile_id != caller_sub or mcp_name != _SELF_SERVICE_MCP_NAME:
+        return False
+    return function_name is None or function_name in _RECOVERY_FUNCTIONS
+
+
 # stateless_http=True is REQUIRED so the identity ContextVars set by
 # _IdentityMiddleware (from the proxy-injected X-User-Sub/X-User-Role headers)
 # reach the tool handlers. In the default stateful streamable-http mode, tools
@@ -337,6 +354,11 @@ async def disable_mcp(
     profile_id = target_profile or caller_sub
     if profile_id != caller_sub and caller_role not in ("admin", "platform_admin"):
         return {"error": "forbidden", "detail": "Only admin can modify other profiles"}
+    if _is_self_lockout(mcp_name, caller_role, profile_id, caller_sub):
+        return {"error": "self_lockout_blocked",
+                "detail": "Cannot disable the self-service MCP for yourself — it holds your "
+                          "own recovery tools (get_profile/enable_mcp/enable_function). "
+                          "Ask an admin if you need this disabled."}
 
     return await _proxy_post(f"/{profile_id}/mcps/{mcp_name}/disable")
 
@@ -419,6 +441,10 @@ async def disable_function(
     profile_id = target_profile or caller_sub
     if profile_id != caller_sub and caller_role not in ("admin", "platform_admin"):
         return {"error": "forbidden"}
+    if _is_self_lockout(mcp_name, caller_role, profile_id, caller_sub, function_name):
+        return {"error": "self_lockout_blocked",
+                "detail": f"Cannot disable your own recovery function '{function_name}' on the "
+                          "self-service MCP. Ask an admin if you need this disabled."}
 
     return await _proxy_post(f"/{profile_id}/mcps/{mcp_name}/functions/{function_name}/disable")
 

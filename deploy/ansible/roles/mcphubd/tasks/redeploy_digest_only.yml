@@ -1,0 +1,63 @@
+---
+# Vault-INDEPENDENT digest swap — used by roles/rollback (D4). The full
+# mcphubd role (tasks/main.yml) starts with several `community.hashi_vault`
+# lookups (postgres/redis passwords, per-IDP client secrets) that are only
+# needed to detect ROTATION and recreate a podman secret when the Vault
+# value has changed. A rollback is not rotating anything — it's putting a
+# PREVIOUSLY-WORKING digest back with the SAME config and SAME already-
+# existing podman secrets — so none of that Vault traffic is actually
+# necessary, and requiring it anyway means Vault being sealed/unreachable
+# (a leading cause of the very deploy failure being recovered from) makes
+# rollback impossible. This task list renders ONLY the container unit
+# (digest + IDP-entries-derived Secret= lines, both sourced from the LOCAL
+# idp.yml file, no Vault) and restarts — no secret is created, rotated, or
+# even read here.
+#
+# Residual Vault dependency this does NOT remove (documented, not silently
+# papered over): the credential-broker KEK is delivered via the podman
+# "shell" secret driver (D2), so mcphubd's own container start still calls
+# out to Vault to materialize `mcphub-mcphubd-broker-kek` regardless of
+# which digest is running. If Vault is unreachable at that moment, THIS
+# start attempt fails — but mcphubd's quadlet unit already has
+# `Restart=on-failure` / `RestartSec=3` (see mcphubd.container.j2), so
+# systemd keeps retrying automatically and mcphubd comes up as soon as
+# Vault is reachable again, with no further operator action. That is
+# fail-closed-and-self-healing, not a hang — worth stating explicitly since
+# it's easy to mistake for the same failure mode this file exists to avoid.
+
+- name: Load install-time IDP config file (LOCAL file, no Vault — needed for the container unit's per-IDP Secret= lines)
+  ansible.builtin.include_vars:
+    file: "{{ mcphub_idp_config_file }}"
+    name: mcphubd_idp_file
+
+- name: Expose IDP entries to the mcphubd config template
+  ansible.builtin.set_fact:
+    mcphubd_idp_entries: "{{ mcphubd_idp_file.idps }}"
+
+- name: Render mcphubd quadlet container unit at the given digest (Vault-independent)
+  ansible.builtin.template:
+    src: mcphubd.container.j2
+    dest: "{{ quadlet_unit_dir }}/{{ mcphubd_container_name }}.container"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd units
+  register: mcphubd_unit_rendered
+
+- name: Flush handlers so the quadlet-generated service unit reflects the new digest
+  ansible.builtin.meta: flush_handlers
+
+- name: Start/enable mcphubd service
+  ansible.builtin.systemd:
+    name: "{{ mcphubd_container_name }}.service"
+    state: started
+    enabled: true
+  register: mcphubd_service_state
+
+- name: Restart mcphubd if the unit changed but systemd didn't see it as a state change
+  ansible.builtin.systemd:
+    name: "{{ mcphubd_container_name }}.service"
+    state: restarted
+  when:
+    - mcphubd_unit_rendered.changed
+    - not mcphubd_service_state.changed

@@ -1,0 +1,14 @@
+-- 0014_profiles_grants.up.sql — grant the least-privilege runtime role access
+-- to `profiles`.
+--
+-- 0013 created the table but never granted on it. Because the profiles lookup
+-- is fail-closed (a read error denies rather than defaulting to "no profile,
+-- allow everything"), the omission did not quietly widen access — it denied
+-- EVERY request with `dependency_unavailable` the moment the composition was
+-- wired into `list_visible`. That is the correct failure direction, and it is
+-- why this was caught by a test rather than by an incident.
+--
+-- Every new table needs its grants in the same migration that creates it;
+-- `mcphubd` connects as a non-owner role by design (see
+-- `assert_non_privileged_connection`), so an ungranted table is invisible to it.
+GRANT SELECT, INSERT, UPDATE ON profiles TO mcphub_app;

@@ -17,6 +17,7 @@ Run: pytest proxy/tests/unit/test_registered_tools_required_roles.py -v
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -74,11 +75,28 @@ class _FakeResult:
         return _FakeMappings(self._rows)
 
 
+def _fresh_gate_row(server_id: str) -> _FakeRow:
+    """Server-state row that passes the F-CX-001 maintenance/scan-freshness
+    discovery gates (debug_mode off, scan just ran) — required_roles is the
+    thing under test here, not those gates."""
+    return _FakeRow({
+        "server_id": server_id, "debug_mode": False, "owner_sub": None,
+        "maintainers": [], "last_rescanned_at": datetime.now(timezone.utc),
+    })
+
+
 class _FakeSession:
-    """Context-manager fake session that returns the configured rows."""
+    """Context-manager fake session that returns the configured rows.
+
+    Distinguishes the tool_registry query from the server_registry gate-state
+    query (F-CX-001) by SQL text, same pattern as
+    test_mcp_tools_list_filtering.py.
+    """
 
     def __init__(self, rows: list) -> None:
         self._rows = rows
+        server_ids = {r["server_id"] for r in rows if r["server_id"] is not None}
+        self._gate_rows = [_fresh_gate_row(sid) for sid in server_ids]
 
     async def __aenter__(self):
         return self
@@ -86,7 +104,9 @@ class _FakeSession:
     async def __aexit__(self, *_):
         pass
 
-    async def execute(self, *_a, **_kw):
+    async def execute(self, stmt, *_a, **_kw):
+        if "server_registry" in str(stmt):
+            return _FakeResult(self._gate_rows)
         return _FakeResult(self._rows)
 
 

@@ -1,4 +1,4 @@
-.PHONY: help up down dev-up dev-down build logs shell proxy-shell db-shell \
+.PHONY: perf-check help up down dev-up dev-down build logs shell proxy-shell db-shell \
         test test-unit test-integration test-oauth test-lab-functional test-security test-perf test-all test-red-team lint \
         db-migrate setup pull-model step-ca-init policy-reload sign-policy-bundle test-signed-bundle \
         assign-role compliance-run sbom-verify onboard-server \
@@ -733,6 +733,10 @@ ship-check: ## Pre-publish gate (docs-honesty + secret scan + compose smoke)
 
 demo: ## 60-second no-full-stack demo of the verifiable network-isolation control
 	@bash scripts/demo.sh
+
+# ─── Rust rewrite (rs/) ───────────────────────────────────────────────────────
+perf-check: ## Re-measure the Rust policy-engine benchmarks on THIS machine
+	@bash rs/scripts/perf-check.sh
 
 # ─── Security guard ───────────────────────────────────────────────────────────
 # RT-001 prevention: never serve the repo root via Python's HTTP server.

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Audit event{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Audit event {{ event.request_id }}</h1>
+  <a class="btn" href="/security/audit">Back to audit</a>
+</div>
+
+<dl class="card">
+  <div><dt>Time</dt><dd>{{ event.at }}</dd></div>
+  <div><dt>Principal</dt><dd>{{ event.principal_sub }}</dd></div>
+  <div><dt>Server</dt><dd>{{ event.server_name }}</dd></div>
+  <div><dt>Tool</dt><dd><code>{{ event.tool_name }}</code></dd></div>
+  <div><dt>Decision</dt><dd>
+    {% if event.decision == "allow" %}
+    <span class="badge badge--allow" data-glyph="&#9679; ">Allow</span>
+    {% else %}
+    <span class="badge badge--deny" data-glyph="&#9679; ">Deny</span>
+    {% endif %}
+  </dd></div>
+</dl>
+
+{% if let Some(reason) = event.deny_reason %}
+<h2>Deny reason</h2>
+<div class="violation">
+  <dl>
+    <dt>Code</dt><dd><code>{{ reason.code }}</code></dd>
+    <dt>Detail</dt><dd>{{ reason.detail }}</dd>
+  </dl>
+</div>
+{% endif %}
+{% endblock %}

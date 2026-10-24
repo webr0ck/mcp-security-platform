@@ -1,0 +1,21 @@
+---
+mcphub_system_user: mcphub
+mcphub_system_group: mcphub
+mcphub_system_uid: 6420
+mcphub_system_gid: 6420
+
+mcphub_dirs:
+  - /etc/mcphub
+  - /etc/mcphub/idp
+  - /var/lib/mcphub
+  - /var/log/mcphub
+  - "{{ mcphub_rollback_state_dir | default('/var/lib/mcphub/rollback') }}"
+
+# quadlet_unit_dir moved to inventories/<env>/group_vars/all.yml — every
+# role's container/volume/network units reference it, including from
+# playbooks (deploy.yml, rollback.yml, rotate-*.yml) that never run this
+# role, and role defaults aren't visible across a dynamic `include_role`.
+podman_packages:
+  - podman
+  - podman-plugins
+  - jq

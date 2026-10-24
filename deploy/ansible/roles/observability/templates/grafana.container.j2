@@ -1,0 +1,33 @@
+## Managed by Ansible role `observability` — do not edit by hand.
+[Unit]
+Description=mcphub grafana
+After=network-online.target {{ mcphub_observability_network }}-network.service {{ mcphub_gateway_network }}-network.service {{ loki_container_name }}.service
+Requires={{ mcphub_observability_network }}-network.service {{ mcphub_gateway_network }}-network.service
+Wants={{ loki_container_name }}.service
+
+[Container]
+Image={{ grafana_image }}
+ContainerName={{ grafana_container_name }}
+Network={{ mcphub_observability_network }}.network
+Network={{ mcphub_gateway_network }}.network
+Volume={{ grafana_volume_name }}.volume:/var/lib/grafana
+Secret=mcphub-grafana-admin-password,type=env,target=GF_SECURITY_ADMIN_PASSWORD
+Environment=GF_SECURITY_ADMIN_USER=admin
+Environment=GF_USERS_ALLOW_SIGN_UP=false
+# Not published directly to 0.0.0.0 — reached only through the gateway
+# (nginx proxies /grafana/ upstream, same pattern as mcphubd).
+PublishPort=127.0.0.1:3000:3000
+User=472:472
+ReadOnly=true
+Tmpfs=/tmp
+NoNewPrivileges=true
+DropCapability=ALL
+Memory=256m
+PidsLimit=128
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

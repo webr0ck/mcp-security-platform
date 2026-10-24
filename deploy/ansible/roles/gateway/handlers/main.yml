@@ -1,0 +1,11 @@
+---
+- name: Reload systemd units
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Reload gateway
+  ansible.builtin.command:
+    cmd: podman exec {{ gateway_container_name }} nginx -s reload
+  register: _gateway_reload
+  changed_when: true
+  failed_when: false   # container may not exist yet on first run; the subsequent (re)start task handles that case

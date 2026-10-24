@@ -1,0 +1,8 @@
+---
+galaxy_info:
+  author: mcp-security-platform devops
+  role_name: rollback
+  description: Records and restores prior mcphubd image digests for health-gated deploy/rollback
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+dependencies: []

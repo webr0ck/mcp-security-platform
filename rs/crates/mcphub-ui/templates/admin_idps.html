@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Identity providers{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Identity providers</h1>
+  <a class="btn btn--primary" href="/admin/idps/new">Add provider</a>
+</div>
+<p class="lede">Runtime IDP configuration wins over install-time file config. Removing a provider does not take effect until every server referencing it is reassigned.</p>
+
+{% if idps.is_empty() %}
+<div class="empty-state"><p>No identity providers configured. The platform cannot start without at least one.</p></div>
+{% else %}
+<table>
+  <caption>Configured providers</caption>
+  <thead>
+    <tr>
+      <th scope="col">Name</th>
+      <th scope="col">Kind</th>
+      <th scope="col">Issuer</th>
+      <th scope="col">RFC 8693 exchange</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for idp in idps %}
+    <tr>
+      <td data-label="Name">{{ idp.display_name }}</td>
+      <td data-label="Kind"><code>{{ idp.kind }}</code></td>
+      <td data-label="Issuer"><code>{{ idp.issuer_url }}</code></td>
+      <td data-label="RFC 8693 exchange">
+        {% if idp.supports_token_exchange %}
+        <span class="badge badge--allow" data-glyph="&#9679; ">Supported</span>
+        {% else %}
+        <span class="badge badge--neutral" data-glyph="&#9679; ">Not supported</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

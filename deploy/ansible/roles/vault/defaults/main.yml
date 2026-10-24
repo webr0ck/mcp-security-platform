@@ -1,0 +1,16 @@
+---
+# vault_container_name moved to inventories/<env>/group_vars/all.yml —
+# referenced (with a `| default(...)` fallback, so not strictly required,
+# but kept consistent with postgres/redis) by roles/mcphubd's container
+# unit template even when this role never ran in the current playbook.
+vault_volume_name: mcp-vault-data
+vault_port: 8200
+vault_cluster_port: 8201
+vault_init_state_path: /var/lib/mcphub/vault-init/init.json  # 0600, root-only — see role README
+vault_seal_type: shamir     # dev/staging default; set 'azurekeyvault' (or awskms/gcpckms) for prod auto-unseal
+vault_shamir_shares: 5
+vault_shamir_threshold: 3
+# Matches hashicorp/vault image's vault uid:gid (User= in vault.container.j2).
+# TLS key must be group-readable by this gid — see D7 in the deploy review.
+vault_container_uid: 100
+vault_container_gid: 1000

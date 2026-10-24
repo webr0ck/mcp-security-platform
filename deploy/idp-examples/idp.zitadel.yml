@@ -1,0 +1,30 @@
+---
+# Zitadel — supports RFC 8693 token exchange (enable "Token Exchange" under
+# the project's OIDC app > Advanced settings in the Zitadel console).
+# client_secret lives in Vault at {{ vault_idp_secrets_path }}/mcp-zitadel.
+idps:
+  - vault_secret_name: mcp-zitadel   # deploy-only key (NOT part of IdpConfig) — selects the Vault path/podman-secret name for this entry's client_secret; stripped before mcphubd ever sees this file
+    issuer: "https://zitadel.internal"
+    discovery_url: null
+    issuer_aliases: []
+    audiences: ["mcphub-proxy@mcphub-project"]
+    allowed_algs: ["RS256"]
+    clock_skew_seconds: 60
+    auth_mode: SharedExchange
+    dedicated_port: null
+    supports_token_exchange: true
+    client_id: "mcp-proxy@mcphub-project"
+    redirect_uri_allowlist:
+      - "https://gateway.internal:8443/oauth/callback"
+    role_mapping:
+      rules:
+        # Zitadel emits one structured claim; the OBJECT'S KEYS are the
+        # granted role names (see claims.rs::extract_raw ZitadelProjectRoles).
+        - extract:
+            kind: zitadel_project_roles
+            claim: "urn:zitadel:iam:org:project:roles"
+          role_values:
+            mcphub-super-admin: SuperAdmin
+            mcphub-server-owner: ServerOwner
+            mcphub-security-analyst: SecurityAnalyst
+            mcphub-employee: Employee

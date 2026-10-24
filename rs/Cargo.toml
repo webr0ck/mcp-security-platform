@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mcphub-types",
+    "crates/mcphub-gateway",
+    "crates/mcphub-identity",
+    "crates/mcphub-policy",
+    "crates/mcphub-creds",
+    "crates/mcphub-store",
+    "crates/mcphub-ui",
+    "crates/mcphub-selfservice",
+    "bin/mcphubd",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+mcphub-types = { path = "crates/mcphub-types" }
+mcphub-gateway = { path = "crates/mcphub-gateway" }
+mcphub-identity = { path = "crates/mcphub-identity" }
+mcphub-policy = { path = "crates/mcphub-policy" }
+mcphub-creds = { path = "crates/mcphub-creds" }
+mcphub-store = { path = "crates/mcphub-store" }
+mcphub-ui = { path = "crates/mcphub-ui", default-features = false }
+
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "timeout", "limit", "catch-panic", "request-id", "util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+hyper = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "rust_decimal", "uuid", "time", "chrono"] }
+redis = { version = "0.27", features = ["aio", "tokio-comp", "connection-manager"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+openidconnect = "3"
+jsonwebtoken = "9"
+aws-lc-rs = "1"
+regorus = "0.2"
+askama = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+governor = "0.6"
+moka = { version = "0.12", features = ["future"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde"] }
+async-trait = "0.1"

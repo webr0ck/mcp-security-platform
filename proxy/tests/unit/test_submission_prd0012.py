@@ -154,6 +154,28 @@ async def test_create_draft_persists_self_host_false():
 
 
 @pytest.mark.asyncio
+async def test_create_draft_grants_submitter_server_owner():
+    """F-CX-003: without this grant row, an approved submission owner is
+    permanently 403'd by _require_server_owner on the entitlements API —
+    owner_sub on server_registry is not enough."""
+    session = _FakeSession(result=_FakeResult(rowcount=0, row=None))
+
+    body = submission.DraftCreate(
+        name="my-server", description="does things",
+        github_repo_url="https://github.com/example/repo", self_host=True,
+    )
+    with patch.object(submission, "AsyncSessionLocal", lambda: _FakeSessionCtx(session)):
+        await submission.create_draft(body, _fake_request("owner-1"))
+
+    grant_calls = [(sql, params) for sql, params in session.executed
+                   if "server_role_grant" in sql]
+    assert grant_calls, "expected an INSERT INTO server_role_grant"
+    sql, params = grant_calls[0]
+    assert params["owner"] == "owner-1"
+    assert "server_owner" in sql
+
+
+@pytest.mark.asyncio
 async def test_submit_platform_deployed_requires_no_url_and_skips_ssrf():
     """is_self_hosted=false: requested_upstream_url must NOT be required, and
     the C1 SSRF check must not run at all (there is nothing to validate yet)."""

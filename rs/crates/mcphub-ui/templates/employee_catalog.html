@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Catalog{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Tool catalog</h1>
+</div>
+<p class="lede">Only tools you are entitled to invoke are listed here — discovery matches what you can actually call.</p>
+
+{% if tools.is_empty() %}
+<div class="empty-state">
+  <p>You don't have access to any tools yet.</p>
+  <p><a href="/me/grants">View your access requests</a></p>
+</div>
+{% else %}
+<table>
+  <caption>Tools available to you</caption>
+  <thead>
+    <tr>
+      <th scope="col">Server</th>
+      <th scope="col">Tool</th>
+      <th scope="col">Description</th>
+      <th scope="col"><span class="visually-hidden">Actions</span></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in tools %}
+    <tr>
+      <td data-label="Server">{{ t.server_name }}</td>
+      <td data-label="Tool"><code>{{ t.tool_name }}</code></td>
+      <td data-label="Description">{{ t.description }}</td>
+      <td data-label="Actions">
+        <form method="post" action="/catalog/request-access" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ chrome.csrf_token }}">
+          <input type="hidden" name="server_id" value="{{ t.server_id }}">
+          <input type="hidden" name="tool_name" value="{{ t.tool_name }}">
+          <button type="submit" class="btn">Request wider access</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,30 @@
+[package]
+name = "mcphub-identity"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcphub-types = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+jsonwebtoken = { workspace = true }
+moka = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+async-trait = { workspace = true }
+base64 = "0.22"
+rand = "0.8"
+sha2 = "0.10"
+url = "2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "macros", "net", "io-util"] }
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+hmac = "0.12"

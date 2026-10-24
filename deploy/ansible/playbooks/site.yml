@@ -1,0 +1,32 @@
+---
+# Full stack, ordered so each role's dependencies are already up when it
+# runs. Idempotent end to end — safe to re-run against a fully-deployed
+# host; every role reports changed=0 on a clean second run.
+#
+# KNOWN LIMITATION (documented, not silently papered over): every role here
+# targets `mcp_gateway` — i.e. this assumes single-host colocation of
+# vault/postgres/redis/mcphubd/gateway behind one internal podman bridge
+# network, which is what the isolation model in `common`'s network quadlets
+# assumes (podman bridge networks are host-local, not an overlay). The
+# `staging` and `prod` inventories already declare separate `mcp_data`
+# hosts as the target *shape* for a real multi-host deploy, but wiring
+# cross-host Postgres/Redis/Vault reachability (real TCP + firewalling or a
+# proper overlay, instead of an internal bridge) is NOT implemented in this
+# pass — see docs/deploy.md "Known limitations". Running this playbook
+# against staging/prod today deploys everything onto the mcp_gateway hosts,
+# same as dev, just with more of them (see mcphub_gateway group replica
+# count per env).
+- name: Deploy the full mcphub platform
+  hosts: mcp_gateway
+  become: true
+  gather_facts: true
+  roles:
+    - common
+    - vault           # secret source of truth — must be unsealed before
+                       # postgres/redis/mcphubd try to read from it
+    - postgres
+    - redis
+    - mcphubd         # install-time IDP config applied here (idp.yml)
+    - gateway
+    - observability
+    - mcp_backends    # includes the F-001 runtime isolation gate

@@ -431,6 +431,19 @@ async def create_draft(body: DraftCreate, request: Request) -> JSONResponse:
             "description": body.description,
             "self_host": body.self_host,
         })
+        # F-CX-003: without a server_role_grant row, the submitter passes
+        # every submission-status check (which query owner_sub directly) but
+        # is permanently 403'd by _require_server_owner on the entitlements
+        # API even after their server is approved and active — owner_sub
+        # alone was never sufficient for that check. Grant server_owner here
+        # so the submitter can self-entitle once the server goes live.
+        await session.execute(text("""
+            INSERT INTO server_role_grant
+                (server_id, principal_id, principal_type, role, granted_by)
+            VALUES
+                (:sid, :owner, 'human', 'server_owner', :owner)
+            ON CONFLICT (server_id, principal_id, principal_type, role) DO NOTHING
+        """), {"sid": sid, "owner": owner})
         await session.commit()
     return JSONResponse({"server_id": sid, "submission_status": "draft"}, status_code=201)
 

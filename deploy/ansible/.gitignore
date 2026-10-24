@@ -1,0 +1,7 @@
+# ansible-galaxy collection install cache (installed via requirements.yml,
+# not vendored — `ansible-galaxy collection install -r requirements.yml`
+# re-fetches this on any machine)
+.ansible/
+collections/
+.ansible-fact-cache/
+*.retry

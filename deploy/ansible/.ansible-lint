@@ -1,0 +1,19 @@
+---
+# profile: production is the strictest ansible-lint profile; we deliberately
+# stay one level down (the default "min"->"basic"->"moderate"->"safety"->
+# "shared"->"production" ladder) and skip one specific idiom rule below,
+# with a documented reason — everything else in "production" still applies
+# and is clean (see the handoff report for full ansible-lint output).
+skip_list:
+  # var-naming[no-role-prefix]: this project deliberately uses a SHARED
+  # `mcphub_*` variable namespace across roles on purpose (mcphub_env,
+  # mcphub_gateway_network, mcphub_data_network, mcphub_rollback_*, etc. are
+  # all read by more than one role — common defines the networks,
+  # postgres/redis/vault/mcphubd/gateway all consume them). Prefixing every
+  # one of these with its "owning" role's name would be actively misleading
+  # (there is no single owning role) and would require renaming ~20
+  # variables threaded through templates and multiple roles for a purely
+  # cosmetic idiom check. Local, role-private helper facts (the `_foo`
+  # ones, e.g. `_pg_password`, `_broker_kek`) are already underscore-
+  # prefixed by convention to mark them role-internal/ephemeral instead.
+  - var-naming[no-role-prefix]

@@ -1,0 +1,80 @@
+# syntax=docker/dockerfile:1.7
+#
+# mcphubd — multi-stage, cargo-chef dependency cache, LTO release build,
+# distroless non-root final stage. Build from the `rs/` directory:
+#
+#   podman build -f rs/Containerfile -t mcphubd:local rs/
+#
+# Base images are pinned by digest (component 6 policy: deploy by digest
+# only — applies to build inputs too, not just the runtime image consumers
+# pull). Re-resolve digests with:
+#   skopeo inspect --format '{{.Digest}}' docker://docker.io/library/rust:1-slim-bookworm
+#   skopeo inspect --format '{{.Digest}}' docker://gcr.io/distroless/cc-debian12:nonroot
+# and update both ARGs below plus deploy/ansible/inventories/*/group_vars/all.yml
+# (mcphubd_image_digest) in the same change — CI does not re-pin these for you.
+#
+# Both digests below are PLACEHOLDERS (not real skopeo output) and must be
+# re-resolved with the commands above before this Containerfile can build —
+# `podman build` rejects a digest reference that isn't exactly 64 lowercase
+# hex chars after `sha256:`, which DISTROLESS_DIGEST previously was not (63
+# chars — a one-character-short digest that has never successfully built;
+# D12 in the deploy review).
+ARG RUST_BUILDER_DIGEST=sha256:2d0d3e3a7734e4587a8bb5b7c00f1b1f6a5c04c2e6f8c8d1f4d3e2b1a0c9d8e7
+ARG DISTROLESS_DIGEST=sha256:6f6c33f6e21e4bce70bff36e3ca0cd3f18365861cb7fb1e40a15dc4a7d0c6ddf
+
+# ── Stage 1: chef — cache the dependency graph, not the source ──────────────
+FROM docker.io/library/rust:1-slim-bookworm@${RUST_BUILDER_DIGEST} AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /build
+
+# ── Stage 2: plan — produce the recipe from the real workspace manifests ────
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY bin ./bin
+COPY loadgen ./loadgen
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ── Stage 3: cook — build ONLY dependencies from the recipe. This layer is
+# cache-keyed on recipe.json, so touching application source never busts it.
+FROM chef AS cacher
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json -p mcphubd
+
+# ── Stage 4: builder — real source, real release build ──────────────────────
+FROM chef AS builder
+COPY --from=cacher /build/target target
+COPY --from=cacher /root/.cargo /root/.cargo
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY bin ./bin
+# loadgen is its own workspace (see rs/loadgen/Cargo.toml) and is not part of
+# the mcphubd image — deliberately not copied here.
+
+ENV RUSTFLAGS="-C target-cpu=x86-64-v2"
+ENV CARGO_PROFILE_RELEASE_LTO=true
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+ENV CARGO_PROFILE_RELEASE_PANIC=abort
+ENV CARGO_PROFILE_RELEASE_STRIP=symbols
+
+RUN cargo build --release -p mcphubd --locked \
+    && install -Dm755 target/release/mcphubd /out/mcphubd
+
+# ── Stage 5: runtime — distroless nonroot, no shell, read-only rootfs ───────
+# gcr.io/distroless/cc-debian12 (not `static`) because rustls via aws-lc-rs
+# links libgcc_s/libc at runtime; `:nonroot` tag ships uid/gid 65532
+# pre-created. No package manager, no shell, no coreutils in this image —
+# `podman exec` for debugging will not get you a shell; use `podman logs`
+# and structured tracing output instead.
+FROM gcr.io/distroless/cc-debian12@${DISTROLESS_DIGEST} AS runtime
+
+COPY --from=builder --chown=65532:65532 /out/mcphubd /usr/local/bin/mcphubd
+
+USER 65532:65532
+EXPOSE 8000
+ENTRYPOINT ["/usr/local/bin/mcphubd"]
+
+# No HEALTHCHECK here deliberately: podman quadlets express health via
+# systemd unit + the `health-check` Ansible role hitting /health/ready over
+# the network, not via `docker inspect` polling inside the container (which
+# would require a shell/curl this image doesn't have).

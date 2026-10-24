@@ -1,0 +1,85 @@
+## Managed by Ansible role `mcphubd` — do not edit by hand.
+## Image is deploy-by-digest ONLY (mcphubd_image_repo@mcphubd_image_digest,
+## never a tag) — deploy.yml/rollback.yml are the only things that change
+## this file's Image= line.
+[Unit]
+Description=mcphubd — MCP security gateway (Rust)
+After=network-online.target {{ mcphub_data_network }}-network.service {{ mcphub_backend_network }}-network.service {{ mcphub_gateway_network }}-network.service {{ postgres_container_name | default('mcp-postgres') }}.service {{ redis_container_name | default('mcp-redis') }}.service {{ vault_container_name | default('mcp-vault') }}.service
+Requires={{ mcphub_data_network }}-network.service {{ mcphub_backend_network }}-network.service {{ mcphub_gateway_network }}-network.service
+Wants={{ postgres_container_name | default('mcp-postgres') }}.service {{ redis_container_name | default('mcp-redis') }}.service {{ vault_container_name | default('mcp-vault') }}.service
+
+[Container]
+Image={{ mcphubd_image_repo }}@{{ mcphubd_image_digest }}
+ContainerName={{ mcphubd_container_name }}
+Network={{ mcphub_data_network }}.network
+Network={{ mcphub_backend_network }}.network
+Network={{ mcphub_gateway_network }}.network
+Volume={{ mcphubd_idp_config_path }}:{{ mcphubd_idp_config_path }}:ro,Z
+## Env var names below are confirmed against the REAL
+## bin/mcphubd/src/config.rs (not guessed/TOML-indirected) — that file is
+## 100% environment-variable driven, no config-file reading at all.
+Secret=mcphub-mcphubd-database-url,type=env,target=DATABASE_URL
+## MCPHUBD_MIGRATION_DATABASE_URL: NOT YET READ by config.rs (which has a
+## single `database_url` field shared for both migrate::check and the
+## runtime pool) — provisioned here so it's ready the moment component 1/4
+## wires the two-connection split that fix-store's
+## assert_non_privileged_connection requires (see the mcphubd role README
+## "DATABASE_URL / migration split" section). Until that wiring lands,
+## DATABASE_URL above (mcphub_app, least-privilege) is what migrate::check
+## ALSO runs against, and it does NOT have privilege to run migrations —
+## confirm this has landed before deploying a fresh environment.
+Secret=mcphub-mcphubd-migration-database-url,type=env,target=MCPHUBD_MIGRATION_DATABASE_URL
+Secret=mcphub-mcphubd-redis-url,type=env,target=REDIS_URL
+## MCPHUB_VAULT_TOKEN: a FRESH AppRole-login token minted at every container
+## start (see lookup.sh's "approle_token" pointer) — mcphubd's own
+## VaultKekSource (rs/crates/mcphub-creds) uses this to fetch the
+## credential-broker KEK itself, live; the KEK never passes through this
+## unit file or any podman secret at all. See the mcphubd role README
+## "Vault token TTL" note for the one caveat this introduces (the AppRole's
+## configured token_ttl must outlive this container's uptime, or in-flight
+## KEK fetches will start failing until the next restart/redeploy).
+Secret=mcphub-mcphubd-vault-token,type=env,target=MCPHUB_VAULT_TOKEN
+Secret=mcphub-mcphubd-audit-hmac-key,type=env,target=MCPHUB_AUDIT_HMAC_KEY
+{% for idp in mcphubd_idp_entries %}
+## client_secret is NOT a field of IdpConfig (confirmed against
+## rs/crates/mcphub-identity/src/config.rs) — delivered as an env var keyed
+## by vault_secret_name, but WHICH mcphubd/mcphub-creds code actually reads
+## this env var, and how it's bound back to this specific issuer, is an open
+## question — see the mcphubd role README "open question" section. Do not
+## assume this wiring works until confirmed.
+Secret=mcphub-idp-{{ idp.vault_secret_name }}-client-secret,type=env,target=MCPHUBD_IDP_{{ idp.vault_secret_name | upper | regex_replace('[^A-Z0-9]', '_') }}_CLIENT_SECRET
+{% endfor %}
+Environment=MCPHUB_IDP_CONFIG_FILE={{ mcphubd_idp_config_path }}
+Environment=MCPHUB_VAULT_ADDR={{ vault_addr }}
+Environment=MCPHUB_VAULT_KEK_PATH={{ vault_kek_path }}
+Environment=MCPHUB_LISTEN_ADDR=0.0.0.0:{{ mcphubd_listen_port }}
+Environment=MCPHUB_DEDICATED_PORT_START={{ dedicated_port_range_start }}
+Environment=MCPHUB_DEDICATED_PORT_END={{ dedicated_port_range_end }}
+Environment=RUST_LOG={{ mcphubd_log_level }}
+# NOT published to the host AT ALL — not even on 127.0.0.1. A 127.0.0.1
+# PublishPort= is reachable by ANY local process or colocated container that
+# can see the host's loopback (podman containers on other networks included,
+# depending on host networking), which bypasses nginx/ModSecurity/CRS, rate
+# limiting, and mTLS entirely (D1). Only the gateway (nginx, on
+# mcphub_gateway_network, see gateway.container.j2) may reach this port, over
+# the container network — see roles/health_check for how post-deploy checks
+# reach it without a host bind.
+User=65532:65532
+ReadOnly=true
+Tmpfs=/tmp
+NoNewPrivileges=true
+DropCapability=ALL
+Memory={{ mcphubd_memory_limit }}
+Cpus={{ mcphubd_cpu_limit }}
+PidsLimit=256
+# No HealthCmd: the final image is distroless with no shell/curl (see
+# rs/Containerfile) — health is verified from outside the container, over
+# the network, by the health_check role and deploy.yml's post-deploy gate.
+
+[Service]
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -31,10 +31,10 @@ from starlette.types import ASGIApp
 _POLICY = (
     "default-src 'self'; "
     "script-src 'self' 'nonce-{nonce}'; "
-    # fonts.googleapis.com serves the webfont CSS; fonts.gstatic.com the font files.
-    # Allowed rather than removed because the typography is a product choice — but it
-    # IS a third-party request from a platform that otherwise isolates egress, so
-    # self-hosting the two families is tracked as follow-up.
+    # Hanken Grotesk / JetBrains Mono are self-hosted under /static/fonts/ (both
+    # variable fonts, one woff2 file each) — this used to carve out
+    # fonts.googleapis.com/fonts.gstatic.com for a third-party request, which is
+    # gone now: style-src/font-src need nothing beyond 'self' for typography.
     # style-src still needs 'unsafe-inline', for a reason that is NOT the one it
     # started with. R1.5 removed all 593 inline style= attributes from the markup —
     # that half is done. But style-src also governs CSSOM writes, and portal.js
@@ -43,9 +43,9 @@ _POLICY = (
     # renders but tab panels never open. Converting those to class toggles is R1.7.
     # Verified by AC-11, which fails on any console CSP violation — that is how this
     # was caught rather than shipped as a silently broken page.
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; "
-    "font-src 'self' https://fonts.gstatic.com; "
+    "font-src 'self'; "
     "connect-src 'self'; "
     "form-action 'self'; "
     "frame-ancestors 'none'; "

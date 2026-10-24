@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Add identity provider{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Add identity provider</h1>
+  <a class="btn" href="/admin/idps">Cancel</a>
+</div>
+
+{% if let Some(err) = error %}
+<p class="error-state" role="alert">{{ err }}</p>
+{% endif %}
+
+<form method="post" action="/admin/idps" class="card">
+  <input type="hidden" name="csrf_token" value="{{ chrome.csrf_token }}">
+
+  <div class="form-row">
+    <label for="kind">Provider type</label>
+    <select id="kind" name="kind" required>
+      <option value="entra">Microsoft Entra ID</option>
+      <option value="keycloak">Keycloak</option>
+      <option value="zitadel">Zitadel</option>
+      <option value="generic_oidc">Generic OIDC</option>
+    </select>
+  </div>
+
+  <div class="form-row">
+    <label for="display_name">Display name</label>
+    <input type="text" id="display_name" name="display_name" required>
+  </div>
+
+  <div class="form-row">
+    <label for="issuer_url">Issuer URL</label>
+    <input type="url" id="issuer_url" name="issuer_url" required placeholder="https://idp.example.com/realms/platform">
+    <p class="hint">Discovery is fetched from <code>{issuer}/.well-known/openid-configuration</code>.</p>
+  </div>
+
+  <div class="form-row">
+    <label for="supports_token_exchange">Supports RFC 8693 token exchange</label>
+    <select id="supports_token_exchange" name="supports_token_exchange">
+      <option value="false">No</option>
+      <option value="true">Yes</option>
+    </select>
+    <p class="hint">
+      Determines which <code>auth_mode</code>s servers on this IDP can use.
+      Without exchange support, a server needing its own IDP must use
+      <code>dedicated_port</code> — allocated from the configured range
+      (currently visible on the <a href="/admin/limits">global limits</a> page) —
+      rather than <code>shared_exchange</code>.
+    </p>
+  </div>
+
+  <button type="submit" class="btn btn--primary">Add provider</button>
+</form>
+{% endblock %}

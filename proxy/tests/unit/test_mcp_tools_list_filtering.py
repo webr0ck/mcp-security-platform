@@ -16,6 +16,7 @@ Run: pytest proxy/tests/unit/test_mcp_tools_list_filtering.py -v
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -75,11 +76,31 @@ class _FakeResult:
         return _FakeMappings(self._rows)
 
 
-class _FakeSession:
-    """Context-manager fake session that returns the configured rows."""
+def _fresh_gate_row(server_id: str) -> _FakeRow:
+    """Server-state row that passes both the maintenance and scan-freshness
+    gates F-CX-001 added to discovery — debug_mode off, scan just ran."""
+    return _FakeRow({
+        "server_id": server_id, "debug_mode": False, "owner_sub": None,
+        "maintainers": [], "last_rescanned_at": datetime.now(timezone.utc),
+    })
 
-    def __init__(self, rows: list) -> None:
+
+class _FakeSession:
+    """Context-manager fake session that returns the configured rows.
+
+    F-CX-001: _registered_tools_for_client now issues a second query against
+    server_registry (maintenance/scan-freshness gate state) alongside the
+    original tool_registry query. This fake distinguishes the two by SQL text
+    so existing fixtures don't need to change shape; `gate_rows` defaults to
+    a fresh/non-maintenance row for every server_id seen in `rows`.
+    """
+
+    def __init__(self, rows: list, gate_rows: list | None = None) -> None:
         self._rows = rows
+        if gate_rows is None:
+            server_ids = {r["server_id"] for r in rows if r["server_id"] is not None}
+            gate_rows = [_fresh_gate_row(sid) for sid in server_ids]
+        self._gate_rows = gate_rows
 
     async def __aenter__(self):
         return self
@@ -87,7 +108,9 @@ class _FakeSession:
     async def __aexit__(self, *_):
         pass
 
-    async def execute(self, *_a, **_kw):
+    async def execute(self, stmt, *_a, **_kw):
+        if "server_registry" in str(stmt):
+            return _FakeResult(self._gate_rows)
         return _FakeResult(self._rows)
 
 
@@ -415,6 +438,101 @@ class _FakeSingleRowSession:
 
     async def execute(self, *_a, **_kw):
         return _FakeSingleRowResult(self._row)
+
+
+# ---------------------------------------------------------------------------
+# F-CX-001: discovery must mirror the invoke path's server-state gates
+# (maintenance mode / scan freshness), so a listed tool can't then be denied.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_maintenance_mode_hides_tool_from_non_owner():
+    from app.routers.mcp_server import _registered_tools_for_client
+
+    all_rows = [ROW_A1]
+    gate_rows = [_FakeRow({
+        "server_id": SERVER_A, "debug_mode": True, "owner_sub": "owner@corp",
+        "maintainers": [], "last_rescanned_at": datetime.now(timezone.utc),
+    })]
+
+    with patch("app.core.database.AsyncSessionLocal",
+               return_value=_FakeSession(all_rows, gate_rows=gate_rows)), \
+         patch("app.services.entitlement.check_entitlement", new=AsyncMock(return_value=_entitled(SERVER_A))), \
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
+
+        result = await _registered_tools_for_client(
+            client_id="alice", roles=["agent"], principal_id="alice", principal_type="human",
+        )
+
+    assert result == [], "a server in maintenance must hide its tools from non-owner/maintainer callers"
+
+
+@pytest.mark.asyncio
+async def test_maintenance_mode_still_shows_tool_to_owner():
+    from app.routers.mcp_server import _registered_tools_for_client
+
+    all_rows = [ROW_A1]
+    gate_rows = [_FakeRow({
+        "server_id": SERVER_A, "debug_mode": True, "owner_sub": "alice",
+        "maintainers": [], "last_rescanned_at": datetime.now(timezone.utc),
+    })]
+
+    with patch("app.core.database.AsyncSessionLocal",
+               return_value=_FakeSession(all_rows, gate_rows=gate_rows)), \
+         patch("app.services.entitlement.check_entitlement", new=AsyncMock(return_value=_entitled(SERVER_A))), \
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
+
+        result = await _registered_tools_for_client(
+            client_id="alice", roles=["agent"], principal_id="alice", principal_type="human",
+        )
+
+    assert {t["name"] for t in result} == {"tool-alpha"}, "the owner must still see their own server's tools"
+
+
+@pytest.mark.asyncio
+async def test_stale_scan_hides_tool_when_enforced():
+    from app.routers.mcp_server import _registered_tools_for_client
+
+    all_rows = [ROW_A1]
+    gate_rows = [_FakeRow({
+        "server_id": SERVER_A, "debug_mode": False, "owner_sub": None,
+        "maintainers": [], "last_rescanned_at": None,  # never scanned
+    })]
+
+    with patch("app.core.database.AsyncSessionLocal",
+               return_value=_FakeSession(all_rows, gate_rows=gate_rows)), \
+         patch("app.services.entitlement.check_entitlement", new=AsyncMock(return_value=_entitled(SERVER_A))), \
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
+
+        result = await _registered_tools_for_client(
+            client_id="alice", roles=["agent"], principal_id="alice", principal_type="human",
+        )
+
+    assert result == [], "a never-scanned/stale server must hide its tools when SCAN_FRESHNESS_ENFORCED=True (default)"
+
+
+@pytest.mark.asyncio
+async def test_missing_gate_row_fails_closed():
+    """A server_id present in tool_registry but absent from server_registry
+    (or unreachable due to a DB error) must hide the tool, not show it."""
+    from app.routers.mcp_server import _registered_tools_for_client
+
+    all_rows = [ROW_A1]
+
+    with patch("app.core.database.AsyncSessionLocal",
+               return_value=_FakeSession(all_rows, gate_rows=[])), \
+         patch("app.services.entitlement.check_entitlement", new=AsyncMock(return_value=_entitled(SERVER_A))), \
+         patch("app.routers.mcp_server._load_grants_data", new=AsyncMock(return_value=({}, {}))), \
+         patch("app.routers.mcp_server._resolve_profile", new=AsyncMock(return_value=None)):
+
+        result = await _registered_tools_for_client(
+            client_id="alice", roles=["agent"], principal_id="alice", principal_type="human",
+        )
+
+    assert result == []
 
 
 @pytest.mark.asyncio

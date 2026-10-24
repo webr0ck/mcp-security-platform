@@ -1,0 +1,1 @@
+REVOKE SELECT, INSERT, UPDATE ON profiles FROM mcphub_app;

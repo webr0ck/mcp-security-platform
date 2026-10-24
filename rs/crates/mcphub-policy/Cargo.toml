@@ -1,0 +1,66 @@
+[package]
+name = "mcphub-policy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcphub-types = { workspace = true }
+mcphub-gateway = { workspace = true }
+# NOTE: default-features must stay ON. With them disabled (an earlier,
+# minimal-looking `default-features = false, features = ["std","regex",...]`
+# selection) regorus's `walk/2` hoisting/safety-checker path behaves
+# differently and rejects `all_string_values`'s `walk(x, [path, v])` as
+# "use of undefined variable `path` is unsafe" even though the identical
+# source compiles and evaluates fine with default features on. Root-caused
+# by bisecting Cargo.toml feature flags against an isolated regorus repro;
+# not spending further budget on which specific default feature it is.
+#
+# `features = ["arc"]`: regorus's internal `Rc` becomes `Arc` (see its
+# `lib.rs`: `#[cfg(feature = "arc")] pub use alloc::sync::Arc as Rc;`),
+# which makes `regorus::Engine` and `regorus::CompiledPolicy` both `Send`
+# and `Sync` — verified directly (`fn assert_send<T: Send>()` /
+# `assert_sync<T: Sync>()` compiled against both types under this feature).
+# This eliminates the need for a thread-local-per-worker-thread engine
+# entirely: one compiled policy, shared behind an `Arc`, callable
+# concurrently from every tokio worker thread with zero per-thread
+# duplication. See `engine.rs` module docs for the full design and the
+# measured numbers.
+regorus = { version = "0.11", features = ["arc"] }
+# Lock-free concurrent reads of the current compiled policy generation —
+# std::sync::RwLock showed real contention under concurrent eval load (see
+# engine.rs module docs / the mcphub-policy performance report); arc-swap
+# is the standard crate for "many readers, rare atomic swap" and avoids it.
+arc-swap = "1"
+# Decision cache (moka is already a workspace dep, but only with the
+# "future"/async feature enabled at the workspace level — evaluate_raw is
+# synchronous, so this crate needs moka's "sync" cache; Cargo unifies
+# features for the same crate+version across the workspace, so this just
+# adds "sync" to the union rather than pulling a second copy).
+moka = { version = "0.12", features = ["sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+governor = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+aws-lc-rs = { workspace = true }
+# Small, single-purpose crates not worth promoting to the workspace table:
+# bundle archive reading (tar.gz, matching `opa build -o bundle.tar.gz`) and
+# base64url/hex encoding for JWS bundle-signature verification.
+flate2 = "1"
+tar = "0.4"
+base64 = "0.22"
+hex = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+criterion = { version = "0.5", default-features = false }
+tempfile = "3"
+uuid = { workspace = true }
+
+[[bench]]
+name = "authz_bench"
+harness = false

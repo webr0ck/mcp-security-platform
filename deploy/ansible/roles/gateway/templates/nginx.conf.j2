@@ -1,0 +1,81 @@
+## Managed by Ansible role `gateway` — do not edit by hand.
+## Ported from gateway/nginx/nginx.conf (the pre-rewrite Python-platform
+## gateway) — same TLS/rate-limit/ModSecurity posture, ansible-templated
+## instead of compose-templated.
+user  nginx;
+worker_processes  auto;
+error_log  /var/log/nginx/error.log warn;
+pid        /var/run/nginx.pid;
+
+load_module modules/ngx_http_modsecurity_module.so;
+
+events {
+    worker_connections  4096;
+    multi_accept on;
+    use epoll;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    log_format json_access escape=json
+        '{'
+            '"time":"$time_iso8601",'
+            '"remote_addr":"$remote_addr",'
+            '"ssl_client_s_dn_cn":"$ssl_client_s_dn_cn",'
+            '"request_method":"$request_method",'
+            '"uri":"$uri",'
+            '"status":$status,'
+            '"body_bytes_sent":$body_bytes_sent,'
+            '"upstream_addr":"$upstream_addr",'
+            '"upstream_response_time":"$upstream_response_time",'
+            '"http_x_request_id":"$http_x_request_id",'
+            '"request_time":"$request_time"'
+        '}';
+    access_log  /var/log/nginx/access.log  json_access;
+
+    sendfile        on;
+    tcp_nopush      on;
+    tcp_nodelay     on;
+    keepalive_timeout  65;
+    server_tokens off;
+    client_max_body_size 10m;
+
+    # `agent` is keyed on the mTLS-verified caller identity and applied ONLY
+    # to /api/v1/tools/ on the mTLS port ({{ gateway_mtls_port }}) — the one
+    # location where nginx has actually verified $ssl_client_s_dn_cn
+    # (ssl_client_verify == SUCCESS; see mcp-proxy.conf's $trusted_cn). Never
+    # applied on the shared port, which has no client-cert verification and
+    # would otherwise key on an empty string for every request (an inert
+    # limiter — this was the original bug). Rate is per-identity headroom
+    # above the per-agent share of the documented 20,000 req/s / ~3000-agent
+    # budget (rs/ARCHITECTURE.md), not a hard per-agent cap.
+    limit_req_zone $trusted_cn         zone=agent:10m       rate=50r/s;
+    # `shared_port` is keyed on the client IP and covers the high-throughput
+    # /mcp and /api/v1/tools/ traffic on the shared port and every
+    # dedicated_port listener. It is an outer safety net against gross
+    # flooding, not a per-agent limiter (nginx has no verified per-request
+    # identity on those ports) — set well above the 20,000 req/s sustained
+    # budget so a real load test or legitimate fleet never self-DoSes.
+    limit_req_zone $binary_remote_addr zone=shared_port:10m rate=25000r/s;
+    # `api` is keyed on client IP and covers low-volume, abuse-sensitive
+    # endpoints (dynamic client/IDP registration, admin) — ported from the
+    # Python-era gateway's zone=api, now actually referenced (see
+    # mcp-proxy.conf's /oauth/register and /api/v1/admin/ locations).
+    limit_req_zone $binary_remote_addr zone=api:10m         rate=30r/m;
+    limit_req_status 429;
+
+    modsecurity on;
+    modsecurity_rules_file /etc/modsecurity.d/modsec_includes.conf;
+
+    ssl_protocols TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    ssl_session_tickets off;
+
+    gzip off;
+
+    include /etc/nginx/conf.d/*.conf;
+}

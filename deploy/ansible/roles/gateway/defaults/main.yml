@@ -1,0 +1,10 @@
+---
+gateway_container_name: mcp-gateway
+gateway_dedicated_ports_registry: /etc/mcphub/dedicated-ports.json
+gateway_tls_dir: /etc/mcphub/gateway-tls
+gateway_conf_dir: /etc/mcphub/gateway
+# Matches the nginx image's nginx uid/gid (owasp/modsecurity-crs:nginx-alpine).
+# Single source of truth for both the quadlet's User= and the TLS key's
+# group ownership — see D7 in the deploy review.
+gateway_container_uid: 101
+gateway_container_gid: 101

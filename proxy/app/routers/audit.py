@@ -115,25 +115,34 @@ async def list_audit_events(
         logger.error("audit_events query error", extra={"error": str(exc)})
         raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Query failed."})
 
-    data = [
-        {
-            "event_id": str(row.event_id),
-            "timestamp": row.created_at.isoformat(),
-            "client_id": row.client_id,
-            "tool_name": row.tool_name,
-            "tool_id": str(row.tool_id) if row.tool_id else None,
-            "outcome": row.outcome,
-            "latency_ms": row.latency_ms,
-            "sha256_hash": row.sha256_hash,
-            "anomaly_score": float(row.anomaly_score) if row.anomaly_score else None,
-            # V083: advisory-only notices (e.g. taint-floor notify-only
-            # disclaimer), distinct from opa_reasons/deny_reasons.
-            "notices": row.notices if isinstance(row.notices, list) else (
-                _json.loads(row.notices) if row.notices else []
-            ),
-        }
-        for row in rows
-    ]
+    # F-CX-005: row serialization used to run unguarded after the query's
+    # try/except, so any unexpected row shape (e.g. a legacy/malformed
+    # `notices` value) leaked a raw, unhandled 500 instead of the documented
+    # error envelope. `row.anomaly_score else None` also silently turned a
+    # genuine 0.0 score into null (0.0 is falsy) — checked for None instead.
+    try:
+        data = [
+            {
+                "event_id": str(row.event_id),
+                "timestamp": row.created_at.isoformat(),
+                "client_id": row.client_id,
+                "tool_name": row.tool_name,
+                "tool_id": str(row.tool_id) if row.tool_id else None,
+                "outcome": row.outcome,
+                "latency_ms": row.latency_ms,
+                "sha256_hash": row.sha256_hash,
+                "anomaly_score": float(row.anomaly_score) if row.anomaly_score is not None else None,
+                # V083: advisory-only notices (e.g. taint-floor notify-only
+                # disclaimer), distinct from opa_reasons/deny_reasons.
+                "notices": row.notices if isinstance(row.notices, list) else (
+                    _json.loads(row.notices) if row.notices else []
+                ),
+            }
+            for row in rows
+        ]
+    except Exception as exc:
+        logger.error("audit_events row serialization error", extra={"error": str(exc)})
+        raise HTTPException(500, {"code": "INTERNAL_ERROR", "message": "Query failed."})
 
     return JSONResponse(content={
         "data": data,

@@ -1,0 +1,59 @@
+---
+# Explicit, minimal-blast-radius audit-HMAC-key rotation. The key is
+# managed via podman's "shell" secret driver (see roles/mcphubd/tasks) so
+# it is fetched LIVE from Vault at every mcphubd (re)start rather than
+# persisted plaintext-on-disk. That also means Ansible has no way to detect
+# "the key changed in Vault" the way it detects other secret rotations (it
+# never reads the value at all) — an operator who rotates the key in Vault
+# must run this playbook to make mcphubd pick it up.
+#
+# COMPLIANCE WARNING, read before running: rotating this key invalidates
+# HMAC verification of EVERY audit row written under the OLD key. There is
+# no re-keying/re-signing mechanism for historical rows in this repo. If
+# you need old rows to remain verifiable under a new key, that requires a
+# batch re-sign job run BEFORE removing the old key from Vault — this
+# playbook does not do that, and does not check whether it has been done.
+#
+# Deliberately touches NOTHING else: no config re-render, no other secret
+# rotation, no digest change — a key rotation should be a single, minimal,
+# auditable action, not bundled with unrelated deploy risk.
+#
+# Usage:
+#   ansible-playbook playbooks/rotate-audit-hmac-key.yml [-e confirm_prod=true] [-e i_understand_old_rows_become_unverifiable=true]
+- name: Restart mcphubd to pick up a rotated audit HMAC key from Vault
+  hosts: mcp_gateway
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Require explicit acknowledgement of the compliance impact
+      ansible.builtin.fail:
+        msg: >-
+          Pass -e i_understand_old_rows_become_unverifiable=true — rotating
+          this key invalidates HMAC verification of every audit row written
+          under the OLD key, with no re-signing mechanism in this repo.
+      when: not (i_understand_old_rows_become_unverifiable | default(false) | bool)
+
+    - name: Refuse on prod without explicit confirmation (same guard as deploy.yml)
+      ansible.builtin.fail:
+        msg: "Prod audit-HMAC-key rotation requires -e confirm_prod=true"
+      when:
+        - mcphub_deploy_requires_confirm | default(false)
+        - not (confirm_prod | default(false) | bool)
+
+    - name: Warn — every prior audit row becomes unverifiable under the new key after this restart
+      ansible.builtin.debug:
+        msg: >-
+          Restarting {{ mcphubd_container_name }} on {{ inventory_hostname }}
+          now. It will fetch the CURRENT value at {{ vault_audit_hmac_path }}
+          from Vault at startup. Make sure the Vault rotation has fully
+          landed before proceeding, and that any required historical
+          re-signing has already run.
+
+    - name: Restart mcphubd
+      ansible.builtin.systemd:
+        name: "{{ mcphubd_container_name }}.service"
+        state: restarted
+
+    - name: Verify the platform is healthy after the restart
+      ansible.builtin.include_role:
+        name: health_check
