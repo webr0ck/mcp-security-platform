@@ -42,6 +42,9 @@ ALLOWED_PROXY_PEERS = {
     "otel-collector",                         # OTLP trace export target, via pairwise proxy-otel-net (task 5)
     # IdP services legitimately on gateway-net in multi-tier deploys
     "keycloak", "keycloak-seeder",
+    # Dark Factory tier canary MCP backend: dialed over its pairwise net; the
+    # reverse path is closed at L7 by SEC-05 (PROXY_INGRESS_ALLOWLIST_ENABLED).
+    "echo",
 }
 # Expected pairwise network per backend. A value may be a set when tiers name the
 # same network differently: docker-compose.yml uses the `proxy-<svc>-net`
@@ -62,6 +65,7 @@ PAIRWISE: dict[str, str | set[str]] = {
     "lab-ops-agent": "proxy-ops-agent-net",
     "prometheus": "proxy-metrics-net",
     "otel-collector": "proxy-otel-net",
+    "echo": "mcp-echo-net",
 }
 
 # ── One-shot init / seeder containers excluded from persistent peer check ─────

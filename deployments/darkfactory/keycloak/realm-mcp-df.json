@@ -1,0 +1,165 @@
+{
+  "realm": "mcp",
+  "enabled": true,
+  "displayName": "Dark Factory MCP",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "loginWithEmailAllowed": false,
+  "verifyEmail": false,
+  "editUsernameAllowed": false,
+  "passwordPolicy": "length(14) and notUsername",
+  "accessTokenLifespan": 900,
+  "refreshTokenMaxReuse": 0,
+  "ssoSessionMaxLifespan": 86400,
+  "bruteForceProtected": true,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 300,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "browserSecurityHeaders": {
+    "contentTypeOptions": "nosniff",
+    "xRobotsTag": "none",
+    "xFrameOptions": "SAMEORIGIN",
+    "contentSecurityPolicy": "frame-src 'self'; frame-ancestors 'self'; object-src 'none';"
+  },
+  "clients": [
+    {
+      "clientId": "mcp-proxy",
+      "name": "MCP Security Proxy",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "${KC_PROXY_CLIENT_SECRET}",
+      "redirectUris": [
+        "https://${MCP_PUBLIC_HOST}/api/v1/auth/oidc/callback"
+      ],
+      "webOrigins": [
+        "https://${MCP_PUBLIC_HOST}"
+      ],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "frontchannelLogout": true,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "use.refresh.tokens": "true",
+        "token.response.include.issued.token.type": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "roles-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "client-roles-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "config": {
+            "claim.name": "resource_access.${clientId}.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "usermodel.clientRoleMapping.clientId": "mcp-proxy"
+          }
+        },
+        {
+          "name": "audience-mcp-proxy",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "mcp-proxy",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "admin-cli",
+      "name": "Admin CLI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "bearerOnly": false
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "admin",
+        "description": "Full platform admin"
+      },
+      {
+        "name": "agent",
+        "description": "Can invoke registered tools"
+      },
+      {
+        "name": "auditor",
+        "description": "Read-only audit and reporting"
+      },
+      {
+        "name": "readonly",
+        "description": "Read-only tool catalogue"
+      },
+      {
+        "name": "security_reviewer",
+        "description": "Second person for approval dual-control"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "mcp-admin",
+      "realmRoles": [
+        "admin"
+      ]
+    },
+    {
+      "name": "mcp-reviewer",
+      "realmRoles": [
+        "security_reviewer"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "operator",
+      "enabled": true,
+      "emailVerified": true,
+      "groups": [
+        "mcp-admin"
+      ],
+      "requiredActions": [
+        "UPDATE_PASSWORD"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KC_OPERATOR_INITIAL_PASSWORD}",
+          "temporary": true
+        }
+      ]
+    }
+  ],
+  "identityProviders": []
+}

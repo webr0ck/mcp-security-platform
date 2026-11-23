@@ -1,0 +1,256 @@
+# Dark Factory tier: the platform as the single MCP ingress on vm-mcp
+# (10.77.30.30). See README.md in this directory.
+#
+# Differs from compose.engine.yml / compose.standard.yml where those are not
+# production-shaped (INSTALL.md H-04, H-05): Keycloak runs `start` on its own
+# Postgres, Vault keeps file storage and unseals itself, and published ports
+# bind 127.0.0.1 behind the host's PROXY-protocol relay. Images are staged by
+# digest from vm-dev (images.lock); nothing is pulled on vm-mcp.
+#
+#   podman-compose -f deployments/darkfactory/compose.yml up -d
+name: mcp-df
+
+x-hardening: &hardening
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  restart: always
+
+networks:
+  gateway-net:            # nginx <-> proxy, keycloak. Not internal: the proxy
+    driver: bridge        # reaches lab backends through it (host firewall decides).
+    ipam:
+      config: [{subnet: 10.89.240.0/24}]
+  proxy-db-net:     {driver: bridge, internal: true}
+  proxy-redis-net:  {driver: bridge, internal: true}
+  proxy-opa-net:    {driver: bridge, internal: true}
+  vault-net:        {driver: bridge, internal: true}
+  step-ca-net:      {driver: bridge, internal: true}
+  kc-db-net:        {driver: bridge, internal: true}
+  # One pairwise network per in-host backend (F-001): only the proxy and the
+  # backend are on it, so the backend has no route to anything else.
+  mcp-echo-net:
+    driver: bridge
+    internal: true
+    ipam:
+      config: [{subnet: 172.31.240.0/28}]
+
+volumes:
+  postgres-data: {}
+  kc-db-data: {}
+  redis-data: {}
+  vault-data: {}
+  step-ca-data: {}
+
+services:
+
+  gateway:
+    image: docker.io/owasp/modsecurity-crs:4.25-nginx-alpine-lts
+    container_name: mcp-gateway
+    restart: always
+    # nginx master needs root in the container to drop to the worker user; in
+    # rootless podman that root is the unprivileged `mcp` user on the host.
+    user: root
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: [CHOWN, SETUID, SETGID, NET_BIND_SERVICE]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "/docker-entrypoint.d/90-copy-modsecurity-config.sh || true; exec nginx -g 'daemon off;'"
+    ports:
+      - "127.0.0.1:18443:443"
+      - "127.0.0.1:18445:8445"
+    volumes:
+      - ../../lab/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ../../gateway/modsecurity:/etc/modsecurity.d/custom:ro
+      - ../../lab/modsecurity-crs/modsecurity.conf:/etc/modsecurity.d/modsecurity.conf:ro
+      - ../../lab/modsecurity-crs/modsecurity-override.conf:/etc/modsecurity.d/modsecurity-override.conf:ro
+      - ../../lab/modsecurity-crs/setup.conf:/etc/modsecurity.d/setup.conf:ro
+      - ./state/tls/gateway:/etc/nginx/tls:ro
+      - ./state/nginx-secrets:/etc/nginx/secrets:ro
+      - step-ca-data:/etc/nginx/step-ca:ro
+    tmpfs: [/tmp, /var/cache/nginx, /var/run, "/etc/nginx/modsecurity.d:size=16m"]
+    networks:
+      gateway-net:
+        ipv4_address: 10.89.240.10
+    depends_on: [proxy, keycloak, step-ca]
+
+  proxy:
+    image: localhost/mcp-security-proxy:df
+    container_name: mcp-proxy
+    <<: *hardening
+    user: "1001:1001"
+    env_file: .env
+    tmpfs: [/tmp]
+    volumes:
+      - ./state/tls/ca.crt:/etc/mcp/vault-ca.crt:ro
+    networks: [gateway-net, proxy-db-net, proxy-redis-net, proxy-opa-net, vault-net, step-ca-net, mcp-echo-net]
+    depends_on: [db, redis, opa, vault]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  opa:
+    image: docker.io/openpolicyagent/opa:0.63.0-static
+    container_name: mcp-opa
+    <<: *hardening
+    user: "0:0"   # container root = the host's mcp user; reads the 0600 key, no capabilities
+    # No API token: compose.engine.yml asks for --authorization=basic but ships
+    # no system.authz policy, which denies the proxy everything. OPA is instead
+    # reachable only on proxy-opa-net, which nothing but the proxy joins (F-001).
+    # The verification key is a file, not an argument in the process list.
+    command:
+      - run
+      - --server
+      - --addr=0.0.0.0:8181
+      - --log-format=json
+      - --set=decision_logs.console=true
+      - --verification-key=/secrets/policy-signing.key
+      - --verification-key-id=mcp-policy-signing-key-v1
+      - --signing-alg=HS256
+      - --bundle
+      - /policies/bundle.tar.gz
+    volumes:
+      - ./state/opa/bundle.tar.gz:/policies/bundle.tar.gz:ro
+      - ./state/opa/policy-signing.key:/secrets/policy-signing.key:ro
+    tmpfs: [/tmp]
+    networks: [proxy-opa-net]
+
+  db:
+    image: docker.io/library/postgres:16-alpine
+    container_name: mcp-db
+    <<: *hardening
+    # Postgres runs its init as root then drops to `postgres`.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    environment:
+      POSTGRES_DB: mcp_security
+      POSTGRES_USER: mcp_app
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Not docker-entrypoint-initdb.d: initdb does not record versions, so the
+      # first db_migrate.sh run would re-apply everything. Migrations always go
+      # through db_migrate.sh (deploy step), which tracks schema_migrations.
+      - ../../infra/db/migrations:/migrations:ro
+    tmpfs: [/tmp, /run, /var/run/postgresql]
+    networks: [proxy-db-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcp_app -d mcp_security"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: mcp-redis
+    <<: *hardening
+    command: >
+      redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+      --maxmemory 256mb --maxmemory-policy allkeys-lru
+    cap_add: [CHOWN, SETUID, SETGID]   # entrypoint chowns /data, then drops to redis
+    volumes: [redis-data:/data]
+    tmpfs: [/tmp]
+    networks: [proxy-redis-net]
+
+  vault:
+    image: docker.io/hashicorp/vault:1.17
+    container_name: mcp-vault
+    <<: *hardening
+    entrypoint: ["/vault/config/auto-unseal.sh"]
+    command: []
+    environment:
+      VAULT_PROXY_TOKEN: ${VAULT_TOKEN}
+      SKIP_SETCAP: "1"
+    volumes:
+      - vault-data:/vault/data
+      - ./vault/df.hcl:/vault/config/df.hcl:ro
+      - ./vault/proxy-policy.hcl:/vault/config/proxy-policy.hcl:ro
+      - ./vault/auto-unseal.sh:/vault/config/auto-unseal.sh:ro
+      - ./state/tls/vault:/vault/tls:ro
+    tmpfs: [/tmp]
+    networks: [vault-net]
+    healthcheck:
+      # Exit 0 only when initialised and unsealed.
+      test: ["CMD", "vault", "status", "-address=https://127.0.0.1:8200", "-ca-cert=/vault/tls/ca.crt"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  step-ca:
+    image: docker.io/smallstep/step-ca:0.27.4
+    container_name: mcp-step-ca
+    <<: *hardening
+    environment:
+      DOCKER_STEPCA_INIT_NAME: Dark Factory MCP agents CA
+      DOCKER_STEPCA_INIT_DNS_NAMES: step-ca
+      DOCKER_STEPCA_INIT_PROVISIONER_NAME: admin
+      DOCKER_STEPCA_INIT_PASSWORD_FILE: /run/secrets/step-ca-password
+    volumes:
+      - step-ca-data:/home/step
+      - ./state/step-ca-password:/run/secrets/step-ca-password:ro
+    tmpfs: [/tmp]
+    networks: [step-ca-net]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: mcp-keycloak
+    restart: always
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    # `start` builds its optimized image into /opt/keycloak on first boot, so
+    # the root filesystem stays writable; data lives in kc-db, not here.
+    command: ["start", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://kc-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KC_HOSTNAME: https://${MCP_PUBLIC_HOST}
+      # The proxy reaches Keycloak at http://keycloak:8080 for the token and
+      # JWKS calls; tokens still carry the public issuer.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: kcadmin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      JAVA_OPTS_KC_HEAP: "-Xms128m -Xmx512m"
+      # Realm import placeholders.
+      MCP_PUBLIC_HOST: ${MCP_PUBLIC_HOST}
+      KC_PROXY_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      KC_OPERATOR_INITIAL_PASSWORD: ${KC_OPERATOR_INITIAL_PASSWORD}
+    volumes:
+      - ./keycloak/realm-mcp-df.json:/opt/keycloak/data/import/realm-mcp.json:ro
+    tmpfs: [/tmp]
+    networks: [gateway-net, kc-db-net]
+    depends_on: [kc-db]
+
+  kc-db:
+    image: docker.io/library/postgres:16-alpine
+    container_name: mcp-kc-db
+    <<: *hardening
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD}
+    volumes: [kc-db-data:/var/lib/postgresql/data]
+    tmpfs: [/tmp, /run, /var/run/postgresql]
+    networks: [kc-db-net]
+
+  # Canary backend: proves a server can be added, quarantined, approved,
+  # disabled and survive a restart without touching gateway code.
+  echo:
+    image: localhost/mcp-echo:df
+    container_name: mcp-echo
+    <<: *hardening
+    environment:
+      SERVER_NAME: echo-canary
+    tmpfs: [/tmp]
+    networks:
+      mcp-echo-net:
+        ipv4_address: 172.31.240.2

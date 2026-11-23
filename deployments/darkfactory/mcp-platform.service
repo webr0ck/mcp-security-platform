@@ -1,0 +1,15 @@
+[Unit]
+Description=mcp-security-platform, Dark Factory tier (single MCP ingress)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=%h/platform/deployments/darkfactory
+ExecStart=/usr/bin/podman-compose -f compose.yml up -d
+ExecStop=/usr/bin/podman-compose -f compose.yml down
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

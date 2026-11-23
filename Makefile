@@ -450,7 +450,7 @@ security-check:
 	fi; \
 	\
 	echo "--- F-001: proxy + MCP server network isolation (all compose tiers) ---"; \
-	if python3 scripts/check_network_isolation.py docker-compose.yml podman-compose.lab.yml compose.poc.yml compose.engine.yml compose.standard.yml; then \
+	if python3 scripts/check_network_isolation.py docker-compose.yml podman-compose.lab.yml compose.poc.yml compose.engine.yml compose.standard.yml deployments/darkfactory/compose.yml; then \
 		echo "PASS: F-001 network isolation"; \
 	else \
 		echo "FAIL: F-001 network isolation"; \
