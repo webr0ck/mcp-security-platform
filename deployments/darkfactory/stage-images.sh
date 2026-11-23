@@ -22,6 +22,7 @@ for img in "${IMAGES[@]}"; do
     [[ $img == localhost/* ]] || podman pull -q "$img" >/dev/null
 done
 
+rm -f "$OUT"   # docker-archive cannot be appended to
 podman save --multi-image-archive -o "$OUT" "${IMAGES[@]}"
 for img in "${IMAGES[@]}"; do
     printf '%s %s\n' "$img" "$(podman image inspect --format '{{.Id}}' "$img")"
