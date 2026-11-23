@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "MCP-Server Integration SDK for the MCP Security Platform"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.8.0",
+    "mcp>=1.8.0,<2",   # 2.x renamed FastMCP; the SDK is v1 code
     "uvicorn>=0.30.0",
     "httpx>=0.27.0",
     "starlette>=0.37.0",
