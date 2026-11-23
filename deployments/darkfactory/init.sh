@@ -50,6 +50,7 @@ MCP_PUBLIC_HOST=$HOST
 PROXY_BASE_URL=https://$HOST
 PROXY_ALLOWED_HOSTS=$HOST
 PROXY_WORKERS=2
+MINIO_ROOT_USER=unused
 OIDC_TRUST_FORWARDED_HOST=false
 SESSION_COOKIE_SECURE=true
 DB_HOST=db
@@ -117,6 +118,8 @@ GSECRET=$(sed -n 's/^GATEWAY_SHARED_SECRET=//p' "$ENV_FILE")
 printf 'proxy_set_header X-Gateway-Secret "%s";\n' "$GSECRET" > "$STATE/nginx-secrets/gateway-secret.conf"
 
 [[ -f $STATE/step-ca-password ]] || rand > "$STATE/step-ca-password"
+# step-ca reads it as uid 1000 in its namespace; state/ (0700) guards it.
+chmod 644 "$STATE/step-ca-password"
 
 # ── signed OPA bundle (INV-012) ───────────────────────────────────────────────
 sed -n 's/^POLICY_SIGNING_KEY=//p' "$ENV_FILE" | tr -d '\n' > "$STATE/opa/policy-signing.key"

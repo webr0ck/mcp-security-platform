@@ -151,7 +151,9 @@ services:
     command: >
       redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
       --maxmemory 256mb --maxmemory-policy allkeys-lru
-    cap_add: [CHOWN, SETUID, SETGID]   # entrypoint chowns /data, then drops to redis
+    # As redis from the start: the entrypoint's root chown of /data cannot
+    # enter its own 0700 appendonlydir without DAC_OVERRIDE.
+    user: "999:1000"
     volumes: [redis-data:/data]
     tmpfs: [/tmp]
     networks: [proxy-redis-net]
