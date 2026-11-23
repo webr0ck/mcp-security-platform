@@ -22,6 +22,8 @@ mkdir -p "$STATE"/{tls/gateway,tls/vault,nginx-secrets,opa}
 # ── secrets (.env) ────────────────────────────────────────────────────────────
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+# Drop the settings block first: a secret appended below it would go with it.
+sed -i '/^# --- settings ---$/,$d' "$ENV_FILE"
 put_once() {   # name value: append only if the name is absent
     grep -q "^$1=" "$ENV_FILE" || printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
 }
@@ -39,8 +41,7 @@ put_once MINIO_ROOT_PASSWORD "$(rand)"
 # Temporary: Keycloak forces a change at first login.
 put_once KC_OPERATOR_INITIAL_PASSWORD "$(openssl rand -base64 18 | tr -d '/+=')"
 
-# Non-secret settings: rewritten every run so the file follows the code.
-sed -i '/^# --- settings ---$/,$d' "$ENV_FILE"
+# Non-secret settings are rewritten every run so the file follows the code.
 cat >> "$ENV_FILE" <<EOF
 # --- settings ---
 ENVIRONMENT=production
