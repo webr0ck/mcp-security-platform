@@ -22,6 +22,10 @@
 #   DB_NAME          — PostgreSQL database (default: mcp_security)
 #   MIGRATIONS_DIR   — path to migration files on HOST (default: infra/db/migrations)
 #   MIGRATIONS_GUEST — path inside the container (default: /docker-entrypoint-initdb.d)
+#   DB_EXEC          — command prefix that runs psql in the DB container
+#                      (default: "$COMPOSE exec -T $DB_CONTAINER"). podman-compose
+#                      1.0.6 echoes the service env, passwords included; set
+#                      DB_EXEC="podman exec -i <container>" where output is logged.
 # =============================================================================
 
 set -euo pipefail
@@ -32,6 +36,7 @@ DB_USER="${DB_USER:-mcp_app}"
 DB_NAME="${DB_NAME:-mcp_security}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-infra/db/migrations}"
 MIGRATIONS_GUEST="${MIGRATIONS_GUEST:-/docker-entrypoint-initdb.d}"
+DB_EXEC="${DB_EXEC:-$COMPOSE exec -T $DB_CONTAINER}"
 
 # ---------------------------------------------------------------------------
 # Helper: run psql inside the container
@@ -39,7 +44,7 @@ MIGRATIONS_GUEST="${MIGRATIONS_GUEST:-/docker-entrypoint-initdb.d}"
 psql_exec() {
     # -v ON_ERROR_STOP=1 makes psql exit non-zero on any SQL error.
     # -X suppresses ~/.psqlrc which could change output format.
-    $COMPOSE exec -T "$DB_CONTAINER" \
+    $DB_EXEC \
         psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -X "$@"
 }
 

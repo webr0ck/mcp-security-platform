@@ -1,3 +1,4 @@
+-- no-txn
 -- =============================================================================
 -- V004__indexes.sql
 -- MCP Security Platform — Performance Indexes
